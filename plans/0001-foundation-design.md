@@ -1,5 +1,14 @@
 # RoboLens — Foundation Design (v2)
 
+> **STATUS (implemented):** The full v0 build order in §10 (M0-lite through OSS
+> hygiene + CI matrix) is **complete and green** — all modules, the registry +
+> entry-point plugins, the CLI (`list`/`run`/`inspect`), Rerun support, and CI
+> across Linux/macOS/Windows × py3.10–3.13 × numpy 1.x/2.x. `eval()`/`eval_set()`
+> also accept registry-name strings. Plan 0002 (temporal-ensembling controller)
+> is implemented. Still deferred to later plans: concrete sim/VLA adapters,
+> vectorized envs, `eval_set` *resume* impl, offline trajectory rescoring
+> (`robolens score`), and a docs site.
+
 > **Goal:** RoboLens is the "Inspect AI for robotics" — an open-source evaluation
 > framework for **physical AI / VLA (Vision-Language-Action) models**. Define a
 > robotics benchmark once and run *any* VLA policy against *any* compatible
