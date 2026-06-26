@@ -13,10 +13,16 @@ thereby validates the chunking + `ActionSemantics` design end-to-end.
 Chunked VLAs predict `H` future actions per inference. With overlapping
 inference (query every control step), timestep `t` is predicted by several recent
 chunks: the chunk queried at time `q` predicts `t` via its action at index
-`t - q` (valid when `0 <= t - q < H`). Temporal ensembling blends these
-overlapping predictions with exponentially decaying weights
-`w = exp(-m * age)` (ALOHA uses `m≈0.01`; larger `m` favors the newest
-prediction), which smooths motion and reduces compounding error.
+`t - q` (valid when `0 <= t - q < len(chunk)`, using each chunk's own length —
+chunks may differ in length). Temporal ensembling blends these overlapping
+predictions with exponentially decaying weights.
+
+**Weight direction (matches ALOHA/ACT exactly):** gather contributing predictions
+in ascending query-time order (**oldest first**) and weight
+`w_i = exp(-m * i)`, `i = 0` for the **oldest** prediction. So the *oldest*
+prediction gets the *largest* weight and larger `m` makes the oldest dominate —
+this is what smooths motion (ALOHA uses `m ≈ 0.01`). Always normalize
+`w /= w.sum()` (so `m = 0` ⇒ plain mean).
 
 ## Design
 
