@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING
 
@@ -22,6 +24,7 @@ from robolens.compat import assert_compatible
 from robolens.controller import Controller, DefaultController
 from robolens.embodiment import Embodiment
 from robolens.errors import EmbodimentFault, PolicyError, SafetyAbort
+from robolens.frames import FrameStore
 from robolens.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from robolens.policy import Policy
 from robolens.rollout import TrialRecord, derive_seed, rollout
@@ -92,12 +95,16 @@ def eval(
     controller: Controller | None = None,
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
+    store_frames: bool = False,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
     ``fail_on_error`` follows Inspect semantics for ``PolicyError`` (``True`` =
     fail on first, ``False`` = never, ``0<x<1`` = proportion, ``x>1`` = count).
     ``EmbodimentFault``/``SafetyAbort`` always halt regardless.
+
+    When ``store_frames`` is set, camera frames are streamed to
+    ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
     Raises :class:`~robolens.errors.CompatibilityError` (fail fast, before any
     rollout) if the policy and embodiment are incompatible.
@@ -111,6 +118,10 @@ def eval(
     bus = _Broadcast(sink_list)
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
+
+    frame_store: FrameStore | None = None
+    if store_frames:
+        frame_store = FrameStore(str(Path(log_dir) / "frames"))
 
     spec = EvalSpec(
         task=task.name,
@@ -164,6 +175,7 @@ def eval(
                     approver=approver,
                     sink=bus,
                     control_hz=task.control_hz,
+                    frame_store=frame_store,
                 )
             except (EmbodimentFault, SafetyAbort) as exc:
                 # Hardware/safety failures always halt the whole eval.
@@ -229,6 +241,7 @@ def eval(
         duration_s=time.perf_counter() - started,
         total_steps=total_steps,
         mean_inference_latency_s=(mean(all_latencies) if all_latencies else None),
+        frames_dir=str(frame_store.root) if frame_store is not None else None,
     )
     log = EvalLog(
         version=EvalLog.SCHEMA_VERSION,
@@ -256,3 +269,46 @@ def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
     if 0 < fail_on_error < 1:
         return trials > 0 and (errors / trials) >= fail_on_error
     return errors >= fail_on_error
+
+
+def eval_set(
+    tasks: Task | Sequence[Task],
+    policy: Policy,
+    embodiment: Embodiment,
+    *,
+    log_dir: str = "logs",
+    seed: int | None = 0,
+    fail_on_error: bool | float = False,
+    controller: Controller | None = None,
+    approver: Approver | None = None,
+    remap: dict[str, str] | None = None,
+    store_frames: bool = False,
+    retry_attempts: int = 0,
+) -> tuple[bool, list[EvalLog]]:
+    """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
+
+    ``success`` is ``True`` iff every task's log has ``status == "success"``.
+
+    Resumption of a partially-completed run (skipping already-finished scenes via
+    a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
+    now so callers don't get retrofitted, but is not yet honored.
+    """
+    task_list = [tasks] if isinstance(tasks, Task) else list(tasks)
+    logs: list[EvalLog] = []
+    for task in task_list:
+        logs.extend(
+            eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=log_dir,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+            )
+        )
+    success = all(log.status == "success" for log in logs)
+    return success, logs

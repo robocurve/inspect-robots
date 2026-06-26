@@ -40,6 +40,8 @@ class EvalStats:
     duration_s: float
     total_steps: int
     mean_inference_latency_s: float | None = None
+    # Directory of streamed camera frame side-cars, if frame logging was enabled.
+    frames_dir: str | None = None
 
 
 @dataclass
