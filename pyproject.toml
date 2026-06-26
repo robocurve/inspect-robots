@@ -1,0 +1,112 @@
+[build-system]
+requires = ["hatchling>=1.18", "hatch-vcs>=0.3"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robolens"
+dynamic = ["version"]
+description = "The Inspect AI for robotics — an evaluation framework for VLA (vision-language-action) models across real robots and simulators."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "RoboLens contributors" }]
+keywords = [
+    "robotics",
+    "evaluation",
+    "vla",
+    "vision-language-action",
+    "benchmark",
+    "embodied-ai",
+    "physical-ai",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# Core depends ONLY on numpy + the standard library. Everything else is an extra.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+rerun = ["rerun-sdk>=0.20"]
+viz = ["rerun-sdk>=0.20"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+all = ["robolens[rerun]"]
+
+[project.scripts]
+robolens = "robolens.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/robocurve/robolens"
+Repository = "https://github.com/robocurve/robolens"
+Issues = "https://github.com/robocurve/robolens/issues"
+
+# ---------------------------------------------------------------------------
+# Build / versioning: single-source the version from git tags via hatch-vcs.
+# ---------------------------------------------------------------------------
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# Before the first tag exists, fall back to a sensible dev version instead of failing.
+version_scheme = "guess-next-dev"
+fallback_version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robolens"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/robolens", "tests", "README.md", "LICENSE"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["robolens"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+disallow_untyped_defs = true
+files = ["src/robolens"]
+
+[[tool.mypy.overrides]]
+module = ["rerun.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "hardware: requires real robot hardware (deselected by default in CI)",
+    "sim: requires a simulator backend (deselected by default in CI)",
+    "slow: slow tests (deselected by default in CI)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["robolens"]

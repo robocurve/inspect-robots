@@ -565,4 +565,39 @@ shippable all night. Each step is its own commit/push.
 11. **OSS hygiene polish + expand CI matrix LAST** as `continue-on-error`
     (Linux+macOS 3.11/3.12 stay the blocking gate; Windows + 3.10/3.13 + numpy
     1.x/2.x added allow-failure). Docs site + tutorial deferred to a later plan.
+
+## 11. Inspect AI grounding (context7-verified — BINDING for API fidelity)
+
+Verified against Inspect AI's live reference (`/websites/inspect_aisi_uk`).
+RoboLens mirrors these so Inspect users feel at home:
+
+- **`eval()` returns `list[EvalLog]`** (one per task), accepting one task or many.
+  `eval_set()` returns `tuple[bool, list[EvalLog]]` (success flag + logs).
+- **`epochs: int | Epochs`** where `Epochs(count, reducer)` bundles the repeat
+  count with the score reducer (default `"mean"`). Reducers registered via a
+  `@score_reducer` decorator (builtins: `mean`, `median`, `mode`, `max`,
+  `pass_at_k`/`at_least`).
+- **`fail_on_error: bool | float`** is the canonical error-tolerance knob —
+  `True`=fail on first error, `False`=never fail, `0<x<1`=fail if that *proportion*
+  of trials error, `x>1`=fail if that *count* error. RoboLens adopts this verbatim
+  for `PolicyError`-class failures. **Robotics addition:** `EmbodimentFault` /
+  `SafetyAbort` always halt regardless of `fail_on_error` (hardware safety is not
+  negotiable) — this is the one place RoboLens deliberately extends Inspect.
+- **`EvalLog` structure** mirrored: `version` (int), `status`
+  (`"started"|"success"|"error"`), `eval` (an `EvalSpec`: task/policy/embodiment/
+  created/git/versions), `plan` (resolved config incl. `PolicyConfig`,
+  controller, approver), `results` (`EvalResults`: aggregate metrics), `stats`
+  (`EvalStats`: timing, actual control rate, inference latency), `error`
+  (`EvalError` w/ traceback), `tags`, `metadata`, `samples` (per-scene
+  `EvalSample`: scene input/target/score/status/transcript), `reductions`
+  (per-scene epoch reductions). `samples` is named `scenes`-internally but keeps
+  the `EvalSample` shape.
+- **`Scene` ≈ `Sample`** field mapping confirmed: Inspect `Sample(input, target,
+  id, metadata, setup, files, sandbox)` → RoboLens `Scene(instruction[=input],
+  target, id, metadata, setup, init_seed, subtasks)`. (`files`/`sandbox` are
+  LLM-sandbox-specific; the robotics analog is embodiment setup/realizability.)
+- **`@scorer(metrics=...)`** returns `score(state, target) -> Score`; RoboLens
+  uses `score(record, target) -> Score` (record replaces the LLM `TaskState`).
+- **Per-scene `cleanup` hook** (Inspect `Task.cleanup`) added for embodiment
+  teardown after each scene, run even on exception.
 ```
