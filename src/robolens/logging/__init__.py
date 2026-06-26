@@ -9,6 +9,7 @@ absent.
 from __future__ import annotations
 
 from robolens.logging.json_log import JsonLogSink
+from robolens.logging.rerun_sink import RerunSink
 from robolens.logging.sink import LogSink, NullSink
 
-__all__ = ["JsonLogSink", "LogSink", "NullSink"]
+__all__ = ["JsonLogSink", "LogSink", "NullSink", "RerunSink"]

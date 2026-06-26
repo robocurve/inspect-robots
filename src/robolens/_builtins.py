@@ -6,8 +6,9 @@ Imported lazily by :mod:`robolens.registry` on first lookup, so importing
 
 from __future__ import annotations
 
+from robolens.logging import JsonLogSink, RerunSink
 from robolens.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
-from robolens.registry import embodiment, policy, scorer, task
+from robolens.registry import embodiment, policy, scorer, sink, task
 from robolens.scene import Scene
 from robolens.scorer import (
     episode_length,
@@ -32,6 +33,10 @@ scorer("episode_length")(episode_length)
 scorer("min_distance_to_goal")(min_distance_to_goal)
 scorer("reached_goal_state")(reached_goal_state)
 scorer("operator")(operator_scorer)
+
+# Sinks
+sink("json")(JsonLogSink)
+sink("rerun")(RerunSink)
 
 
 @task("cubepick-reach")
