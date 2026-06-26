@@ -18,4 +18,23 @@ try:
 except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed tree
     __version__ = "0.0.0+unknown"
 
-__all__ = ["__version__"]
+from robolens.eval import eval
+from robolens.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    read_eval_log,
+)
+
+__all__ = [
+    "EvalLog",
+    "EvalResults",
+    "EvalSpec",
+    "EvalStats",
+    "SceneResult",
+    "__version__",
+    "eval",
+    "read_eval_log",
+]
