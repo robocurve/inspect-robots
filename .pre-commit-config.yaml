@@ -50,6 +50,6 @@ repos:
         name: pytest (100% coverage gate)
         entry: pytest --cov --cov-report=term-missing
         language: system
-        types: [python]
+        always_run: true # run on every push, even when no .py files changed
         pass_filenames: false
         stages: [pre-push]
