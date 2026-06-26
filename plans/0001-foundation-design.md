@@ -1,75 +1,99 @@
-# RoboLens — Foundation Design
+# RoboLens — Foundation Design (v2)
 
 > **Goal:** RoboLens is the "Inspect AI for robotics" — an open-source evaluation
-> framework for **physical AI / VLA (Vision-Language-Action) models**. It lets
-> anyone define a robotics benchmark once and run *any* VLA policy against *any*
-> compatible embodiment (real robot or simulator), with first-class logging to
-> [Rerun](https://github.com/rerun-io/rerun) and structured eval logs.
+> framework for **physical AI / VLA (Vision-Language-Action) models**. Define a
+> robotics benchmark once and run *any* VLA policy against *any* compatible
+> embodiment (real robot or simulator), with first-class logging to
+> [Rerun](https://github.com/rerun-io/rerun) and reproducible structured logs.
 >
 > This repo is the *framework* ("Inspect AI"). Concrete benchmarks
-> ("Inspect Evals for robotics") are explicitly **out of scope** and live in a
-> separate repo. We ship only the minimal reference evals needed to exercise and
-> document the framework.
+> ("Inspect Evals for robotics") live in a separate repo and are **out of scope**.
+> We ship only minimal reference evals (a mock world) to exercise and document it.
 
-## 0. Design provenance & key insight
+**v2 changelog:** rewritten after a 3-way critique loop (Inspect-fidelity,
+robotics-domain, OSS-engineering lenses). The structural changes vs v1 — adopted
+because they are expensive to retrofit and cheap to specify now:
 
-Inspect AI's core decomposition is `Task = dataset + solver + scorer`, with a
-pluggable `Model` and an `eval()` entry point that produces an immutable
-`EvalLog`. The genius is the clean separation between *what you evaluate*
-(`Task`) and *what does the work* (`Model`/`Solver`), plus a great log/viewer.
+- **Action chunking is core, not an extension.** Policies emit an `ActionChunk`
+  (a horizon of actions played open-loop), because real VLAs (π0, ACT, diffusion
+  policies) infer slower than the control rate.
+- **A `Scene` dataset replaces `num_trials`.** A benchmark is a dataset of initial
+  conditions / instructions / targets (the Inspect `Sample` analog), iterated
+  over `epochs` repeats.
+- **Action *semantics* are first-class** (control mode, rotation repr, gripper,
+  frame, bounds) — `Box` alone cannot say what an action *means*.
+- **An explicit error taxonomy** separates "record & continue" from "halt the
+  eval" — required for safe unattended overnight runs.
+- **Composable controllers** (the rollout middleware layer), **operator/VLM
+  scorers**, **entry-point plugins**, **side-car binary logging**, and
+  **`eval_set` resumption** are designed in (interfaces reserved even where
+  implementation is deferred).
 
-**The robotics twist:** unlike LLM evals which have *one* swappable input (the
-model), robotics evals have **two orthogonal swappable inputs**:
+## 0. Design provenance & the central insight
 
-1. **The VLA / Policy** — the "brain". Maps observations + instruction → actions.
-2. **The Embodiment** — the "body + world". A real robot or a simulator. Produces
-   observations and consumes actions; owns the action/observation *spaces* and
-   the success/reset machinery.
+Inspect AI decomposes LLM evals as `Task = Dataset[Sample] + solver + scorer`,
+with a pluggable `Model`, an `eval()` entry point, an immutable `EvalLog`, a
+registry/decorator extension model, and a great log viewer. The Dataset is the
+spine; epochs handle repeats; reducers collapse epochs before metrics aggregate.
 
-A benchmark `Task` is defined *independently* of both. The framework's job is to
-(a) verify a given (policy, embodiment) pair is *compatible*, (b) run the
-closed-loop rollout, (c) score it, and (d) log everything. This 2-input
-factoring is the central architectural commitment and everything else follows
-from it.
+**The robotics twist — two orthogonal swappable inputs** (vs one for LLMs):
 
-## 1. Scope of this first deliverable
+1. **The VLA / `Policy`** — the "brain". Maps observations + instruction →
+   *action chunk*.
+2. **The `Embodiment`** — the "body + world". A real robot or simulator. Produces
+   observations, executes actions, owns the action/observation *spaces*,
+   control rate, and reset/safety machinery.
 
-Foundational framework only. Concretely:
+A benchmark `Task` is defined *independently* of both. The framework: (a)
+verifies a `(policy, embodiment)` pair is *compatible* (spaces + semantics +
+camera/state key mapping), (b) runs the closed-loop rollout with open-loop chunk
+execution, (c) scores recorded trajectories, (d) logs everything reproducibly.
+This 2-input factoring is the central architectural commitment.
 
-- Core abstractions & interfaces (`Policy`, `Embodiment`, `Task`, `Scorer`,
-  spaces, observation/action types).
-- The rollout engine (`rollout()` — the closed control loop) and the top-level
-  `eval()` entry point producing an immutable `EvalLog`.
-- A **registry + decorators** (`@task`, `@policy`, `@embodiment`, `@scorer`) so
-  third parties extend by registration, mirroring Inspect.
-- **Mock policy + mock embodiment** ("CubePick" toy world) so the entire stack is
-  testable with zero hardware/sim dependencies in CI.
-- **Rerun logging** as an optional, pluggable sink (degrades gracefully when
-  rerun isn't installed).
-- **Structured eval logs** (JSON, versioned schema) + a tiny CLI (`robolens`).
-- Full pytest suite, CI (GitHub Actions), packaging (`pyproject.toml`/uv), docs
-  scaffold, contributor guidelines. Open-source best practices throughout.
+## 1. Scope of v0 (this foundation)
 
-**Out of scope for v0:** specific sim backends (ManiSkill/RoboSuite/Isaac/MuJoCo
-adapters), specific VLA model weights (OpenVLA/π0/Octo adapters), a web viewer,
-distributed/parallel rollout execution. These get their own plans later. We
-design the *interfaces* so these slot in without refactoring.
+Ship the framework skeleton with the *hard-to-retrofit interfaces correct*:
 
-## 2. Key assumptions (made autonomously — flagged for later confirmation)
+- Core types & spaces with **action semantics**; `compat.check_compatibility`.
+- `Policy` → `ActionChunk`; `Embodiment`; `Scene`/`SceneDataset`; `Task`.
+- `Scorer` (+ `target`) / `Metric` / epoch **reducer** split; builtin scorers
+  incl. an operator (human-in-the-loop) scorer stub.
+- The **rollout engine** with open-loop chunk execution + a composable
+  `Controller` middleware layer + a safety `Approver` gate; the `eval()` entry
+  point producing an immutable, schema-versioned `EvalLog`.
+- **Error taxonomy** (`CompatibilityError` fail-fast; `PolicyError`
+  record-and-continue; `EmbodimentFault`/`SafetyAbort` halt) + circuit breaker.
+- **Registry + decorators + entry-point discovery** (`@task/@policy/@embodiment/
+  @scorer`), string resolution in `eval()`.
+- **Mock world** (`CubePick`, deterministic, dependency-free) + scripted/random
+  policies that exercise *chunked* execution — full stack tested in CI w/o
+  hardware or sim.
+- **Logging:** `JsonLogSink` (canonical, atomic writes, binary side-cars) +
+  `RerunSink` (optional, lazy). `LogSink` protocol.
+- **CLI** (`robolens list|run|inspect|score`), packaging (uv/hatchling +
+  hatch-vcs), `mypy --strict`, ruff, pytest, GitHub Actions matrix, docs
+  scaffold, and OSS hygiene (CONTRIBUTING, CoC, SECURITY, templates, CHANGELOG).
 
-- **Language:** Python 3.10+ (matches Inspect AI, robotics ecosystem, `uv`).
-- **Numerics:** NumPy is the lingua franca for observations/actions. Torch is
-  *not* a core dependency (policies may use it internally; framework stays
-  framework-agnostic). Images are `np.ndarray` (H,W,C uint8).
-- **Sync-first:** rollouts are synchronous (`step()`), because real robots are
-  inherently sequential and most sims are too. Async is a later extension; we
-  keep the interface `async`-friendly by not baking blocking assumptions into
-  return types. (Revisit — see open questions.)
-- **Primary use case is real-world benchmarks**, so the `Embodiment` interface is
-  designed around a real robot's reality (no `reset()`-to-arbitrary-state
-  guarantee, human-in-the-loop reset hooks, wall-clock control rate), with sims
-  as a *stricter* special case that can offer more (seeding, deterministic
-  reset, privileged success detection).
+**Deferred (interfaces reserved, separate plans):** concrete sim adapters
+(MuJoCo/ManiSkill/Isaac), concrete VLA adapters (OpenVLA/π0/Octo), vectorized
+envs, temporal-ensembling controller, VLM success classifier, `eval_set`
+resumption *implementation*, web results viewer, parallel sim sample execution.
+
+## 2. Assumptions (made autonomously — flagged for confirmation)
+
+- **Python 3.10+**; **NumPy** is the obs/action lingua franca; images are raw
+  `(H,W,C) uint8` `np.ndarray`. **Torch is not a core dependency.**
+- **Sync per-step control** (real robots are sequential). Concurrency across
+  *scenes* (sim) and vectorized envs are reserved at the interface, not built.
+- **Primary use case = real-world benchmarks.** The `Embodiment` interface
+  assumes real-robot reality (no arbitrary-state reset guarantee, human-in-loop
+  reset, wall-clock rate, no privileged success oracle); **sim is a stricter
+  special case** exposing more via opt-in `capabilities`.
+- **Policy owns observation preprocessing** (resize/normalize/history); the
+  embodiment emits raw sensor frames. The framework only does **key remapping**
+  (policy wants `base_rgb`, robot provides `camera_0`) and presence/space checks.
+- **Conventions follow LeRobot** where sensible (camera keys, `observation.state`,
+  `action`, fps) to make real-VLA adapters near-trivial.
 
 ## 3. Architecture
 
@@ -77,233 +101,361 @@ design the *interfaces* so these slot in without refactoring.
 
 ```
 robolens/
-  __init__.py          # public API surface (eval, rollout, decorators, types)
-  _version.py
-  types.py             # Observation, Action, StepResult, dataclasses
-  spaces.py            # Space, Box, Dict, Discrete — compatibility checking
-  policy.py            # Policy ABC/Protocol + PolicyInfo metadata
-  embodiment.py        # Embodiment ABC/Protocol + EmbodimentInfo metadata
-  task.py              # Task, Trial/Episode spec, success criteria hooks
-  scorer.py            # Scorer protocol + builtin scorers + Score/Metric
-  rollout.py           # rollout() closed-loop engine, RolloutResult
-  eval.py              # eval() orchestration, EvalConfig, EvalLog (immutable)
+  __init__.py          # public API surface (__all__ fenced)
+  types.py             # Observation, Action, ActionChunk, StepResult
+  spaces.py            # Space/Box/Dict/Discrete + ActionSemantics + StateSpec
+  policy.py            # Policy Protocol + PolicyBase ABC + PolicyConfig, PolicyInfo
+  embodiment.py        # Embodiment Protocol + EmbodimentBase ABC + EmbodimentInfo
+  scene.py             # Scene (Sample analog), SceneDataset, Target
+  task.py              # Task (dataset + scorer + horizon + control_hz + epochs)
+  scorer.py            # Scorer/Score/Metric protocols, reducers, builtins
+  controller.py        # Controller (rollout middleware): chunk exec, ensembling
+  approver.py          # Approver safety gate (auto/operator/policy)
+  rollout.py           # rollout() closed loop + TrialRecord, RolloutResult
+  eval.py              # eval()/eval_set(), EvalConfig, EvalLog (immutable)
   compat.py            # check_compatibility(policy, embodiment) -> report
-  registry.py          # global registry + @task/@policy/@embodiment/@scorer
+  errors.py            # CompatibilityError, PolicyError, EmbodimentFault, SafetyAbort
+  registry.py          # decorators + importlib.metadata entry-point discovery
   logging/
-    __init__.py
-    sink.py            # LogSink protocol (start/log_step/finish hooks)
-    rerun_sink.py      # RerunSink (optional import; no-op stub if missing)
-    json_log.py        # EvalLog read/write, schema versioning
+    sink.py            # LogSink protocol + event/transcript model
+    json_log.py        # EvalLog read/write, schema_version, atomic, side-cars
+    rerun_sink.py      # RerunSink (optional import; no-op if rerun missing)
   mock/
-    __init__.py
     cubepick.py        # CubePickEmbodiment (2D toy world, deterministic)
-    policies.py        # ScriptedPolicy, RandomPolicy, NoopPolicy
-  cli.py               # `robolens` CLI: list/run/inspect
+    policies.py        # ScriptedPolicy, RandomPolicy, NoopPolicy (chunk-aware)
+  cli.py               # `robolens` CLI
   py.typed
 ```
 
-### 3.2 Core data types (`types.py`, `spaces.py`)
+Public API is fenced by `__all__`; everything else / `_`-prefixed is private with
+no stability guarantee. An API-snapshot test guards accidental surface growth.
+
+### 3.2 Core types (`types.py`)
 
 ```python
 @dataclass(frozen=True)
 class Observation:
-    images: dict[str, np.ndarray]      # camera_name -> (H,W,C) uint8
-    state: dict[str, np.ndarray]       # proprioception: joints, eef pose, gripper
-    instruction: str | None            # language goal for this step (usually const)
-    extra: dict[str, Any]              # embodiment-specific extras
-    timestamp: float                   # wall-clock or sim time (seconds)
+    images: Mapping[str, np.ndarray]   # camera key -> (H,W,C) uint8 (raw)
+    state: Mapping[str, np.ndarray]    # proprio: joint_pos, eef_pose, gripper...
+    instruction: str | None            # language goal (may change across steps)
+    image_times: Mapping[str, float]   # per-camera capture time (async sensors)
+    state_time: float
+    extra: Mapping[str, Any]
 
 @dataclass(frozen=True)
 class Action:
-    data: np.ndarray                   # raw action vector
-    space_id: str                      # which action space this targets
-    meta: dict[str, Any]               # e.g. predicted by which VLA head
+    data: np.ndarray
+    semantics: ActionSemantics         # full semantics, not a bare string id
+    meta: Mapping[str, Any]
+
+@dataclass(frozen=True)
+class ActionChunk:                     # VLAs predict H actions, played open-loop
+    actions: Sequence[Action]
+    control_hz: float | None           # rate to play them at (None = embodiment default)
+    inference_latency_s: float | None  # measured; logged as a metric
+    meta: Mapping[str, Any]
+    # H==1 is the degenerate "reactive policy" case.
 
 @dataclass(frozen=True)
 class StepResult:
-    observation: Observation           # observation AFTER applying the action
-    reward: float | None               # optional dense/sparse signal (sims)
-    terminated: bool                   # task ended (success or hard failure)
-    truncated: bool                    # time/limit cut-off
-    info: dict[str, Any]
+    observation: Observation           # AFTER applying the action
+    reward: float | None               # optional (sims)
+    terminated: bool                   # task ended...
+    termination_reason: str | None     # ...success | collision | fault | out_of_bounds
+    truncated: bool                    # horizon/time cut-off
+    info: Mapping[str, Any]            # sims may put privileged success here
 ```
 
-`Space` types (`Box`, `Dict`, `Discrete`) describe action & observation shapes
-and enable `compat.check_compatibility()` to fail *fast and loud* before a
-rollout if a VLA emits 7-DoF actions but the arm expects 6-DoF, or expects a
-wrist camera the embodiment doesn't have.
+Frames are large: `TrialRecord` keeps **references** to images streamed to disk
+(per-camera mp4 or `.rrd`), not in-RAM arrays, so 1000-step multi-camera
+episodes don't blow up memory. The `info` channel is the documented place a sim
+puts privileged success.
 
-### 3.3 The two inputs
+### 3.3 Spaces & semantics (`spaces.py`)
+
+`Box/Dict/Discrete` describe shapes; **`ActionSemantics`** describes *meaning*
+and is required on action spaces:
 
 ```python
-class Policy(Protocol):              # the VLA / "brain"
-    info: PolicyInfo                 # name, action_space it emits, obs it needs
-    def reset(self, task: Task) -> None: ...
-    def act(self, observation: Observation) -> Action: ...
-    # optional: act_batch / async_act later
+@dataclass(frozen=True)
+class ActionSemantics:
+    control_mode: Literal["joint_pos","joint_vel","eef_delta_pose",
+                          "eef_abs_pose","eef_delta_pos"]
+    rotation_repr: Literal["none","quat_wxyz","quat_xyzw","rot6d",
+                           "axis_angle","euler_xyz"]
+    gripper: Literal["none","continuous","binary"]
+    frame: Literal["base","world","camera"]
+    bounds: tuple[np.ndarray, np.ndarray] | None
+```
 
-class Embodiment(Protocol):          # the robot or sim / "body + world"
-    info: EmbodimentInfo             # name, action_space, observation_space,
-                                     # control_hz, is_simulated, capabilities
-    def reset(self, task: Task, *, seed: int | None = None) -> Observation: ...
+Semantics make compatibility checking real (7-DoF VLA vs 6-DoF arm; delta vs
+absolute) and make temporal ensembling *correct* (you cannot average absolute and
+delta poses the same way; quaternion/euler averaging needs the repr). `StateSpec`
+gives proprioception a controlled vocabulary + units (radians, meters,
+normalized gripper) so `state` compatibility isn't illusory.
+
+`compat.check_compatibility(policy, embodiment)` returns a structured report:
+hard mismatches (raise `CompatibilityError` before any rollout), soft warnings
+(missing optional camera), and the resolved **key remap** (policy ↔ embodiment
+camera/state names). It also reconciles `Policy` desired vs `Embodiment` actual
+**control rate**.
+
+### 3.4 The two inputs (`policy.py`, `embodiment.py`)
+
+```python
+@runtime_checkable
+class Policy(Protocol):                # the VLA / "brain"
+    info: PolicyInfo                   # name, emitted ActionSemantics, required obs keys
+    config: PolicyConfig               # temperature, action_horizon, replan, ensemble — logged
+    def reset(self, scene: Scene) -> None: ...
+    def act(self, observation: Observation) -> ActionChunk: ...
+    # reserved for later: act_batch(list[Observation]) -> list[ActionChunk]
+
+@runtime_checkable
+class Embodiment(Protocol):            # the robot or sim / "body + world"
+    info: EmbodimentInfo               # spaces, control_hz, is_simulated, capabilities
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation: ...
     def step(self, action: Action) -> StepResult: ...
     def close(self) -> None: ...
-    # optional sim-only: render(), set_state(), get_privileged_state()
+    # sim-only (gated by capabilities): render(), set_state(), privileged_state()
 ```
 
-`PolicyInfo`/`EmbodimentInfo` carry the *spaces* and *capabilities* used for
-compatibility checking and logging. `capabilities` is a set of opt-in flags
-(`"seedable"`, `"resettable"`, `"privileged_success"`, `"renderable"`) so the
-framework and scorers can ask "can this embodiment do X?" rather than assuming.
+Both ship as runtime-checkable **Protocols** (wrap existing envs without
+inheriting) *plus* optional `PolicyBase`/`EmbodimentBase` ABCs with sane defaults
+(`close()` no-op, capability defaults). `capabilities` is an opt-in flag set
+(`"seedable"`, `"resettable"`, `"privileged_success"`, `"renderable"`,
+`"auto_reset"`). On real hardware `reset()` may drive to home and **block on a
+logged human-confirmation prompt**; auto-reset is a sim capability, not assumed.
 
-### 3.4 Task & success criteria (`task.py`)
+### 3.5 Scenes & tasks (`scene.py`, `task.py`)
+
+A `Scene` is the **Sample analog** — one initial condition of a benchmark:
 
 ```python
+@dataclass(frozen=True)
+class Scene:
+    id: str
+    instruction: str                   # per-scene language goal
+    target: Target | None              # success spec the scorer reads (goal obj/pose...)
+    init_seed: int | None
+    setup: str | None                  # registered setup hook name (serializable!)
+    subtasks: Sequence[Subtask] = ()   # long-horizon (CALVIN-style) chained goals
+    metadata: Mapping[str, Any] = ...
+
+class SceneDataset(Protocol):          # iterable/filterable/sliceable/shuffleable
+    def __iter__(self) -> Iterator[Scene]: ...
+    def __len__(self) -> int: ...
+
 @dataclass
 class Task:
     name: str
-    instruction: str                  # language goal given to the VLA
-    scorer: Scorer | list[Scorer]
-    max_steps: int                    # truncation horizon
-    control_hz: float | None          # desired loop rate (None = as fast as possible)
-    num_trials: int = 1               # episodes per (policy, embodiment) eval
-    setup: Callable | None            # optional per-trial setup hook (e.g. human reset prompt)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    scenes: SceneDataset               # the spine — e.g. 50 object layouts
+    scorer: Scorer | Sequence[Scorer]  # normalized to a list internally
+    max_steps: int                     # truncation horizon
+    epochs: int = 1                    # repeats per scene (was num_trials)
+    epoch_reducer: Reducer = mean      # collapse epochs before metrics
+    control_hz: float | None = None
+    metadata: Mapping[str, Any] = ...
 ```
 
-A `Task` is *embodiment-agnostic*: it describes the goal and how to score it, not
-how the robot is built. Success detection is delegated to `Scorer`s, which may
-use either privileged embodiment state (sim) or learned/sensor-based detectors
-(real world).
+A `Task` is embodiment-agnostic. Per-scene `instruction`/`target`/`seed` and
+optional `subtasks` (instruction changes mid-episode; scored sequentially) make
+real benchmarks (CALVIN/LIBERO/SIMPLER-style) representable. `setup` is a
+*registered hook name*, not a raw callable, so it serializes into the log.
 
-### 3.5 Scoring (`scorer.py`)
+### 3.6 Scoring, metrics, reducers (`scorer.py`)
 
-Mirrors Inspect's `Scorer`/`Score`/`Metric` split.
+Mirrors Inspect's `@scorer`/`@metric` split and adds an explicit epoch-reducer
+stage:
 
 ```python
 @dataclass(frozen=True)
 class Score:
-    value: float | bool | str         # primary outcome (e.g. success=True)
+    value: float | bool | str
     explanation: str | None
-    metadata: dict[str, Any]
+    metadata: Mapping[str, Any]
 
 class Scorer(Protocol):
-    def __call__(self, trial: TrialRecord) -> Score: ...
+    def __call__(self, record: TrialRecord, target: Target | None) -> Score: ...
 
-# builtins: success_at_end, reached_goal_state, min_distance_to_goal,
-#           episode_length, composite([...]) ; reducers across trials:
-#           mean, success_rate, stderr, pass_at_k
+# epoch reducers (collapse `epochs` per scene): mean, mode, max, pass_at_k
+# metrics (aggregate per-scene scores): mean, stderr, success_rate, ...
 ```
 
-A `Scorer` consumes the *recorded trajectory* (`TrialRecord`: every Observation,
-Action, StepResult, timing) — not live env access — so scoring is reproducible
-from a saved log and decoupled from the rollout. Sim "privileged success" is just
-data in `StepResult.info` that a scorer reads.
+Scorers consume the **recorded trajectory** (`TrialRecord`) + the scene `target`,
+never live env access — so scoring is reproducible from a saved log and an
+offline `robolens score <log>` can re-run scorers (the achievable analog of
+Inspect's generation cache). Builtins:
 
-### 3.6 Rollout engine (`rollout.py`)
+- `success_at_end`, `reached_goal_state`, `min_distance_to_goal`,
+  `episode_length`, `progress`/`partial_success` (subtask fraction — key for
+  long-horizon), `intervention_rate`, `composite([...])`.
+- `OperatorScorer` — **human-in-the-loop**: at episode end, blocks and records
+  the operator's success/partial judgement (the dominant real-world method).
+- `VLMScorer` — interface reserved: runs a VLM classifier over final frames.
 
-The closed control loop — the heart of the framework:
+Reducer validity is typed: `mean`/`stderr` over a `str` value raises a clear
+error rather than silently coercing.
+
+### 3.7 Rollout: open-loop chunk execution + middleware (`rollout.py`, `controller.py`, `approver.py`)
+
+The heart of the framework. Two nested loops — *inference* (slow VLA) and
+*execution* (fast control), connecting a single `act()` to many `step()`s:
 
 ```
-policy.reset(task); obs = embodiment.reset(task, seed=...)
-for t in range(task.max_steps):
-    action = policy.act(obs)                 # VLA inference
-    step = embodiment.step(action)           # robot/sim executes
-    sink.log_step(t, obs, action, step)      # rerun + json
-    record.append(...)
-    if step.terminated or step.truncated: break
-    obs = step.observation
-    pace_to(task.control_hz)                  # honor control rate
-return RolloutResult(record, ...)
+policy.reset(scene); obs = embodiment.reset(scene, seed=scene.init_seed)
+while not done and step_idx < max_steps:
+    chunk = controller.infer(policy, obs)        # VLA inference; record latency
+    for action in controller.actions_to_execute(chunk):   # open-loop horizon
+        action = approver.review(action, state)  # SAFETY GATE before hardware
+        result = embodiment.step(action)         # robot/sim executes
+        sink.log_step(step_idx, obs, action, result)
+        record.append(...); step_idx += 1
+        if result.terminated or result.truncated: done = True; break
+        obs = result.observation
+        pace_to(embodiment control rate)         # paced by EMBODIMENT, not wish
 ```
 
-Cross-cutting concerns handled here: control-rate pacing, exception capture
-(a policy/robot exception is *recorded as a failed trial*, not a crash —
-critical for unattended overnight benchmark runs), and per-step logging.
+- **`Controller`** is the composable middleware layer (Inspect's `@solver`
+  analog): default executes the first `replan_interval` actions of each chunk;
+  an `EnsemblingController` (deferred) blends overlapping chunks using
+  `ActionSemantics`. Observation preprocessing/history, action smoothing, and
+  retry-on-stuck are controllers too — so the loop is never forked.
+- **`Approver`** intercepts every action before `step()` (auto-clamp / operator
+  / policy), logged as events — the robotics analog of Inspect's `ApprovalPolicy`,
+  and more safety-critical.
+- **Error handling:** a `PolicyError` is recorded as a failed trial and the eval
+  continues; an `EmbodimentFault`/`SafetyAbort` **halts the whole eval** (a
+  faulted robot must not auto-proceed to scene 2 overnight). A
+  `max_consecutive_failures` circuit breaker and `--fail-fast` are config.
+- **Transcript:** `TrialRecord` carries a typed **event stream** (reset, infer,
+  step, approval decision, intervention, error+traceback, scorer outcome) — the
+  data a viewer renders.
 
-### 3.7 eval() & EvalLog (`eval.py`)
+### 3.8 eval(), eval_set(), EvalLog (`eval.py`)
 
 ```python
-def eval(
-    tasks: Task | list[Task],
-    policy: Policy,
-    embodiment: Embodiment,
-    *,
-    log_dir: str = "logs",
-    sinks: list[LogSink] | None = None,
-    seed: int | None = None,
-) -> EvalLog: ...
+def eval(task: str | Task, policy: str | Policy, embodiment: str | Embodiment,
+         *, log_dir="logs", sinks=None, seed=None, fail_fast=False,
+         max_consecutive_failures=None) -> EvalLog: ...
+
+def eval_set(...) -> EvalLog:          # idempotent; resumes a partial run by
+                                       # skipping completed (scene, epoch) keys
 ```
 
-Steps: resolve tasks → `check_compatibility(policy, embodiment)` (raise on hard
-mismatch, warn on soft) → for each task, for each trial, run `rollout()` → score
-→ aggregate metrics → write immutable `EvalLog` (JSON, schema-versioned) to
-`log_dir`. `EvalLog` mirrors Inspect: header (config, policy/embodiment info,
-git rev, timestamps, package versions) + per-trial results + aggregate metrics.
+`eval()` accepts **registry strings** (`policy="openvla/7b"`,
+`embodiment="cubepick"`) resolved through the registry with `key=value` args
+(CLI `-P k=v`), recording the *resolved spec + args* for reproducibility — the
+Inspect ergonomic that makes logs re-runnable. Flow: resolve → compat check
+(fail fast) → for each scene × epoch run `rollout()` → score with `target` →
+epoch-reduce → aggregate metrics → write immutable `EvalLog`.
 
-### 3.8 Logging sinks (`logging/`)
+`eval_set()` makes overnight runs resumable: a stable run id + per-`(scene,epoch)`
+status (`success|error|incomplete`) means a crashed 6-hour run re-invokes and
+skips finished work. (Interface in v0; full resume impl is a follow-up plan.)
 
-`LogSink` protocol: `on_eval_start`, `on_trial_start`, `log_step`,
-`on_trial_end`, `on_eval_end`. Two builtins:
+### 3.9 Logging (`logging/`) & EvalLog schema
 
-- `JsonLogSink` — always on; the canonical reproducible record.
-- `RerunSink` — optional. Logs camera images, 3D eef poses, joint time-series,
-  action vectors, and success markers to a Rerun recording (`.rrd`). Imported
-  lazily; if `rerun-sdk` isn't installed, RoboLens warns once and no-ops so core
-  never hard-depends on it.
+`LogSink` protocol: `on_eval_start / on_trial_start / log_step / on_trial_end /
+on_eval_end`. Builtins:
 
-### 3.9 Registry & decorators (`registry.py`)
+- **`JsonLogSink`** (always on, canonical). JSON holds metadata + references;
+  large binaries (images→mp4, `.rrd`) are **side-car files** on disk. Writes are
+  **atomic** (temp + rename) so an overnight crash never leaves a half log.
+- **`RerunSink`** (optional, lazy import). Logs camera images, 3D eef poses,
+  joint/action time-series, approval & success markers to a `.rrd`. If
+  `rerun-sdk` is absent, warns once and no-ops; `mock/` never imports it.
 
-`@task`, `@policy`, `@embodiment`, `@scorer` register factories by name so the
-CLI and third-party packages discover them (entry-points later). Exactly the
-Inspect extension story.
+`EvalLog` (immutable, `schema_version`ed) mirrors Inspect: header (resolved
+config, policy/embodiment info + `capabilities`, `PolicyConfig`, git rev, package
+versions, timestamps, `EvalStats` incl. actual control rate & inference
+latency), per-scene results with `status` + structured `error`/traceback +
+`reductions`, aggregate metrics. **Read-back guarantee:** newer RoboLens always
+reads older logs; a JSON Schema / pydantic model + golden-file round-trip test
+enforce it.
 
-### 3.10 CLI (`cli.py`)
+### 3.10 Registry, plugins, CLI (`registry.py`, `cli.py`)
 
-`robolens list [tasks|policies|embodiments]`, `robolens run --task X --policy Y
---embodiment Z`, `robolens inspect <log.json>`. Thin wrapper over `eval()`.
+`@task/@policy/@embodiment/@scorer/@sink` register factories by name. **Out-of-
+tree discovery** uses `importlib.metadata` entry-point groups —
+`robolens.policies`, `robolens.embodiments`, `robolens.tasks`, `robolens.scorers`,
+`robolens.sinks` — so an installed `robolens-maniskill` / `robolens-openvla`
+package appears in `robolens list` without being imported first. CLI: `robolens
+list [...]`, `robolens run --task X --policy Y -P k=v --embodiment Z`, `robolens
+inspect <log>` (terminal results table — distinct from Rerun trajectory viz),
+`robolens score <log>` (offline re-scoring).
 
-## 4. Testing strategy (pytest, TDD)
+## 4. Errors, safety & the overnight tension (`errors.py`)
 
-- **Unit:** spaces & compatibility (matching, mismatching, subset cameras);
-  types immutability; scorers on synthetic `TrialRecord`s; registry; json-log
-  round-trip + schema version.
-- **Integration:** full `eval()` on `CubePick` mock world with `ScriptedPolicy`
-  (deterministic success) and `RandomPolicy` (mostly failure) → assert success
-  rates, log structure, reproducibility under fixed seed.
-- **Logging:** `RerunSink` is exercised behind a guard (skips if rerun missing);
-  a fake sink verifies the hook sequence/ordering.
-- **Property:** seeded determinism — same seed ⇒ identical `EvalLog` (modulo
-  timestamps).
-- Coverage gate in CI; `ruff` + `mypy` + `pytest` all green before merge.
+The "fail-fast vs never-crash-overnight" tension, resolved explicitly:
 
-## 5. Open questions (resolve via critique loop / later confirmation)
+| Class | When | Policy |
+|---|---|---|
+| `CompatibilityError` | before any rollout | **fail fast**, abort eval |
+| `ConfigError` | bad task/registry args | **fail fast** |
+| `PolicyError` | VLA raised at inference | record trial `status=error`, **continue** |
+| `EmbodimentFault` | robot/sim hardware fault | **halt eval**, require human |
+| `SafetyAbort` | approver veto / e-stop | **halt eval**, require human |
 
-1. **Sync vs async rollout.** Sync now; is the interface future-proof for async
-   real-robot drivers and batched sim envs? Confirm `Action`/`StepResult` don't
-   preclude it.
-2. **Action/observation space taxonomy.** Is `Box/Dict/Discrete` enough, or do we
-   need explicit robot semantics (joint vs eef-delta vs eef-abs, gripper
-   continuous vs binary)? Leaning toward a thin `semantics` tag on `Box` rather
-   than a rigid enum.
-3. **Vectorized/parallel embodiments** (N sim envs at once) — interface hook now
-   or later? Leaning: design `rollout` to *not* assume single-env so a
-   `VectorEmbodiment` slots in later.
-4. **Real-world reset & safety.** How much of human-in-the-loop reset, e-stop,
-   and safety-limit checking belongs in core vs adapters? v0: hooks only.
-5. **Naming:** `Policy` vs `VLA` vs `Agent`; `Embodiment` vs `Env` vs `Robot`.
-   Leaning `Policy`/`Embodiment` (precise, not over-loaded with RL `Env`).
+Plus `max_consecutive_failures` circuit breaker and `--fail-fast` for dev. A
+faulted robot never auto-advances unattended.
 
-## 6. Milestones (each its own commit/push; plan-per-feature as repo grows)
+## 5. Testing (pytest, TDD)
 
-- **M0** Packaging, CI, license/readme/contributing, repo hygiene. *(this PR)*
-- **M1** `types`, `spaces`, `compat` + tests.
-- **M2** `Policy`/`Embodiment`/`Task`/`Scorer` interfaces + mock CubePick + tests.
-- **M3** `rollout` + `eval` + `JsonLogSink` + `EvalLog` + integration tests.
-- **M4** `registry` + decorators + CLI.
-- **M5** `RerunSink` + visualization docs.
-- **M6** Docs site scaffold + "write your first benchmark" tutorial.
+- **Unit:** spaces + semantics + compat (match/mismatch/subset cameras/key
+  remap/rate reconcile); type immutability; scorers on synthetic records incl.
+  `target` and subtask progress; reducer type-validity; registry + entry-point
+  discovery (fake dist); json-log round-trip + **golden schema** + atomic write.
+- **Integration:** full `eval()` on `CubePick` with `ScriptedPolicy` (deterministic
+  success) and `RandomPolicy` (mostly failure) — **exercising chunked execution
+  (H>1) and replanning** — assert success/metric values, log structure, status
+  taxonomy, circuit breaker.
+- **Logging:** `RerunSink` behind a skip-guard; a fake sink asserts hook
+  ordering + event transcript.
+- **Determinism:** scoped to the **mock world only** — same seed ⇒ identical
+  `EvalLog` (modulo timestamps). Real-sim determinism is documented as
+  backend-dependent/best-effort, *not* a CI gate.
+- **Boundary:** a CI job imports core in a **rerun/torch-free** env to enforce the
+  dependency boundary.
+- **Markers:** `@pytest.mark.hardware/sim/slow` default-deselected in CI.
+- **Matrix:** Python 3.10–3.13 × {Linux, macOS, Windows}; numpy 1.x & 2.x floors.
+- `ruff` + `mypy --strict` + `pytest` (coverage gate) all green before merge.
+  `dict[str, Any]` escape hatches (`info`/`extra`/`meta`) are the deliberate
+  typing boundary.
 
-Later plans (separate files): sim adapter (MuJoCo/ManiSkill), one real VLA
-adapter, parallel rollout, web viewer.
+## 6. OSS hygiene & release
+
+- `pyproject.toml` (hatchling + **hatch-vcs** single-source version from git
+  tags). Extras: `robolens[rerun]`, `[viz]`, `[dev]`, `[all]`; **core depends
+  only on numpy + stdlib**.
+- SemVer (honest `0.x` = breaking allowed on minor pre-1.0), `CHANGELOG.md` (Keep
+  a Changelog), release via tag → CI → PyPI **trusted publishing (OIDC)**.
+- `README`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY.md`, issue/PR templates,
+  MIT license (already present). Docs: **mkdocs-material** + mkdocstrings (renders
+  the typed API), with a "write your first benchmark" tutorial.
+
+## 7. Milestones (each = its own commit/push; plan-per-feature as repo grows)
+
+- **M0** Packaging, CI matrix, OSS hygiene, core-only import test, repo skeleton.
+- **M1** `types`, `spaces`+semantics, `errors`, `compat` + tests.
+- **M2** `Policy`/`Embodiment` (Protocol+ABC), `Scene`/`SceneDataset`, `Task`,
+  `Scorer`/reducers + mock `CubePick` + chunk-aware mock policies + tests.
+- **M3** `controller` + `approver` + `rollout` (chunk exec, error taxonomy,
+  transcript) + integration tests.
+- **M4** `eval()` + `JsonLogSink` + `EvalLog` schema + golden tests; `eval_set`
+  interface.
+- **M5** `registry` + entry-point discovery + CLI (`list/run/inspect/score`).
+- **M6** `RerunSink` + viz docs.
+- **M7** Docs site + "write your first benchmark" tutorial.
+
+Later plans (separate files): sim adapter, real VLA adapter, ensembling
+controller, vectorized envs, `eval_set` resume impl, web results viewer.
+
+## 8. Remaining open questions (track, don't block)
+
+1. Batched `act_batch`/`VectorEmbodiment` exact signature (reserved, unbuilt).
+2. `eval_set` resume granularity (scene vs epoch) & on-disk run-state format.
+3. Operator-scorer UX (terminal prompt now; richer later).
+4. Whether `Scene` should be the user-facing name vs `Sample` (chose `Scene` for
+   robotics intuition; documented as the Inspect Sample analog).
 ```
