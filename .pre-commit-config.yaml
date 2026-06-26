@@ -1,0 +1,55 @@
+# Pre-commit hooks for RoboLens. Install once per clone:
+#
+#     uv run pre-commit install        # sets up both pre-commit and pre-push hooks
+#
+# On commit: file hygiene + ruff (lint & format) + mypy (strict).
+# On push:   pytest with the 100% coverage gate.
+#
+# Run everything manually with:  uv run pre-commit run --all-files
+#
+# The ruff / mypy / pytest hooks are "local" so they use the exact versions
+# pinned in this project's dev environment (matching CI) rather than a separate
+# pinned copy.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint, autofix)
+        entry: ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff (format)
+        entry: ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: mypy
+        name: mypy (strict)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest-coverage
+        name: pytest (100% coverage gate)
+        entry: pytest --cov --cov-report=term-missing
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]

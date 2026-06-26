@@ -44,5 +44,8 @@ All notable changes to this project are documented here. The format is based on
 - **100% test coverage**, enforced by `--cov-fail-under=100` in CI (a blocking PR
   check). Genuinely unexecutable lines (Protocol stubs, `__main__` guards,
   defensive branches) are excluded via `tool.coverage.report`.
+- **Pre-commit hooks** (`.pre-commit-config.yaml`): ruff (lint + format) and
+  strict mypy on commit, the 100% coverage gate on push. Install with
+  `uv run pre-commit install`. Documented in `CONTRIBUTING.md`.
 
 [Unreleased]: https://github.com/robocurve/robolens/commits/main

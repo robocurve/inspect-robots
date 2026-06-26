@@ -27,9 +27,13 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 
 ## Working here
 
-- Dev loop: `uv pip install -e ".[dev]"`, then `uv run pytest`.
+- Dev loop: `uv pip install -e ".[dev]"`, `uv run pre-commit install`, then
+  `uv run pytest --cov`.
 - Gates that must pass: `ruff check .`, `ruff format --check .`, `mypy` (strict),
-  `pytest`. CI runs all four on Linux+macOS / py3.11-3.12 (blocking).
+  and `pytest --cov` at **100% coverage** (`--cov-fail-under=100`). Pre-commit
+  runs ruff+mypy on commit and the coverage gate on push
+  (`.pre-commit-config.yaml`). CI runs all gates on Linux+macOS / py3.11-3.12 as
+  **blocking, required PR checks**; coverage below 100% fails the build.
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.

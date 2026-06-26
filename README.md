@@ -128,11 +128,13 @@ and [`llms-full.txt`](https://robocurve.github.io/robolens/llms-full.txt).
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-uv run pytest
+uv run pre-commit install          # ruff + mypy on commit, 100% coverage on push
+uv run pytest --cov                 # 100% coverage required
 uv run ruff check . && uv run mypy
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the design docs in [`plans/`](plans/).
+Pre-commit hooks and a blocking CI coverage gate keep `main` green. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and the design docs in [`plans/`](plans/).
 
 ## License
 
