@@ -124,3 +124,32 @@ jobs:
           import roboinspect
           print("roboinspect", roboinspect.__version__, "imported with core deps only")
           PY
+
+  # First-party plugins under plugins/* are their own packages with their own
+  # tests and coverage scope (NOT part of the core 100% gate). The Isaac adapter's
+  # suite runs WITHOUT Isaac installed: it covers spaces/semantics, protocol
+  # conformance, registry discovery, compatibility, memory-safety, and the
+  # clear-error path when Isaac is absent.
+  plugin-isaacsim:
+    name: plugin · isaacsim (no Isaac)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - name: Sync workspace (core + plugins, dev extras)
+        run: uv sync --python 3.11 --all-packages --extra dev
+      - name: Ruff (plugin)
+        run: uv run --no-sync ruff check plugins/robolens-isaacsim
+      - name: Mypy (plugin, strict)
+        run: >
+          uv run --no-sync mypy
+          --config-file plugins/robolens-isaacsim/pyproject.toml
+          plugins/robolens-isaacsim/src/robolens_isaacsim
+      - name: Pytest (plugin)
+        run: uv run --no-sync python -m pytest plugins/robolens-isaacsim/tests -q

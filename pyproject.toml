@@ -134,3 +134,16 @@ exclude_also = [
     ": \\.\\.\\.$",             # one-line Protocol method bodies (def ...: ...)
     "pragma: no cover",
 ]
+
+# ---------------------------------------------------------------------------
+# uv workspace
+# ---------------------------------------------------------------------------
+# First-party plugins (concrete simulators/VLAs that are "out of scope" for the
+# numpy-only core) live in plugins/* as their OWN packages — each with its own
+# pyproject, entry point, tests, and coverage scope. Co-locating them here keeps
+# everything in one repo and versioned together, while the core stays numpy-only
+# and 100%-covered (coverage source above is scoped to "roboinspect" only, so plugin
+# code never counts toward the core gate). `uv sync` installs the core plus every
+# plugin editable into one shared environment.
+[tool.uv.workspace]
+members = ["plugins/*"]

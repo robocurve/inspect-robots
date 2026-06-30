@@ -24,6 +24,12 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 - `plans/` — design docs. `plans/0001-foundation-design.md` is the authoritative
   spec (read its §9–§11 "binding resolutions" before changing core interfaces).
 - `examples/` — runnable demos (`quickstart.py`).
+- `plugins/*` — first-party plugin packages (concrete sims/VLAs that are out of
+  scope for the numpy-only core), each its own package with its own pyproject,
+  entry point, tests, and coverage scope. A uv workspace (`[tool.uv.workspace]`)
+  ties them in: `uv sync --all-packages --extra dev` installs core + all plugins
+  editable. They never count toward the core 100% gate (coverage is scoped to
+  `roboinspect`). E.g. `plugins/robolens-isaacsim/` (Isaac Lab embodiment).
 
 ## Working here
 
@@ -45,4 +51,6 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 Specific benchmarks ("Inspect Evals for robotics"), specific simulators
 (ManiSkill/MuJoCo/Isaac), and specific VLA weights (OpenVLA/π0/Octo) ship as
 separate plugin packages registered via entry points (`roboinspect.embodiments`,
-`roboinspect.policies`, …).
+`roboinspect.policies`, …) — either in their own repos or as in-repo `plugins/*`
+workspace members (see Layout). Either way they stay out of the numpy-only core
+and its 100% coverage gate; `plugins/robolens-isaacsim/` is the reference example.
