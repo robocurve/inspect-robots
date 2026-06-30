@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from robolens import eval, eval_set
-from robolens.cli import main
+from roboinspect import eval, eval_set
+from roboinspect.cli import main
 
 
 def test_eval_resolves_all_strings(tmp_path: Path) -> None:

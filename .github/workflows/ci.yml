@@ -121,6 +121,6 @@ jobs:
           import importlib.util
           for mod in ("rerun", "torch"):
               assert importlib.util.find_spec(mod) is None, f"{mod} unexpectedly installed"
-          import robolens
-          print("robolens", robolens.__version__, "imported with core deps only")
+          import roboinspect
+          print("roboinspect", roboinspect.__version__, "imported with core deps only")
           PY

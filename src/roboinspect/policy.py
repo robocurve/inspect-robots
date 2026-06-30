@@ -1,13 +1,13 @@
-"""The Policy (VLA) interface — one of RoboLens's two swappable inputs.
+"""The Policy (VLA) interface — one of RoboInspect's two swappable inputs.
 
-A [`Policy`][robolens.policy.Policy] is the "brain": given an
-[`Observation`][robolens.types.Observation]
+A [`Policy`][roboinspect.policy.Policy] is the "brain": given an
+[`Observation`][roboinspect.types.Observation]
 (plus the scene's instruction), it returns an
-[`ActionChunk`][robolens.types.ActionChunk] to be executed open-loop.
+[`ActionChunk`][roboinspect.types.ActionChunk] to be executed open-loop.
 
-The public contract is a runtime-checkable [`Policy`][robolens.policy.Policy] ``Protocol`` so
+The public contract is a runtime-checkable [`Policy`][roboinspect.policy.Policy] ``Protocol`` so
 callers
-can wrap existing models without inheriting. [`PolicyBase`][robolens.policy.PolicyBase] is an
+can wrap existing models without inheriting. [`PolicyBase`][roboinspect.policy.PolicyBase] is an
 optional
 convenience ABC with sane defaults.
 """
@@ -18,9 +18,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from robolens.scene import Scene
-from robolens.spaces import Box, ObservationSpace
-from robolens.types import ActionChunk, Observation
+from roboinspect.scene import Scene
+from roboinspect.spaces import Box, ObservationSpace
+from roboinspect.types import ActionChunk, Observation
 
 
 @dataclass(frozen=True)

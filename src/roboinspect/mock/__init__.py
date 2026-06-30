@@ -8,7 +8,7 @@ dependencies (rerun, torch).
 
 from __future__ import annotations
 
-from robolens.mock.cubepick import CubePickEmbodiment
-from robolens.mock.policies import NoopPolicy, RandomPolicy, ScriptedPolicy
+from roboinspect.mock.cubepick import CubePickEmbodiment
+from roboinspect.mock.policies import NoopPolicy, RandomPolicy, ScriptedPolicy
 
 __all__ = ["CubePickEmbodiment", "NoopPolicy", "RandomPolicy", "ScriptedPolicy"]

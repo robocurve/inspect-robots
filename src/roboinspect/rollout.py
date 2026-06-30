@@ -1,10 +1,10 @@
-"""The rollout engine — the closed control loop at the heart of RoboLens.
+"""The rollout engine — the closed control loop at the heart of RoboInspect.
 
-One [`rollout`][robolens.rollout.rollout] runs a single trial (one scene, one epoch): it drives the
-policy↔embodiment loop through the [`Controller`][robolens.controller.Controller]
-(open-loop chunk execution) and the [`Approver`][robolens.approver.Approver] safety
+One [`rollout`][roboinspect.rollout.rollout] runs a single trial (one scene, one epoch): it
+drives the policy↔embodiment loop through the [`Controller`][roboinspect.controller.Controller]
+(open-loop chunk execution) and the [`Approver`][roboinspect.approver.Approver] safety
 gate, logging each step to the sinks, and returns an immutable
-[`TrialRecord`][robolens.rollout.TrialRecord] that scorers consume.
+[`TrialRecord`][roboinspect.rollout.TrialRecord] that scorers consume.
 """
 
 from __future__ import annotations
@@ -14,24 +14,24 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from robolens.approver import Approver
-from robolens.controller import Controller
-from robolens.embodiment import SELF_PACED, Embodiment
-from robolens.errors import EmbodimentFault, PolicyError, RoboLensError
-from robolens.frames import FrameRef, FrameStore
-from robolens.policy import Policy
-from robolens.scene import Scene
-from robolens.transcript import (
+from roboinspect.approver import Approver
+from roboinspect.controller import Controller
+from roboinspect.embodiment import SELF_PACED, Embodiment
+from roboinspect.errors import EmbodimentFault, PolicyError, RoboInspectError
+from roboinspect.frames import FrameRef, FrameStore
+from roboinspect.policy import Policy
+from roboinspect.scene import Scene
+from roboinspect.transcript import (
     Event,
     error_event,
     inference_event,
     reset_event,
     step_event,
 )
-from robolens.types import Action, Observation, StepResult
+from roboinspect.types import Action, Observation, StepResult
 
 if TYPE_CHECKING:
-    from robolens.logging.sink import LogSink
+    from roboinspect.logging.sink import LogSink
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -49,7 +49,7 @@ def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> in
 class StepRecord:
     """One step of a recorded trajectory.
 
-    When a [`FrameStore`][robolens.frames.FrameStore] is used, ``observation`` has its
+    When a [`FrameStore`][roboinspect.frames.FrameStore] is used, ``observation`` has its
     images stripped and ``image_refs`` holds on-disk handles instead (R5).
     """
 
@@ -118,9 +118,9 @@ def rollout(
     """Run a single trial and return its record.
 
     Generic exceptions raised by the policy are wrapped as
-    [`PolicyError`][robolens.errors.PolicyError]; by the embodiment as
-    [`EmbodimentFault`][robolens.errors.EmbodimentFault]. Already-typed RoboLens errors
-    (incl. [`SafetyAbort`][robolens.errors.SafetyAbort]) propagate unchanged, so the
+    [`PolicyError`][roboinspect.errors.PolicyError]; by the embodiment as
+    [`EmbodimentFault`][roboinspect.errors.EmbodimentFault]. Already-typed RoboInspect errors
+    (incl. [`SafetyAbort`][roboinspect.errors.SafetyAbort]) propagate unchanged, so the
     eval orchestrator can apply the correct continue-vs-halt policy.
     """
     trial_id = f"{scene.id}-e{epoch}"
@@ -136,7 +136,7 @@ def rollout(
         prev_inferences = len(store.get("_controller_inferences", []))
         try:
             action = controller.next_action(policy, obs, t, store)
-        except RoboLensError:
+        except RoboInspectError:
             raise
         except Exception as exc:
             record.events.append(error_event(t, "PolicyError", str(exc)))
@@ -151,7 +151,7 @@ def rollout(
 
         try:
             result: StepResult = embodiment.step(action)
-        except RoboLensError:
+        except RoboInspectError:
             raise
         except Exception as exc:
             record.events.append(error_event(t, "EmbodimentFault", str(exc)))

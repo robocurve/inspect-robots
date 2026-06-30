@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with RoboLens
+about: Report a problem with RoboInspect
 title: "[bug] "
 labels: bug
 ---
@@ -20,7 +20,7 @@ A minimal code snippet or steps that reproduce the behavior. The dependency-free
 What you expected to happen.
 
 **Environment**
-- RoboLens version (`robolens --version`):
+- RoboInspect version (`roboinspect --version`):
 - Python version:
 - OS:
 - NumPy version:

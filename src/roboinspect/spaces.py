@@ -1,14 +1,14 @@
 """Action/observation spaces and action *semantics*.
 
 Spaces describe the *shape* of actions and observations;
-[`ActionSemantics`][robolens.spaces.ActionSemantics]
+[`ActionSemantics`][roboinspect.spaces.ActionSemantics]
 describes what an action *means* (control mode, rotation representation, gripper
 kind, reference frame). Semantics are what make compatibility checking real (a
 7-DoF VLA vs a 6-DoF arm; delta vs absolute poses) and make temporal ensembling
 correct.
 
 This module ships a minimal-but-functional core for the tracer slice; richer
-validation and the full [`StateSpec`][robolens.spaces.StateSpec] vocabulary are layered on in a
+validation and the full [`StateSpec`][roboinspect.spaces.StateSpec] vocabulary are layered on in a
 later
 step without changing these signatures.
 """
@@ -42,7 +42,7 @@ Frame = Literal["base", "world", "camera"]
 
 @dataclass(frozen=True)
 class ActionSemantics:
-    """What an action vector *means*. Attached to an action [`Box`][robolens.spaces.Box]."""
+    """What an action vector *means*. Attached to an action [`Box`][roboinspect.spaces.Box]."""
 
     control_mode: ControlMode
     rotation_repr: RotationRepr = "none"
@@ -53,7 +53,7 @@ class ActionSemantics:
 @dataclass(frozen=True, eq=False)
 class Box:
     """A continuous box-shaped space. Optional ``low``/``high`` bounds and, for
-    action spaces, [`ActionSemantics`][robolens.spaces.ActionSemantics]."""
+    action spaces, [`ActionSemantics`][roboinspect.spaces.ActionSemantics]."""
 
     shape: tuple[int, ...]
     low: npt.NDArray[np.floating[Any]] | None = None
@@ -125,7 +125,8 @@ class ObservationSpace:
     """The observations an embodiment provides / a policy requires.
 
     ``state_keys`` is the compatibility-relevant set of proprioception keys.
-    ``state`` optionally carries the richer [`StateSpec`][robolens.spaces.StateSpec] (shapes/units).
+    ``state`` optionally carries the richer [`StateSpec`][roboinspect.spaces.StateSpec]
+    (shapes/units).
     """
 
     cameras: tuple[CameraSpec, ...] = ()

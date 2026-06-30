@@ -1,8 +1,8 @@
-"""The immutable evaluation log — RoboLens's reproducible record of a run.
+"""The immutable evaluation log — RoboInspect's reproducible record of a run.
 
 Mirrors Inspect AI's ``EvalLog``: ``version`` + ``status`` + ``eval`` spec +
 ``results`` + ``stats`` + per-scene ``samples`` + ``error``. Serialized to JSON
-with a schema version so newer RoboLens always reads older logs (a read-back
+with a schema version so newer RoboInspect always reads older logs (a read-back
 guarantee enforced by golden tests in a later step).
 """
 
@@ -24,7 +24,7 @@ class EvalSpec:
     policy: str
     embodiment: str
     created: str
-    robolens_version: str
+    roboinspect_version: str
     git_commit: str | None = None
     policy_config: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
@@ -66,7 +66,7 @@ class EvalResults:
 
 @dataclass
 class EvalLog:
-    """The full record returned by [`eval`][robolens.eval.eval] and persisted to disk."""
+    """The full record returned by [`eval`][roboinspect.eval.eval] and persisted to disk."""
 
     version: int
     status: str  # "started" | "success" | "error"
@@ -86,7 +86,7 @@ class EvalLog:
         if data.get("version") != SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported eval-log schema version {data.get('version')!r}; "
-                f"this RoboLens reads version {SCHEMA_VERSION}"
+                f"this RoboInspect reads version {SCHEMA_VERSION}"
             )
         return cls(
             version=data["version"],
@@ -100,6 +100,6 @@ class EvalLog:
 
 
 def read_eval_log(path: str) -> EvalLog:
-    """Read an [`EvalLog`][robolens.log.EvalLog] back from a JSON file on disk."""
+    """Read an [`EvalLog`][roboinspect.log.EvalLog] back from a JSON file on disk."""
     with Path(path).open(encoding="utf-8") as fh:
         return EvalLog.from_dict(json.load(fh))

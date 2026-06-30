@@ -2,7 +2,7 @@
 
 Mirrors Inspect AI's ``eval()``: it runs a task's scenes (repeated over epochs),
 scores each recorded trajectory, reduces epochs, aggregates metrics, and returns
-a list of immutable [`EvalLog`][robolens.log.EvalLog] (one per task). The tracer
+a list of immutable [`EvalLog`][roboinspect.log.EvalLog] (one per task). The tracer
 slice accepts already-constructed objects; registry-string resolution
 (``policy="openvla/7b"``) is layered on with the registry milestone.
 """
@@ -18,22 +18,22 @@ from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, cast
 
-from robolens import __version__
-from robolens.approver import Approver, AutoApprover
-from robolens.compat import assert_compatible
-from robolens.controller import Controller, DefaultController
-from robolens.embodiment import Embodiment
-from robolens.errors import EmbodimentFault, PolicyError, SafetyAbort
-from robolens.frames import FrameStore
-from robolens.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
-from robolens.policy import Policy
-from robolens.rollout import TrialRecord, derive_seed, rollout
-from robolens.scorer import Score, reduce_scores, value_to_float
-from robolens.task import Task
+from roboinspect import __version__
+from roboinspect.approver import Approver, AutoApprover
+from roboinspect.compat import assert_compatible
+from roboinspect.controller import Controller, DefaultController
+from roboinspect.embodiment import Embodiment
+from roboinspect.errors import EmbodimentFault, PolicyError, SafetyAbort
+from roboinspect.frames import FrameStore
+from roboinspect.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from roboinspect.policy import Policy
+from roboinspect.rollout import TrialRecord, derive_seed, rollout
+from roboinspect.scorer import Score, reduce_scores, value_to_float
+from roboinspect.task import Task
 
 if TYPE_CHECKING:
-    from robolens.logging.sink import LogSink
-    from robolens.types import Action, Observation, StepResult
+    from roboinspect.logging.sink import LogSink
+    from roboinspect.types import Action, Observation, StepResult
 
 
 def _now_iso() -> str:
@@ -110,11 +110,11 @@ def eval(
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
-    Raises [`CompatibilityError`][robolens.errors.CompatibilityError] (fail fast, before any
+    Raises [`CompatibilityError`][roboinspect.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible.
     """
-    from robolens.logging.json_log import JsonLogSink
-    from robolens.registry import resolve
+    from roboinspect.logging.json_log import JsonLogSink
+    from roboinspect.registry import resolve
 
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -141,7 +141,7 @@ def eval(
         policy=policy.info.name,
         embodiment=embodiment.info.name,
         created=_now_iso(),
-        robolens_version=__version__,
+        roboinspect_version=__version__,
         git_commit=_git_commit(),
         policy_config=asdict(policy.config),
         embodiment_info={

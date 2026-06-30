@@ -1,4 +1,4 @@
-# `robolens` package — module map
+# `roboinspect` package — module map
 
 Read `plans/0001-foundation-design.md` (§9–§11 are binding) before changing core
 interfaces. The package is `mypy --strict` clean and ships `py.typed`.
@@ -25,7 +25,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
 | `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
-| `cli.py` | `robolens list` / `robolens run` |
+| `cli.py` | `roboinspect list` / `roboinspect run` |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants

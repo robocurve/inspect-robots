@@ -1,4 +1,4 @@
-# RoboLens
+# RoboInspect
 
 <p style="font-size: 1.3rem; font-weight: 500; margin-bottom: 0.25rem;">
 The <strong>Inspect AI</strong> for robotics.
@@ -12,14 +12,14 @@ visualization.
 
 [Get started](guide/quickstart.md){ .md-button .md-button--primary }
 [Concepts](guide/concepts.md){ .md-button }
-[GitHub](https://github.com/robocurve/robolens){ .md-button }
+[GitHub](https://github.com/robocurve/roboinspect){ .md-button }
 
 ---
 
 ## One framework, two swappable inputs
 
 LLM evals have a single swappable input: the model. **Robotics evals have two** —
-and RoboLens makes both first-class and orthogonal.
+and RoboInspect makes both first-class and orthogonal.
 
 <div class="grid cards" markdown>
 
@@ -43,7 +43,7 @@ and RoboLens makes both first-class and orthogonal.
 
 A **`Task`** — a dataset of `Scene`s (initial conditions, instructions, success
 targets) plus scorers — is defined *independently* of both. Before any rollout,
-RoboLens verifies the `(policy, embodiment)` pair is **compatible** and fails fast
+RoboInspect verifies the `(policy, embodiment)` pair is **compatible** and fails fast
 and loud if not.
 
 ---
@@ -51,19 +51,19 @@ and loud if not.
 ## Quickstart
 
 ```bash
-pip install robolens            # core (numpy only)
-pip install "robolens[rerun]"   # + Rerun visualization
+pip install roboinspect            # core (numpy only)
+pip install "roboinspect[rerun]"   # + Rerun visualization
 ```
 
 No hardware or simulator required — the dependency-free `CubePick` mock world
 exercises the whole stack:
 
 ```python
-from robolens import eval
-from robolens.mock import CubePickEmbodiment, ScriptedPolicy
-from robolens.scene import Scene
-from robolens.scorer import success_at_end
-from robolens.task import Task
+from roboinspect import eval
+from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
+from roboinspect.scene import Scene
+from roboinspect.scorer import success_at_end
+from roboinspect.task import Task
 
 task = Task(
     name="cubepick-reach",
@@ -80,14 +80,14 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 …or from the command line:
 
 ```bash
-robolens list                                   # registered components
-robolens run --task cubepick-reach --policy scripted --embodiment cubepick
-robolens inspect logs/cubepick-reach_*.json     # results table
+roboinspect list                                   # registered components
+roboinspect run --task cubepick-reach --policy scripted --embodiment cubepick
+roboinspect inspect logs/cubepick-reach_*.json     # results table
 ```
 
 ---
 
-## Why RoboLens
+## Why RoboInspect
 
 <div class="grid cards" markdown>
 
@@ -130,8 +130,8 @@ robolens inspect logs/cubepick-reach_*.json     # results table
 
     ---
 
-    Ship `robolens-maniskill` or `robolens-openvla` as separate packages — entry
-    points make them appear in `robolens list` automatically.
+    Ship `roboinspect-maniskill` or `roboinspect-openvla` as separate packages — entry
+    points make them appear in `roboinspect list` automatically.
 
 </div>
 
@@ -139,9 +139,9 @@ robolens inspect logs/cubepick-reach_*.json     # results table
 
 ## How it maps to Inspect AI
 
-If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know RoboLens.
+If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know RoboInspect.
 
-| Inspect AI | RoboLens |
+| Inspect AI | RoboInspect |
 |---|---|
 | `Model` | `Policy` (VLA) **+** `Embodiment` *(two inputs)* |
 | `Task = dataset + solver + scorer` | `Task = scenes + controller + scorer` |
@@ -150,5 +150,5 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know RoboLen
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task`/`@solver`/`@scorer` + registry | `@task`/`@policy`/`@embodiment`/`@scorer` + entry points |
 
-For LLMs: [`llms.txt`](https://robocurve.github.io/robolens/llms.txt) ·
-[`llms-full.txt`](https://robocurve.github.io/robolens/llms-full.txt).
+For LLMs: [`llms.txt`](https://robocurve.github.io/roboinspect/llms.txt) ·
+[`llms-full.txt`](https://robocurve.github.io/roboinspect/llms-full.txt).

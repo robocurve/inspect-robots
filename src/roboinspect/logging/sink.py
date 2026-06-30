@@ -10,9 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from robolens.log import EvalLog, EvalSpec
-    from robolens.rollout import TrialRecord
-    from robolens.types import Action, Observation, StepResult
+    from roboinspect.log import EvalLog, EvalSpec
+    from roboinspect.rollout import TrialRecord
+    from roboinspect.types import Action, Observation, StepResult
 
 
 @runtime_checkable

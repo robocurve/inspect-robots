@@ -1,4 +1,4 @@
-# RoboLens — Foundation Design (v2)
+# RoboInspect — Foundation Design (v2)
 
 > **STATUS (implemented):** The full v0 build order in §10 (M0-lite through OSS
 > hygiene + CI matrix) is **complete and green** — all modules, the registry +
@@ -7,9 +7,9 @@
 > also accept registry-name strings. Plan 0002 (temporal-ensembling controller)
 > is implemented. Still deferred to later plans: concrete sim/VLA adapters,
 > vectorized envs, `eval_set` *resume* impl, offline trajectory rescoring
-> (`robolens score`), and a docs site.
+> (`roboinspect score`), and a docs site.
 
-> **Goal:** RoboLens is the "Inspect AI for robotics" — an open-source evaluation
+> **Goal:** RoboInspect is the "Inspect AI for robotics" — an open-source evaluation
 > framework for **physical AI / VLA (Vision-Language-Action) models**. Define a
 > robotics benchmark once and run *any* VLA policy against *any* compatible
 > embodiment (real robot or simulator), with first-class logging to
@@ -79,7 +79,7 @@ Ship the framework skeleton with the *hard-to-retrofit interfaces correct*:
   hardware or sim.
 - **Logging:** `JsonLogSink` (canonical, atomic writes, binary side-cars) +
   `RerunSink` (optional, lazy). `LogSink` protocol.
-- **CLI** (`robolens list|run|inspect|score`), packaging (uv/hatchling +
+- **CLI** (`roboinspect list|run|inspect|score`), packaging (uv/hatchling +
   hatch-vcs), `mypy --strict`, ruff, pytest, GitHub Actions matrix, docs
   scaffold, and OSS hygiene (CONTRIBUTING, CoC, SECURITY, templates, CHANGELOG).
 
@@ -109,7 +109,7 @@ resumption *implementation*, web results viewer, parallel sim sample execution.
 ### 3.1 Module layout
 
 ```
-robolens/
+roboinspect/
   __init__.py          # public API surface (__all__ fenced)
   types.py             # Observation, Action, ActionChunk, StepResult
   spaces.py            # Space/Box/Dict/Discrete + ActionSemantics + StateSpec
@@ -132,7 +132,7 @@ robolens/
   mock/
     cubepick.py        # CubePickEmbodiment (2D toy world, deterministic)
     policies.py        # ScriptedPolicy, RandomPolicy, NoopPolicy (chunk-aware)
-  cli.py               # `robolens` CLI
+  cli.py               # `roboinspect` CLI
   py.typed
 ```
 
@@ -293,7 +293,7 @@ class Scorer(Protocol):
 
 Scorers consume the **recorded trajectory** (`TrialRecord`) + the scene `target`,
 never live env access — so scoring is reproducible from a saved log and an
-offline `robolens score <log>` can re-run scorers (the achievable analog of
+offline `roboinspect score <log>` can re-run scorers (the achievable analog of
 Inspect's generation cache). Builtins:
 
 - `success_at_end`, `reached_goal_state`, `min_distance_to_goal`,
@@ -379,7 +379,7 @@ on_eval_end`. Builtins:
 config, policy/embodiment info + `capabilities`, `PolicyConfig`, git rev, package
 versions, timestamps, `EvalStats` incl. actual control rate & inference
 latency), per-scene results with `status` + structured `error`/traceback +
-`reductions`, aggregate metrics. **Read-back guarantee:** newer RoboLens always
+`reductions`, aggregate metrics. **Read-back guarantee:** newer RoboInspect always
 reads older logs; a JSON Schema / pydantic model + golden-file round-trip test
 enforce it.
 
@@ -387,12 +387,12 @@ enforce it.
 
 `@task/@policy/@embodiment/@scorer/@sink` register factories by name. **Out-of-
 tree discovery** uses `importlib.metadata` entry-point groups —
-`robolens.policies`, `robolens.embodiments`, `robolens.tasks`, `robolens.scorers`,
-`robolens.sinks` — so an installed `robolens-maniskill` / `robolens-openvla`
-package appears in `robolens list` without being imported first. CLI: `robolens
-list [...]`, `robolens run --task X --policy Y -P k=v --embodiment Z`, `robolens
+`roboinspect.policies`, `roboinspect.embodiments`, `roboinspect.tasks`, `roboinspect.scorers`,
+`roboinspect.sinks` — so an installed `roboinspect-maniskill` / `roboinspect-openvla`
+package appears in `roboinspect list` without being imported first. CLI: `roboinspect
+list [...]`, `roboinspect run --task X --policy Y -P k=v --embodiment Z`, `roboinspect
 inspect <log>` (terminal results table — distinct from Rerun trajectory viz),
-`robolens score <log>` (offline re-scoring).
+`roboinspect score <log>` (offline re-scoring).
 
 ## 4. Errors, safety & the overnight tension (`errors.py`)
 
@@ -435,7 +435,7 @@ faulted robot never auto-advances unattended.
 ## 6. OSS hygiene & release
 
 - `pyproject.toml` (hatchling + **hatch-vcs** single-source version from git
-  tags). Extras: `robolens[rerun]`, `[viz]`, `[dev]`, `[all]`; **core depends
+  tags). Extras: `roboinspect[rerun]`, `[viz]`, `[dev]`, `[all]`; **core depends
   only on numpy + stdlib**.
 - SemVer (honest `0.x` = breaking allowed on minor pre-1.0), `CHANGELOG.md` (Keep
   a Changelog), release via tag → CI → PyPI **trusted publishing (OIDC)**.
@@ -578,7 +578,7 @@ shippable all night. Each step is its own commit/push.
 ## 11. Inspect AI grounding (context7-verified — BINDING for API fidelity)
 
 Verified against Inspect AI's live reference (`/websites/inspect_aisi_uk`).
-RoboLens mirrors these so Inspect users feel at home:
+RoboInspect mirrors these so Inspect users feel at home:
 
 - **`eval()` returns `list[EvalLog]`** (one per task), accepting one task or many.
   `eval_set()` returns `tuple[bool, list[EvalLog]]` (success flag + logs).
@@ -588,10 +588,10 @@ RoboLens mirrors these so Inspect users feel at home:
   `pass_at_k`/`at_least`).
 - **`fail_on_error: bool | float`** is the canonical error-tolerance knob —
   `True`=fail on first error, `False`=never fail, `0<x<1`=fail if that *proportion*
-  of trials error, `x>1`=fail if that *count* error. RoboLens adopts this verbatim
+  of trials error, `x>1`=fail if that *count* error. RoboInspect adopts this verbatim
   for `PolicyError`-class failures. **Robotics addition:** `EmbodimentFault` /
   `SafetyAbort` always halt regardless of `fail_on_error` (hardware safety is not
-  negotiable) — this is the one place RoboLens deliberately extends Inspect.
+  negotiable) — this is the one place RoboInspect deliberately extends Inspect.
 - **`EvalLog` structure** mirrored: `version` (int), `status`
   (`"started"|"success"|"error"`), `eval` (an `EvalSpec`: task/policy/embodiment/
   created/git/versions), `plan` (resolved config incl. `PolicyConfig`,
@@ -602,10 +602,10 @@ RoboLens mirrors these so Inspect users feel at home:
   (per-scene epoch reductions). `samples` is named `scenes`-internally but keeps
   the `EvalSample` shape.
 - **`Scene` ≈ `Sample`** field mapping confirmed: Inspect `Sample(input, target,
-  id, metadata, setup, files, sandbox)` → RoboLens `Scene(instruction[=input],
+  id, metadata, setup, files, sandbox)` → RoboInspect `Scene(instruction[=input],
   target, id, metadata, setup, init_seed, subtasks)`. (`files`/`sandbox` are
   LLM-sandbox-specific; the robotics analog is embodiment setup/realizability.)
-- **`@scorer(metrics=...)`** returns `score(state, target) -> Score`; RoboLens
+- **`@scorer(metrics=...)`** returns `score(state, target) -> Score`; RoboInspect
   uses `score(record, target) -> Score` (record replaces the LLM `TaskState`).
 - **Per-scene `cleanup` hook** (Inspect `Task.cleanup`) added for embodiment
   teardown after each scene, run even on exception.

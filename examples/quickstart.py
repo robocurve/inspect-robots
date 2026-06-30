@@ -1,4 +1,4 @@
-"""RoboLens quickstart: evaluate a policy on an embodiment over a benchmark.
+"""RoboInspect quickstart: evaluate a policy on an embodiment over a benchmark.
 
 Run with:  uv run python examples/quickstart.py
 
@@ -9,11 +9,11 @@ plugin policy/embodiment to evaluate a real VLA on a real or simulated robot.
 
 from __future__ import annotations
 
-from robolens import eval
-from robolens.mock import CubePickEmbodiment, ScriptedPolicy
-from robolens.scene import Scene
-from robolens.scorer import episode_length, success_at_end
-from robolens.task import Epochs, Task
+from roboinspect import eval
+from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
+from roboinspect.scene import Scene
+from roboinspect.scorer import episode_length, success_at_end
+from roboinspect.task import Epochs, Task
 
 
 def main() -> None:

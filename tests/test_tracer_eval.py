@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from robolens import EvalLog, eval, read_eval_log
-from robolens.logging import JsonLogSink
-from robolens.mock import CubePickEmbodiment, RandomPolicy, ScriptedPolicy
-from robolens.scene import Scene
-from robolens.scorer import success_at_end
-from robolens.task import Task
+from roboinspect import EvalLog, eval, read_eval_log
+from roboinspect.logging import JsonLogSink
+from roboinspect.mock import CubePickEmbodiment, RandomPolicy, ScriptedPolicy
+from roboinspect.scene import Scene
+from roboinspect.scorer import success_at_end
+from roboinspect.task import Task
 
 
 def _cubepick_task() -> Task:

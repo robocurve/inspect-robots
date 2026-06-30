@@ -1,21 +1,21 @@
 """Mock policies for the CubePick world.
 
-- [`ScriptedPolicy`][robolens.mock.policies.ScriptedPolicy] — a deterministic oracle that walks the
-effector to the
+- [`ScriptedPolicy`][roboinspect.mock.policies.ScriptedPolicy] — a deterministic oracle that
+walks the effector to the
   cube. It predicts a full action *chunk* by simulating its own future motion, so
   the chunk is a genuine open-loop trajectory (``H > 1``).
-- [`RandomPolicy`][robolens.mock.policies.RandomPolicy] — emits random deltas; mostly fails.
-- [`NoopPolicy`][robolens.mock.policies.NoopPolicy] — emits zero actions; never succeeds.
+- [`RandomPolicy`][roboinspect.mock.policies.RandomPolicy] — emits random deltas; mostly fails.
+- [`NoopPolicy`][roboinspect.mock.policies.NoopPolicy] — emits zero actions; never succeeds.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from robolens.policy import PolicyConfig, PolicyInfo
-from robolens.scene import Scene
-from robolens.spaces import ActionSemantics, Box, ObservationSpace
-from robolens.types import Action, ActionChunk, Observation
+from roboinspect.policy import PolicyConfig, PolicyInfo
+from roboinspect.scene import Scene
+from roboinspect.spaces import ActionSemantics, Box, ObservationSpace
+from roboinspect.types import Action, ActionChunk, Observation
 
 _ACTION_SPACE = Box(
     shape=(2,),

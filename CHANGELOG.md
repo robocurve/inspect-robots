@@ -9,13 +9,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- **Widened the public API for plugin authors.** `robolens.__all__` now exports
+- **Widened the public API for plugin authors.** `roboinspect.__all__` now exports
   the authoring primitives directly — `Task`/`Epochs`, `Scene`/`Target`,
   `Scorer`/`Score` and the builtin scorers, `Policy`/`PolicyBase`/`PolicyInfo`/
   `PolicyConfig`, `Embodiment`/`EmbodimentBase`/`EmbodimentInfo`, the
   `types`/`spaces` dataclasses, `TrialRecord`, and the `@task`/`@policy`/
   `@embodiment`/`@scorer`/`@sink` registry decorators plus `registered`/`resolve`.
-  Out-of-tree benchmarks (e.g. KitchenBench) and adapters can now `from robolens
+  Out-of-tree benchmarks (e.g. KitchenBench) and adapters can now `from roboinspect
   import Task, Scene, task, ...` against a stable surface.
 
 - **Core framework foundation.** The two-input model for robotics evals:
@@ -43,7 +43,7 @@ All notable changes to this project are documented here. The format is based on
   discovery so out-of-tree backends register without being imported.
 - **Logging sinks:** canonical `JsonLogSink`; optional, lazily-imported
   `RerunSink` for [Rerun](https://github.com/rerun-io/rerun) visualization.
-- **CLI:** `robolens list`, `robolens run`, and `robolens inspect <log>`.
+- **CLI:** `roboinspect list`, `roboinspect run`, and `roboinspect inspect <log>`.
 - **String resolution:** `eval()`/`eval_set()` accept registry names
   (`eval("cubepick-reach", "scripted", "cubepick")`) in addition to objects.
 - Dependency-free `CubePick` mock world and scripted/random/noop policies.
@@ -57,4 +57,4 @@ All notable changes to this project are documented here. The format is based on
   strict mypy on commit, the 100% coverage gate on push. Install with
   `uv run pre-commit install`. Documented in `CONTRIBUTING.md`.
 
-[Unreleased]: https://github.com/robocurve/robolens/commits/main
+[Unreleased]: https://github.com/robocurve/roboinspect/commits/main

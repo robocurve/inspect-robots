@@ -3,12 +3,12 @@
 Mirrors Inspect AI's extension model: components register by name via decorators
 and are resolved from strings (so ``eval(policy="scripted")`` and the CLI work).
 Out-of-tree packages publish components through ``importlib.metadata`` entry-point
-groups, so an installed ``robolens-openvla`` appears in ``robolens list`` without
+groups, so an installed ``roboinspect-openvla`` appears in ``roboinspect list`` without
 being imported first.
 
 Entry-point groups:
-``robolens.tasks``, ``robolens.policies``, ``robolens.embodiments``,
-``robolens.scorers``, ``robolens.sinks``.
+``roboinspect.tasks``, ``roboinspect.policies``, ``roboinspect.embodiments``,
+``roboinspect.scorers``, ``roboinspect.sinks``.
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink"
 KINDS: tuple[Kind, ...] = ("task", "policy", "embodiment", "scorer", "sink")
 
 _GROUPS: dict[Kind, str] = {
-    "task": "robolens.tasks",
-    "policy": "robolens.policies",
-    "embodiment": "robolens.embodiments",
-    "scorer": "robolens.scorers",
-    "sink": "robolens.sinks",
+    "task": "roboinspect.tasks",
+    "policy": "roboinspect.policies",
+    "embodiment": "roboinspect.embodiments",
+    "scorer": "roboinspect.scorers",
+    "sink": "roboinspect.sinks",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -79,7 +79,7 @@ def _ensure_loaded() -> None:
     global _loaded_builtins, _loaded_entrypoints
     if not _loaded_builtins:
         _loaded_builtins = True
-        import robolens._builtins  # noqa: F401  (registers builtin components)
+        import roboinspect._builtins  # noqa: F401  (registers builtin components)
     if not _loaded_entrypoints:
         _loaded_entrypoints = True
         for kind, group in _GROUPS.items():

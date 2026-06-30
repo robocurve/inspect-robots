@@ -1,10 +1,10 @@
-"""The ``robolens`` command-line interface.
+"""The ``roboinspect`` command-line interface.
 
 Subcommands:
 
-- ``robolens list [tasks|policies|embodiments|scorers|sinks]`` — show registered
+- ``roboinspect list [tasks|policies|embodiments|scorers|sinks]`` — show registered
   components (builtins + installed plugins).
-- ``robolens run --task T --policy P --embodiment E`` — run an eval, resolving
+- ``roboinspect run --task T --policy P --embodiment E`` — run an eval, resolving
   components from the registry. Pass constructor args with ``-T/-P/-E k=v``.
 """
 
@@ -14,7 +14,7 @@ import argparse
 from collections.abc import Sequence
 from typing import Any
 
-from robolens import __version__
+from roboinspect import __version__
 
 _KIND_BY_PLURAL = {
     "tasks": "task",
@@ -52,10 +52,10 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="robolens",
-        description="RoboLens — the Inspect AI for robotics.",
+        prog="roboinspect",
+        description="RoboInspect — the Inspect AI for robotics.",
     )
-    parser.add_argument("--version", action="version", version=f"robolens {__version__}")
+    parser.add_argument("--version", action="version", version=f"roboinspect {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     p_list = sub.add_parser("list", help="list registered components")
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_list(what: str | None) -> int:
-    from robolens.registry import registered
+    from roboinspect.registry import registered
 
     plurals = [what] if what else sorted(_KIND_BY_PLURAL)
     for plural in plurals:
@@ -97,8 +97,8 @@ def _cmd_list(what: str | None) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from robolens import eval
-    from robolens.registry import resolve
+    from roboinspect import eval
+    from roboinspect.registry import resolve
 
     task = resolve("task", args.task, **_parse_kvs(args.task_args))
     policy = resolve("policy", args.policy, **_parse_kvs(args.policy_args))
@@ -114,7 +114,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_inspect(path: str) -> int:
-    from robolens import read_eval_log
+    from roboinspect import read_eval_log
 
     log = read_eval_log(path)
     print(f"task:        {log.eval.task}")

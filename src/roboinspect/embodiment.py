@@ -1,6 +1,6 @@
-"""The Embodiment interface — RoboLens's second swappable input.
+"""The Embodiment interface — RoboInspect's second swappable input.
 
-An [`Embodiment`][robolens.embodiment.Embodiment] is the "body + world": a real robot or a
+An [`Embodiment`][roboinspect.embodiment.Embodiment] is the "body + world": a real robot or a
 simulator. It
 produces observations, executes actions, and owns the action/observation spaces,
 the native control rate, and reset/safety machinery.
@@ -20,9 +20,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from robolens.scene import Scene
-from robolens.spaces import Box, ObservationSpace
-from robolens.types import Action, Observation, StepResult
+from roboinspect.scene import Scene
+from roboinspect.spaces import Box, ObservationSpace
+from roboinspect.types import Action, Observation, StepResult
 
 # Opt-in capability flags an embodiment may advertise.
 Capability = str

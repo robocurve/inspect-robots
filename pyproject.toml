@@ -3,14 +3,14 @@ requires = ["hatchling>=1.18", "hatch-vcs>=0.3"]
 build-backend = "hatchling.build"
 
 [project]
-name = "robolens"
+name = "roboinspect"
 dynamic = ["version"]
 description = "The Inspect AI for robotics — an evaluation framework for VLA (vision-language-action) models across real robots and simulators."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "RoboLens contributors" }]
+authors = [{ name = "RoboInspect contributors" }]
 keywords = [
     "robotics",
     "evaluation",
@@ -44,6 +44,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.5",
+    # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.10)
+    # rejects; pin the 2.4.x line for a deterministic dev/CI gate (runtime is free).
+    "numpy<2.5",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -51,15 +54,15 @@ docs = [
     "mkdocstrings[python]>=0.26",
     "mkdocs-llmstxt>=0.2",
 ]
-all = ["robolens[rerun]"]
+all = ["roboinspect[rerun]"]
 
 [project.scripts]
-robolens = "robolens.cli:main"
+roboinspect = "roboinspect.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/robocurve/robolens"
-Repository = "https://github.com/robocurve/robolens"
-Issues = "https://github.com/robocurve/robolens/issues"
+Homepage = "https://github.com/robocurve/roboinspect"
+Repository = "https://github.com/robocurve/roboinspect"
+Issues = "https://github.com/robocurve/roboinspect/issues"
 
 # ---------------------------------------------------------------------------
 # Build / versioning: single-source the version from git tags via hatch-vcs.
@@ -73,10 +76,10 @@ version_scheme = "guess-next-dev"
 fallback_version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/robolens"]
+packages = ["src/roboinspect"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/robolens", "tests", "README.md", "LICENSE"]
+include = ["src/roboinspect", "tests", "README.md", "LICENSE"]
 
 # ---------------------------------------------------------------------------
 # Tooling
@@ -91,14 +94,14 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["robolens"]
+known-first-party = ["roboinspect"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 warn_unreachable = true
 disallow_untyped_defs = true
-files = ["src/robolens"]
+files = ["src/roboinspect"]
 
 [[tool.mypy.overrides]]
 module = ["rerun.*"]
@@ -116,7 +119,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["robolens"]
+source = ["roboinspect"]
 
 [tool.coverage.report]
 fail_under = 100

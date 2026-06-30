@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 RoboLens
+# 🤖 RoboInspect
 
 ### The [Inspect AI](https://inspect.aisi.org.uk/) for robotics
 
@@ -10,17 +10,17 @@ Define a robotics benchmark once, then run *any* policy against *any* compatible
 embodiment — a real robot or a simulator — with reproducible logs and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
-[![CI](https://github.com/robocurve/robolens/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/robolens/actions/workflows/ci.yml)
-[![Docs](https://github.com/robocurve/robolens/actions/workflows/docs.yml/badge.svg)](https://robocurve.github.io/robolens/)
-[![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/robolens)
+[![CI](https://github.com/robocurve/roboinspect/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/roboinspect/actions/workflows/ci.yml)
+[![Docs](https://github.com/robocurve/roboinspect/actions/workflows/docs.yml/badge.svg)](https://robocurve.github.io/roboinspect/)
+[![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/roboinspect)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/robolens)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/robolens/actions/workflows/ci.yml)
+[![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/roboinspect)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/roboinspect/actions/workflows/ci.yml)
 
-[**Documentation**](https://robocurve.github.io/robolens/) ·
-[Quickstart](https://robocurve.github.io/robolens/guide/quickstart.html) ·
-[Concepts](https://robocurve.github.io/robolens/guide/concepts.html) ·
-[For LLMs](https://robocurve.github.io/robolens/llms.txt)
+[**Documentation**](https://robocurve.github.io/roboinspect/) ·
+[Quickstart](https://robocurve.github.io/roboinspect/guide/quickstart.html) ·
+[Concepts](https://robocurve.github.io/roboinspect/guide/concepts.html) ·
+[For LLMs](https://robocurve.github.io/roboinspect/llms.txt)
 
 </div>
 
@@ -29,7 +29,7 @@ embodiment — a real robot or a simulator — with reproducible logs and first-
 ## One framework, two swappable inputs
 
 LLM evaluations have a single swappable input: the model. **Robotics evaluations
-have two** — and RoboLens makes both first-class and orthogonal:
+have two** — and RoboInspect makes both first-class and orthogonal:
 
 | | |
 |---|---|
@@ -38,14 +38,14 @@ have two** — and RoboLens makes both first-class and orthogonal:
 
 A **`Task`** — a dataset of `Scene`s (initial conditions, instructions, success
 targets) plus scorers — is defined *independently* of both. Before any rollout,
-RoboLens checks the `(policy, embodiment)` pair is **compatible** (action/observation
+RoboInspect checks the `(policy, embodiment)` pair is **compatible** (action/observation
 spaces, semantics, control rate, scene realizability) and fails fast if not.
 
 ## Install
 
 ```bash
-pip install robolens            # core (numpy only)
-pip install "robolens[rerun]"   # + Rerun visualization
+pip install roboinspect            # core (numpy only)
+pip install "roboinspect[rerun]"   # + Rerun visualization
 ```
 
 ## Quickstart
@@ -54,11 +54,11 @@ No hardware or simulator needed — the dependency-free `CubePick` mock world
 exercises the whole stack:
 
 ```python
-from robolens import eval
-from robolens.mock import CubePickEmbodiment, ScriptedPolicy
-from robolens.scene import Scene
-from robolens.scorer import success_at_end
-from robolens.task import Task
+from roboinspect import eval
+from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
+from roboinspect.scene import Scene
+from roboinspect.scorer import success_at_end
+from roboinspect.task import Task
 
 task = Task(
     name="cubepick-reach",
@@ -75,12 +75,12 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 …or from the command line (components resolve from a registry):
 
 ```bash
-robolens list                                          # registered components
-robolens run --task cubepick-reach --policy scripted --embodiment cubepick
-robolens inspect logs/cubepick-reach_*.json            # results table
+roboinspect list                                          # registered components
+roboinspect run --task cubepick-reach --policy scripted --embodiment cubepick
+roboinspect inspect logs/cubepick-reach_*.json            # results table
 ```
 
-## Why RoboLens
+## Why RoboInspect
 
 - 🌍 **Real-world first.** Interfaces assume real-robot reality — human-in-the-loop
   reset, no privileged success oracle, wall-clock control rate. Simulators just
@@ -94,17 +94,17 @@ robolens inspect logs/cubepick-reach_*.json            # results table
   from "halt and require a human", so a faulted robot never auto-advances overnight.
 - 🎞️ **Rerun visualization.** Stream camera images, 3D poses, joint/action
   time-series, and success markers to a `.rrd` recording.
-- 🧩 **Pluggable.** Ship `robolens-maniskill` or `robolens-openvla` as separate
-  packages — entry points make them appear in `robolens list` automatically.
+- 🧩 **Pluggable.** Ship `roboinspect-maniskill` or `roboinspect-openvla` as separate
+  packages — entry points make them appear in `roboinspect list` automatically.
 - ⚙️ **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
   ensembling are built in, with action *semantics* (control mode, rotation
   representation, gripper, frame) that make compatibility and ensembling correct.
 
 ## How it maps to Inspect AI
 
-If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know RoboLens.
+If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know RoboInspect.
 
-| Inspect AI | RoboLens |
+| Inspect AI | RoboInspect |
 |---|---|
 | `Model` | `Policy` (VLA) **+** `Embodiment` *(two inputs)* |
 | `Task = dataset + solver + scorer` | `Task = scenes + controller + scorer` |
@@ -120,9 +120,9 @@ separate plugin packages.
 ## Documentation
 
 Full guides and an auto-generated API reference live at
-**[robocurve.github.io/robolens](https://robocurve.github.io/robolens/)**.
-LLM-friendly versions: [`llms.txt`](https://robocurve.github.io/robolens/llms.txt)
-and [`llms-full.txt`](https://robocurve.github.io/robolens/llms-full.txt).
+**[robocurve.github.io/roboinspect](https://robocurve.github.io/roboinspect/)**.
+LLM-friendly versions: [`llms.txt`](https://robocurve.github.io/roboinspect/llms.txt)
+and [`llms-full.txt`](https://robocurve.github.io/roboinspect/llms-full.txt).
 
 ## Development
 

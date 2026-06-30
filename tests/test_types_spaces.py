@@ -7,7 +7,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from robolens.spaces import (
+from roboinspect.spaces import (
     ActionSemantics,
     Box,
     CameraSpec,
@@ -15,7 +15,7 @@ from robolens.spaces import (
     StateField,
     StateSpec,
 )
-from robolens.types import Action, ActionChunk, Observation, StepResult
+from roboinspect.types import Action, ActionChunk, Observation, StepResult
 
 
 def test_core_types_are_frozen() -> None:

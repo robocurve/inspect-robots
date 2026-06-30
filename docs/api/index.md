@@ -1,72 +1,72 @@
 # API reference
 
 Generated automatically from the source docstrings. The public,
-stability-guaranteed surface is everything exported by `robolens.__all__`
+stability-guaranteed surface is everything exported by `roboinspect.__all__`
 (`eval`, `eval_set`, `read_eval_log`, `EvalLog` and the other log dataclasses);
 the sections below document the full framework.
 
 ## Core types & spaces
 
-::: robolens.types
+::: roboinspect.types
 
-::: robolens.spaces
+::: roboinspect.spaces
 
 ## Policy & embodiment
 
-::: robolens.policy
+::: roboinspect.policy
 
-::: robolens.embodiment
+::: roboinspect.embodiment
 
 ## Tasks & scenes
 
-::: robolens.scene
+::: roboinspect.scene
 
-::: robolens.task
+::: roboinspect.task
 
 ## Scoring
 
-::: robolens.scorer
+::: roboinspect.scorer
 
 ## Rollout, controllers & safety
 
-::: robolens.rollout
+::: roboinspect.rollout
 
-::: robolens.controller
+::: roboinspect.controller
 
-::: robolens.approver
+::: roboinspect.approver
 
-::: robolens.frames
+::: roboinspect.frames
 
-::: robolens.transcript
+::: roboinspect.transcript
 
 ## Compatibility & errors
 
-::: robolens.compat
+::: roboinspect.compat
 
-::: robolens.errors
+::: roboinspect.errors
 
 ## Evaluation & logs
 
-::: robolens.eval
+::: roboinspect.eval
 
-::: robolens.log
+::: roboinspect.log
 
 ## Logging sinks
 
-::: robolens.logging.sink
+::: roboinspect.logging.sink
 
-::: robolens.logging.json_log
+::: roboinspect.logging.json_log
 
-::: robolens.logging.rerun_sink
+::: roboinspect.logging.rerun_sink
 
 ## Registry & CLI
 
-::: robolens.registry
+::: roboinspect.registry
 
-::: robolens.cli
+::: roboinspect.cli
 
 ## Mock world
 
-::: robolens.mock.cubepick
+::: roboinspect.mock.cubepick
 
-::: robolens.mock.policies
+::: roboinspect.mock.policies

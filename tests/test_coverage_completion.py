@@ -1,7 +1,7 @@
 """Targeted tests closing the remaining coverage gaps to reach 100%.
 
 Each test names the behavior it exercises; together with the rest of the suite
-these drive line + branch coverage of ``robolens`` to 100% (enforced by
+these drive line + branch coverage of ``roboinspect`` to 100% (enforced by
 ``--cov-fail-under=100``).
 """
 
@@ -15,28 +15,28 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import robolens.controller as controller_mod
-import robolens.registry as reg
-from robolens import eval
-from robolens.approver import AutoApprover, ClampApprover
-from robolens.cli import _parse_kvs, _parse_value, main
-from robolens.compat import check_compatibility
-from robolens.controller import DefaultController, EnsemblingController, SmoothingController
-from robolens.embodiment import EmbodimentInfo
-from robolens.errors import EmbodimentFault, PolicyError
-from robolens.eval import _git_commit, _should_fail
-from robolens.log import EvalLog, EvalResults, EvalSpec, EvalStats
-from robolens.logging.sink import NullSink
-from robolens.mock import CubePickEmbodiment, NoopPolicy, ScriptedPolicy
-from robolens.policy import PolicyConfig, PolicyInfo
-from robolens.registry import register, registered, resolve
-from robolens.rollout import StepRecord, TrialRecord, _effective_control_hz, rollout
-from robolens.scene import ListSceneDataset, Scene
-from robolens.scorer import min_distance_to_goal, success_at_end, value_to_float
-from robolens.spaces import ActionSemantics, Box, ObservationSpace
-from robolens.task import Task
-from robolens.transcript import approval_event, operator_event
-from robolens.types import Action, ActionChunk, Observation, StepResult
+import roboinspect.controller as controller_mod
+import roboinspect.registry as reg
+from roboinspect import eval
+from roboinspect.approver import AutoApprover, ClampApprover
+from roboinspect.cli import _parse_kvs, _parse_value, main
+from roboinspect.compat import check_compatibility
+from roboinspect.controller import DefaultController, EnsemblingController, SmoothingController
+from roboinspect.embodiment import EmbodimentInfo
+from roboinspect.errors import EmbodimentFault, PolicyError
+from roboinspect.eval import _git_commit, _should_fail
+from roboinspect.log import EvalLog, EvalResults, EvalSpec, EvalStats
+from roboinspect.logging.sink import NullSink
+from roboinspect.mock import CubePickEmbodiment, NoopPolicy, ScriptedPolicy
+from roboinspect.policy import PolicyConfig, PolicyInfo
+from roboinspect.registry import register, registered, resolve
+from roboinspect.rollout import StepRecord, TrialRecord, _effective_control_hz, rollout
+from roboinspect.scene import ListSceneDataset, Scene
+from roboinspect.scorer import min_distance_to_goal, success_at_end, value_to_float
+from roboinspect.spaces import ActionSemantics, Box, ObservationSpace
+from roboinspect.task import Task
+from roboinspect.transcript import approval_event, operator_event
+from roboinspect.types import Action, ActionChunk, Observation, StepResult
 
 _SCENE = Scene(id="s", instruction="reach", init_seed=0)
 _CUBE_SEM = ActionSemantics(control_mode="eef_delta_pos", frame="world")
@@ -87,7 +87,7 @@ def test_parse_kvs_rejects_bad_pair() -> None:
 def test_cli_list_empty_kind(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("robolens.registry.registered", lambda kind: {})
+    monkeypatch.setattr("roboinspect.registry.registered", lambda kind: {})
     assert main(["list", "sinks"]) == 0
     assert "(none)" in capsys.readouterr().out
 
@@ -96,7 +96,7 @@ def test_cli_inspect_error_log(tmp_path: Path, capsys: pytest.CaptureFixture[str
     log = EvalLog(
         version=1,
         status="error",
-        eval=EvalSpec(task="t", policy="p", embodiment="e", created="x", robolens_version="0"),
+        eval=EvalSpec(task="t", policy="p", embodiment="e", created="x", roboinspect_version="0"),
         results=EvalResults(total_scenes=0, total_trials=0),
         stats=EvalStats(started_at="a", completed_at="b", duration_s=0.0, total_steps=0),
         samples=[],
@@ -326,7 +326,7 @@ def test_entrypoint_load_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> 
             raise RuntimeError("import blew up")
 
     monkeypatch.setattr(
-        reg, "entry_points", lambda *, group: [_BadEP()] if group == "robolens.policies" else []
+        reg, "entry_points", lambda *, group: [_BadEP()] if group == "roboinspect.policies" else []
     )
     monkeypatch.setattr(reg, "_loaded_entrypoints", False)
     assert "broken" not in registered("policy")  # a broken plugin must not crash discovery
@@ -416,7 +416,7 @@ def test_compat_scene_setup_realizability() -> None:
 # scorer reducers (median, pass@k edge cases)
 # --------------------------------------------------------------------------- #
 def test_reduce_median() -> None:
-    from robolens.scorer import Score, reduce_scores
+    from roboinspect.scorer import Score, reduce_scores
 
     assert (
         reduce_scores("median", [Score(value=1.0), Score(value=3.0), Score(value=9.0)]).value == 3.0
@@ -424,7 +424,7 @@ def test_reduce_median() -> None:
 
 
 def test_pass_at_k_edge_cases() -> None:
-    from robolens.scorer import Score, get_reducer, pass_at_k, reduce_scores
+    from roboinspect.scorer import Score, get_reducer, pass_at_k, reduce_scores
 
     with pytest.raises(ValueError, match="k must be"):
         pass_at_k(0)
@@ -452,7 +452,7 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
     fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "rerun", fake)
 
-    from robolens.logging.rerun_sink import RerunSink
+    from roboinspect.logging.rerun_sink import RerunSink
 
     sink = RerunSink(str(tmp_path / "run.rrd"))
     assert sink.available is True  # imports the fake backend

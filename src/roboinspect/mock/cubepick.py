@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from robolens.scene import Scene
-from robolens.spaces import ActionSemantics, Box, CameraSpec, ObservationSpace
-from robolens.types import Action, Observation, StepResult
+from roboinspect.scene import Scene
+from roboinspect.spaces import ActionSemantics, Box, CameraSpec, ObservationSpace
+from roboinspect.types import Action, Observation, StepResult
 
 _IMG = 32  # rendered camera resolution (square)
 
@@ -27,7 +27,7 @@ class CubePickEmbodiment:
         goal_radius: float = 0.05,
         start: tuple[float, float] = (0.1, 0.1),
     ):
-        from robolens.embodiment import (
+        from roboinspect.embodiment import (
             AUTO_RESET,
             PRIVILEGED_SUCCESS,
             RENDERABLE,

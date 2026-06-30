@@ -1,9 +1,9 @@
 """Controllers — the rollout middleware layer (Inspect's ``@solver`` analog).
 
-A [`Controller`][robolens.controller.Controller] owns the per-control-step decision of which action
-to send
+A [`Controller`][roboinspect.controller.Controller] owns the per-control-step decision
+of which action to send
 to the embodiment. It internally decides *when* to call ``policy.act()`` (a slow
-VLA inference returning an [`ActionChunk`][robolens.types.ActionChunk]), buffers the
+VLA inference returning an [`ActionChunk`][roboinspect.types.ActionChunk]), buffers the
 returned chunk, and pops the next action each step. This single-method, stateful
 shape (R3) is what lets advanced controllers — e.g. a temporal-ensembling
 controller that re-infers every step and blends overlapping predictions —
@@ -22,9 +22,9 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from robolens.policy import Policy
-from robolens.spaces import Box
-from robolens.types import Action, Observation
+from roboinspect.policy import Policy
+from roboinspect.spaces import Box
+from roboinspect.types import Action, Observation
 
 _BUFFER_KEY = "_controller_action_buffer"
 # Each entry is (inference_latency_s | None, chunk_len): one per policy.act() call.

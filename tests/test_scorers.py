@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from robolens.rollout import StepRecord, TrialRecord
-from robolens.scorer import (
+from roboinspect.rollout import StepRecord, TrialRecord
+from roboinspect.scorer import (
     Score,
     episode_length,
     get_reducer,
@@ -16,7 +16,7 @@ from robolens.scorer import (
     reduce_scores,
     success_at_end,
 )
-from robolens.types import Action, Observation, StepResult
+from roboinspect.types import Action, Observation, StepResult
 
 
 def _record(distances: list[float], *, success: bool, operator: str | None = None) -> TrialRecord:

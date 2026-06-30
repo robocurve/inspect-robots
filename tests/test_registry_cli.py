@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-import robolens.registry as reg
-from robolens.cli import main
-from robolens.mock import ScriptedPolicy
-from robolens.registry import registered, resolve
+import roboinspect.registry as reg
+from roboinspect.cli import main
+from roboinspect.mock import ScriptedPolicy
+from roboinspect.registry import registered, resolve
 
 
 def test_builtins_are_registered() -> None:
@@ -38,7 +38,7 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
             return ScriptedPolicy
 
     def fake_entry_points(*, group: str) -> list[object]:
-        return [_FakeEP()] if group == "robolens.policies" else []
+        return [_FakeEP()] if group == "roboinspect.policies" else []
 
     # Reset discovery state and inject a fake installed plugin.
     monkeypatch.setattr(reg, "entry_points", fake_entry_points)
@@ -83,4 +83,4 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
-    assert "RoboLens" in capsys.readouterr().out
+    assert "RoboInspect" in capsys.readouterr().out

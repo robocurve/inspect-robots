@@ -1,6 +1,6 @@
 """Compatibility checking between a policy and an embodiment.
 
-Before any rollout, RoboLens verifies that a ``(policy, embodiment)`` pair can
+Before any rollout, RoboInspect verifies that a ``(policy, embodiment)`` pair can
 actually run together: the action spaces agree in dimension and semantics, the
 embodiment provides every observation the policy requires (resolving a name
 remap), the control rates are reconcilable (R1), and — given a task — every
@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from robolens.embodiment import Embodiment
-from robolens.errors import CompatibilityError
-from robolens.policy import Policy
-from robolens.spaces import Box
-from robolens.task import Task
+from roboinspect.embodiment import Embodiment
+from roboinspect.errors import CompatibilityError
+from roboinspect.policy import Policy
+from roboinspect.spaces import Box
+from roboinspect.task import Task
 
 _RATE_TOL = 1e-6
 
@@ -196,8 +196,8 @@ def assert_compatible(
     *,
     remap: dict[str, str] | None = None,
 ) -> CompatibilityReport:
-    """Check compatibility and raise [`CompatibilityError`][robolens.errors.CompatibilityError] on
-    hard errors."""
+    """Check compatibility and raise
+    [`CompatibilityError`][roboinspect.errors.CompatibilityError] on hard errors."""
     report = check_compatibility(policy, embodiment, task, remap=remap)
     report.raise_for_errors()
     return report

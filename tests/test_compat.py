@@ -5,18 +5,18 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from robolens import eval
-from robolens.compat import assert_compatible, check_compatibility
-from robolens.embodiment import EmbodimentInfo
-from robolens.errors import CompatibilityError
-from robolens.mock import CubePickEmbodiment, ScriptedPolicy
-from robolens.mock.policies import _ACTION_SPACE
-from robolens.policy import PolicyConfig, PolicyInfo
-from robolens.scene import Scene, Target
-from robolens.scorer import success_at_end
-from robolens.spaces import ActionSemantics, Box, ObservationSpace
-from robolens.task import Task
-from robolens.types import Action, ActionChunk, Observation
+from roboinspect import eval
+from roboinspect.compat import assert_compatible, check_compatibility
+from roboinspect.embodiment import EmbodimentInfo
+from roboinspect.errors import CompatibilityError
+from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
+from roboinspect.mock.policies import _ACTION_SPACE
+from roboinspect.policy import PolicyConfig, PolicyInfo
+from roboinspect.scene import Scene, Target
+from roboinspect.scorer import success_at_end
+from roboinspect.spaces import ActionSemantics, Box, ObservationSpace
+from roboinspect.task import Task
+from roboinspect.types import Action, ActionChunk, Observation
 
 
 class _StubPolicy:

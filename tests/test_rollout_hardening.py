@@ -7,20 +7,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from robolens import eval
-from robolens.approver import AutoApprover, ClampApprover
-from robolens.controller import DefaultController
-from robolens.errors import EmbodimentFault, PolicyError, SafetyAbort
-from robolens.frames import FrameStore
-from robolens.logging.sink import NullSink
-from robolens.mock import CubePickEmbodiment, ScriptedPolicy
-from robolens.policy import PolicyConfig, PolicyInfo
-from robolens.rollout import derive_seed, rollout
-from robolens.scene import Scene
-from robolens.scorer import success_at_end
-from robolens.spaces import ActionSemantics, Box
-from robolens.task import Task
-from robolens.types import Action, ActionChunk, Observation
+from roboinspect import eval
+from roboinspect.approver import AutoApprover, ClampApprover
+from roboinspect.controller import DefaultController
+from roboinspect.errors import EmbodimentFault, PolicyError, SafetyAbort
+from roboinspect.frames import FrameStore
+from roboinspect.logging.sink import NullSink
+from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
+from roboinspect.policy import PolicyConfig, PolicyInfo
+from roboinspect.rollout import derive_seed, rollout
+from roboinspect.scene import Scene
+from roboinspect.scorer import success_at_end
+from roboinspect.spaces import ActionSemantics, Box
+from roboinspect.task import Task
+from roboinspect.types import Action, ActionChunk, Observation
 
 _SCENE = Scene(id="s", instruction="reach", init_seed=0)
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))

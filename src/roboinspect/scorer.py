@@ -1,7 +1,7 @@
 """Scoring: Scores, the Scorer protocol, epoch reducers, and builtin scorers.
 
 Mirrors Inspect AI's ``@scorer``/reducer split. A scorer maps a recorded
-trajectory (+ the scene's ``Target``) to a [`Score`][robolens.scorer.Score]; an epoch *reducer*
+trajectory (+ the scene's ``Target``) to a [`Score`][roboinspect.scorer.Score]; an epoch *reducer*
 collapses the per-epoch scores of one scene into a single score before metrics
 aggregate across scenes.
 
@@ -19,10 +19,10 @@ from statistics import mean as _mean
 from statistics import median as _median
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from robolens.scene import Target
+from roboinspect.scene import Target
 
 if TYPE_CHECKING:
-    from robolens.rollout import TrialRecord
+    from roboinspect.rollout import TrialRecord
 
 ScoreValue = bool | int | float | str
 Reducer = Callable[[Sequence["Score"]], "Score"]
@@ -51,7 +51,7 @@ def value_to_float(value: ScoreValue) -> float:
 
 @runtime_checkable
 class Scorer(Protocol):
-    """Maps a recorded trajectory + scene target to a [`Score`][robolens.scorer.Score]."""
+    """Maps a recorded trajectory + scene target to a [`Score`][roboinspect.scorer.Score]."""
 
     @property
     def name(self) -> str: ...
@@ -65,7 +65,7 @@ class Scorer(Protocol):
 def _numeric(value: ScoreValue) -> float:
     """Strictly coerce a value to a number for numeric reduction.
 
-    Unlike [`value_to_float`][robolens.scorer.value_to_float] (which is lenient for metric
+    Unlike [`value_to_float`][roboinspect.scorer.value_to_float] (which is lenient for metric
     aggregation), this
     raises on a non-numeric string rather than silently coercing it to 0.0 — so a
     ``mean`` over categorical scores fails loudly instead of lying.

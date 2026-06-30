@@ -45,7 +45,8 @@ class Action:
     """A single action to apply to an embodiment.
 
     Semantics (control mode, rotation representation, gripper kind, frame) live on
-    the action *space*, not on every action instance — see [`robolens.spaces`][robolens.spaces].
+    the action *space*, not on every action instance —
+    see [`roboinspect.spaces`][roboinspect.spaces].
     """
 
     data: StateArray

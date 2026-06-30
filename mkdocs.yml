@@ -1,12 +1,12 @@
-site_name: RoboLens
+site_name: RoboInspect
 site_description: >-
   The Inspect AI for robotics — an evaluation framework for physical AI and VLA
   (vision-language-action) models.
-site_url: https://robocurve.github.io/robolens/
-repo_url: https://github.com/robocurve/robolens
-repo_name: robocurve/robolens
+site_url: https://robocurve.github.io/roboinspect/
+repo_url: https://github.com/robocurve/roboinspect
+repo_name: robocurve/roboinspect
 edit_uri: edit/main/docs/
-copyright: Copyright &copy; RoboLens contributors
+copyright: Copyright &copy; RoboInspect contributors
 
 theme:
   name: material
@@ -80,7 +80,7 @@ plugins:
             filters: ["!^_"]
   - llmstxt:
       markdown_description: >-
-        RoboLens is the open-source evaluation framework for physical AI and VLA
+        RoboInspect is the open-source evaluation framework for physical AI and VLA
         (vision-language-action) models — the "Inspect AI for robotics". A
         benchmark is a Task (dataset of Scenes + scorers) run against two
         swappable inputs: a Policy (the VLA) and an Embodiment (a real robot or
@@ -114,4 +114,4 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/robocurve/robolens
+      link: https://github.com/robocurve/roboinspect

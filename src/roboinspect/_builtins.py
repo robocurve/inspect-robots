@@ -1,23 +1,23 @@
 """Register the in-tree builtin components with the registry.
 
-Imported lazily by [`robolens.registry`][robolens.registry] on first lookup, so importing
-``robolens`` stays cheap and free of import cycles.
+Imported lazily by [`roboinspect.registry`][roboinspect.registry] on first lookup, so importing
+``roboinspect`` stays cheap and free of import cycles.
 """
 
 from __future__ import annotations
 
-from robolens.logging import JsonLogSink, RerunSink
-from robolens.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
-from robolens.registry import embodiment, policy, scorer, sink, task
-from robolens.scene import Scene
-from robolens.scorer import (
+from roboinspect.logging import JsonLogSink, RerunSink
+from roboinspect.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
+from roboinspect.registry import embodiment, policy, scorer, sink, task
+from roboinspect.scene import Scene
+from roboinspect.scorer import (
     episode_length,
     min_distance_to_goal,
     operator_scorer,
     reached_goal_state,
     success_at_end,
 )
-from robolens.task import Task
+from roboinspect.task import Task
 
 # Embodiments
 embodiment("cubepick")(CubePickEmbodiment)

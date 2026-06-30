@@ -1,6 +1,6 @@
-# RoboLens — agent guide
+# RoboInspect — agent guide
 
-RoboLens is the **"Inspect AI for robotics"**: an open-source evaluation
+RoboInspect is the **"Inspect AI for robotics"**: an open-source evaluation
 framework for physical AI / VLA (vision-language-action) models. This repo is the
 *framework*; concrete benchmarks and backend adapters live elsewhere (see below).
 
@@ -18,7 +18,7 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 
 ## Layout
 
-- `src/robolens/` — the package (see `src/robolens/CLAUDE.md` for the module map).
+- `src/roboinspect/` — the package (see `src/roboinspect/CLAUDE.md` for the module map).
 - `tests/` — pytest; the `CubePick` mock world exercises the whole stack with no
   hardware or sim.
 - `plans/` — design docs. `plans/0001-foundation-design.md` is the authoritative
@@ -37,12 +37,12 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.
-- Public API is fenced by `robolens.__all__` and guarded by
+- Public API is fenced by `roboinspect.__all__` and guarded by
   `tests/test_api_snapshot.py` — update both together.
 
 ## Out of scope (separate repos / plugins)
 
 Specific benchmarks ("Inspect Evals for robotics"), specific simulators
 (ManiSkill/MuJoCo/Isaac), and specific VLA weights (OpenVLA/π0/Octo) ship as
-separate plugin packages registered via entry points (`robolens.embodiments`,
-`robolens.policies`, …).
+separate plugin packages registered via entry points (`roboinspect.embodiments`,
+`roboinspect.policies`, …).

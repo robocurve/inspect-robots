@@ -14,7 +14,7 @@ What does this change do and why?
 - [ ] `ruff check .` and `ruff format --check .` pass
 - [ ] `mypy` passes (strict)
 - [ ] `CHANGELOG.md` updated under "Unreleased"
-- [ ] Public API changes are reflected in `robolens.__all__` and the API-snapshot test
+- [ ] Public API changes are reflected in `roboinspect.__all__` and the API-snapshot test
 - [ ] Core stays NumPy-only (new deps are optional extras, lazily imported)
 
 ## Related

@@ -1,7 +1,7 @@
 """Scenes — the robotics analog of Inspect AI's ``Sample``.
 
-A [`Scene`][robolens.scene.Scene] is one initial condition of a benchmark: a language instruction,
-an optional success ``Target``, an optional seed, and metadata. A benchmark
+A [`Scene`][roboinspect.scene.Scene] is one initial condition of a benchmark: a language
+instruction, an optional success ``Target``, an optional seed, and metadata. A benchmark
 ``Task`` iterates over a dataset of scenes (e.g. 50 object layouts), repeated
 ``epochs`` times.
 

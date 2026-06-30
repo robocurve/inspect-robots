@@ -6,7 +6,7 @@ lazily *inside* methods so the core package never depends on it; if it is not
 installed, the sink warns once and becomes a no-op (so unattended runs and the
 core-only import gate are unaffected).
 
-Install with ``pip install "robolens[rerun]"``.
+Install with ``pip install "roboinspect[rerun]"``.
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from robolens.log import EvalLog, EvalSpec
-    from robolens.rollout import TrialRecord
-    from robolens.types import Action, Observation, StepResult
+    from roboinspect.log import EvalLog, EvalSpec
+    from roboinspect.rollout import TrialRecord
+    from roboinspect.types import Action, Observation, StepResult
 
 _WARNED = False
 
@@ -31,7 +31,7 @@ class RerunSink:
         self,
         recording_path: str | None = None,
         *,
-        application_id: str = "robolens",
+        application_id: str = "roboinspect",
         spawn: bool = False,
     ):
         self.recording_path = recording_path
@@ -50,7 +50,7 @@ class RerunSink:
             if not _WARNED:
                 warnings.warn(
                     "rerun-sdk is not installed; RerunSink is a no-op. "
-                    'Install with: pip install "robolens[rerun]"',
+                    'Install with: pip install "roboinspect[rerun]"',
                     RuntimeWarning,
                     stacklevel=2,
                 )

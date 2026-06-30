@@ -1,13 +1,13 @@
 """Guard the public API surface against accidental growth/shrinkage.
 
 If you intend to change the public API, update ``EXPECTED`` here and note it in
-the changelog. Everything not in ``robolens.__all__`` (or prefixed ``_``) is
+the changelog. Everything not in ``roboinspect.__all__`` (or prefixed ``_``) is
 private and carries no stability guarantee.
 """
 
 from __future__ import annotations
 
-import robolens
+import roboinspect
 
 EXPECTED = {
     # evaluation + logs
@@ -65,11 +65,11 @@ EXPECTED = {
 
 
 def test_public_api_snapshot() -> None:
-    assert set(robolens.__all__) == EXPECTED
+    assert set(roboinspect.__all__) == EXPECTED
     # __all__ must have no duplicates.
-    assert len(robolens.__all__) == len(set(robolens.__all__))
+    assert len(roboinspect.__all__) == len(set(roboinspect.__all__))
 
 
 def test_public_names_are_importable() -> None:
-    for name in robolens.__all__:
-        assert hasattr(robolens, name), f"{name} declared in __all__ but missing"
+    for name in roboinspect.__all__:
+        assert hasattr(roboinspect, name), f"{name} declared in __all__ but missing"
