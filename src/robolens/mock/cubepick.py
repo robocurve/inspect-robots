@@ -101,8 +101,9 @@ class CubePickEmbodiment:
 
     def _render(self) -> np.ndarray:
         img = np.zeros((_IMG, _IMG, 3), dtype=np.uint8)
-        cy, cx = (np.clip(self._cube, 0, 1) * (_IMG - 1)).astype(int)
-        ey, ex = (np.clip(self._eef, 0, 1) * (_IMG - 1)).astype(int)
-        img[cx, cy] = (0, 200, 0)  # cube = green
-        img[ex, ey] = (200, 0, 0)  # effector = red
+        # Unit-square coordinates map x -> column, y -> row.
+        cube_col, cube_row = (np.clip(self._cube, 0, 1) * (_IMG - 1)).astype(int)
+        eef_col, eef_row = (np.clip(self._eef, 0, 1) * (_IMG - 1)).astype(int)
+        img[cube_row, cube_col] = (0, 200, 0)  # cube = green
+        img[eef_row, eef_col] = (200, 0, 0)  # effector = red
         return img

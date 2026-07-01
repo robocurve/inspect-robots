@@ -99,6 +99,15 @@ def test_clamp_approver_bounds_action() -> None:
     assert out.meta.get("clamped") is True
 
 
+def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    img = np.zeros((2, 2, 3), dtype=np.uint8)
+    a = store.put("a/b", 0, "cam", img)
+    b = store.put("a-b", 0, "cam", img)
+    assert a.path != b.path  # sanitization must not introduce collisions
+    assert Path(a.path).exists() and Path(b.path).exists()
+
+
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)

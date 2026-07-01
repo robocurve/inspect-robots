@@ -333,7 +333,7 @@ def test_registered_unknown_kind() -> None:
         registered("bogus")
 
 
-def test_entrypoint_load_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entrypoint_load_failure_is_skipped_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BadEP:
         name = "broken"
 
@@ -344,7 +344,10 @@ def test_entrypoint_load_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> 
         reg, "entry_points", lambda *, group: [_BadEP()] if group == "robolens.policies" else []
     )
     monkeypatch.setattr(reg, "_loaded_entrypoints", False)
-    assert "broken" not in registered("policy")  # a broken plugin must not crash discovery
+    # A broken plugin must not crash discovery — but must not vanish silently.
+    with pytest.warns(RuntimeWarning, match="failed to load robolens plugin 'broken'"):
+        names = registered("policy")
+    assert "broken" not in names
 
 
 def test_resolve_forwards_kwargs() -> None:
