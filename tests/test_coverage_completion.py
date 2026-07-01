@@ -453,22 +453,32 @@ def test_pass_at_k_edge_cases() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# RerunSink — exercise the rerun-present logging path with a fake backend
+# RerunSink — exercise the rerun-present logging path with fake backends
 # --------------------------------------------------------------------------- #
-def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import sys
+def _fake_rerun_module(calls: list[str], paths: list[str], *, new_api: bool) -> object:
     import types
 
-    calls: list[str] = []
     fake = types.ModuleType("rerun")
     fake.init = lambda *a, **k: calls.append("init")  # type: ignore[attr-defined]
     fake.save = lambda p: calls.append("save")  # type: ignore[attr-defined]
-    fake.set_time_sequence = lambda *a: calls.append("time")  # type: ignore[attr-defined]
-    fake.log = lambda *a, **k: calls.append("log")  # type: ignore[attr-defined]
+    fake.log = lambda path, *a, **k: paths.append(path)  # type: ignore[attr-defined]
     fake.Image = lambda img: ("Image",)  # type: ignore[attr-defined]
-    fake.Scalar = lambda v: ("Scalar", v)  # type: ignore[attr-defined]
     fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "rerun", fake)
+    if new_api:  # rerun-sdk >= 0.23 surface
+        fake.set_time = lambda *a, **k: calls.append("time")  # type: ignore[attr-defined]
+        fake.Scalars = lambda v: ("Scalars", v)  # type: ignore[attr-defined]
+    else:  # older SDK surface
+        fake.set_time_sequence = lambda *a: calls.append("time")  # type: ignore[attr-defined]
+        fake.Scalar = lambda v: ("Scalar", v)  # type: ignore[attr-defined]
+    return fake
+
+
+def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import sys
+
+    calls: list[str] = []
+    paths: list[str] = []
+    monkeypatch.setitem(sys.modules, "rerun", _fake_rerun_module(calls, paths, new_api=False))
 
     from robolens.logging.rerun_sink import RerunSink
 
@@ -478,7 +488,9 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
 
     (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
     assert log.status == "success"
-    assert "init" in calls and "save" in calls and "log" in calls and "time" in calls
+    assert "init" in calls and "save" in calls and "time" in calls
+    # Entities are namespaced per trial so trials never overwrite each other.
+    assert paths and all(p.startswith("trial/s/e0/") for p in paths)
 
     # Exercise the empty-observation and reward-is-None branches directly.
     sink.log_step(
@@ -490,3 +502,19 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
 
     # A sink with no recording path skips rr.save (the other on_eval_start branch).
     RerunSink().on_eval_start(None)  # type: ignore[arg-type]
+
+
+def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    calls: list[str] = []
+    paths: list[str] = []
+    monkeypatch.setitem(sys.modules, "rerun", _fake_rerun_module(calls, paths, new_api=True))
+
+    from robolens.logging.rerun_sink import RerunSink
+
+    sink = RerunSink()
+    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    assert log.status == "success"
+    assert "time" in calls  # rr.set_time (>=0.23) was used
+    assert paths and all(p.startswith("trial/s/e0/") for p in paths)

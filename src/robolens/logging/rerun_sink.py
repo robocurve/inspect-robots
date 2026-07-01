@@ -6,6 +6,9 @@ lazily *inside* methods so the core package never depends on it; if it is not
 installed, the sink warns once and becomes a no-op (so unattended runs and the
 core-only import gate are unaffected).
 
+Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
+successive trials never overwrite one another on the shared step timeline.
+
 Install with ``pip install "robolens[rerun]"``.
 """
 
@@ -20,8 +23,6 @@ if TYPE_CHECKING:
     from robolens.log import EvalLog, EvalSpec
     from robolens.rollout import TrialRecord
     from robolens.types import Action, Observation, StepResult
-
-_WARNED = False
 
 
 class RerunSink:
@@ -38,23 +39,23 @@ class RerunSink:
         self.application_id = application_id
         self.spawn = spawn
         self._rr: Any | None = None
-        self._t = 0
+        self._warned = False
+        self._prefix = "trial"
 
     def _ensure_rerun(self) -> Any | None:
-        global _WARNED
         if self._rr is not None:
             return self._rr
         try:
             import rerun as rr
         except ImportError:
-            if not _WARNED:
+            if not self._warned:
                 warnings.warn(
                     "rerun-sdk is not installed; RerunSink is a no-op. "
                     'Install with: pip install "robolens[rerun]"',
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                _WARNED = True
+                self._warned = True
             return None
         self._rr = rr
         return rr
@@ -62,6 +63,20 @@ class RerunSink:
     @property
     def available(self) -> bool:
         return self._ensure_rerun() is not None
+
+    @staticmethod
+    def _set_step(rr: Any, t: int) -> None:
+        if hasattr(rr, "set_time"):  # rerun-sdk >= 0.23
+            rr.set_time("step", sequence=t)
+        else:  # older SDKs
+            rr.set_time_sequence("step", t)
+
+    @staticmethod
+    def _scalar(rr: Any, value: float) -> Any:
+        scalars = getattr(rr, "Scalars", None)  # rerun-sdk >= 0.23
+        if scalars is not None:
+            return scalars(value)
+        return rr.Scalar(value)  # older SDKs
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         rr = self._ensure_rerun()
@@ -72,7 +87,8 @@ class RerunSink:
             rr.save(self.recording_path)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
-        self._t = 0
+        # Namespace this trial's entities so trials never overwrite each other.
+        self._prefix = f"trial/{scene_id}/e{epoch}"
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
@@ -80,18 +96,22 @@ class RerunSink:
         rr = self._ensure_rerun()
         if rr is None:
             return
-        rr.set_time_sequence("step", t)
+        self._set_step(rr, t)
+        pre = self._prefix
         for cam, image in observation.images.items():
-            rr.log(f"camera/{cam}", rr.Image(image))
+            rr.log(f"{pre}/camera/{cam}", rr.Image(image))
         for key, value in observation.state.items():
             for i, scalar in enumerate(np.atleast_1d(np.asarray(value, dtype=np.float64))):
-                rr.log(f"state/{key}/{i}", rr.Scalar(float(scalar)))
+                rr.log(f"{pre}/state/{key}/{i}", self._scalar(rr, float(scalar)))
         for i, scalar in enumerate(np.atleast_1d(np.asarray(action.data, dtype=np.float64))):
-            rr.log(f"action/{i}", rr.Scalar(float(scalar)))
+            rr.log(f"{pre}/action/{i}", self._scalar(rr, float(scalar)))
         if result.reward is not None:
-            rr.log("reward", rr.Scalar(float(result.reward)))
+            rr.log(f"{pre}/reward", self._scalar(rr, float(result.reward)))
         if result.terminated:
-            rr.log("event/terminated", rr.TextLog(result.termination_reason or "terminated"))
+            rr.log(
+                f"{pre}/event/terminated",
+                rr.TextLog(result.termination_reason or "terminated"),
+            )
 
     def on_trial_end(self, record: TrialRecord) -> None:
         return None
