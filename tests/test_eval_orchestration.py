@@ -21,7 +21,7 @@ from robolens.scene import Scene
 from robolens.scorer import min_distance_to_goal, success_at_end
 from robolens.spaces import ActionSemantics, Box
 from robolens.task import Epochs, Task
-from robolens.types import Action, ActionChunk, Observation
+from robolens.types import Action, ActionChunk, Observation, StepResult
 
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))
 
@@ -58,7 +58,7 @@ class _FaultAfterEpochsEmbodiment(CubePickEmbodiment):
         self._resets += 1
         return super().reset(scene, seed=seed)
 
-    def step(self, action: Action) -> object:  # type: ignore[override]
+    def step(self, action: Action) -> StepResult:
         if self._resets > self.good_epochs:
             raise EmbodimentFault("motor stalled")
         return super().step(action)
@@ -284,7 +284,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         ScriptedPolicy(),
         CubePickEmbodiment(),
         sinks=[sink],
-        controller=_EagerErrorController(),  # type: ignore[arg-type]
+        controller=_EagerErrorController(),
     )
     assert log.status == "success"  # fail_on_error=False
     (record,) = sink.records

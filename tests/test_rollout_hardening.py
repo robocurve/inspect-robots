@@ -9,14 +9,14 @@ import numpy as np
 import pytest
 
 from robolens import eval
-from robolens.approver import AutoApprover, ClampApprover
+from robolens.approver import Approver, AutoApprover, ClampApprover
 from robolens.controller import DefaultController
 from robolens.errors import EmbodimentFault, PolicyError, SafetyAbort
 from robolens.frames import FrameStore
 from robolens.logging.sink import NullSink
 from robolens.mock import CubePickEmbodiment, ScriptedPolicy
 from robolens.policy import PolicyConfig, PolicyInfo
-from robolens.rollout import derive_seed, rollout
+from robolens.rollout import TrialRecord, derive_seed, rollout
 from robolens.scene import Scene
 from robolens.scorer import success_at_end
 from robolens.spaces import ActionSemantics, Box
@@ -27,7 +27,13 @@ _SCENE = Scene(id="s", instruction="reach", init_seed=0)
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))
 
 
-def _run(policy: object, embodiment: object, *, approver: object = None, frame_store=None):  # type: ignore[no-untyped-def]
+def _run(
+    policy: object,
+    embodiment: object,
+    *,
+    approver: Approver | None = None,
+    frame_store: FrameStore | None = None,
+) -> TrialRecord:
     return rollout(
         policy,  # type: ignore[arg-type]
         embodiment,  # type: ignore[arg-type]

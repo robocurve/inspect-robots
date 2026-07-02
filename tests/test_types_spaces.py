@@ -25,7 +25,7 @@ def test_core_types_are_frozen() -> None:
     step = StepResult(observation=obs)
     for frozen in (obs, act, chunk, step):
         with pytest.raises(dataclasses.FrozenInstanceError):
-            frozen.foo = 1  # type: ignore[attr-defined]
+            frozen.foo = 1  # type: ignore[union-attr]
 
 
 def test_action_chunk_rejects_empty() -> None:

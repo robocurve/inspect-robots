@@ -8,6 +8,7 @@ import pytest
 from robolens import eval
 from robolens.controller import EnsemblingController
 from robolens.mock import CubePickEmbodiment, ScriptedPolicy
+from robolens.policy import PolicyConfig, PolicyInfo
 from robolens.scene import Scene
 from robolens.scorer import success_at_end
 from robolens.spaces import ActionSemantics, Box
@@ -24,6 +25,11 @@ class _FixedChunkPolicy:
         self._actions = [np.array(a0, dtype=np.float64), np.array(a1, dtype=np.float64)]
         self.chunk_len = chunk_len
         self.num_inferences = 0
+        self.info = PolicyInfo(name="fixed-chunk", action_space=_DELTA_SPACE)
+        self.config = PolicyConfig()
+
+    def reset(self, scene: Scene) -> None:
+        return None
 
     def act(self, observation: Observation) -> ActionChunk:
         self.num_inferences += 1

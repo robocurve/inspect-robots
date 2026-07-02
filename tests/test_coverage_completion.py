@@ -307,11 +307,11 @@ def test_null_sink_lifecycle() -> None:
     sink = NullSink()
     obs = Observation()
     record = TrialRecord(scene_id="s", epoch=0, seed=0)
-    assert sink.on_eval_start(None) is None  # type: ignore[arg-type]
-    assert sink.on_trial_start("s", 0) is None
-    assert sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs)) is None
-    assert sink.on_trial_end(record) is None
-    assert sink.on_eval_end(None) is None  # type: ignore[arg-type]
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s", 0)
+    sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs))
+    sink.on_trial_end(record)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
