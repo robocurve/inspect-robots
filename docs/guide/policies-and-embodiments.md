@@ -5,17 +5,17 @@ inheritance required), or subclass the convenience base classes.
 
 ## A policy (VLA)
 
-A [`Policy`][roboinspect.policy.Policy] maps an observation to an
-[`ActionChunk`][roboinspect.types.ActionChunk]. It declares a
-[`PolicyInfo`][roboinspect.policy.PolicyInfo] (the action space it emits and the
+A [`Policy`][inspect_robots.policy.Policy] maps an observation to an
+[`ActionChunk`][inspect_robots.types.ActionChunk]. It declares a
+[`PolicyInfo`][inspect_robots.policy.PolicyInfo] (the action space it emits and the
 observations it requires) used for compatibility checking.
 
 ```python
 import numpy as np
-from roboinspect.policy import PolicyConfig, PolicyInfo
-from roboinspect.scene import Scene
-from roboinspect.spaces import ActionSemantics, Box, ObservationSpace
-from roboinspect.types import Action, ActionChunk, Observation
+from inspect_robots.policy import PolicyConfig, PolicyInfo
+from inspect_robots.scene import Scene
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
+from inspect_robots.types import Action, ActionChunk, Observation
 
 
 class MyVLA:
@@ -50,15 +50,15 @@ frames. Temporal concerns (history, smoothing, ensembling) live in a
 
 ## An embodiment (robot or sim)
 
-An [`Embodiment`][roboinspect.embodiment.Embodiment] produces observations and executes
-actions. It declares an [`EmbodimentInfo`][roboinspect.embodiment.EmbodimentInfo] with its
+An [`Embodiment`][inspect_robots.embodiment.Embodiment] produces observations and executes
+actions. It declares an [`EmbodimentInfo`][inspect_robots.embodiment.EmbodimentInfo] with its
 spaces, native control rate, and opt-in capability flags.
 
 ```python
-from roboinspect.embodiment import EmbodimentInfo, PRIVILEGED_SUCCESS, SEEDABLE
-from roboinspect.scene import Scene
-from roboinspect.spaces import Box, CameraSpec, ObservationSpace
-from roboinspect.types import Action, Observation, StepResult
+from inspect_robots.embodiment import EmbodimentInfo, PRIVILEGED_SUCCESS, SEEDABLE
+from inspect_robots.scene import Scene
+from inspect_robots.spaces import Box, CameraSpec, ObservationSpace
+from inspect_robots.types import Action, Observation, StepResult
 
 
 class MyArm:
@@ -95,13 +95,13 @@ human-in-the-loop reset, wall-clock control. Simulators opt into more via
 `capabilities` (`SEEDABLE`, `AUTO_RESET`, `PRIVILEGED_SUCCESS`, `RENDERABLE`, …).
 A sim may put privileged success into `StepResult.info` for a scorer to read; a
 real robot typically relies on an operator verdict
-([`operator_scorer`][roboinspect.scorer.operator_scorer]) or a learned classifier.
+([`operator_scorer`][inspect_robots.scorer.operator_scorer]) or a learned classifier.
 
 ## Compatibility
 
 If the policy's action dimension/semantics or required observations don't match
-the embodiment, [`eval`][roboinspect.eval.eval] raises a
-[`CompatibilityError`][roboinspect.errors.CompatibilityError] before any rollout. Use `remap=` to
+the embodiment, [`eval`][inspect_robots.eval.eval] raises a
+[`CompatibilityError`][inspect_robots.errors.CompatibilityError] before any rollout. Use `remap=` to
 alias differing camera/state key names:
 
 ```python

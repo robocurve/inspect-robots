@@ -121,8 +121,8 @@ jobs:
           import importlib.util
           for mod in ("rerun", "torch"):
               assert importlib.util.find_spec(mod) is None, f"{mod} unexpectedly installed"
-          import roboinspect
-          print("roboinspect", roboinspect.__version__, "imported with core deps only")
+          import inspect_robots
+          print("inspect_robots", inspect_robots.__version__, "imported with core deps only")
           PY
 
   # First-party plugins under plugins/* are their own packages with their own
@@ -145,11 +145,11 @@ jobs:
       - name: Sync workspace (core + plugins, dev extras)
         run: uv sync --python 3.11 --all-packages --extra dev
       - name: Ruff (plugin)
-        run: uv run --no-sync ruff check plugins/robolens-isaacsim
+        run: uv run --no-sync ruff check plugins/inspect-robots-isaacsim
       - name: Mypy (plugin, strict)
         run: >
           uv run --no-sync mypy
-          --config-file plugins/robolens-isaacsim/pyproject.toml
-          plugins/robolens-isaacsim/src/robolens_isaacsim
+          --config-file plugins/inspect-robots-isaacsim/pyproject.toml
+          plugins/inspect-robots-isaacsim/src/inspect_robots_isaacsim
       - name: Pytest (plugin)
-        run: uv run --no-sync python -m pytest plugins/robolens-isaacsim/tests -q
+        run: uv run --no-sync python -m pytest plugins/inspect-robots-isaacsim/tests -q

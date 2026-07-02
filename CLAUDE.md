@@ -1,6 +1,6 @@
-# RoboInspect — agent guide
+# Inspect Robots — agent guide
 
-RoboInspect is the **"Inspect AI for robotics"**: an open-source evaluation
+Inspect Robots is the **"Inspect AI for robotics"**: an open-source evaluation
 framework for physical AI / VLA (vision-language-action) models. This repo is the
 *framework*; concrete benchmarks and backend adapters live elsewhere (see below).
 
@@ -18,7 +18,7 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 
 ## Layout
 
-- `src/roboinspect/` — the package (see `src/roboinspect/CLAUDE.md` for the module map).
+- `src/inspect_robots/` — the package (see `src/inspect_robots/CLAUDE.md` for the module map).
 - `tests/` — pytest; the `CubePick` mock world exercises the whole stack with no
   hardware or sim.
 - `plans/` — design docs. `plans/0001-foundation-design.md` is the authoritative
@@ -29,7 +29,7 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   entry point, tests, and coverage scope. A uv workspace (`[tool.uv.workspace]`)
   ties them in: `uv sync --all-packages --extra dev` installs core + all plugins
   editable. They never count toward the core 100% gate (coverage is scoped to
-  `roboinspect`). E.g. `plugins/robolens-isaacsim/` (Isaac Lab embodiment).
+  `inspect_robots`). E.g. `plugins/inspect-robots-isaacsim/` (Isaac Lab embodiment).
 
 ## Working here
 
@@ -43,14 +43,14 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.
-- Public API is fenced by `roboinspect.__all__` and guarded by
+- Public API is fenced by `inspect_robots.__all__` and guarded by
   `tests/test_api_snapshot.py` — update both together.
 
 ## Out of scope (separate repos / plugins)
 
 Specific benchmarks ("Inspect Evals for robotics"), specific simulators
 (ManiSkill/MuJoCo/Isaac), and specific VLA weights (OpenVLA/π0/Octo) ship as
-separate plugin packages registered via entry points (`roboinspect.embodiments`,
-`roboinspect.policies`, …) — either in their own repos or as in-repo `plugins/*`
+separate plugin packages registered via entry points (`inspect_robots.embodiments`,
+`inspect_robots.policies`, …) — either in their own repos or as in-repo `plugins/*`
 workspace members (see Layout). Either way they stay out of the numpy-only core
-and its 100% coverage gate; `plugins/robolens-isaacsim/` is the reference example.
+and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference example.

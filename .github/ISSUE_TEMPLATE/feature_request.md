@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for RoboInspect
+about: Suggest an idea for Inspect Robots
 title: "[feature] "
 labels: enhancement
 ---

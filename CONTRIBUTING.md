@@ -1,6 +1,6 @@
-# Contributing to RoboInspect
+# Contributing to Inspect Robots
 
-Thanks for your interest in improving RoboInspect — the evaluation framework for
+Thanks for your interest in improving Inspect Robots — the evaluation framework for
 physical AI. This guide covers how to get set up and what we expect from a change.
 
 ## Scope
@@ -87,7 +87,7 @@ The docs site is built with [MkDocs](https://www.mkdocs.org/) +
 [Material](https://squidfunk.github.io/mkdocs-material/) +
 [mkdocstrings](https://mkdocstrings.github.io/) — the API reference is generated
 from docstrings, so keep them accurate. Cross-reference other symbols with
-mkdocstrings autorefs: `` [`Observation`][roboinspect.types.Observation] ``.
+mkdocstrings autorefs: `` [`Observation`][inspect_robots.types.Observation] ``.
 
 ```bash
 uv pip install -e ".[docs]"
@@ -103,15 +103,15 @@ Register your component(s) by publishing entry points in your package's
 `pyproject.toml`:
 
 ```toml
-[project.entry-points."roboinspect.embodiments"]
-maniskill = "roboinspect_maniskill:ManiSkillEmbodiment"
+[project.entry-points."inspect_robots.embodiments"]
+maniskill = "inspect_robots_maniskill:ManiSkillEmbodiment"
 
-[project.entry-points."roboinspect.policies"]
-openvla = "roboinspect_openvla:OpenVLAPolicy"
+[project.entry-points."inspect_robots.policies"]
+openvla = "inspect_robots_openvla:OpenVLAPolicy"
 ```
 
-Groups: `roboinspect.tasks`, `roboinspect.policies`, `roboinspect.embodiments`,
-`roboinspect.scorers`, `roboinspect.sinks`. They will then appear in `roboinspect list`
+Groups: `inspect_robots.tasks`, `inspect_robots.policies`, `inspect_robots.embodiments`,
+`inspect_robots.scorers`, `inspect_robots.sinks`. They will then appear in `inspect-robots list`
 and resolve by name in `eval()` / the CLI.
 
 ## Submitting changes

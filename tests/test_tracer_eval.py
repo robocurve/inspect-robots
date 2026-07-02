@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from roboinspect import EvalLog, eval, read_eval_log
-from roboinspect.logging import JsonLogSink
-from roboinspect.mock import CubePickEmbodiment, RandomPolicy, ScriptedPolicy
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.task import Task
+from inspect_robots import EvalLog, eval, read_eval_log
+from inspect_robots.logging import JsonLogSink
+from inspect_robots.mock import CubePickEmbodiment, RandomPolicy, ScriptedPolicy
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.task import Task
 
 
 def _cubepick_task() -> Task:

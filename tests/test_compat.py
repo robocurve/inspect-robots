@@ -5,18 +5,18 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from roboinspect import eval
-from roboinspect.compat import assert_compatible, check_compatibility
-from roboinspect.embodiment import EmbodimentInfo
-from roboinspect.errors import CompatibilityError
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.mock.policies import _ACTION_SPACE
-from roboinspect.policy import PolicyConfig, PolicyInfo
-from roboinspect.scene import Scene, Target
-from roboinspect.scorer import success_at_end
-from roboinspect.spaces import ActionSemantics, Box, ObservationSpace
-from roboinspect.task import Task
-from roboinspect.types import Action, ActionChunk, Observation
+from inspect_robots import eval
+from inspect_robots.compat import assert_compatible, check_compatibility
+from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import CompatibilityError
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.mock.policies import _ACTION_SPACE
+from inspect_robots.policy import PolicyConfig, PolicyInfo
+from inspect_robots.scene import Scene, Target
+from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
+from inspect_robots.task import Task
+from inspect_robots.types import Action, ActionChunk, Observation
 
 
 class _StubPolicy:

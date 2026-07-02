@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from roboinspect import eval_set, read_eval_log
-from roboinspect.log import (
+from inspect_robots import eval_set, read_eval_log
+from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
     EvalResults,
@@ -16,10 +16,10 @@ from roboinspect.log import (
     EvalStats,
     SceneResult,
 )
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.task import Task
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.task import Task
 
 
 def _golden_log() -> EvalLog:
@@ -31,7 +31,7 @@ def _golden_log() -> EvalLog:
             policy="scripted",
             embodiment="cubepick",
             created="2026-06-26T00:00:00+00:00",
-            roboinspect_version="0.0.0",
+            inspect_robots_version="0.0.0",
             git_commit="deadbeef",
             seed=0,
         ),
@@ -71,7 +71,7 @@ def test_unsupported_schema_version_rejected() -> None:
 
 
 def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
-    from roboinspect import eval
+    from inspect_robots import eval
 
     task = Task(
         name="demo",
@@ -85,7 +85,7 @@ def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
 
 
 def test_store_frames_writes_side_cars(tmp_path: Path) -> None:
-    from roboinspect import eval
+    from inspect_robots import eval
 
     task = Task(
         name="demo",

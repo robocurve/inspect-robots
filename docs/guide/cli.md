@@ -1,37 +1,37 @@
 # Command-line interface
 
-The `roboinspect` CLI wraps the registry and [`eval`][roboinspect.eval.eval].
+The `inspect_robots` CLI wraps the registry and [`eval`][inspect_robots.eval.eval].
 
-## `roboinspect list`
+## `inspect-robots list`
 
 Show registered components (builtins + installed plugins):
 
 ```bash
-roboinspect list                 # all kinds
-roboinspect list policies        # just one kind
-roboinspect list embodiments
+inspect-robots list                 # all kinds
+inspect-robots list policies        # just one kind
+inspect-robots list embodiments
 ```
 
-## `roboinspect run`
+## `inspect-robots run`
 
 Resolve a task/policy/embodiment from the registry and run an eval. Pass
 constructor arguments with `-T` (task), `-P` (policy), and `-E` (embodiment) as
 `key=value` (parsed as bool/int/float/None/str):
 
 ```bash
-roboinspect run --task cubepick-reach --policy scripted --embodiment cubepick
-roboinspect run --task cubepick-reach -T num_scenes=10 --policy scripted -P chunk_size=8 \
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
+inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P chunk_size=8 \
              --embodiment cubepick --log-dir logs --seed 0
 ```
 
 The exit code is `0` on a successful eval, `1` otherwise.
 
-## `roboinspect inspect`
+## `inspect-robots inspect`
 
-Print a summary of a saved [`EvalLog`][roboinspect.log.EvalLog]:
+Print a summary of a saved [`EvalLog`][inspect_robots.log.EvalLog]:
 
 ```bash
-roboinspect inspect logs/cubepick-reach_xxxx.json
+inspect-robots inspect logs/cubepick-reach_xxxx.json
 ```
 
 ```text
@@ -47,8 +47,8 @@ scenes:
   ...
 ```
 
-## `roboinspect --version`
+## `inspect-robots --version`
 
 ```bash
-roboinspect --version
+inspect-robots --version
 ```

@@ -5,14 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from roboinspect import eval
-from roboinspect.controller import EnsemblingController
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.spaces import ActionSemantics, Box
-from roboinspect.task import Task
-from roboinspect.types import Action, ActionChunk, Observation
+from inspect_robots import eval
+from inspect_robots.controller import EnsemblingController
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.task import Task
+from inspect_robots.types import Action, ActionChunk, Observation
 
 _DELTA_SPACE = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos"))
 
@@ -86,7 +86,7 @@ def test_rejects_unaverageable_semantics() -> None:
 
 
 def test_warns_when_semantics_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import roboinspect.controller as ctrl_mod
+    import inspect_robots.controller as ctrl_mod
 
     monkeypatch.setattr(ctrl_mod, "_ENSEMBLE_WARNED", False)
     with pytest.warns(RuntimeWarning, match="no semantics"):

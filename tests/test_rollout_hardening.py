@@ -7,20 +7,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from roboinspect import eval
-from roboinspect.approver import AutoApprover, ClampApprover
-from roboinspect.controller import DefaultController
-from roboinspect.errors import EmbodimentFault, PolicyError, SafetyAbort
-from roboinspect.frames import FrameStore
-from roboinspect.logging.sink import NullSink
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.policy import PolicyConfig, PolicyInfo
-from roboinspect.rollout import derive_seed, rollout
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.spaces import ActionSemantics, Box
-from roboinspect.task import Task
-from roboinspect.types import Action, ActionChunk, Observation
+from inspect_robots import eval
+from inspect_robots.approver import AutoApprover, ClampApprover
+from inspect_robots.controller import DefaultController
+from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.frames import FrameStore
+from inspect_robots.logging.sink import NullSink
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.policy import PolicyConfig, PolicyInfo
+from inspect_robots.rollout import derive_seed, rollout
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.task import Task
+from inspect_robots.types import Action, ActionChunk, Observation
 
 _SCENE = Scene(id="s", instruction="reach", init_seed=0)
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))

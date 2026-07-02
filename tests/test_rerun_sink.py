@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-import roboinspect.logging.rerun_sink as rerun_mod
-from roboinspect import eval
-from roboinspect.logging import RerunSink
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.registry import registered
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.task import Task
+import inspect_robots.logging.rerun_sink as rerun_mod
+from inspect_robots import eval
+from inspect_robots.logging import RerunSink
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.registry import registered
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.task import Task
 
 _RERUN_INSTALLED = importlib.util.find_spec("rerun") is not None
 

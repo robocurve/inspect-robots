@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with RoboInspect
+about: Report a problem with Inspect Robots
 title: "[bug] "
 labels: bug
 ---
@@ -20,7 +20,7 @@ A minimal code snippet or steps that reproduce the behavior. The dependency-free
 What you expected to happen.
 
 **Environment**
-- RoboInspect version (`roboinspect --version`):
+- Inspect Robots version (`inspect-robots --version`):
 - Python version:
 - OS:
 - NumPy version:

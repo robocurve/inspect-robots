@@ -3,14 +3,14 @@ requires = ["hatchling>=1.18", "hatch-vcs>=0.3"]
 build-backend = "hatchling.build"
 
 [project]
-name = "roboinspect"
+name = "inspect-robots"
 dynamic = ["version"]
 description = "The Inspect AI for robotics — an evaluation framework for VLA (vision-language-action) models across real robots and simulators."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "RoboInspect contributors" }]
+authors = [{ name = "Inspect Robots contributors" }]
 keywords = [
     "robotics",
     "evaluation",
@@ -54,15 +54,15 @@ docs = [
     "mkdocstrings[python]>=0.26",
     "mkdocs-llmstxt>=0.2",
 ]
-all = ["roboinspect[rerun]"]
+all = ["inspect-robots[rerun]"]
 
 [project.scripts]
-roboinspect = "roboinspect.cli:main"
+inspect-robots = "inspect_robots.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/robocurve/roboinspect"
-Repository = "https://github.com/robocurve/roboinspect"
-Issues = "https://github.com/robocurve/roboinspect/issues"
+Homepage = "https://github.com/robocurve/inspect-robots"
+Repository = "https://github.com/robocurve/inspect-robots"
+Issues = "https://github.com/robocurve/inspect-robots/issues"
 
 # ---------------------------------------------------------------------------
 # Build / versioning: single-source the version from git tags via hatch-vcs.
@@ -76,10 +76,10 @@ version_scheme = "guess-next-dev"
 fallback_version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/roboinspect"]
+packages = ["src/inspect_robots"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/roboinspect", "tests", "README.md", "LICENSE"]
+include = ["src/inspect_robots", "tests", "README.md", "LICENSE"]
 
 # ---------------------------------------------------------------------------
 # Tooling
@@ -94,14 +94,14 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["roboinspect"]
+known-first-party = ["inspect_robots"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 warn_unreachable = true
 disallow_untyped_defs = true
-files = ["src/roboinspect"]
+files = ["src/inspect_robots"]
 
 [[tool.mypy.overrides]]
 module = ["rerun.*"]
@@ -119,7 +119,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["roboinspect"]
+source = ["inspect_robots"]
 
 [tool.coverage.report]
 fail_under = 100
@@ -142,7 +142,7 @@ exclude_also = [
 # numpy-only core) live in plugins/* as their OWN packages — each with its own
 # pyproject, entry point, tests, and coverage scope. Co-locating them here keeps
 # everything in one repo and versioned together, while the core stays numpy-only
-# and 100%-covered (coverage source above is scoped to "roboinspect" only, so plugin
+# and 100%-covered (coverage source above is scoped to "inspect_robots" only, so plugin
 # code never counts toward the core gate). `uv sync` installs the core plus every
 # plugin editable into one shared environment.
 [tool.uv.workspace]

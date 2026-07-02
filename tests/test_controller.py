@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from roboinspect.controller import DefaultController, SmoothingController
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.types import Observation
+from inspect_robots.controller import DefaultController, SmoothingController
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.types import Observation
 
 
 def _obs(embodiment: CubePickEmbodiment) -> Observation:
-    from roboinspect.scene import Scene
+    from inspect_robots.scene import Scene
 
     return embodiment.reset(Scene(id="s", instruction="x"), seed=0)
 

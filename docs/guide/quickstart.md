@@ -3,8 +3,8 @@
 ## Install
 
 ```bash
-pip install roboinspect            # core (numpy only)
-pip install "roboinspect[rerun]"   # + Rerun visualization
+pip install inspect-robots            # core (numpy only)
+pip install "inspect-robots[rerun]"   # + Rerun visualization
 ```
 
 For development, use [uv](https://github.com/astral-sh/uv):
@@ -20,11 +20,11 @@ The dependency-free `CubePick` mock world lets you exercise the whole stack with
 no hardware or simulator:
 
 ```python
-from roboinspect import eval
-from roboinspect.mock import CubePickEmbodiment, ScriptedPolicy
-from roboinspect.scene import Scene
-from roboinspect.scorer import success_at_end
-from roboinspect.task import Task
+from inspect_robots import eval
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.task import Task
 
 task = Task(
     name="cubepick-reach",
@@ -38,7 +38,7 @@ print(log.status)                    # "success"
 print(log.results.metrics)           # {"success_at_end": 1.0}
 ```
 
-`eval()` returns a list of [`EvalLog`][roboinspect.log.EvalLog] (one per task, mirroring
+`eval()` returns a list of [`EvalLog`][inspect_robots.log.EvalLog] (one per task, mirroring
 Inspect AI). Each log is immutable, schema-versioned, and written to `log_dir`.
 
 ## Use registry names
@@ -47,7 +47,7 @@ Inspect AI). Each log is immutable, schema-versioned, and written to `log_dir`.
 mechanism the CLI uses:
 
 ```python
-from roboinspect import eval
+from inspect_robots import eval
 
 (log,) = eval("cubepick-reach", "scripted", "cubepick")
 ```
@@ -55,11 +55,11 @@ from roboinspect import eval
 ## From the command line
 
 ```bash
-roboinspect list                                          # all registered components
-roboinspect list policies                                 # just policies
-roboinspect run --task cubepick-reach --policy scripted --embodiment cubepick
-roboinspect run --task cubepick-reach --policy scripted --embodiment cubepick -P chunk_size=6
-roboinspect inspect logs/cubepick-reach_*.json            # print a saved log
+inspect-robots list                                          # all registered components
+inspect-robots list policies                                 # just policies
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick -P chunk_size=6
+inspect-robots inspect logs/cubepick-reach_*.json            # print a saved log
 ```
 
 ## Next steps
