@@ -25,7 +25,7 @@ def test_core_types_are_frozen() -> None:
     step = StepResult(observation=obs)
     for frozen in (obs, act, chunk, step):
         with pytest.raises(dataclasses.FrozenInstanceError):
-            frozen.foo = 1  # type: ignore[attr-defined]
+            frozen.foo = 1  # type: ignore[union-attr]
 
 
 def test_action_chunk_rejects_empty() -> None:
@@ -43,6 +43,11 @@ def test_box_dim_and_bounds_validation() -> None:
     assert box.dim == 6
     with pytest.raises(ValueError, match="shape"):
         Box(shape=(6,), low=np.zeros(3))
+
+
+def test_box_rejects_inverted_bounds() -> None:
+    with pytest.raises(ValueError, match="low must be elementwise"):
+        Box(shape=(2,), low=np.array([0.0, 1.0]), high=np.array([1.0, 0.5]))
 
 
 def test_action_semantics_defaults() -> None:
@@ -65,3 +70,38 @@ def test_observation_space_derives_state_keys_from_spec() -> None:
     )
     assert space.state_keys == {"joint_pos", "gripper"}
     assert space.camera_names == {"wrist"}
+
+
+def test_observation_space_rejects_inconsistent_state_keys() -> None:
+    spec = StateSpec(fields=(StateField(key="joint_pos", shape=(7,)),))
+    # Consistent duplication is allowed...
+    ObservationSpace(state_keys=frozenset({"joint_pos"}), state=spec)
+    # ...but a silent disagreement is not.
+    with pytest.raises(ValueError, match="inconsistent"):
+        ObservationSpace(state_keys=frozenset({"eef_pos"}), state=spec)
+
+
+def test_task_validation_and_scorer_names() -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Epochs, Task
+
+    scene = Scene(id="s", instruction="x")
+    with pytest.raises(ConfigError, match="max_steps"):
+        Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=0)
+    with pytest.raises(ConfigError, match="Epochs count"):
+        Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=5, epochs=0)
+    with pytest.raises(ConfigError, match="Epochs count"):
+        Epochs(count=0)
+
+    # A scorer registry name resolves to one scorer, never to a sequence of
+    # one-character "scorers" (str is a Sequence).
+    task = Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=5)
+    (scorer,) = task.scorers
+    assert scorer.name == "success_at_end"
+
+    # Sequences may mix objects and names.
+    from inspect_robots.scorer import episode_length
+
+    mixed = Task(name="t", scenes=[scene], scorer=[episode_length(), "success_at_end"], max_steps=5)
+    assert [s.name for s in mixed.scorers] == ["episode_length", "success_at_end"]

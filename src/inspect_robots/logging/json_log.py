@@ -27,13 +27,15 @@ def _slug(name: str) -> str:
 
 
 class JsonLogSink:
-    """Persist the final [`EvalLog`][inspect_robots.log.EvalLog] as JSON; step
-    events counted only."""
+    """Persist the final [`EvalLog`][inspect_robots.log.EvalLog] as JSON.
+
+    Per-step data lives in the ``TrialRecord``/``FrameStore``, not here; this
+    sink only writes the final log (``path`` holds where it landed).
+    """
 
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.path: Path | None = None
-        self._steps = 0
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         return None
@@ -44,7 +46,7 @@ class JsonLogSink:
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
-        self._steps += 1
+        return None
 
     def on_trial_end(self, record: TrialRecord) -> None:
         return None

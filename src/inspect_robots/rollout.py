@@ -14,15 +14,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from inspect_robots.approver import Approver
-from inspect_robots.controller import Controller
-from inspect_robots.embodiment import SELF_PACED, Embodiment
-from inspect_robots.errors import EmbodimentFault, InspectRobotsError, PolicyError
+from inspect_robots.controller import _INFER_KEY, Controller
+from inspect_robots.embodiment import Embodiment
+from inspect_robots.errors import EmbodimentFault, InspectRobotsError, PolicyError, SafetyAbort
 from inspect_robots.frames import FrameRef, FrameStore
 from inspect_robots.policy import Policy
 from inspect_robots.scene import Scene
 from inspect_robots.transcript import (
     Event,
+    approval_event,
     error_event,
     inference_event,
     reset_event,
@@ -39,9 +42,10 @@ def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> in
 
     Distinct epochs of the same scene get distinct seeds so repeats actually vary
     for stochastic policies, while a fixed ``(eval_seed, scene_seed, epoch)``
-    reproduces bitwise.
+    reproduces bitwise. ``None`` and ``0`` hash differently, so an unseeded
+    input does not silently alias ``seed=0``.
     """
-    payload = f"{eval_seed or 0}:{scene_seed or 0}:{epoch}".encode()
+    payload = f"{eval_seed}:{scene_seed}:{epoch}".encode()
     return zlib.crc32(payload) & 0xFFFFFFFF
 
 
@@ -84,11 +88,31 @@ class TrialRecord:
 def _effective_control_hz(
     chunk_hz: float | None, task_hz: float | None, embodiment_hz: float | None
 ) -> float | None:
-    """First non-None of chunk → task → embodiment rate (R1)."""
+    """First non-None of chunk → task → embodiment rate (R1).
+
+    Real-time pacing (sleeping the control loop to this rate, honoring the
+    ``SELF_PACED`` capability) is wired up together with the first real-robot
+    adapter; until then the test suite stays fast and this helper is unused by
+    the loop below.
+    """
     for hz in (chunk_hz, task_hz, embodiment_hz):
         if hz is not None:
             return hz
     return None
+
+
+def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> InspectRobotsError:
+    """Mark ``record`` failed and attach it to ``exc`` (see ``InspectRobotsError.record``).
+
+    The partial record — steps walked and transcript events up to the failure —
+    is forensic data the orchestrator preserves in the eval log.
+    """
+    message = str(exc)
+    record.events.append(error_event(t, type(exc).__name__, message))
+    record.status = "error"
+    record.error = f"{type(exc).__name__}: {message}"
+    exc.record = record
+    return exc
 
 
 def _store_frames(
@@ -119,72 +143,113 @@ def rollout(
 
     Generic exceptions raised by the policy are wrapped as
     [`PolicyError`][inspect_robots.errors.PolicyError]; by the embodiment as
-    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault]. Already-typed Inspect Robots errors
-    (incl. [`SafetyAbort`][inspect_robots.errors.SafetyAbort]) propagate unchanged, so the
-    eval orchestrator can apply the correct continue-vs-halt policy.
+    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault]; by the approver as
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort] (an approver that crashed cannot
+    vouch for safety). Already-typed Inspect Robots errors (incl.
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]) propagate unchanged, so the
+    eval orchestrator can apply the correct continue-vs-halt policy. Every error
+    raised from inside the trial carries the partial ``TrialRecord`` on
+    ``exc.record`` for the orchestrator to preserve.
+
+    ``control_hz`` is accepted for R1's rate-precedence chain; real-time pacing
+    lands with the first real-robot adapter (see ``_effective_control_hz``).
     """
     trial_id = f"{scene.id}-e{epoch}"
     record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
+    expected_dim = embodiment.info.action_space.dim
 
-    policy.reset(scene)
-    obs = embodiment.reset(scene, seed=seed)
-
-    t = 0
-    while t < max_steps:
-        prev_inferences = len(store.get("_controller_inferences", []))
+    try:
         try:
-            action = controller.next_action(policy, obs, t, store)
-        except InspectRobotsError:
+            policy.reset(scene)
+        except InspectRobotsError as exc:
+            _record_failure(record, exc, -1)
             raise
         except Exception as exc:
-            record.events.append(error_event(t, "PolicyError", str(exc)))
-            raise PolicyError(str(exc)) from exc
-
-        inferences = store.get("_controller_inferences", [])
-        if len(inferences) > prev_inferences:
-            latency, chunk_len = inferences[-1]
-            record.events.append(inference_event(t, latency, chunk_len))
-
-        action = approver.review(action, store)  # may raise SafetyAbort
-
+            raise _record_failure(record, PolicyError(str(exc)), -1) from exc
         try:
-            result: StepResult = embodiment.step(action)
-        except InspectRobotsError:
+            obs = embodiment.reset(scene, seed=seed)
+        except InspectRobotsError as exc:
+            _record_failure(record, exc, -1)
             raise
         except Exception as exc:
-            record.events.append(error_event(t, "EmbodimentFault", str(exc)))
-            raise EmbodimentFault(str(exc)) from exc
+            raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
 
-        sink.log_step(t, obs, action, result)
-        obs_rec, refs = _store_frames(frame_store, trial_id, t, obs)
-        record.steps.append(
-            StepRecord(t=t, observation=obs_rec, action=action, result=result, image_refs=refs)
-        )
-        record.events.append(
-            step_event(t, result.terminated, result.truncated, result.termination_reason)
-        )
-        t += 1
+        t = 0
+        while t < max_steps:
+            prev_inferences = len(store.get(_INFER_KEY, []))
+            try:
+                action = controller.next_action(policy, obs, t, store)
+            except InspectRobotsError as exc:
+                _record_failure(record, exc, t)
+                raise
+            except Exception as exc:
+                raise _record_failure(record, PolicyError(str(exc)), t) from exc
 
-        if result.terminated:
-            record.terminated = True
-            record.termination_reason = result.termination_reason
-            break
-        if result.truncated:
+            inferences = store.get(_INFER_KEY, [])
+            if len(inferences) > prev_inferences:
+                latency, chunk_len = inferences[-1]
+                record.events.append(inference_event(t, latency, chunk_len))
+
+            # A malformed action is the policy's fault; catching it here keeps it
+            # from surfacing inside the approver/embodiment as a halting fault.
+            emitted_dim = int(np.asarray(action.data).size)
+            if emitted_dim != expected_dim:
+                raise _record_failure(
+                    record,
+                    PolicyError(
+                        f"policy emitted a {emitted_dim}-D action but embodiment "
+                        f"{embodiment.info.name!r} expects {expected_dim}-D"
+                    ),
+                    t,
+                )
+
+            try:
+                reviewed = approver.review(action, store)  # may raise SafetyAbort
+            except InspectRobotsError as exc:
+                _record_failure(record, exc, t)
+                raise
+            except Exception as exc:
+                raise _record_failure(record, SafetyAbort(str(exc)), t) from exc
+            if reviewed is not action:
+                detail = "clamped" if reviewed.meta.get("clamped") else None
+                record.events.append(approval_event(t, modified=True, detail=detail))
+            action = reviewed
+
+            try:
+                result: StepResult = embodiment.step(action)
+            except InspectRobotsError as exc:
+                _record_failure(record, exc, t)
+                raise
+            except Exception as exc:
+                raise _record_failure(record, EmbodimentFault(str(exc)), t) from exc
+
+            sink.log_step(t, obs, action, result)
+            obs_rec, refs = _store_frames(frame_store, trial_id, t, obs)
+            record.steps.append(
+                StepRecord(t=t, observation=obs_rec, action=action, result=result, image_refs=refs)
+            )
+            record.events.append(
+                step_event(t, result.terminated, result.truncated, result.termination_reason)
+            )
+            t += 1
+
+            if result.terminated:
+                record.terminated = True
+                record.termination_reason = result.termination_reason
+                break
+            if result.truncated:
+                record.truncated = True
+                record.termination_reason = result.termination_reason or "truncated"
+                break
+            obs = result.observation
+        else:
             record.truncated = True
-            record.termination_reason = result.termination_reason or "truncated"
-            break
-        obs = result.observation
-    else:
-        record.truncated = True
-        record.termination_reason = "max_steps"
-
-    record.inference_latencies = [
-        lat for lat, _ in store.get("_controller_inferences", []) if lat is not None
-    ]
-    # ``control_hz`` / SELF_PACED are wired here; real-time pacing (sleep) is added
-    # with a real-robot adapter so the test suite stays fast.
-    _ = _effective_control_hz(None, control_hz, embodiment.info.control_hz)
-    _ = SELF_PACED
+            record.termination_reason = "max_steps"
+    finally:
+        # Preserve measured latencies even when the trial ends in an error.
+        record.inference_latencies = [
+            lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None
+        ]
     return record

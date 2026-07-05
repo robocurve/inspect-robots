@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.approver import AutoApprover, ClampApprover
+from inspect_robots.approver import Approver, AutoApprover, ClampApprover
 from inspect_robots.controller import DefaultController
 from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
 from inspect_robots.frames import FrameStore
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
-from inspect_robots.rollout import derive_seed, rollout
+from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
@@ -26,7 +27,13 @@ _SCENE = Scene(id="s", instruction="reach", init_seed=0)
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))
 
 
-def _run(policy: object, embodiment: object, *, approver: object = None, frame_store=None):  # type: ignore[no-untyped-def]
+def _run(
+    policy: object,
+    embodiment: object,
+    *,
+    approver: Approver | None = None,
+    frame_store: FrameStore | None = None,
+) -> TrialRecord:
     return rollout(
         policy,  # type: ignore[arg-type]
         embodiment,  # type: ignore[arg-type]
@@ -98,6 +105,15 @@ def test_clamp_approver_bounds_action() -> None:
     assert out.meta.get("clamped") is True
 
 
+def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    img = np.zeros((2, 2, 3), dtype=np.uint8)
+    a = store.put("a/b", 0, "cam", img)
+    b = store.put("a-b", 0, "cam", img)
+    assert a.path != b.path  # sanitization must not introduce collisions
+    assert Path(a.path).exists() and Path(b.path).exists()
+
+
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)
@@ -115,6 +131,168 @@ def test_per_trial_seed_varies_by_epoch() -> None:
     assert s0 != s1
     # deterministic
     assert derive_seed(7, 3, 0) == s0
+
+
+def test_derive_seed_distinguishes_none_from_zero() -> None:
+    # "unseeded" must not silently alias seed=0.
+    assert derive_seed(None, 3, 0) != derive_seed(0, 3, 0)
+    assert derive_seed(7, None, 0) != derive_seed(7, 0, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Partial-record preservation: every in-trial error carries the forensic record.
+# --------------------------------------------------------------------------- #
+class _BoomLaterPolicy:
+    """Delivers one good chunk, then explodes on the second inference."""
+
+    def __init__(self) -> None:
+        self.info = PolicyInfo(name="boom-later", action_space=_BOX)
+        self.config = PolicyConfig()
+        self._calls = 0
+
+    def reset(self, scene: Scene) -> None:
+        return None
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self._calls += 1
+        if self._calls > 1:
+            raise RuntimeError("inference exploded later")
+        return ActionChunk(actions=[Action(data=np.zeros(2)) for _ in range(4)])
+
+
+def test_policy_error_carries_partial_record() -> None:
+    with pytest.raises(PolicyError, match="exploded later") as excinfo:
+        _run(_BoomLaterPolicy(), CubePickEmbodiment())
+    rec = excinfo.value.record
+    assert rec is not None
+    assert rec.status == "error"
+    assert rec.error is not None and "exploded later" in rec.error
+    assert len(rec.steps) == 4  # the first chunk executed before the failure
+    assert rec.events[-1].kind == "error"
+
+
+def test_embodiment_fault_carries_partial_record() -> None:
+    with pytest.raises(EmbodimentFault, match="motor stalled") as excinfo:
+        _run(ScriptedPolicy(), _FaultyEmbodiment())
+    rec = excinfo.value.record
+    assert rec is not None and rec.status == "error"
+    kinds = [e.kind for e in rec.events]
+    assert kinds[0] == "reset" and kinds[-1] == "error"
+
+
+def test_safety_abort_carries_partial_record() -> None:
+    with pytest.raises(SafetyAbort, match="e-stop") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_VetoApprover())
+    rec = excinfo.value.record
+    assert rec is not None and rec.status == "error"
+
+
+class _CrashingApprover:
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        raise ZeroDivisionError("approver crashed")
+
+
+def test_approver_crash_wrapped_as_safety_abort() -> None:
+    # An approver that crashed cannot vouch for safety: treat it as an abort.
+    with pytest.raises(SafetyAbort, match="approver crashed") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_CrashingApprover())
+    assert excinfo.value.record is not None
+
+
+# --------------------------------------------------------------------------- #
+# Reset failures are wrapped/attributed like in-loop failures.
+# --------------------------------------------------------------------------- #
+class _ResetBoomPolicy(_BoomLaterPolicy):
+    def reset(self, scene: Scene) -> None:
+        raise RuntimeError("policy reset failed")
+
+
+class _TypedResetPolicy(_BoomLaterPolicy):
+    def reset(self, scene: Scene) -> None:
+        raise PolicyError("typed reset failure")
+
+
+class _ResetFaultEmbodiment(CubePickEmbodiment):
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        raise RuntimeError("homing failed")
+
+
+class _TypedResetEmbodiment(CubePickEmbodiment):
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        raise EmbodimentFault("e-stop during reset")
+
+
+def test_policy_reset_exception_wrapped() -> None:
+    with pytest.raises(PolicyError, match="policy reset failed") as excinfo:
+        _run(_ResetBoomPolicy(), CubePickEmbodiment())
+    assert excinfo.value.record is not None
+
+
+def test_policy_reset_typed_error_propagates() -> None:
+    with pytest.raises(PolicyError, match="typed reset failure") as excinfo:
+        _run(_TypedResetPolicy(), CubePickEmbodiment())
+    assert excinfo.value.record is not None
+
+
+def test_embodiment_reset_exception_wrapped() -> None:
+    with pytest.raises(EmbodimentFault, match="homing failed") as excinfo:
+        _run(ScriptedPolicy(), _ResetFaultEmbodiment())
+    assert excinfo.value.record is not None
+
+
+def test_embodiment_reset_typed_error_propagates() -> None:
+    with pytest.raises(EmbodimentFault, match="e-stop during reset") as excinfo:
+        _run(ScriptedPolicy(), _TypedResetEmbodiment())
+    assert excinfo.value.record is not None
+
+
+# --------------------------------------------------------------------------- #
+# Runtime action-shape validation: a malformed action is a PolicyError, not a
+# halting EmbodimentFault misattributed to the robot.
+# --------------------------------------------------------------------------- #
+class _WrongDimPolicy:
+    def __init__(self) -> None:
+        self.info = PolicyInfo(name="wrong-dim", action_space=_BOX)  # declares 2-D
+        self.config = PolicyConfig()
+
+    def reset(self, scene: Scene) -> None:
+        return None
+
+    def act(self, observation: Observation) -> ActionChunk:
+        return ActionChunk(actions=[Action(data=np.zeros(3))])  # emits 3-D
+
+
+def test_wrong_dim_action_attributed_to_policy() -> None:
+    with pytest.raises(PolicyError, match="expects 2-D") as excinfo:
+        _run(_WrongDimPolicy(), CubePickEmbodiment())
+    rec = excinfo.value.record
+    assert rec is not None and rec.status == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Approval events: a modified action is recorded in the transcript.
+# --------------------------------------------------------------------------- #
+def test_clamp_approver_records_approval_event() -> None:
+    space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=ClampApprover(space))
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["modified"] is True
+    assert approvals[0].data["detail"] == "clamped"
+
+
+class _HalvingApprover:
+    """Modifies the action without setting the ``clamped`` meta flag."""
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.5)
+
+
+def test_modified_action_records_approval_event_without_detail() -> None:
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_HalvingApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] is None
 
 
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
