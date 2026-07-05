@@ -3,11 +3,20 @@
 Writes the immutable [`EvalLog`][inspect_robots.log.EvalLog] to ``log_dir`` once the run
 finishes. The write is atomic (temp file + ``os.replace``) so an interrupted
 overnight run never leaves a half-written log.
+
+The file is strict RFC 8259 JSON: non-finite floats (``nan``, ``±inf``, e.g. a
+``min_distance_to_goal`` score when no distance was ever recorded) are mapped
+to ``null`` before serialization, so any conforming parser (``jq``, browsers,
+non-Python tooling) can read the log. ``allow_nan=False`` is kept on the
+``json.dump`` call as a regression backstop: if a non-finite value ever slips
+past the sanitizer, writing fails loudly instead of emitting ``Infinity``/
+``NaN`` literals.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import uuid
@@ -24,6 +33,22 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 def _slug(name: str) -> str:
     return _SLUG_RE.sub("-", name.lower()).strip("-") or "eval"
+
+
+def _sanitize(obj: object) -> object:
+    """Recursively map non-finite floats to ``None`` (JSON ``null``).
+
+    ``json.dump`` would happily emit the non-standard ``Infinity``/``NaN``
+    literals for them (``default=`` never fires for floats), which RFC 8259
+    parsers reject.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {key: _sanitize(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(value) for value in obj]
+    return obj
 
 
 class JsonLogSink:
@@ -57,7 +82,7 @@ class JsonLogSink:
         self.path = self.log_dir / filename
         tmp = self.path.with_suffix(".json.tmp")
         with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(log.to_dict(), fh, indent=2, sort_keys=True)
+            json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)

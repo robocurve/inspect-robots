@@ -9,6 +9,17 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Eval logs are strict RFC 8259 JSON.** Non-finite floats (e.g. an inf
+  `min_distance_to_goal` when no distance was ever recorded) are mapped to
+  `null` at the JSON boundary, so `jq` and other conforming parsers accept the
+  file; `json.dump(..., allow_nan=False)` stays on as a regression backstop.
+  In-memory scores keep the inf sentinel.
+- **`ClampApprover` hardening:** a NaN action raises `SafetyAbort` (a NaN has
+  no meaningful clamp and must never reach hardware) while `±inf` clamps to the
+  finite bound like any out-of-range value; one-sided boxes (`low`-only /
+  `high`-only) are honored instead of ignored; an unmodified action is returned
+  as the *same* object so the rollout's identity-based `approval_event` stays
+  accurate.
 - **Never lose the log.** `eval()` always produces and persists an `EvalLog`
   once rollouts have started: scorer/reducer failures degrade the run to an
   error log instead of crashing; `policy.reset`/`embodiment.reset` failures are

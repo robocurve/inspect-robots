@@ -105,6 +105,48 @@ def test_clamp_approver_bounds_action() -> None:
     assert out.meta.get("clamped") is True
 
 
+def test_clamp_approver_nan_raises_safety_abort() -> None:
+    # A NaN has no meaningful clamp; it must never reach hardware.
+    space = Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]))
+    approver = ClampApprover(space)
+    with pytest.raises(SafetyAbort, match="NaN"):
+        approver.review(Action(data=np.array([0.0, float("nan")])), {})
+
+
+def test_clamp_approver_nan_aborts_even_without_bounds() -> None:
+    approver = ClampApprover(Box(shape=(2,)))  # no low/high
+    with pytest.raises(SafetyAbort, match="NaN"):
+        approver.review(Action(data=np.array([float("nan"), 0.0])), {})
+
+
+def test_clamp_approver_inf_clamps_without_abort() -> None:
+    # ±inf is out-of-range, not poisonous: it clamps to the finite bound.
+    space = Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]))
+    approver = ClampApprover(space)
+    out = approver.review(Action(data=np.array([float("inf"), float("-inf")])), {})
+    assert np.allclose(out.data, [1.0, -1.0])
+    assert out.meta.get("clamped") is True
+
+
+def test_clamp_approver_low_only_bound() -> None:
+    approver = ClampApprover(Box(shape=(2,), low=np.array([0.0, 0.0])))
+    out = approver.review(Action(data=np.array([-0.5, 0.5])), {})
+    assert np.allclose(out.data, [0.0, 0.5])
+    assert out.meta.get("clamped") is True
+    in_bounds = Action(data=np.array([0.5, 0.5]))
+    assert approver.review(in_bounds, {}) is in_bounds  # identity pass-through
+
+
+def test_clamp_approver_high_only_bound() -> None:
+    approver = ClampApprover(Box(shape=(2,), high=np.array([1.0, 1.0])))
+    out = approver.review(Action(data=np.array([2.0, 0.5])), {})
+    assert np.allclose(out.data, [1.0, 0.5])
+    assert out.meta.get("clamped") is True
+    # inf on the unbounded side has nothing to clamp against: pass-through.
+    unbounded_side = Action(data=np.array([float("-inf"), 0.0]))
+    assert approver.review(unbounded_side, {}) is unbounded_side
+
+
 def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     img = np.zeros((2, 2, 3), dtype=np.uint8)
