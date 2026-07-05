@@ -243,10 +243,12 @@ class IsaacSimEmbodiment:
     def close(self) -> None:
         """Release the gym env and Isaac Sim app (and the GPU memory they hold).
 
-        Idempotent: safe to call before launch or twice. ``eval()`` does not call
-        this for you, so use the embodiment as a context manager (or call
-        ``close()`` in a ``finally``) to guarantee the simulator is torn down and
-        GPU memory is freed when a run ends.
+        Idempotent: safe to call before launch or twice. ``eval()`` closes what
+        it resolves — an embodiment looked up by registry name is closed when
+        the run finishes, but an embodiment object you construct is yours to
+        close. Use it as a context manager (or call ``close()`` in a
+        ``finally``) to guarantee the simulator is torn down and GPU memory is
+        freed when a run ends.
         """
         global _ACTIVE_APP
         if self._env is not None:
