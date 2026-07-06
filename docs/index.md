@@ -150,5 +150,5 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task`/`@solver`/`@scorer` + registry | `@task`/`@policy`/`@embodiment`/`@scorer` + entry points |
 
-For LLMs: [`llms.txt`](https://robocurve.github.io/inspect-robots/llms.txt) ·
-[`llms-full.txt`](https://robocurve.github.io/inspect-robots/llms-full.txt).
+For LLMs: [`llms.txt`](https://inspectrobots.org/llms.txt) ·
+[`llms-full.txt`](https://inspectrobots.org/llms-full.txt).

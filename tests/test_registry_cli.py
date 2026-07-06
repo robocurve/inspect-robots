@@ -78,7 +78,37 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "status: success" in out
     assert "success_at_end" in out
-    assert list(tmp_path.glob("*.json"))
+    (written,) = tmp_path.glob("*.json")
+    assert f"log: {written}" in out  # the CLI tells the user where the log went
+
+
+def test_cli_run_epochs_fail_on_error_store_frames(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "-T",
+            "num_scenes=1",
+            "--epochs",
+            "2",
+            "--fail-on-error",
+            "1",
+            "--store-frames",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "trials: 2" in out  # --epochs overrode the task's epoch count
+    assert list((tmp_path / "frames").glob("*.npy"))  # --store-frames streamed
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:

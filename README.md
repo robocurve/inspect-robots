@@ -11,16 +11,16 @@ embodiment — a real robot or a simulator — with reproducible logs and first-
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
-[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://robocurve.github.io/inspect-robots/)
+[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://inspectrobots.org/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
-[**Documentation**](https://robocurve.github.io/inspect-robots/) ·
-[Quickstart](https://robocurve.github.io/inspect-robots/guide/quickstart.html) ·
-[Concepts](https://robocurve.github.io/inspect-robots/guide/concepts.html) ·
-[For LLMs](https://robocurve.github.io/inspect-robots/llms.txt)
+[**Documentation**](https://inspectrobots.org/) ·
+[Quickstart](https://inspectrobots.org/guide/quickstart.html) ·
+[Concepts](https://inspectrobots.org/guide/concepts.html) ·
+[For LLMs](https://inspectrobots.org/llms.txt)
 
 </div>
 
@@ -120,9 +120,9 @@ separate plugin packages.
 ## Documentation
 
 Full guides and an auto-generated API reference live at
-**[robocurve.github.io/inspect-robots](https://robocurve.github.io/inspect-robots/)**.
-LLM-friendly versions: [`llms.txt`](https://robocurve.github.io/inspect-robots/llms.txt)
-and [`llms-full.txt`](https://robocurve.github.io/inspect-robots/llms-full.txt).
+**[inspectrobots.org](https://inspectrobots.org/)**.
+LLM-friendly versions: [`llms.txt`](https://inspectrobots.org/llms.txt)
+and [`llms-full.txt`](https://inspectrobots.org/llms-full.txt).
 
 ## Development
 

@@ -7,7 +7,57 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Eval logs are strict RFC 8259 JSON.** Non-finite floats (e.g. an inf
+  `min_distance_to_goal` when no distance was ever recorded) are mapped to
+  `null` at the JSON boundary, so `jq` and other conforming parsers accept the
+  file; `json.dump(..., allow_nan=False)` stays on as a regression backstop.
+  In-memory scores keep the inf sentinel.
+- **`ClampApprover` hardening:** a NaN action raises `SafetyAbort` (a NaN has
+  no meaningful clamp and must never reach hardware) while `±inf` clamps to the
+  finite bound like any out-of-range value; one-sided boxes (`low`-only /
+  `high`-only) are honored instead of ignored; an unmodified action is returned
+  as the *same* object so the rollout's identity-based `approval_event` stays
+  accurate.
+- **Never lose the log.** `eval()` always produces and persists an `EvalLog`
+  once rollouts have started: scorer/reducer failures degrade the run to an
+  error log instead of crashing; `policy.reset`/`embodiment.reset` failures are
+  wrapped into the error taxonomy; every error raised from inside a trial
+  carries the partial `TrialRecord` on `exc.record` (recorded and delivered to
+  sinks — errored trials are never scored); `on_trial_end` fires for halted
+  trials too.
+- **A crashing approver now halts the eval as `SafetyAbort`** — an approver that
+  crashed cannot vouch for safety — and approved-but-modified actions emit an
+  `approval_event`.
+- **`eval()` owns what it opens:** an embodiment resolved from a registry name
+  is closed when the run finishes (even on a halt); caller-constructed
+  embodiments stay caller-owned.
+- **`fail_on_error` is checked after every trial** (Inspect semantics:
+  `True` = first error, `0<x<1` = proportion, `x>1` = count), not just at the
+  end of the run.
+- `derive_seed`: `seed=None` no longer aliases `seed=0` — unseeded runs draw a
+  fresh OS seed and record it in the log.
+- `Task`/`Epochs`/`Box`/`ObservationSpace` validate their configuration at
+  construction (`max_steps`/`epochs` must be positive, `Box` bounds must be
+  elementwise ordered, `state_keys` must agree with `StateSpec`), raising
+  `ConfigError`/`ValueError` instead of failing mid-eval. `Task.scorer` also
+  accepts registry names.
+- Inference events no longer overstate `chunk_len` when `replan_interval`
+  exceeds the chunk; the ensembling no-semantics warning fires per instance
+  (at construction) instead of once per process.
+- Collision-safe frame-file slugs (camera names and trial ids are fully
+  sanitized); broken plugin entry points warn loudly instead of being silently
+  skipped.
+- Rerun sink: per-trial namespacing, new-SDK (`>=0.23`) compatibility, and a
+  correct install hint.
+
 ### Added
+
+- CLI: `inspect-robots run` gained `--epochs`, `--fail-on-error`, and
+  `--store-frames`; the written log's path is printed at the end of a run.
+- Tests are now type-checked under strict mypy (`files = ["src/inspect_robots",
+  "tests"]`).
 
 - **Widened the public API for plugin authors.** `inspect_robots.__all__` now exports
   the authoring primitives directly — `Task`/`Epochs`, `Scene`/`Target`,

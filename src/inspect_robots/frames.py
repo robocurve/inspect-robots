@@ -10,11 +10,27 @@ recorded (and scorable) independent of which optional sinks are enabled.
 
 from __future__ import annotations
 
+import re
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+
+_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe(name: str) -> str:
+    """Make ``name`` filesystem-safe without introducing collisions.
+
+    Unsafe characters become ``-``; when anything was replaced, a short hash of
+    the original is appended so e.g. ``a/b`` and ``a-b`` stay distinct.
+    """
+    safe = _SAFE_RE.sub("-", name)
+    if safe != name:
+        safe = f"{safe}-{zlib.crc32(name.encode()) & 0xFFFFFFFF:08x}"
+    return safe
 
 
 @dataclass(frozen=True)
@@ -38,8 +54,7 @@ class FrameStore:
         self.count = 0
 
     def put(self, trial_id: str, t: int, camera: str, image: npt.NDArray[np.uint8]) -> FrameRef:
-        safe_trial = trial_id.replace("/", "-")
-        path = self.root / f"{safe_trial}_{camera}_{t:06d}.npy"
+        path = self.root / f"{_safe(trial_id)}_{_safe(camera)}_{t:06d}.npy"
         np.save(path, image)
         self.count += 1
         return FrameRef(camera=camera, t=t, path=str(path))

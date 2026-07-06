@@ -9,6 +9,7 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from collections.abc import Sequence
@@ -23,12 +24,12 @@ from inspect_robots.approver import Approver, AutoApprover
 from inspect_robots.compat import assert_compatible
 from inspect_robots.controller import Controller, DefaultController
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError, SafetyAbort
 from inspect_robots.frames import FrameStore
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
-from inspect_robots.scorer import Score, reduce_scores, value_to_float
+from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
 from inspect_robots.task import Task
 
 if TYPE_CHECKING:
@@ -41,17 +42,33 @@ def _now_iso() -> str:
 
 
 def _git_commit() -> str | None:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+    """HEAD commit of the *current working directory's* repository, if any.
+
+    This is deliberately the caller's repo (the code driving the eval), not
+    Inspect Robots's own install. A ``-dirty`` suffix is appended when the working
+    tree has uncommitted changes, so a log never silently claims a clean commit.
+    """
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    head = _git("rev-parse", "HEAD")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
         return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    commit = head.stdout.strip()
+    tree = _git("status", "--porcelain")
+    if tree is not None and tree.returncode == 0 and tree.stdout.strip():
+        commit += "-dirty"
+    return commit
 
 
 class _Broadcast:
@@ -101,21 +118,33 @@ def eval(
 
     ``task``/``policy``/``embodiment`` may be objects or **registry names**
     (e.g. ``policy="scripted"``), resolved through the registry — the Inspect-style
-    ergonomic that keeps logs and the CLI reproducible.
+    ergonomic that keeps logs and the CLI reproducible. An embodiment resolved
+    from a registry name is owned by ``eval()`` and is closed when the run
+    finishes (even on a halt); a caller-constructed embodiment object stays
+    open — the caller owns its lifecycle.
+
+    ``seed=None`` draws a fresh seed from the OS and records it in the log, so
+    an "unseeded" run remains reproducible after the fact (and is distinct from
+    ``seed=0``).
 
     ``fail_on_error`` follows Inspect semantics for ``PolicyError`` (``True`` =
-    fail on first, ``False`` = never, ``0<x<1`` = proportion, ``x>1`` = count).
-    ``EmbodimentFault``/``SafetyAbort`` always halt regardless.
+    fail on first, ``False`` = never, ``0<x<1`` = proportion, ``x>1`` = count),
+    checked after every trial. ``EmbodimentFault``/``SafetyAbort`` always halt
+    regardless. Errored trials are recorded (with their partial trajectory
+    delivered to sinks) but never scored, so a failed trial cannot masquerade
+    as data in the metrics; it stays visible via ``SceneResult.status`` and an
+    empty entry in ``SceneResult.epochs``.
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
-    rollout) if the policy and embodiment are incompatible.
+    rollout) if the policy and embodiment are incompatible, and
+    [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
     """
-    from inspect_robots.logging.json_log import JsonLogSink
     from inspect_robots.registry import resolve
 
+    owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
     embodiment = (
@@ -123,9 +152,59 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    try:
+        return _run_eval(
+            task,
+            policy,
+            embodiment,
+            log_dir=log_dir,
+            sinks=sinks,
+            seed=seed,
+            fail_on_error=fail_on_error,
+            controller=controller,
+            approver=approver,
+            remap=remap,
+            store_frames=store_frames,
+        )
+    finally:
+        # Close what we opened: a registry-resolved embodiment is released even
+        # when the run halts, so a real robot never leaks its connection.
+        if owns_embodiment:
+            embodiment.close()
+
+
+def _run_eval(
+    task: Task,
+    policy: Policy,
+    embodiment: Embodiment,
+    *,
+    log_dir: str,
+    sinks: list[LogSink] | None,
+    seed: int | None,
+    fail_on_error: bool | float,
+    controller: Controller | None,
+    approver: Approver | None,
+    remap: dict[str, str] | None,
+    store_frames: bool,
+) -> list[EvalLog]:
+    """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
+    from inspect_robots.logging.json_log import JsonLogSink
 
     # Fail fast on incompatible pairings before touching any hardware/sim.
     assert_compatible(policy, embodiment, task, remap=remap)
+
+    epoch_spec = task.epoch_spec
+    scorers = task.scorers
+    # Fail fast on an unknown/invalid epoch reducer, before any rollout runs.
+    try:
+        get_reducer(epoch_spec.reducer)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    if seed is None:
+        # Draw and record a real seed so the run stays reproducible after the
+        # fact; None must not silently alias seed=0 (see derive_seed).
+        seed = int.from_bytes(os.urandom(4), "little")
 
     sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
     bus = _Broadcast(sink_list)
@@ -155,8 +234,6 @@ def eval(
 
     started = time.perf_counter()
     started_iso = _now_iso()
-    epoch_spec = task.epoch_spec
-    scorers = task.scorers
 
     scene_results: list[SceneResult] = []
     all_latencies: list[float] = []
@@ -167,6 +244,7 @@ def eval(
     error_count = 0
 
     halted = False
+    stopped = False
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
@@ -176,6 +254,7 @@ def eval(
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
             bus.on_trial_start(scene.id, epoch)
+            record: TrialRecord | None
             try:
                 record = rollout(
                     policy,
@@ -191,18 +270,19 @@ def eval(
                     frame_store=frame_store,
                 )
             except (EmbodimentFault, SafetyAbort) as exc:
-                # Hardware/safety failures always halt the whole eval.
+                # Hardware/safety failures always halt the whole eval; the
+                # partial trial record (if any) is preserved below.
                 status = "error"
                 error = f"{type(exc).__name__}: {exc}"
                 scene_status = "error"
                 scene_error = error
                 halted = True
-                break
+                record = exc.record
             except PolicyError as exc:
                 error_count += 1
                 scene_status = "error"
                 scene_error = f"{type(exc).__name__}: {exc}"
-                record = TrialRecord(
+                record = exc.record or TrialRecord(
                     scene_id=scene.id,
                     epoch=epoch,
                     seed=trial_seed,
@@ -210,23 +290,54 @@ def eval(
                     error=scene_error,
                 )
 
-            total_trials += 1
-            total_steps += len(record.steps)
-            all_latencies.extend(record.inference_latencies)
+            if record is not None:
+                total_trials += 1
+                total_steps += len(record.steps)
+                all_latencies.extend(record.inference_latencies)
+                if record.status == "error":
+                    # Errored trials are not scored: a failed trial must not
+                    # masquerade as data (e.g. an inf min-distance poisoning
+                    # the metric mean). It stays visible via scene status.
+                    epoch_dicts.append({})
+                else:
+                    epoch_values: dict[str, float] = {}
+                    for scorer in scorers:
+                        score = scorer(record, scene.target)
+                        per_scorer_scores[scorer.name].append(score)
+                        epoch_values[scorer.name] = value_to_float(score.value)
+                    epoch_dicts.append(epoch_values)
+                bus.on_trial_end(record)
 
-            epoch_values: dict[str, float] = {}
-            for scorer in scorers:
-                score = scorer(record, scene.target)
-                per_scorer_scores[scorer.name].append(score)
-                epoch_values[scorer.name] = value_to_float(score.value)
-            epoch_dicts.append(epoch_values)
-            bus.on_trial_end(record)
+            if halted:
+                stopped = True
+                break
+            if _should_fail(fail_on_error, error_count, total_trials):
+                # Checked after every trial, so fail_on_error=True stops at the
+                # first PolicyError instead of finishing the scene's epochs.
+                status = "error"
+                error = f"fail_on_error threshold exceeded ({error_count} errors)"
+                stopped = True
+                break
 
-        reduced = {
-            name: value_to_float(reduce_scores(epoch_spec.reducer, scores).value)
-            for name, scores in per_scorer_scores.items()
-            if scores
-        }
+        reduced: dict[str, float] = {}
+        for name, scene_scores in per_scorer_scores.items():
+            if not scene_scores:
+                continue
+            try:
+                reduced[name] = value_to_float(
+                    reduce_scores(epoch_spec.reducer, scene_scores).value
+                )
+            except Exception as exc:
+                # A reducer failure (e.g. pass_at_k over fewer epochs than k
+                # after a halt, or mean over categorical scores) degrades to an
+                # error log — it must never crash the eval and lose the log.
+                note = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
+                scene_status = "error"
+                scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                if status == "success":
+                    status = "error"
+                    error = note
+
         scene_results.append(
             SceneResult(
                 scene_id=scene.id,
@@ -236,10 +347,7 @@ def eval(
                 error=scene_error,
             )
         )
-        if halted or _should_fail(fail_on_error, error_count, total_trials):
-            if not halted:
-                status = "error"
-                error = error or f"fail_on_error threshold exceeded ({error_count} errors)"
+        if stopped:
             break
 
     metrics: dict[str, float] = {}

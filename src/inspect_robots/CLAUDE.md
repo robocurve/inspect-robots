@@ -34,6 +34,13 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
   inference/replanning is controller-internal (so ensembling composes — R3).
 - Frames live in a rollout-owned `FrameStore`, never in a sink (R5).
 - Action *semantics* live on the action `Box`, not on every `Action` (R8).
-- Generic policy/embodiment exceptions are wrapped into `PolicyError` /
-  `EmbodimentFault`; `SafetyAbort`/`EmbodimentFault` always halt the eval.
+- Generic policy/embodiment exceptions (incl. from `reset`) are wrapped into
+  `PolicyError` / `EmbodimentFault`; a crashing approver becomes `SafetyAbort`;
+  `SafetyAbort`/`EmbodimentFault` always halt the eval. Every error raised from
+  inside a trial carries the partial `TrialRecord` on `exc.record`.
+- `eval()` must always return/persist an `EvalLog` once rollouts have started —
+  scorer/reducer failures degrade to an error log, never a crash. Errored
+  trials are recorded (and delivered to sinks) but **never scored**.
+- `eval()` closes embodiments it resolved from registry names ("close what we
+  open"); caller-constructed objects are caller-owned.
 - `mock/` and core must never import `rerun`/`torch` at module top.

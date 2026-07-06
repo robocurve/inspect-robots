@@ -35,11 +35,13 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 
 - Dev loop: `uv pip install -e ".[dev]"`, `uv run pre-commit install`, then
   `uv run pytest --cov`.
-- Gates that must pass: `ruff check .`, `ruff format --check .`, `mypy` (strict),
-  and `pytest --cov` at **100% coverage** (`--cov-fail-under=100`). Pre-commit
-  runs ruff+mypy on commit and the coverage gate on push
-  (`.pre-commit-config.yaml`). CI runs all gates on Linux+macOS / py3.11-3.12 as
-  **blocking, required PR checks**; coverage below 100% fails the build.
+- Gates that must pass: `ruff check .`, `ruff format --check .`, `mypy` (strict,
+  covers `src` **and** `tests`), and `pytest --cov` at **100% coverage**
+  (`--cov-fail-under=100`). Pre-commit runs ruff+mypy on commit and the coverage
+  gate on push (`.pre-commit-config.yaml`). CI runs all gates on Linux+macOS /
+  py3.11-3.12 as **blocking, required PR checks** (coverage below 100% fails the
+  build), plus a **non-blocking** `test-extra` tier for py3.10/py3.13, Windows,
+  and the NumPy floor — together covering the py3.10–3.13 range pyproject claims.
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.

@@ -88,6 +88,11 @@ class MyArm:
         ...
 ```
 
+Lifecycle: [`eval`][inspect_robots.eval.eval] closes what it resolves — an
+embodiment looked up by **registry name** is closed when the run finishes (even
+on a halt). If you construct the embodiment object yourself, you own it: call
+`close()` yourself when you are done.
+
 ## Real-robot vs simulator
 
 The interfaces assume **real-robot reality**: no guaranteed privileged success,
