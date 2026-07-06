@@ -136,6 +136,21 @@ uv run ruff check . && uv run mypy
 Pre-commit hooks and a blocking CI coverage gate keep `main` green. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and the design docs in [`plans/`](plans/).
 
+## Citation
+
+If you use Inspect Robots in your research, please cite it:
+
+```bibtex
+@software{inspect-robots,
+  author  = {Robocurve},
+  title   = {Inspect Robots: The open-source evaluation framework for physical AI},
+  year    = {2026},
+  url     = {https://github.com/robocurve/inspect-robots},
+  version = {0.3.0},
+  license = {MIT}
+}
+```
+
 ## License
 
 [MIT](LICENSE)

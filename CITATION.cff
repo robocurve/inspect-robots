@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Inspect Robots: The open-source evaluation framework for physical AI"
+authors:
+  - name: "Robocurve"
+type: software
+license: MIT
+repository-code: "https://github.com/robocurve/inspect-robots"
+url: "https://inspectrobots.org/"
+version: "0.3.0"
