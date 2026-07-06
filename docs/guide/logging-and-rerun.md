@@ -24,8 +24,11 @@ A [`LogSink`][inspect_robots.logging.LogSink] observes the run lifecycle
 (`on_eval_start` → per trial `on_trial_start`/`log_step`/`on_trial_end` →
 `on_eval_end`). Builtins:
 
-- [`JsonLogSink`][inspect_robots.logging.JsonLogSink] — always on; the canonical JSON record.
+- [`JsonLogSink`][inspect_robots.logging.JsonLogSink] — the default; the canonical JSON record.
 - [`RerunSink`][inspect_robots.logging.RerunSink] — optional, lazily imported.
+
+Passing `sinks=` **replaces** the default `JsonLogSink`, it does not add to it —
+so include one in the list if you still want the JSON log:
 
 ```python
 from inspect_robots.logging import JsonLogSink, RerunSink

@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- CLI: `inspect-robots run` gained `--epochs`, `--fail-on-error`, and
+  `--store-frames`; the written log's path is printed at the end of a run.
+- Tests are now type-checked under strict mypy (`files = ["src/inspect_robots",
+  "tests"]`).
+
+### Changed
+
+- **Documentation site moved to a custom domain:** <https://inspectrobots.org/>.
+
 ### Fixed
 
 - **Eval logs are strict RFC 8259 JSON.** Non-finite floats (e.g. an inf
@@ -52,12 +63,37 @@ All notable changes to this project are documented here. The format is based on
 - Rerun sink: per-trial namespacing, new-SDK (`>=0.23`) compatibility, and a
   correct install hint.
 
+## [0.3.0] - 2026-07-01
+
+### Changed
+
+- **Renamed the framework RoboInspect → Inspect Robots.** The import package is
+  now `inspect_robots`, the distribution/CLI `inspect-robots`, the error base
+  class `InspectRobotsError`, the log field `inspect_robots_version`, and the
+  plugin entry-point groups `inspect_robots.*`. The Isaac Sim plugin follows as
+  `inspect-robots-isaacsim` (import package `inspect_robots_isaacsim`, entry
+  point group `inspect_robots.embodiments`).
+
+## [0.2.0] - 2026-06-30
+
 ### Added
 
-- CLI: `inspect-robots run` gained `--epochs`, `--fail-on-error`, and
-  `--store-frames`; the written log's path is printed at the end of a run.
-- Tests are now type-checked under strict mypy (`files = ["src/inspect_robots",
-  "tests"]`).
+- **Isaac Sim / Isaac Lab plugin** as an in-repo uv-workspace package
+  (`plugins/`): an `Embodiment` adapter backed by an Isaac Lab physics
+  simulation (default profile: 7-DoF Franka Panda under joint-position control
+  with a binary gripper), registered via entry point, with Isaac imported
+  lazily so the plugin installs anywhere and the core stays NumPy-only.
+  First-party plugins live as their own packages with their own pyproject,
+  tests, and coverage scope; `uv sync --all-packages --extra dev` installs
+  core + plugins editable.
+
+### Changed
+
+- Renamed the package RoboLens → RoboInspect (superseded by the 0.3.0 rename).
+
+## [0.1.0] - 2026-06-27
+
+### Added
 
 - **Widened the public API for plugin authors.** `inspect_robots.__all__` now exports
   the authoring primitives directly — `Task`/`Epochs`, `Scene`/`Target`,
@@ -107,4 +143,7 @@ All notable changes to this project are documented here. The format is based on
   strict mypy on commit, the 100% coverage gate on push. Install with
   `uv run pre-commit install`. Documented in `CONTRIBUTING.md`.
 
-[Unreleased]: https://github.com/robocurve/inspect-robots/commits/main
+[Unreleased]: https://github.com/robocurve/inspect-robots/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/robocurve/inspect-robots/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/robocurve/inspect-robots/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/robocurve/inspect-robots/releases/tag/v0.1.0
