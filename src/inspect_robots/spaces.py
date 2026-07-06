@@ -65,6 +65,8 @@ class Box:
                 raise ValueError(
                     f"Box {name} shape {tuple(bound.shape)} != space shape {self.shape}"
                 )
+        if self.low is not None and self.high is not None and bool(np.any(self.low > self.high)):
+            raise ValueError("Box low must be elementwise <= high")
 
     @property
     def dim(self) -> int:
@@ -134,8 +136,15 @@ class ObservationSpace:
 
     def __post_init__(self) -> None:
         # If a rich StateSpec is given, keep state_keys consistent with it.
-        if self.state is not None and not self.state_keys:
-            object.__setattr__(self, "state_keys", self.state.keys)
+        if self.state is not None:
+            if not self.state_keys:
+                object.__setattr__(self, "state_keys", self.state.keys)
+            elif self.state_keys != self.state.keys:
+                raise ValueError(
+                    f"ObservationSpace state_keys {sorted(self.state_keys)} inconsistent "
+                    f"with StateSpec keys {sorted(self.state.keys)}; provide one or make "
+                    "them agree"
+                )
 
     @property
     def camera_names(self) -> frozenset[str]:

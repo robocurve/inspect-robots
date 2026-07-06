@@ -55,8 +55,11 @@ class DefaultController:
         if not buffer:
             chunk = policy.act(observation)
             take = self.replan_interval or len(chunk)
-            buffer.extend(list(chunk.actions)[:take])
-            store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, take))
+            taken = list(chunk.actions)[:take]
+            buffer.extend(taken)
+            # Record the number of actions actually buffered (the chunk may be
+            # shorter than replan_interval), so the transcript never overstates.
+            store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(taken)))
         return buffer.popleft()
 
 
@@ -98,7 +101,6 @@ _AVERAGEABLE_MODES = frozenset(
 # "rot6d" is averaged un-normalized here on the assumption the consumer applies
 # Gram-Schmidt on decode (true for the standard rot6d->matrix path).
 _AVERAGEABLE_ROT = frozenset({"none", "rot6d"})
-_ENSEMBLE_WARNED = False
 
 
 class EnsemblingController:
@@ -122,15 +124,12 @@ class EnsemblingController:
         self.m = m
         sem = action_space.semantics
         if sem is None:
-            global _ENSEMBLE_WARNED
-            if not _ENSEMBLE_WARNED:
-                warnings.warn(
-                    "EnsemblingController: action space has no semantics; cannot "
-                    "verify that actions are safe to average.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                _ENSEMBLE_WARNED = True
+            warnings.warn(
+                "EnsemblingController: action space has no semantics; cannot "
+                "verify that actions are safe to average.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         else:
             if sem.control_mode not in _AVERAGEABLE_MODES:  # pragma: no cover
                 # Defensive: every valid ControlMode literal is currently averageable.

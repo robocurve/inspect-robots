@@ -87,9 +87,11 @@ constructor exposes hooks so you don't edit the adapter:
 Long unattended evals should not creep in RAM or VRAM. This adapter is built to
 hold nothing per step, but a few usage rules keep a full run leak-free:
 
-- **Free the simulator when done.** `eval()` does *not* close the embodiment for
-  you, and an open `SimulationApp` holds GPU memory until the process exits. Use
-  the embodiment as a context manager (or `close()` in a `finally`):
+- **Free the simulator when done.** `eval()` closes what it resolves: an
+  embodiment looked up by **registry name** (e.g. `embodiment="isaacsim"`) is
+  closed when the run finishes. An embodiment object *you* construct is yours
+  to close — an open `SimulationApp` holds GPU memory until the process exits,
+  so use it as a context manager (or `close()` in a `finally`):
 
   ```python
   with IsaacSimEmbodiment() as emb:

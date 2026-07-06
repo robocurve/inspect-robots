@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import functools
 import json
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -122,13 +121,25 @@ def test_controller_validation_raises() -> None:
         EnsemblingController(Box(shape=(2,), semantics=_CUBE_SEM), m=-1.0)
 
 
-def test_ensembling_warns_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(controller_mod, "_ENSEMBLE_WARNED", False)
+def test_ensembling_warns_per_instance() -> None:
+    # No global warn-once state: every instance constructed without semantics
+    # warns, independent of construction order elsewhere in the process.
     with pytest.warns(RuntimeWarning):
         EnsemblingController(Box(shape=(2,)))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # a second warning would raise
-        EnsemblingController(Box(shape=(2,)))  # already warned -> no warning
+    with pytest.warns(RuntimeWarning):
+        EnsemblingController(Box(shape=(2,)))
+
+
+def test_default_controller_records_actual_buffered_count() -> None:
+    # replan_interval larger than the chunk: the recorded per-inference count is
+    # the number of actions actually buffered, not the requested interval.
+    policy = ScriptedPolicy(chunk_size=4)
+    embodiment = CubePickEmbodiment()
+    obs = embodiment.reset(_SCENE, seed=0)
+    store: dict[str, object] = {}
+    DefaultController(replan_interval=10).next_action(policy, obs, 0, store)
+    inferences = store[controller_mod._INFER_KEY]
+    assert inferences[-1][1] == 4  # type: ignore[index]
 
 
 # --------------------------------------------------------------------------- #
@@ -212,8 +223,12 @@ def test_min_distance_without_signal() -> None:
 # --------------------------------------------------------------------------- #
 # rollout
 # --------------------------------------------------------------------------- #
-def test_effective_control_hz_all_none() -> None:
+def test_effective_control_hz_precedence() -> None:
+    # First non-None of chunk -> task -> embodiment (R1).
     assert _effective_control_hz(None, None, None) is None
+    assert _effective_control_hz(30.0, 20.0, 10.0) == 30.0
+    assert _effective_control_hz(None, 20.0, 10.0) == 20.0
+    assert _effective_control_hz(None, None, 10.0) == 10.0
 
 
 class _PolicyErrorPolicy:
@@ -294,11 +309,11 @@ def test_null_sink_lifecycle() -> None:
     sink = NullSink()
     obs = Observation()
     record = TrialRecord(scene_id="s", epoch=0, seed=0)
-    assert sink.on_eval_start(None) is None  # type: ignore[arg-type]
-    assert sink.on_trial_start("s", 0) is None
-    assert sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs)) is None
-    assert sink.on_trial_end(record) is None
-    assert sink.on_eval_end(None) is None  # type: ignore[arg-type]
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s", 0)
+    sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs))
+    sink.on_trial_end(record)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +335,7 @@ def test_registered_unknown_kind() -> None:
         registered("bogus")
 
 
-def test_entrypoint_load_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entrypoint_load_failure_is_skipped_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BadEP:
         name = "broken"
 
@@ -333,7 +348,10 @@ def test_entrypoint_load_failure_is_skipped(monkeypatch: pytest.MonkeyPatch) -> 
         lambda *, group: [_BadEP()] if group == "inspect_robots.policies" else [],
     )
     monkeypatch.setattr(reg, "_loaded_entrypoints", False)
-    assert "broken" not in registered("policy")  # a broken plugin must not crash discovery
+    # A broken plugin must not crash discovery — but must not vanish silently.
+    with pytest.warns(RuntimeWarning, match="failed to load inspect_robots plugin 'broken'"):
+        names = registered("policy")
+    assert "broken" not in names
 
 
 def test_resolve_forwards_kwargs() -> None:
@@ -439,22 +457,32 @@ def test_pass_at_k_edge_cases() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# RerunSink — exercise the rerun-present logging path with a fake backend
+# RerunSink — exercise the rerun-present logging path with fake backends
 # --------------------------------------------------------------------------- #
-def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import sys
+def _fake_rerun_module(calls: list[str], paths: list[str], *, new_api: bool) -> object:
     import types
 
-    calls: list[str] = []
     fake = types.ModuleType("rerun")
     fake.init = lambda *a, **k: calls.append("init")  # type: ignore[attr-defined]
     fake.save = lambda p: calls.append("save")  # type: ignore[attr-defined]
-    fake.set_time_sequence = lambda *a: calls.append("time")  # type: ignore[attr-defined]
-    fake.log = lambda *a, **k: calls.append("log")  # type: ignore[attr-defined]
+    fake.log = lambda path, *a, **k: paths.append(path)  # type: ignore[attr-defined]
     fake.Image = lambda img: ("Image",)  # type: ignore[attr-defined]
-    fake.Scalar = lambda v: ("Scalar", v)  # type: ignore[attr-defined]
     fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "rerun", fake)
+    if new_api:  # rerun-sdk >= 0.23 surface
+        fake.set_time = lambda *a, **k: calls.append("time")  # type: ignore[attr-defined]
+        fake.Scalars = lambda v: ("Scalars", v)  # type: ignore[attr-defined]
+    else:  # older SDK surface
+        fake.set_time_sequence = lambda *a: calls.append("time")  # type: ignore[attr-defined]
+        fake.Scalar = lambda v: ("Scalar", v)  # type: ignore[attr-defined]
+    return fake
+
+
+def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import sys
+
+    calls: list[str] = []
+    paths: list[str] = []
+    monkeypatch.setitem(sys.modules, "rerun", _fake_rerun_module(calls, paths, new_api=False))
 
     from inspect_robots.logging.rerun_sink import RerunSink
 
@@ -464,7 +492,9 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
 
     (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
     assert log.status == "success"
-    assert "init" in calls and "save" in calls and "log" in calls and "time" in calls
+    assert "init" in calls and "save" in calls and "time" in calls
+    # Entities are namespaced per trial so trials never overwrite each other.
+    assert paths and all(p.startswith("trial/s/e0/") for p in paths)
 
     # Exercise the empty-observation and reward-is-None branches directly.
     sink.log_step(
@@ -476,3 +506,19 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
 
     # A sink with no recording path skips rr.save (the other on_eval_start branch).
     RerunSink().on_eval_start(None)  # type: ignore[arg-type]
+
+
+def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    calls: list[str] = []
+    paths: list[str] = []
+    monkeypatch.setitem(sys.modules, "rerun", _fake_rerun_module(calls, paths, new_api=True))
+
+    from inspect_robots.logging.rerun_sink import RerunSink
+
+    sink = RerunSink()
+    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    assert log.status == "success"
+    assert "time" in calls  # rr.set_time (>=0.23) was used
+    assert paths and all(p.startswith("trial/s/e0/") for p in paths)
