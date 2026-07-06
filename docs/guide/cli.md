@@ -24,6 +24,11 @@ inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P c
              --embodiment cubepick --log-dir logs --seed 0
 ```
 
+`--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
+`PolicyError`s (`1` = first error, `0<X<1` = proportion, `X>1` = count), and
+`--store-frames` streams camera frames to `<log-dir>/frames`. When the run
+finishes, the path of the written log is printed.
+
 The exit code is `0` on a successful eval, `1` otherwise.
 
 ## `inspect-robots inspect`

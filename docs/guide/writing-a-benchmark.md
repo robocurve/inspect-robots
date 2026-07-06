@@ -37,7 +37,9 @@ analog):
   `kind` is resolved in the *embodiment's* namespace (compatibility checking
   verifies the embodiment can realize it).
 - `init_seed` — combined with the eval seed and epoch index to seed each trial
-  deterministically.
+  deterministically. (An eval run with `seed=None` draws a fresh OS seed and
+  records it in the log, so even "unseeded" runs are reproducible after the
+  fact — and distinct from `seed=0`.)
 
 ## Epochs and reducers
 

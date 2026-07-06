@@ -68,12 +68,30 @@ The error taxonomy resolves the "fail fast vs never-crash-overnight" tension:
 | Class | Policy |
 |---|---|
 | [`CompatibilityError`][inspect_robots.errors.CompatibilityError], `ConfigError` | fail fast, before any rollout |
-| [`PolicyError`][inspect_robots.errors.PolicyError] | record the trial, continue (governed by `fail_on_error`) |
+| [`PolicyError`][inspect_robots.errors.PolicyError] | record the trial, then continue or halt per `fail_on_error` (`True` = first error, `0<x<1` = proportion, `x>1` = count), checked after every trial |
 | [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault], [`SafetyAbort`][inspect_robots.errors.SafetyAbort] | **always halt** — a faulted/unsafe robot never auto-advances |
+
+Failures inside a trial (including `reset`) are wrapped into the taxonomy; a
+crashing approver becomes a `SafetyAbort` (it can no longer vouch for safety).
+Every error raised from inside a trial carries the partial
+[`TrialRecord`][inspect_robots.rollout.TrialRecord] on its `record` attribute, so the
+steps that did run are delivered to sinks. Errored trials are recorded but
+**never scored** — a failed trial cannot masquerade as data in the metrics.
 
 ## The eval log
 
 [`eval`][inspect_robots.eval.eval] orchestrates scenes × epochs and returns immutable
 [`EvalLog`][inspect_robots.log.EvalLog]s (status, spec, results, stats, per-scene samples,
 error). Logs are written atomically as schema-versioned JSON with a read-back
-guarantee.
+guarantee. Once rollouts have started, an `EvalLog` is always produced and
+persisted: scorer or reducer failures degrade the run to an error log rather
+than crashing away the night's data.
+
+`eval()` also owns what it opens: an embodiment resolved from a **registry
+name** is closed when the run finishes (even on a halt), while a
+caller-constructed embodiment object stays open — its lifecycle belongs to the
+caller.
+
+Passing `seed=None` draws a fresh seed from the OS and records it in the log,
+so an "unseeded" run remains reproducible after the fact (and is distinct from
+`seed=0`).

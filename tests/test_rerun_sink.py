@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import inspect_robots.logging.rerun_sink as rerun_mod
 from inspect_robots import eval
 from inspect_robots.logging import RerunSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -33,11 +32,15 @@ def test_rerun_sink_registered() -> None:
 
 
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
-def test_noop_and_warns_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rerun_mod, "_WARNED", False)
+def test_noop_and_warns_when_absent() -> None:
     sink = RerunSink()
     with pytest.warns(RuntimeWarning, match="rerun-sdk is not installed"):
         assert sink.available is False
+    # Warned once per instance; a second check stays quiet.
+    assert sink.available is False
+    # ...but a fresh instance warns again (no hidden module-global state).
+    with pytest.warns(RuntimeWarning, match="rerun-sdk is not installed"):
+        assert RerunSink().available is False
 
 
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")

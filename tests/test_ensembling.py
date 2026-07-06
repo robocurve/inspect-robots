@@ -8,6 +8,7 @@ import pytest
 from inspect_robots import eval
 from inspect_robots.controller import EnsemblingController
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
@@ -24,6 +25,11 @@ class _FixedChunkPolicy:
         self._actions = [np.array(a0, dtype=np.float64), np.array(a1, dtype=np.float64)]
         self.chunk_len = chunk_len
         self.num_inferences = 0
+        self.info = PolicyInfo(name="fixed-chunk", action_space=_DELTA_SPACE)
+        self.config = PolicyConfig()
+
+    def reset(self, scene: Scene) -> None:
+        return None
 
     def act(self, observation: Observation) -> ActionChunk:
         self.num_inferences += 1
@@ -85,10 +91,7 @@ def test_rejects_unaverageable_semantics() -> None:
         )
 
 
-def test_warns_when_semantics_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import inspect_robots.controller as ctrl_mod
-
-    monkeypatch.setattr(ctrl_mod, "_ENSEMBLE_WARNED", False)
+def test_warns_when_semantics_missing() -> None:
     with pytest.warns(RuntimeWarning, match="no semantics"):
         EnsemblingController(Box(shape=(2,)))
 

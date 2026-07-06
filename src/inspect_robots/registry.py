@@ -13,6 +13,7 @@ Entry-point groups:
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
@@ -86,7 +87,15 @@ def _ensure_loaded() -> None:
             for ep in entry_points(group=group):
                 try:
                     factory = ep.load()
-                except Exception:
+                except Exception as exc:
+                    # A broken plugin must not crash discovery, but it must not
+                    # vanish silently either — that is undebuggable.
+                    warnings.warn(
+                        f"failed to load inspect_robots plugin {ep.name!r} from "
+                        f"entry-point group {group!r}: {exc!r}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                     continue
                 _FACTORIES[kind].setdefault(ep.name, factory)
 
