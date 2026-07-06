@@ -6,5 +6,5 @@ authors:
 type: software
 license: MIT
 repository-code: "https://github.com/robocurve/inspect-robots"
-url: "https://robocurve.github.io/inspect-robots/"
+url: "https://inspectrobots.org/"
 version: "0.3.0"
