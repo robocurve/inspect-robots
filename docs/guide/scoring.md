@@ -31,7 +31,7 @@ class SmoothMotion:
     name: str = "smooth_motion"
 
     def __call__(self, record, target) -> Score:
-        deltas = [abs(float(s.action.data).sum()) for s in record.steps]
+        deltas = [abs(float(s.action.data.sum())) for s in record.steps]
         return Score(value=-sum(deltas), explanation="negative total command magnitude")
 ```
 

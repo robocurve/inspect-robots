@@ -25,7 +25,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
 | `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
-| `cli.py` | `inspect-robots list` / `inspect-robots run` |
+| `cli.py` | `inspect-robots list` / `inspect-robots run` / `inspect-robots inspect` |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants

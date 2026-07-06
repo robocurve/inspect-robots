@@ -61,6 +61,7 @@ inspect-robots = "inspect_robots.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots"
+Documentation = "https://inspectrobots.org/"
 Repository = "https://github.com/robocurve/inspect-robots"
 Issues = "https://github.com/robocurve/inspect-robots/issues"
 
@@ -74,6 +75,9 @@ source = "vcs"
 # Before the first tag exists, fall back to a sensible dev version instead of failing.
 version_scheme = "guess-next-dev"
 fallback_version = "0.0.0"
+
+[tool.hatch.build]
+exclude = ["src/inspect_robots/CLAUDE.md"]  # agent docs; not for the wheel/sdist
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inspect_robots"]
