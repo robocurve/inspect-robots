@@ -120,3 +120,18 @@ def test_json_dump_backstop_rejects_unsanitized_non_finite(tmp_path: Path) -> No
         (tmp_path / "x.json").open("w", encoding="utf-8") as fh,
     ):
         json.dump({"bad": float("inf")}, fh, allow_nan=False)
+
+
+def test_scene_instruction_and_judgements_serialize_strict(tmp_path: Path) -> None:
+    # The new SceneResult fields reach disk as strict JSON: the instruction
+    # verbatim, and one judgement slot per epoch (None when nobody judged).
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    (path,) = tmp_path.glob("*.json")
+    data = _read_strict(path)
+    samples = data["samples"]
+    assert isinstance(samples, list)
+    sample = samples[0]
+    assert isinstance(sample, dict)
+    assert sample["instruction"] == "reach"
+    assert sample["operator_judgements"] == [None]
