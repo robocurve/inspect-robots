@@ -244,3 +244,37 @@ def test_no_ram_leak_over_many_steps() -> None:
     assert fake.step_calls == 3200
     for value in vars(emb).values():
         assert not isinstance(value, (list, dict)) or len(value) <= 1
+
+
+def test_disable_debug_vis_walks_nested_configs() -> None:
+    from inspect_robots_isaacsim.embodiment import _disable_debug_vis
+
+    class _Term:
+        def __init__(self, debug_vis: bool) -> None:
+            self.debug_vis = debug_vis
+
+    class _Commands:
+        def __init__(self) -> None:
+            self.object_pose = _Term(True)
+            self.extra = [_Term(True), {"nested": _Term(True)}]
+
+    class _EnvCfg:
+        def __init__(self) -> None:
+            self.commands = _Commands()
+            self.scene = _Term(False)  # already off: stays off
+            self.not_a_flag = _Term(True)
+            self.debug_vis = "keep"  # non-bool sentinel: must not be touched
+
+    cfg = _EnvCfg()
+    cfg.commands.object_pose.debug_vis = True
+    # A reference cycle must not hang the walk.
+    cfg.commands.parent = cfg  # type: ignore[attr-defined]
+
+    _disable_debug_vis(cfg)
+
+    assert cfg.commands.object_pose.debug_vis is False
+    assert cfg.commands.extra[0].debug_vis is False
+    assert cfg.commands.extra[1]["nested"].debug_vis is False
+    assert cfg.not_a_flag.debug_vis is False
+    assert cfg.scene.debug_vis is False
+    assert cfg.debug_vis == "keep"
