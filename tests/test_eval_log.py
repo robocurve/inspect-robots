@@ -145,7 +145,7 @@ def test_store_frames_writes_side_cars(tmp_path: Path) -> None:
         task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), store_frames=True
     )
     assert logs[0].stats.frames_dir is not None
-    assert list((tmp_path / "frames").glob("*.npy"))
+    assert list((tmp_path / "frames").rglob("*.npy"))
 
 
 def test_eval_set_runs_multiple_tasks(tmp_path: Path) -> None:
@@ -166,3 +166,25 @@ def test_eval_set_runs_multiple_tasks(tmp_path: Path) -> None:
     assert success is True
     assert len(logs) == 2
     assert {log.eval.task for log in logs} == {"a", "b"}
+
+
+def test_store_frames_runs_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    """Each eval gets its own frames subdir; a second run must not clobber the first."""
+    from inspect_robots import eval
+
+    task = Task(
+        name="demo",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+    dirs = set()
+    for _ in range(2):
+        logs = eval(
+            task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), store_frames=True
+        )
+        assert logs[0].stats.frames_dir is not None
+        dirs.add(logs[0].stats.frames_dir)
+    assert len(dirs) == 2  # distinct per-run directories
+    for d in dirs:
+        assert list(Path(d).glob("*.npy"))  # both runs' frames still on disk

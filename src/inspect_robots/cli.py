@@ -325,7 +325,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             seed=args.seed,
             sinks=[sink],
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-            store_frames=args.store_frames,
+            store_frames=args.store_frames or defaults.store_frames,
             before_scoring=before_scoring,
         )
     finally:

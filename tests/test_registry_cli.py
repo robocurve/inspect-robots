@@ -129,7 +129,7 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert rc == 0
     out = capsys.readouterr().out
     assert "trials: 2" in out  # --epochs overrode the task's epoch count
-    assert list((tmp_path / "frames").glob("*.npy"))  # --store-frames streamed
+    assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -584,3 +584,19 @@ def test_cli_run_closes_the_embodiment_it_resolved(
     rc = main(["reach the cube", "--scorer", "success_at_end", "--log-dir", str(tmp_path / "logs")])
     assert rc == 0
     assert closed == [True]
+
+
+def test_config_store_frames_enables_frame_capture(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """store_frames = true in the config file captures frames with no CLI flag."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nstore_frames = true\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert list((log_dir / "frames").rglob("*.npy"))
+    assert _read_only_log(log_dir).stats.frames_dir is not None
