@@ -1,0 +1,46 @@
+name: Release
+
+# Publishes to PyPI via trusted publishing (OIDC) — no API tokens.
+# Each job authenticates against its own PyPI trusted-publisher entry,
+# distinguished by the GitHub environment name (pypi / pypi-isaacsim).
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish-core:
+    name: publish inspect-robots
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # OIDC token for PyPI trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from git tags
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-isaacsim:
+    name: publish inspect-robots-isaacsim
+    runs-on: ubuntu-latest
+    environment: pypi-isaacsim
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build --package inspect-robots-isaacsim
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # The plugin is versioned independently (static version in its
+          # pyproject); a repo release that doesn't bump it should not fail
+          # on the already-uploaded file.
+          skip-existing: true
