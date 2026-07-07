@@ -42,7 +42,16 @@ def _golden_log() -> EvalLog:
             duration_s=1.0,
             total_steps=12,
         ),
-        samples=[SceneResult(scene_id="s0", status="success", reduced={"success_at_end": 1.0})],
+        samples=[
+            SceneResult(
+                scene_id="s0",
+                status="success",
+                reduced={"success_at_end": 1.0},
+                epochs=[{"success_at_end": 1.0}],
+                instruction="reach the cube",
+                operator_judgements=["yes"],
+            )
+        ],
     )
 
 
@@ -61,6 +70,23 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.version == SCHEMA_VERSION
     assert restored.eval.git_commit == "deadbeef"
     assert restored.samples[0].scene_id == "s0"
+    assert restored.samples[0].instruction == "reach the cube"
+    assert restored.samples[0].operator_judgements == ["yes"]
+
+
+def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path) -> None:
+    # Logs written before SceneResult grew instruction/operator_judgements
+    # must stay readable at the same schema version (newer reads older).
+    data = _golden_log().to_dict()
+    for sample in data["samples"]:
+        del sample["instruction"]
+        del sample["operator_judgements"]
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    restored = read_eval_log(str(path))
+    assert restored.samples[0].reduced == {"success_at_end": 1.0}
+    assert restored.samples[0].instruction is None
+    assert restored.samples[0].operator_judgements == []
 
 
 def test_unsupported_schema_version_rejected() -> None:

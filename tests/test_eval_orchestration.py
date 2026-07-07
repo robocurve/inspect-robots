@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from inspect_robots import eval
+from inspect_robots import eval, eval_set
 from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError
 from inspect_robots.eval import _git_commit
 from inspect_robots.log import EvalLog
@@ -18,7 +18,7 @@ from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
-from inspect_robots.scorer import min_distance_to_goal, success_at_end
+from inspect_robots.scorer import min_distance_to_goal, operator_scorer, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.task import Epochs, Task
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
@@ -318,3 +318,83 @@ def test_git_commit_clean_tree_has_no_suffix(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr("subprocess.run", fake_run)
     assert _git_commit() == "abc123"
+
+
+# --------------------------------------------------------------------------- #
+# 8. before_scoring hook: the R6 seam for capturing operator judgements.
+# --------------------------------------------------------------------------- #
+def test_before_scoring_runs_before_scorers_and_persists_judgement(tmp_path: Path) -> None:
+    task = _task(scorer=operator_scorer())
+    seen: list[tuple[str, int]] = []
+
+    def judge(record: TrialRecord, scene: Scene) -> None:
+        seen.append((scene.id, record.epoch))
+        record.operator_judgement = "yes"
+
+    (log,) = eval(
+        task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=judge
+    )
+    assert seen == [("s0", 0)]
+    # The operator scorer read the verdict, so the hook ran before scoring.
+    assert log.results.metrics["operator"] == 1.0
+    assert log.samples[0].operator_judgements == ["yes"]
+    assert log.samples[0].instruction == "reach"
+
+
+def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
+    # Epoch 0 succeeds and is judged; epoch 1 errors (PolicyError) and must
+    # neither be scored nor prompt the hook — its judgement slot stays None,
+    # parallel to the empty epochs entry.
+    task = _task(epochs=2, scorer=operator_scorer())
+    calls: list[int] = []
+
+    def judge(record: TrialRecord, scene: Scene) -> None:
+        calls.append(record.epoch)
+        record.operator_judgement = "yes"
+
+    (log,) = eval(
+        task,
+        _BoomOnSecondEpochPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=judge,
+    )
+    assert calls == [0]
+    scene = log.samples[0]
+    assert scene.epochs == [{"operator": 1.0}, {}]
+    assert scene.operator_judgements == ["yes", None]
+
+
+def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise RuntimeError("hook exploded")
+
+    with pytest.raises(RuntimeError, match="hook exploded"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            before_scoring=bad_hook,
+        )
+
+
+def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> None:
+    (log,) = eval(_task(epochs=2), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].operator_judgements == [None, None]
+
+
+def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
+    def judge(record: TrialRecord, scene: Scene) -> None:
+        record.operator_judgement = "pass"
+
+    success, logs = eval_set(
+        _task(scorer=operator_scorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=judge,
+    )
+    assert success
+    assert logs[0].samples[0].operator_judgements == ["pass"]
+    assert logs[0].results.metrics["operator"] == 1.0

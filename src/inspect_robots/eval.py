@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +29,7 @@ from inspect_robots.frames import FrameStore
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
+from inspect_robots.scene import Scene
 from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
 from inspect_robots.task import Task
 
@@ -113,6 +114,7 @@ def eval(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -137,6 +139,13 @@ def eval(
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
+
+    ``before_scoring`` is called exactly once per trial that will be scored
+    (never for errored trials, which are recorded but not scored), after the
+    rollout returns and before the scorers run. It may mutate the record —
+    e.g. capture ``TrialRecord.operator_judgement`` (R6) so the ``operator``
+    scorer can read it. Exceptions it raises propagate to the caller. Note
+    this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
@@ -165,6 +174,7 @@ def eval(
             approver=approver,
             remap=remap,
             store_frames=store_frames,
+            before_scoring=before_scoring,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -186,6 +196,7 @@ def _run_eval(
     approver: Approver | None,
     remap: dict[str, str] | None,
     store_frames: bool,
+    before_scoring: Callable[[TrialRecord, Scene], None] | None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -248,6 +259,7 @@ def _run_eval(
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
+        judgements: list[str | None] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -299,13 +311,20 @@ def _run_eval(
                     # masquerade as data (e.g. an inf min-distance poisoning
                     # the metric mean). It stays visible via scene status.
                     epoch_dicts.append({})
+                    judgements.append(None)
                 else:
+                    if before_scoring is not None:
+                        # The only trials the hook sees are the ones scorers
+                        # will read — an operator verdict on a crashed trial
+                        # would be dead data (errored trials are never scored).
+                        before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
                         score = scorer(record, scene.target)
                         per_scorer_scores[scorer.name].append(score)
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
+                    judgements.append(record.operator_judgement)
                 bus.on_trial_end(record)
 
             if halted:
@@ -345,6 +364,8 @@ def _run_eval(
                 reduced=reduced,
                 epochs=epoch_dicts,
                 error=scene_error,
+                instruction=scene.instruction,
+                operator_judgements=judgements,
             )
         )
         if stopped:
@@ -404,6 +425,7 @@ def eval_set(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     retry_attempts: int = 0,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
@@ -429,6 +451,7 @@ def eval_set(
                 approver=approver,
                 remap=remap,
                 store_frames=store_frames,
+                before_scoring=before_scoring,
             )
         )
     success = all(log.status == "success" for log in logs)

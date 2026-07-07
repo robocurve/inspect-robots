@@ -53,6 +53,12 @@ class SceneResult:
     reduced: dict[str, float] = field(default_factory=dict)
     epochs: list[dict[str, float]] = field(default_factory=list)
     error: str | None = None
+    # What the scene asked the policy to do — makes a log self-describing.
+    instruction: str | None = None
+    # Strictly parallel to ``epochs``: the operator's verdict per recorded
+    # trial, ``None`` when the trial errored or no judgement was captured.
+    # Defaults keep logs written before these fields existed readable.
+    operator_judgements: list[str | None] = field(default_factory=list)
 
 
 @dataclass
