@@ -2,13 +2,13 @@
 
 # 🤖 Inspect Robots
 
-### The [Inspect AI](https://inspect.aisi.org.uk/) for robotics
-
-**An open-source evaluation framework for physical AI and VLA (vision-language-action) models.**
+### An open-source evaluation framework for physical AI and VLA (vision-language-action) models
 
 Define a robotics benchmark once, then run *any* policy against *any* compatible
 embodiment — a real robot or a simulator — with reproducible logs and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
+
+If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotics.
 
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://inspectrobots.org/)
@@ -122,9 +122,9 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task` / `@solver` / `@scorer` + registry | `@task` / `@policy` / `@embodiment` / `@scorer` + entry points |
 
-This repository is the **framework** (the "Inspect AI for robotics"). Concrete
-benchmarks (the "Inspect Evals for robotics") and backend adapters live in
-separate plugin packages.
+This repository is the **framework**. Concrete benchmarks live in
+[WorldEvals](https://github.com/robocurve/worldevals), the benchmark catalog,
+and backend adapters live in separate plugin packages.
 
 ## Documentation
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "inspect-robots"
 dynamic = ["version"]
-description = "The Inspect AI for robotics — an evaluation framework for VLA (vision-language-action) models across real robots and simulators."
+description = "An evaluation framework for VLA (vision-language-action) models across real robots and simulators — the Inspect AI for robotics."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
