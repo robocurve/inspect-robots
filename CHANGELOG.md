@@ -20,6 +20,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`EvalLog` and friends are now actually immutable.** `EvalLog`, `EvalSpec`,
+  `EvalStats`, `EvalResults`, and `SceneResult` are frozen dataclasses, and
+  `SceneResult.epochs`/`operator_judgements` and `EvalLog.samples` are tuples
+  instead of lists — previously nothing stopped e.g. `log.samples.clear()`
+  despite the "immutable EvalLog" documentation (#4). `read_eval_log` coerces
+  older on-disk logs (whose JSON arrays deserialize as lists) back into tuples,
+  so the read-back guarantee is unaffected.
 - **Eval logs are strict RFC 8259 JSON.** Non-finite floats (e.g. an inf
   `min_distance_to_goal` when no distance was ever recorded) are mapped to
   `null` at the JSON boundary, so `jq` and other conforming parsers accept the

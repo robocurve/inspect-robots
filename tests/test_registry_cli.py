@@ -339,7 +339,7 @@ def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     assert rc == 0
     assert "unrecognized answer 'yse'" in capsys.readouterr().out
     log = _read_only_log(log_dir)
-    assert log.samples[0].operator_judgements == ["y"]
+    assert log.samples[0].operator_judgements == ("y",)
     assert log.results.metrics["operator"] == 1.0
 
 
@@ -356,14 +356,14 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     log_dir_a = tmp_path / "a"
     assert main(["reach the cube", "--log-dir", str(log_dir_a)]) == 0
-    assert _read_only_log(log_dir_a).samples[0].operator_judgements == [None]
+    assert _read_only_log(log_dir_a).samples[0].operator_judgements == (None,)
 
     # TTY but --no-prompt: never prompts either.
     _tty_stdin(monkeypatch)
     log_dir_b = tmp_path / "b"
     assert main(["reach the cube", "--no-prompt", "--log-dir", str(log_dir_b)]) == 0
     log = _read_only_log(log_dir_b)
-    assert log.samples[0].operator_judgements == [None]
+    assert log.samples[0].operator_judgements == (None,)
     assert log.results.metrics["operator"] == 0.0  # unjudged scores honestly as failure
     capsys.readouterr()
 
@@ -408,7 +408,7 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
         # Don't leak the ad-hoc registration into later tests' registry views.
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
-    assert _read_only_log(log_dir).samples[0].operator_judgements == [None]
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
     capsys.readouterr()
 
 
