@@ -98,12 +98,13 @@ def test_missing_config_file_means_empty_defaults(tmp_path: Path) -> None:
 
 
 def test_unknown_sections_and_keys_are_ignored(tmp_path: Path) -> None:
-    _write_config(
+    path = _write_config(
         tmp_path,
         "[defaults]\npolicy = p\nfuture_knob = 7\n\n[future.section]\nx = 1\n",
     )
     d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
-    assert d.policy == "p"
+    # Full equality: the unknown key and section contributed nothing at all.
+    assert d == Defaults(policy="p", policy_source=str(path))
 
 
 def test_malformed_ini_raises_system_exit_naming_file(tmp_path: Path) -> None:

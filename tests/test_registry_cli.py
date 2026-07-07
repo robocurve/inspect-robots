@@ -183,9 +183,31 @@ def test_config_file_supplies_defaults_and_adhoc_settings(
     assert f"policy: scripted (from {config})" in out
     log = _read_only_log(log_dir)
     assert log.samples[0].instruction == "reach the cube"
+    # The config's scorer (not the "operator" fallback) actually scored the run.
+    assert log.results.metrics == {"success_at_end": 1.0}
     # [policy.args] chunk_size=6 reached the policy constructor (recorded in
     # the log as the policy's action_horizon).
     assert log.eval.policy_config["action_horizon"] == 6
+
+
+def test_config_max_steps_truncates_adhoc_run(
+    _hermetic_defaults: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "max_steps = 3\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--log-dir", str(log_dir)])
+    assert rc == 0  # truncation is not an error; the eval itself succeeded
+    # Three steps cannot reach the cube: the config horizon (not the 300
+    # fallback, which would succeed) governed the rollout.
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 0.0
+    capsys.readouterr()
 
 
 def test_cli_flags_beat_config_defaults_and_args(
@@ -367,19 +389,23 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
         "builtins.input", lambda _prompt: pytest.fail("R6: --task runs must not block")
     )
     log_dir = tmp_path / "logs"
-    rc = main(
-        [
-            "run",
-            "--task",
-            "operator-task-for-test",
-            "--policy",
-            "scripted",
-            "--embodiment",
-            "cubepick",
-            "--log-dir",
-            str(log_dir),
-        ]
-    )
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "operator-task-for-test",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        # Don't leak the ad-hoc registration into later tests' registry views.
+        reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
     assert _read_only_log(log_dir).samples[0].operator_judgements == [None]
     capsys.readouterr()
