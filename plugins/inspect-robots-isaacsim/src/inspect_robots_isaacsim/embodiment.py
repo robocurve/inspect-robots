@@ -208,8 +208,13 @@ class IsaacSimEmbodiment:
         # Importing the tasks registers the gym ids; must happen AFTER the app boots.
         import gymnasium as gym
         import isaaclab_tasks  # noqa: F401  (registers Isaac-* gym ids)
+        from isaaclab_tasks.utils import parse_env_cfg
 
-        self._env = gym.make(self.task_id, num_envs=1, render_mode="rgb_array")
+        # Isaac Lab envs take a mandatory cfg object (gym.make(task_id) alone
+        # raises "missing 1 required positional argument: 'cfg'"); parse_env_cfg
+        # is Isaac Lab's own task-id -> config resolution.
+        env_cfg = parse_env_cfg(self.task_id, device=self.device, num_envs=1)
+        self._env = gym.make(self.task_id, cfg=env_cfg, render_mode="rgb_array")
         return self._env
 
     # ------------------------------------------------------------------ #
