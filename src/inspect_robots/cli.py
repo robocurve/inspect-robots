@@ -9,15 +9,37 @@ Subcommands:
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
 - ``inspect-robots inspect LOG.json`` — print a saved eval log.
+
+Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
+is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
+default policy/embodiment (flags > ``INSPECT_ROBOTS_POLICY``/``_EMBODIMENT``
+env vars > ``~/.config/inspect-robots/config.ini``). The sugar only fires for
+a first argument with interior whitespace, so a mistyped subcommand
+(``inspect-robots isnpect``) errors instead of starting a robot rollout;
+single-word instructions use the explicit ``run --instruction`` form.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from inspect_robots import __version__
+from inspect_robots._defaults import (
+    ADHOC_MAX_STEPS_FALLBACK,
+    ADHOC_SCORER_FALLBACK,
+    ENV_EMBODIMENT,
+    ENV_POLICY,
+    load_defaults,
+    parse_value,
+)
+
+if TYPE_CHECKING:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
 
 _KIND_BY_PLURAL = {
     "tasks": "task",
@@ -27,20 +49,11 @@ _KIND_BY_PLURAL = {
     "sinks": "sink",
 }
 
+_PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-def _parse_value(text: str) -> Any:
-    """Best-effort scalar parse for ``k=v`` CLI args (bool/int/float/None/str)."""
-    low = text.lower()
-    if low in ("true", "false"):
-        return low == "true"
-    if low in ("none", "null"):
-        return None
-    for caster in (int, float):
-        try:
-            return caster(text)
-        except ValueError:
-            continue
-    return text
+_SUBCOMMANDS = ("list", "run", "inspect")
+
+_ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
 
 def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
@@ -49,7 +62,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
         if "=" not in pair:
             raise SystemExit(f"expected key=value, got {pair!r}")
         key, _, value = pair.partition("=")
-        out[key] = _parse_value(value)
+        out[key] = parse_value(value)
     return out
 
 
@@ -70,15 +83,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_run = sub.add_parser("run", help="run an evaluation")
-    p_run.add_argument("--task", required=True, help="registered task name")
-    p_run.add_argument("--policy", required=True, help="registered policy name")
-    p_run.add_argument("--embodiment", required=True, help="registered embodiment name")
+    p_run.add_argument("--task", help="registered task name")
+    p_run.add_argument(
+        "--instruction",
+        help="run a single ad-hoc scene with this language instruction "
+        "(instead of a registered --task)",
+    )
+    p_run.add_argument("--policy", help="registered policy name (default: user config)")
+    p_run.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_run.add_argument("-T", dest="task_args", action="append", metavar="k=v")
     p_run.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
     p_run.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
     p_run.add_argument("--log-dir", default="logs")
     p_run.add_argument("--seed", type=int, default=0)
     p_run.add_argument("--epochs", type=int, default=None, help="override the task's epoch count")
+    p_run.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="horizon of an --instruction run (default: config or "
+        f"{ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
+    )
+    p_run.add_argument(
+        "--scorer",
+        default=None,
+        help="scorer for an --instruction run (default: config or "
+        f"{ADHOC_SCORER_FALLBACK!r}); invalid with --task",
+    )
+    p_run.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="never ask the terminal operator for a success verdict",
+    )
     p_run.add_argument(
         "--fail-on-error",
         type=float,
@@ -112,18 +148,133 @@ def _cmd_list(what: str | None) -> int:
     return 0
 
 
+def _pick_component(
+    kind: str, flag_value: str | None, default: str | None, source: str | None
+) -> tuple[str, str]:
+    """Resolve a component name via flag > defaults, or exit with guidance."""
+    if flag_value:
+        return flag_value, f"--{kind}"
+    if default:
+        return default, f"from {source}"
+    from inspect_robots.registry import registered
+
+    names = ", ".join(sorted(registered(kind))) or "(none)"
+    raise SystemExit(
+        f"no {kind} given and no default configured.\n"
+        f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
+        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or add "
+        f"'{kind} = NAME' under [defaults] in ~/.config/inspect-robots/config.ini"
+    )
+
+
+def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
+    """Registry resolution with a clean error instead of a KeyError traceback."""
+    from inspect_robots.registry import resolve
+
+    try:
+        return resolve(kind, name, **kwargs)
+    except KeyError as exc:
+        raise SystemExit(str(exc.args[0])) from exc
+
+
+_PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
+_PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
+
+
+def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
+    """Capture the terminal operator's verdict on the record (R6)."""
+    from inspect_robots.transcript import operator_event
+
+    del scene
+    while True:
+        try:
+            answer = input(_PROMPT).strip().lower()
+        except EOFError:
+            answer = "skip"
+        if answer in _PROMPT_ANSWERS:
+            break
+        print(f"unrecognized answer {answer!r}; expected one of y/n/partial/skip")
+    if answer == "skip":
+        return
+    record.operator_judgement = answer
+    record.events.append(operator_event(t=len(record.steps), verdict=answer))
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from inspect_robots import eval
     from inspect_robots.logging import JsonLogSink
-    from inspect_robots.registry import resolve
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
 
-    task = resolve("task", args.task, **_parse_kvs(args.task_args))
-    policy = resolve("policy", args.policy, **_parse_kvs(args.policy_args))
-    embodiment = resolve("embodiment", args.embodiment, **_parse_kvs(args.embodiment_args))
+    is_adhoc = args.instruction is not None
+    if is_adhoc and args.task:
+        raise SystemExit("pass exactly one of --task or --instruction, not both")
+    if not is_adhoc and not args.task:
+        raise SystemExit("pass a registered --task name or an --instruction to run")
+    if not is_adhoc:
+        if args.max_steps is not None:
+            raise SystemExit(
+                "--max-steps only applies to --instruction runs; a registered task owns its horizon"
+            )
+        if args.scorer is not None:
+            raise SystemExit(
+                "--scorer only applies to --instruction runs; a registered task owns its scorers"
+            )
+    elif args.task_args:
+        raise SystemExit(
+            "-T only applies to --task runs; an ad-hoc instruction task takes no constructor args"
+        )
+
+    defaults = load_defaults(os.environ)
+    policy_name, policy_source = _pick_component(
+        "policy", args.policy, defaults.policy, defaults.policy_source
+    )
+    embodiment_name, embodiment_source = _pick_component(
+        "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
+    )
+    # Config-file args apply to whichever component is selected; explicit
+    # -P/-E flags override same-named keys.
+    policy_kvs = {**defaults.policy_args, **_parse_kvs(args.policy_args)}
+    embodiment_kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+
+    if is_adhoc:
+        scorer_name = args.scorer or defaults.scorer or ADHOC_SCORER_FALLBACK
+        max_steps = (
+            args.max_steps
+            if args.max_steps is not None
+            else (defaults.max_steps or ADHOC_MAX_STEPS_FALLBACK)
+        )
+        task = Task(
+            name="adhoc",
+            scenes=[Scene(id="scene-0", instruction=args.instruction)],
+            scorer=_resolve_or_exit("scorer", scorer_name),
+            max_steps=max_steps,
+            metadata={"instruction": args.instruction, "adhoc": True},
+        )
+    else:
+        task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
+
+    policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
+    embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
     if args.epochs is not None:
         task = replace(task, epochs=args.epochs)
+
+    # Defaults must never be silent: say what runs, and why, before it moves.
+    print(f"policy: {policy_name} ({policy_source})")
+    print(f"embodiment: {embodiment_name} ({embodiment_source})")
+
+    before_scoring = None
+    if (
+        is_adhoc
+        and not args.no_prompt
+        and sys.stdin.isatty()
+        and any(s.name == "operator" for s in task.scorers)
+    ):
+        # Ad-hoc runs only: a registered task with an operator scorer keeps
+        # R6's non-blocking, unattended-safe behavior (judgement stays None).
+        before_scoring = _prompt_operator
 
     # Construct the sink explicitly so we can tell the user where the log went.
     sink = JsonLogSink(args.log_dir)
@@ -136,6 +287,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         sinks=[sink],
         fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
         store_frames=args.store_frames,
+        before_scoring=before_scoring,
     )
     log = logs[0]
     print(f"status: {log.status}")
@@ -169,9 +321,26 @@ def _cmd_inspect(path: str) -> int:
     return 0 if log.status == "success" else 1
 
 
+def _apply_instruction_sugar(argv: list[str]) -> list[str]:
+    """``inspect-robots "wipe the table"`` → ``run --instruction "wipe the table"``.
+
+    Fires only for a first argument that is not a subcommand or flag AND has
+    interior whitespace after stripping: a mistyped subcommand
+    (``inspect-robots isnpect``) or a whitespace-padded one
+    (``inspect-robots " list "``) must never silently start a rollout.
+    """
+    if not argv:
+        return argv
+    tok = argv[0].strip()
+    if tok in _SUBCOMMANDS or tok.startswith("-") or not any(ch.isspace() for ch in tok):
+        return argv
+    return ["run", "--instruction", argv[0], *argv[1:]]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_apply_instruction_sugar(argv_list))
     if args.command == "list":
         return _cmd_list(args.what)
     if args.command == "run":

@@ -17,8 +17,9 @@ import pytest
 import inspect_robots.controller as controller_mod
 import inspect_robots.registry as reg
 from inspect_robots import eval
+from inspect_robots._defaults import parse_value as _parse_value
 from inspect_robots.approver import AutoApprover, ClampApprover
-from inspect_robots.cli import _parse_kvs, _parse_value, main
+from inspect_robots.cli import _parse_kvs, main
 from inspect_robots.compat import check_compatibility
 from inspect_robots.controller import DefaultController, EnsemblingController, SmoothingController
 from inspect_robots.embodiment import EmbodimentInfo
