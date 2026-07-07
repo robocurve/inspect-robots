@@ -50,8 +50,25 @@ pip install "inspect-robots[rerun]"   # + Rerun visualization
 
 ## Quickstart
 
-No hardware or simulator needed — the dependency-free `CubePick` mock world
-exercises the whole stack:
+With a default policy/embodiment configured once in
+`~/.config/inspect-robots/config.ini`, just tell the robot what to do:
+
+```bash
+inspect-robots "place the spoon on the plate"                # zero-config ad-hoc eval
+inspect-robots "place the spoon on the plate" --sim          # same, on your configured sim
+```
+
+The full command line resolves any registered task/policy/embodiment
+(builtins + installed plugins):
+
+```bash
+inspect-robots list                                          # registered components
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
+inspect-robots inspect logs/cubepick-reach_*.json            # results table
+```
+
+And everything is a Python API. No hardware or simulator needed — the
+dependency-free `CubePick` mock world exercises the whole stack:
 
 ```python
 from inspect_robots import eval
@@ -70,21 +87,6 @@ task = Task(
 # The two swappable inputs: a policy (VLA) and an embodiment (robot/sim).
 (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment())
 print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
-```
-
-…or from the command line (components resolve from a registry):
-
-```bash
-inspect-robots list                                          # registered components
-inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
-inspect-robots inspect logs/cubepick-reach_*.json            # results table
-```
-
-…or, with a default policy/embodiment configured once in
-`~/.config/inspect-robots/config.ini`, just tell the robot what to do:
-
-```bash
-inspect-robots "place the spoon on the plate"                # zero-config ad-hoc eval
 ```
 
 ## Why Inspect Robots
