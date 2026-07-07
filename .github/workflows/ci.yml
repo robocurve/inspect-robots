@@ -153,3 +153,40 @@ jobs:
           plugins/inspect-robots-isaacsim/src/inspect_robots_isaacsim
       - name: Pytest (plugin)
         run: uv run --no-sync python -m pytest plugins/inspect-robots-isaacsim/tests -q
+
+  # Single required status check for branch protection: green iff every job
+  # above is green. Add new jobs to 'needs' here or they won't gate merges.
+  ci-ok:
+    name: ci-ok
+    if: ${{ always() }}
+    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every needed job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'
+
+  # Red main is a stop-the-line event: open an issue so it can't go unnoticed.
+  # Only fires on pushes (i.e. merges to main), never on PR runs.
+  alert-red-main:
+    name: alert on red main
+    if: ${{ failure() && github.event_name == 'push' }}
+    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue unless one is already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "CI is red on main in:title" --json number --jq length)
+          if [ "$existing" = "0" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY"               --title "CI is red on main (${GITHUB_SHA:0:8})"               --body "CI failed on a push to main: $RUN_URL
+
+Stop-the-line: fix forward or revert before merging anything else. If the failure is transient (network, external deps), re-run the failed jobs and close this."
+          else
+            echo "an open red-main issue already exists; not filing another"
+          fi
