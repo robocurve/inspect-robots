@@ -561,3 +561,26 @@ def test_sim_ignores_real_embodiment_env_var(
     rc = main(["reach the cube", "--sim", "--scorer", "success_at_end", "--log-dir", str(log_dir)])
     assert rc == 0
     assert "embodiment: cubepick" in capsys.readouterr().out
+
+
+def test_cli_run_closes_the_embodiment_it_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The CLI resolves the embodiment itself (so eval() does not own it); it
+    must close what it opened — real-hardware embodiments release motor torque
+    in close(), and skipping it leaves arms energized after the run."""
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closed: list[bool] = []
+
+    class _Tracked(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
+    rc = main(["reach the cube", "--scorer", "success_at_end", "--log-dir", str(tmp_path / "logs")])
+    assert rc == 0
+    assert closed == [True]

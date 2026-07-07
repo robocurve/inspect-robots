@@ -316,17 +316,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     # Construct the sink explicitly so we can tell the user where the log went.
     sink = JsonLogSink(args.log_dir)
-    logs = eval(
-        task,
-        policy,
-        embodiment,
-        log_dir=args.log_dir,
-        seed=args.seed,
-        sinks=[sink],
-        fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-        store_frames=args.store_frames,
-        before_scoring=before_scoring,
-    )
+    try:
+        logs = eval(
+            task,
+            policy,
+            embodiment,
+            log_dir=args.log_dir,
+            seed=args.seed,
+            sinks=[sink],
+            fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
+            store_frames=args.store_frames,
+            before_scoring=before_scoring,
+        )
+    finally:
+        # The CLI resolved the embodiment itself, so eval() does not own it
+        # ("close what we open"). Real-hardware embodiments release motor
+        # torque in close(); skipping this leaves a robot energized.
+        embodiment.close()
     log = logs[0]
     print(f"status: {log.status}")
     print(f"scenes: {log.results.total_scenes}  trials: {log.results.total_trials}")
