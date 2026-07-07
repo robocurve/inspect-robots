@@ -28,11 +28,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Create venv
-        run: uv venv --python 3.12
-      - name: Install (docs extras)
-        run: uv pip install -e ".[docs]"
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install from uv.lock (docs extras)
+        run: uv sync --locked --python 3.12 --extra docs
       - name: Build site (strict)
         run: uv run mkdocs build --strict
       - name: Upload Pages artifact

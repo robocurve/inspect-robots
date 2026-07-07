@@ -24,11 +24,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Create venv
-        run: uv venv --python 3.11
-      - name: Install (dev extras)
-        run: uv pip install -e ".[dev]"
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install from uv.lock (dev extras)
+        run: uv sync --locked --python 3.11 --extra dev
       - name: Ruff (lint)
         run: uv run ruff check .
       - name: Ruff (format check)
@@ -53,11 +53,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Create venv (py${{ matrix.python-version }})
-        run: uv venv --python ${{ matrix.python-version }}
-      - name: Install (dev extras)
-        run: uv pip install -e ".[dev]"
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install from uv.lock (dev extras)
+        run: uv sync --locked --python ${{ matrix.python-version }} --extra dev
       - name: Pytest
         run: uv run pytest --cov --cov-report=term-missing
 
@@ -87,15 +87,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Create venv (py${{ matrix.python-version }})
-        run: uv venv --python ${{ matrix.python-version }}
-      - name: Install (dev extras) with pinned NumPy
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install from uv.lock (dev extras), then pin NumPy
         run: |
-          uv pip install -e ".[dev]"
+          uv sync --locked --python ${{ matrix.python-version }} --extra dev
           uv pip install "${{ matrix.numpy }}"
       - name: Pytest
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
 
   core-only-import:
     # Enforce the dependency boundary: the core package must import with ONLY
@@ -110,11 +110,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
-      - name: Create venv
-        run: uv venv --python 3.12
-      - name: Install core only (no extras)
-        run: uv pip install -e .
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install core only from uv.lock (no extras)
+        run: uv sync --locked --python 3.12
       - name: Assert optional deps are absent, then import
         run: |
           uv run python - <<'PY'
@@ -141,9 +141,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
       - name: Sync workspace (core + plugins, dev extras)
-        run: uv sync --python 3.11 --all-packages --extra dev
+        run: uv sync --locked --python 3.11 --all-packages --extra dev
       - name: Ruff (plugin)
         run: uv run --no-sync ruff check plugins/inspect-robots-isaacsim
       - name: Mypy (plugin, strict)
