@@ -80,6 +80,13 @@ inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 inspect-robots inspect logs/cubepick-reach_*.json            # results table
 ```
 
+…or, with a default policy/embodiment configured once in
+`~/.config/inspect-robots/config.ini`, just tell the robot what to do:
+
+```bash
+inspect-robots "place the spoon on the plate"                # zero-config ad-hoc eval
+```
+
 ## Why Inspect Robots
 
 - 🌍 **Real-world first.** Interfaces assume real-robot reality — human-in-the-loop

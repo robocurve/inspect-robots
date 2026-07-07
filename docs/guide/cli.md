@@ -2,6 +2,71 @@
 
 The `inspect_robots` CLI wraps the registry and [`eval`][inspect_robots.eval.eval].
 
+## Zero-config: `inspect-robots "<instruction>"`
+
+Once you have configured a default policy and embodiment (below), giving the
+robot a command is a one-liner:
+
+```bash
+inspect-robots "place the spoon on the plate"
+```
+
+This runs a single **ad-hoc scene** built from that language instruction on
+your default policy/embodiment — sugar for
+`inspect-robots run --instruction "..."`. The resolved components and where
+they came from are printed before the robot moves. Two flags exist only for
+instruction runs: `--max-steps N` (horizon, default 300) and `--scorer NAME`
+(default `operator`).
+
+The sugar only fires when the first argument contains whitespace, so a
+mistyped subcommand (`inspect-robots isnpect`) errors out instead of starting
+a rollout; a single-word instruction needs the explicit
+`run --instruction "wipe"` form.
+
+### Default policy and embodiment
+
+Resolved in order — first hit wins:
+
+1. explicit flags: `--policy` / `--embodiment`
+2. environment: `INSPECT_ROBOTS_POLICY` / `INSPECT_ROBOTS_EMBODIMENT`
+3. the user config file `~/.config/inspect-robots/config.ini`
+   (`$XDG_CONFIG_HOME` is honored):
+
+```ini
+[defaults]
+policy = molmoact2-yam
+embodiment = yam-bimanual
+scorer = operator      ; optional, ad-hoc runs only
+max_steps = 300        ; optional, ad-hoc runs only
+
+[policy.args]          ; default -P key=value pairs
+checkpoint = ~/ckpts/molmoact2-yam.pt
+
+[embodiment.args]      ; default -E key=value pairs
+cameras = wrist,front
+```
+
+Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
+`[*.args]` values, and an explicit `-P/-E key=value` flag overrides the
+same-named config key. There is deliberately **no project-local config file**:
+a checked-in file choosing which policy drives your hardware would be a trust
+footgun.
+
+### Operator scoring
+
+An arbitrary instruction has no success oracle, so ad-hoc runs default to the
+`operator` scorer: when run on an interactive terminal, the CLI asks after
+each trial —
+
+```text
+did the robot succeed? [y/n/partial/skip] (partial scores as failure)
+```
+
+— and records the verdict in the log (`skip` records nothing). Piped/CI
+stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
+runs stay non-blocking, and an unjudged trial honestly scores as failure with
+"no operator judgement recorded".
+
 ## `inspect-robots list`
 
 Show registered components (builtins + installed plugins):
@@ -28,6 +93,10 @@ inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P c
 `PolicyError`s (`1` = first error, `0<X<1` = proportion, `X>1` = count), and
 `--store-frames` streams camera frames to `<log-dir>/frames`. When the run
 finishes, the path of the written log is printed.
+
+`--policy`/`--embodiment` may be omitted when defaults are configured (see
+the zero-config section above); `--instruction "..."` replaces `--task` to
+run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise.
 
