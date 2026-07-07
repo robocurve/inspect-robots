@@ -135,6 +135,12 @@ and [`llms-full.txt`](https://inspectrobots.org/llms-full.txt).
 
 ## Development
 
+> **Dependency changes:** after editing dependencies in `pyproject.toml`, run
+> `uv lock` and commit the updated lockfile — CI installs with
+> `uv sync --locked` and fails with "the lockfile needs to be updated" if you
+> forget. Day-to-day conventions (PR-only `main`, the required `ci-ok` check,
+> one-click releases) are documented in [`CLAUDE.md`](CLAUDE.md).
+
 ```bash
 uv venv && uv pip install -e ".[dev]"
 uv run pre-commit install          # ruff + mypy on commit, 100% coverage on push
