@@ -1,15 +1,73 @@
 name: Release
 
-# Publishes to PyPI via trusted publishing (OIDC) — no API tokens.
-# Each job authenticates against its own PyPI trusted-publisher entry,
-# distinguished by the GitHub environment name (pypi / pypi-isaacsim).
+# Two ways to release; both publish to PyPI via trusted publishing (OIDC):
+#
+#   1. One-click: Actions -> Release -> "Run workflow" -> pick a version bump.
+#      The core version is derived from git tags by hatch-vcs, so the cut job
+#      only computes the next tag and creates the GitHub release — no commit.
+#      Publish then runs in this same workflow run. (A release created with the
+#      built-in GITHUB_TOKEN never re-triggers workflows, which is why publish
+#      must live in this run rather than firing on the release event.)
+#
+#   2. Manual: publish a GitHub release by hand — the publish jobs run on the
+#      release event. The tag must point at a commit that contains this file.
+#
+# The isaacsim plugin has its own static version (plugins/*/pyproject.toml);
+# it is published alongside every core release, with skip-existing so an
+# unchanged plugin version is a no-op. To release the plugin, bump its
+# version in a PR, then cut any release.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (applied to the latest v* tag)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  cut:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the tag + release
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full tag history to find the latest version
+      - name: Compute next tag from latest v* tag
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          latest=${latest:-v0.0.0}
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          case "$BUMP" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+          esac
+          echo "tag: $latest -> v$major.$minor.$patch"
+          echo "tag=v$major.$minor.$patch" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+
   publish-core:
     name: publish inspect-robots
+    needs: [cut]
+    if: ${{ !cancelled() && (github.event_name == 'release' || needs.cut.result == 'success') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -17,6 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.cut.outputs.tag || github.ref }}
           fetch-depth: 0  # hatch-vcs derives the version from git tags
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -27,12 +86,16 @@ jobs:
 
   publish-isaacsim:
     name: publish inspect-robots-isaacsim
+    needs: [cut]
+    if: ${{ !cancelled() && (github.event_name == 'release' || needs.cut.result == 'success') }}
     runs-on: ubuntu-latest
     environment: pypi-isaacsim
     permissions:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
         uses: astral-sh/setup-uv@v5
       - name: Build sdist + wheel
@@ -40,7 +103,6 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # The plugin is versioned independently (static version in its
-          # pyproject); a repo release that doesn't bump it should not fail
-          # on the already-uploaded file.
+          # The plugin is versioned independently; a core release that doesn't
+          # bump it must not fail on the already-uploaded file.
           skip-existing: true
