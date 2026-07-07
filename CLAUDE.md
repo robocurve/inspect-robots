@@ -72,6 +72,10 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - **CI installs from `uv.lock`** (`uv sync --locked`). After changing
   dependencies in `pyproject.toml`, run `uv lock` and commit the lockfile —
   otherwise CI fails with "the lockfile needs to be updated".
+- A weekly **canary** (`canary.yml`) does the opposite: it installs the latest
+  dependency versions the pyproject ranges allow (ignoring the lockfile), runs
+  the tests, and opens an issue on failure — catching ecosystem breakage that
+  locked CI can't see. A green canary means `uv lock --upgrade` is safe.
 - The `test-extra` tier stays advisory: `continue-on-error: true` means it
   reports success to `ci-ok` even when its steps fail — listing it in `needs`
   does not make it blocking.
