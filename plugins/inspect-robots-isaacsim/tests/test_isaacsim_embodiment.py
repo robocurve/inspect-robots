@@ -278,3 +278,23 @@ def test_disable_debug_vis_walks_nested_configs() -> None:
     assert cfg.not_a_flag.debug_vis is False
     assert cfg.scene.debug_vis is False
     assert cfg.debug_vis == "keep"
+
+
+def test_request_named_obs_terms_flips_concatenate_flag() -> None:
+    from inspect_robots_isaacsim.embodiment import _request_named_obs_terms
+
+    class _Group:
+        concatenate_terms = True
+
+    class _Obs:
+        policy = _Group()
+
+    class _Cfg:
+        observations = _Obs()
+
+    cfg = _Cfg()
+    _request_named_obs_terms(cfg, "policy")
+    assert cfg.observations.policy.concatenate_terms is False
+    # Unknown group / missing attrs: silently a no-op, never raises.
+    _request_named_obs_terms(cfg, "nonexistent")
+    _request_named_obs_terms(object(), "policy")

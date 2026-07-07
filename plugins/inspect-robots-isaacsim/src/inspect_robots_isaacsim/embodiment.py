@@ -102,6 +102,21 @@ def _disable_debug_vis(cfg: Any) -> None:
                 stack.append(value)
 
 
+def _request_named_obs_terms(env_cfg: Any, obs_group: str) -> None:
+    """Ask Isaac Lab to keep the observation group as a named dict.
+
+    Manager-based envs concatenate a group's terms into one flat tensor by
+    default (``concatenate_terms=True``), which would leave ``_to_observation``
+    with nothing to map onto the adapter's *named* state fields — policies
+    would see an empty ``Observation.state``. The adapter's contract is named
+    proprioception, so request named terms.
+    """
+    groups = getattr(env_cfg, "observations", None)
+    group_cfg = getattr(groups, obs_group, None)
+    if group_cfg is not None and hasattr(group_cfg, "concatenate_terms"):
+        group_cfg.concatenate_terms = False
+
+
 def _default_state_fields(num_arm_joints: int) -> tuple[StateField, ...]:
     """Canonical proprioception for a Franka-like arm (keys/units from Inspect Robots)."""
 
@@ -250,6 +265,7 @@ class IsaacSimEmbodiment:
         env_cfg = parse_env_cfg(self.task_id, device=self.device, num_envs=1)
         if self.headless:
             _disable_debug_vis(env_cfg)
+        _request_named_obs_terms(env_cfg, self.obs_group)
         self._env = gym.make(self.task_id, cfg=env_cfg, render_mode="rgb_array")
         return self._env
 
