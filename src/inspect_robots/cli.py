@@ -33,6 +33,8 @@ from inspect_robots._defaults import (
     ADHOC_SCORER_FALLBACK,
     ENV_EMBODIMENT,
     ENV_POLICY,
+    ENV_SIM_EMBODIMENT,
+    Defaults,
     load_defaults,
     parse_value,
 )
@@ -111,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
         f"{ADHOC_SCORER_FALLBACK!r}); invalid with --task",
     )
     p_run.add_argument(
+        "--sim",
+        action="store_true",
+        help="run on the configured sim_embodiment instead of the default "
+        "(real-hardware) embodiment",
+    )
+    p_run.add_argument(
         "--no-prompt",
         action="store_true",
         help="never ask the terminal operator for a success verdict",
@@ -164,6 +172,26 @@ def _pick_component(
         f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
         f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or add "
         f"'{kind} = NAME' under [defaults] in ~/.config/inspect-robots/config.ini"
+    )
+
+
+def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
+    """The --sim chain: env var > config ``sim_embodiment``, or exit with guidance.
+
+    Deliberately does NOT consult ``--embodiment``/``$INSPECT_ROBOTS_EMBODIMENT``
+    (those pick the *real* default; an exported env var is a persistent
+    preference, not per-invocation intent, so --sim simply ignores it).
+    """
+    if defaults.sim_embodiment:
+        return defaults.sim_embodiment, f"--sim, from {defaults.sim_embodiment_source}"
+    from inspect_robots.registry import registered
+
+    names = ", ".join(sorted(registered("embodiment"))) or "(none)"
+    raise SystemExit(
+        "--sim given but no sim embodiment configured.\n"
+        f"registered embodiments: {names}\n"
+        f"fix: set ${ENV_SIM_EMBODIMENT}, or add 'sim_embodiment = NAME' under "
+        "[defaults] in ~/.config/inspect-robots/config.ini"
     )
 
 
@@ -226,18 +254,28 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise SystemExit(
             "-T only applies to --task runs; an ad-hoc instruction task takes no constructor args"
         )
+    if args.sim and args.embodiment:
+        raise SystemExit(
+            "--sim selects your configured sim_embodiment; "
+            "passing --embodiment already picks the embodiment — drop one"
+        )
 
     defaults = load_defaults(os.environ)
     policy_name, policy_source = _pick_component(
         "policy", args.policy, defaults.policy, defaults.policy_source
     )
-    embodiment_name, embodiment_source = _pick_component(
-        "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
-    )
+    if args.sim:
+        embodiment_name, embodiment_source = _pick_sim_embodiment(defaults)
+        embodiment_defaults = defaults.sim_embodiment_args
+    else:
+        embodiment_name, embodiment_source = _pick_component(
+            "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
+        )
+        embodiment_defaults = defaults.embodiment_args
     # Config-file args apply to whichever component is selected; explicit
     # -P/-E flags override same-named keys.
     policy_kvs = {**defaults.policy_args, **_parse_kvs(args.policy_args)}
-    embodiment_kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+    embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     if is_adhoc:
         scorer_name = args.scorer or defaults.scorer or ADHOC_SCORER_FALLBACK

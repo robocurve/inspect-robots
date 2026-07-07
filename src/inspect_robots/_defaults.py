@@ -23,6 +23,7 @@ from typing import Any
 
 ENV_POLICY = "INSPECT_ROBOTS_POLICY"
 ENV_EMBODIMENT = "INSPECT_ROBOTS_EMBODIMENT"
+ENV_SIM_EMBODIMENT = "INSPECT_ROBOTS_SIM_EMBODIMENT"
 
 # Fallbacks for ad-hoc (instruction) runs when neither flag nor config decides.
 ADHOC_SCORER_FALLBACK = "operator"
@@ -52,10 +53,16 @@ class Defaults:
     policy_source: str | None = None
     embodiment: str | None = None
     embodiment_source: str | None = None
+    # The sim counterpart --sim swaps in; real hardware is just the default
+    # `embodiment`. Args are kept separate: real-rig args (ports, camera
+    # serials) are wrong for a sim and vice versa.
+    sim_embodiment: str | None = None
+    sim_embodiment_source: str | None = None
     scorer: str | None = None
     max_steps: int | None = None
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
+    sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
 
 
 def _config_path(env: Mapping[str, str]) -> Path | None:
@@ -106,15 +113,19 @@ def _read_config(path: Path) -> Defaults:
 
     policy = parser.get("defaults", "policy", fallback=None)
     embodiment = parser.get("defaults", "embodiment", fallback=None)
+    sim_embodiment = parser.get("defaults", "sim_embodiment", fallback=None)
     return Defaults(
         policy=policy,
         policy_source=source if policy else None,
         embodiment=embodiment,
         embodiment_source=source if embodiment else None,
+        sim_embodiment=sim_embodiment,
+        sim_embodiment_source=source if sim_embodiment else None,
         scorer=parser.get("defaults", "scorer", fallback=None),
         max_steps=max_steps,
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
+        sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
     )
 
 
@@ -135,4 +146,8 @@ def load_defaults(env: Mapping[str, str]) -> Defaults:
         defaults = replace(defaults, policy=policy, policy_source=f"${ENV_POLICY}")
     if embodiment := env.get(ENV_EMBODIMENT):
         defaults = replace(defaults, embodiment=embodiment, embodiment_source=f"${ENV_EMBODIMENT}")
+    if sim := env.get(ENV_SIM_EMBODIMENT):
+        defaults = replace(
+            defaults, sim_embodiment=sim, sim_embodiment_source=f"${ENV_SIM_EMBODIMENT}"
+        )
     return defaults

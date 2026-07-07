@@ -26,7 +26,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect`, plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY) |
-| `_defaults.py` | user default policy/embodiment for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file) |
+| `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file) |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants

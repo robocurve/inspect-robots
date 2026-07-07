@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import inspect_robots.registry as reg
-from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY
+from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
 from inspect_robots.log import EvalLog
 from inspect_robots.mock import ScriptedPolicy
@@ -22,6 +22,7 @@ def _hermetic_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
     monkeypatch.delenv(ENV_POLICY, raising=False)
     monkeypatch.delenv(ENV_EMBODIMENT, raising=False)
+    monkeypatch.delenv(ENV_SIM_EMBODIMENT, raising=False)
     return config_home
 
 
@@ -449,3 +450,114 @@ def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None
     _prompt_operator(record, scene)
     assert record.operator_judgement is None
     assert record.events == []
+
+
+# --------------------------------------------------------------------------- #
+# --sim (plan 0006): swap the default embodiment for its sim counterpart.
+# --------------------------------------------------------------------------- #
+_SIM_SWAP_CONFIG = (
+    "[defaults]\n"
+    "policy = scripted\n"
+    "embodiment = missing-real-arm\n"  # would explode if ever resolved
+    "sim_embodiment = cubepick\n"
+    "scorer = success_at_end\n"
+    "[embodiment.args]\n"
+    "port = 1\n"  # real-rig arg cubepick would reject
+)
+
+
+def test_sim_flag_swaps_embodiment_and_is_load_bearing(
+    _hermetic_defaults: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(_hermetic_defaults, _SIM_SWAP_CONFIG)
+    log_dir = tmp_path / "logs"
+
+    # With --sim: runs green on cubepick — the real default (which does not
+    # exist) was never resolved, and [embodiment.args] port=1 never leaked
+    # into the sim constructor (it would TypeError).
+    rc = main(["reach the cube", "--sim", "--log-dir", str(log_dir)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"embodiment: cubepick (--sim, from {config})" in out
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 1.0
+
+    # Without --sim the same command dies resolving the real default,
+    # proving --sim was load-bearing.
+    with pytest.raises(SystemExit, match="no embodiment named 'missing-real-arm'"):
+        main(["reach the cube", "--log-dir", str(log_dir)])
+
+
+def test_sim_embodiment_args_reach_constructor_and_e_flag_overrides(
+    _hermetic_defaults: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "sim_embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[sim_embodiment.args]\n"
+        "max_step = 0.001\n",  # crawls: cube is >=0.5 away, 300 steps max
+    )
+    log_dir_a = tmp_path / "a"
+    assert main(["reach the cube", "--sim", "--log-dir", str(log_dir_a)]) == 0
+    assert _read_only_log(log_dir_a).results.metrics["success_at_end"] == 0.0
+
+    # An explicit -E overrides the same-named [sim_embodiment.args] key.
+    log_dir_b = tmp_path / "b"
+    assert main(["reach the cube", "--sim", "-E", "max_step=0.1", "--log-dir", str(log_dir_b)]) == 0
+    assert _read_only_log(log_dir_b).results.metrics["success_at_end"] == 1.0
+    capsys.readouterr()
+
+
+def test_sim_conflicts_with_explicit_embodiment() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(["run", "--instruction", "reach it", "--sim", "--embodiment", "cubepick"])
+
+
+def test_sim_without_configuration_exits_with_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    with pytest.raises(SystemExit, match="no sim embodiment configured") as excinfo:
+        main(["run", "--instruction", "reach it", "--sim"])
+    message = str(excinfo.value)
+    assert ENV_SIM_EMBODIMENT in message and "sim_embodiment = NAME" in message
+
+
+def test_sim_works_with_registered_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    log_dir = tmp_path / "logs"
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--sim",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # env beats config for the sim chain, and the header says so.
+    assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
+    assert "status: success" in out
+
+
+def test_sim_ignores_real_embodiment_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A persistent real-embodiment env var must not break (or leak into)
+    # --sim runs: the sim chain simply doesn't consult it.
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "bogus-real-arm")
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--sim", "--scorer", "success_at_end", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert "embodiment: cubepick" in capsys.readouterr().out

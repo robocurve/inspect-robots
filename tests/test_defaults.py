@@ -10,6 +10,7 @@ import pytest
 from inspect_robots._defaults import (
     ENV_EMBODIMENT,
     ENV_POLICY,
+    ENV_SIM_EMBODIMENT,
     Defaults,
     load_defaults,
     parse_value,
@@ -129,3 +130,46 @@ def test_parse_value_scalars() -> None:
     assert parse_value("42") == 42
     assert parse_value("2.5") == 2.5
     assert parse_value("hello") == "hello"
+
+
+_SIM_CONFIG = """
+[defaults]
+embodiment = yam-bimanual
+sim_embodiment = yam-bimanual-isaac
+
+[embodiment.args]
+port = /dev/ttyUSB0
+
+[sim_embodiment.args]
+headless = true
+scene_file = ~/scenes/kitchen.usd
+"""
+
+
+def test_sim_embodiment_config_is_independent_of_real(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, _SIM_CONFIG)
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    scene_file = d.sim_embodiment_args["scene_file"]
+    assert isinstance(scene_file, str) and not scene_file.startswith("~")  # ~ expanded
+    # Full equality: sim and real defaults live side by side without bleed.
+    assert d == Defaults(
+        embodiment="yam-bimanual",
+        embodiment_source=str(path),
+        sim_embodiment="yam-bimanual-isaac",
+        sim_embodiment_source=str(path),
+        embodiment_args={"port": "/dev/ttyUSB0"},
+        sim_embodiment_args={"headless": True, "scene_file": scene_file},
+    )
+
+
+def test_env_sim_embodiment_overrides_config_but_not_real(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, _SIM_CONFIG)
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path), ENV_SIM_EMBODIMENT: "other-sim"})
+    assert d.sim_embodiment == "other-sim"
+    assert d.sim_embodiment_source == f"${ENV_SIM_EMBODIMENT}"
+    assert d.embodiment == "yam-bimanual"  # the real default is untouched
+    assert d.embodiment_source == str(path)
+    # The env var overrides only the *name*; config-file sim args still apply.
+    assert d.sim_embodiment_args["headless"] is True
+    scene_file = d.sim_embodiment_args["scene_file"]
+    assert isinstance(scene_file, str) and scene_file.endswith("scenes/kitchen.usd")

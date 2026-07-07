@@ -35,7 +35,8 @@ Resolved in order — first hit wins:
 ```ini
 [defaults]
 policy = molmoact2-yam
-embodiment = yam-bimanual
+embodiment = yam-bimanual            ; the default: real hardware
+sim_embodiment = yam-bimanual-isaac  ; what --sim swaps in
 scorer = operator      ; optional, ad-hoc runs only
 max_steps = 300        ; optional, ad-hoc runs only
 
@@ -44,6 +45,9 @@ checkpoint = ~/ckpts/molmoact2-yam.pt
 
 [embodiment.args]      ; default -E key=value pairs
 cameras = wrist,front
+
+[sim_embodiment.args]  ; -E pairs used only under --sim
+headless = true
 ```
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
@@ -51,6 +55,26 @@ Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
 same-named config key. There is deliberately **no project-local config file**:
 a checked-in file choosing which policy drives your hardware would be a trust
 footgun.
+
+### Running in simulation: `--sim`
+
+Real hardware is the default (it is whatever you configured as `embodiment`).
+`--sim` swaps in your configured sim counterpart for one invocation:
+
+```bash
+inspect-robots "place the spoon on the plate" --sim
+inspect-robots run --task my-benchmark --policy molmoact2-yam --sim
+```
+
+The sim embodiment resolves as `$INSPECT_ROBOTS_SIM_EMBODIMENT` > config
+`sim_embodiment`, with constructor args from `[sim_embodiment.args]` only —
+real-rig args (`[embodiment.args]`: serial ports, camera IDs) never leak into
+a sim run, and vice versa. `--sim` together with an explicit `--embodiment`
+is an error (they both pick the embodiment); an exported
+`$INSPECT_ROBOTS_EMBODIMENT` is simply not consulted under `--sim` — it's a
+persistent default for real runs, not a per-invocation intent. The mapping is
+explicit configuration: the framework never guesses which sim matches your
+robot.
 
 ### Operator scoring
 
