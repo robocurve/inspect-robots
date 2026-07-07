@@ -1,0 +1,46 @@
+name: Canary
+
+# Weekly fresh-resolution test. Regular CI installs from uv.lock, so it can't
+# see that a new release of an allowed dependency breaks us — this job can:
+# it resolves the latest versions the pyproject ranges allow (ignoring the
+# lockfile) and runs the test suite. On failure it opens an issue, like the
+# red-main alert. A green canary is also the signal that it's safe to refresh
+# the lockfile (`uv lock --upgrade`).
+on:
+  schedule:
+    - cron: "23 5 * * 1"  # Mondays 05:23 UTC
+  workflow_dispatch:
+
+jobs:
+  fresh-deps:
+    name: fresh resolution (latest allowed deps)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write  # open the failure alert
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs derives the version from git tags
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Create venv
+        run: uv venv --python 3.12
+      - name: Install latest allowed deps (unlocked)
+        run: uv pip install -e ".[dev]"
+      - name: Pytest
+        run: uv run --no-sync pytest -q
+      - name: Open an issue on failure (unless one is already open)
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "Canary in:title" --json number --jq length)
+          if [ "$existing" = "0" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "Canary: latest allowed dependencies break the build" \
+              --body "The weekly fresh-resolution canary failed: $RUN_URL — a new release of an allowed dependency likely breaks us. Fix: cap the offending dependency in pyproject.toml (then uv lock), or adapt the code and refresh the lock with uv lock --upgrade."
+          else
+            echo "an open canary issue already exists; not filing another"
+          fi
