@@ -68,6 +68,40 @@ def _missing_isaac(exc: ImportError) -> RuntimeError:
     )
 
 
+def _disable_debug_vis(cfg: Any) -> None:
+    """Recursively switch every ``debug_vis`` flag off on an Isaac Lab env cfg.
+
+    Debug-visualization markers exist for a human watching a viewport — a
+    headless eval has none. Spawning their prototype prims also drags in the
+    shader/material machinery (``Sdr.Registry()`` / MDL discovery), which can
+    hang env creation outright on hosts whose render stack is unhealthy
+    (observed live: a missing ``libGLU.so.1`` killed ``omni.iray.libs`` and
+    the marker's preview-surface material spun forever). Never creating the
+    markers is both faster and more robust.
+    """
+    seen: set[int] = set()
+    stack: list[Any] = [cfg]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen or isinstance(obj, type):
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+            continue
+        if isinstance(obj, (list, tuple, set)):
+            stack.extend(obj)
+            continue
+        obj_vars = getattr(obj, "__dict__", None)
+        if obj_vars is None:
+            continue
+        for key, value in obj_vars.items():
+            if key == "debug_vis" and value is True:
+                setattr(obj, "debug_vis", False)
+            elif isinstance(value, (dict, list, tuple, set)) or hasattr(value, "__dict__"):
+                stack.append(value)
+
+
 def _default_state_fields(num_arm_joints: int) -> tuple[StateField, ...]:
     """Canonical proprioception for a Franka-like arm (keys/units from Inspect Robots)."""
 
@@ -214,6 +248,8 @@ class IsaacSimEmbodiment:
         # raises "missing 1 required positional argument: 'cfg'"); parse_env_cfg
         # is Isaac Lab's own task-id -> config resolution.
         env_cfg = parse_env_cfg(self.task_id, device=self.device, num_envs=1)
+        if self.headless:
+            _disable_debug_vis(env_cfg)
         self._env = gym.make(self.task_id, cfg=env_cfg, render_mode="rgb_array")
         return self._env
 
