@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -109,7 +110,8 @@ def test_unknown_sections_and_keys_are_ignored(tmp_path: Path) -> None:
 
 def test_malformed_ini_raises_system_exit_naming_file(tmp_path: Path) -> None:
     path = _write_config(tmp_path, "not an ini file [\n===\n")
-    with pytest.raises(SystemExit, match=str(path)):
+    # re.escape: a Windows path's backslashes are not a regex.
+    with pytest.raises(SystemExit, match=re.escape(str(path))):
         load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
 
 
