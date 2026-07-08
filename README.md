@@ -10,6 +10,7 @@ embodiment — a real robot or a simulator — with reproducible logs and first-
 
 If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotics.
 
+![Status: alpha](https://img.shields.io/badge/status-alpha-blue)
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://inspectrobots.org/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
@@ -23,6 +24,9 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [For LLMs](https://inspectrobots.org/llms.txt)
 
 </div>
+
+> [!NOTE]
+> This project is in early development. The API may change between releases, so pin a version before depending on it.
 
 ---
 
