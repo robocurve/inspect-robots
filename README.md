@@ -24,6 +24,8 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 </div>
 
+> **⚠️ Early alpha.** Under active development. APIs, data formats, and results may change without notice.
+
 ---
 
 ## One framework, two swappable inputs
