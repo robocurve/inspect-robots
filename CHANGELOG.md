@@ -20,6 +20,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **isaacsim plugin: real env creation was broken.** `_ensure_env` called
+  `gym.make(task_id)` without the mandatory Isaac Lab `cfg` object, so every
+  live run failed with `missing 1 required positional argument: 'cfg'`; the
+  config is now resolved via Isaac Lab's own `parse_env_cfg`. Alongside it:
+  observation groups are requested as *named* dicts (`concatenate_terms=False`
+  — a flat tensor left `Observation.state` empty; a warning fires when the
+  request can't be honored), and headless runs disable every `debug_vis` flag
+  (markers exist for a viewport nobody has, and their material machinery can
+  hang env creation on hosts with a broken render stack).
 - **Eval logs are strict RFC 8259 JSON.** Non-finite floats (e.g. an inf
   `min_distance_to_goal` when no distance was ever recorded) are mapped to
   `null` at the JSON boundary, so `jq` and other conforming parsers accept the
