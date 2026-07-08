@@ -25,6 +25,7 @@ without editing this file.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +57,8 @@ _DEFAULT_CAPABILITIES = frozenset({"seedable", "resettable", "privileged_success
 # second embodiment instance reuses the live app instead of launching a duplicate
 # (which crashes) or leaking one. Cleared by close().
 _ACTIVE_APP: Any | None = None
+
+logger = logging.getLogger(__name__)
 
 
 def _missing_isaac(exc: ImportError) -> RuntimeError:
@@ -115,6 +118,15 @@ def _request_named_obs_terms(env_cfg: Any, obs_group: str) -> None:
     group_cfg = getattr(groups, obs_group, None)
     if group_cfg is not None and hasattr(group_cfg, "concatenate_terms"):
         group_cfg.concatenate_terms = False
+    else:
+        # Without named terms the group arrives as one flat tensor and
+        # _to_observation maps nothing -> policies see an empty state.
+        logger.warning(
+            "could not request named observation terms for group %r "
+            "(missing group or no concatenate_terms attribute); "
+            "Observation.state may be empty",
+            obs_group,
+        )
 
 
 def _default_state_fields(num_arm_joints: int) -> tuple[StateField, ...]:

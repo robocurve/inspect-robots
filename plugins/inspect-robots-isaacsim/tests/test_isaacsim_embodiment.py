@@ -280,7 +280,11 @@ def test_disable_debug_vis_walks_nested_configs() -> None:
     assert cfg.debug_vis == "keep"
 
 
-def test_request_named_obs_terms_flips_concatenate_flag() -> None:
+def test_request_named_obs_terms_flips_concatenate_flag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
     from inspect_robots_isaacsim.embodiment import _request_named_obs_terms
 
     class _Group:
@@ -293,8 +297,14 @@ def test_request_named_obs_terms_flips_concatenate_flag() -> None:
         observations = _Obs()
 
     cfg = _Cfg()
-    _request_named_obs_terms(cfg, "policy")
-    assert cfg.observations.policy.concatenate_terms is False
-    # Unknown group / missing attrs: silently a no-op, never raises.
-    _request_named_obs_terms(cfg, "nonexistent")
-    _request_named_obs_terms(object(), "policy")
+    with caplog.at_level(logging.WARNING, logger="inspect_robots_isaacsim.embodiment"):
+        _request_named_obs_terms(cfg, "policy")
+        assert cfg.observations.policy.concatenate_terms is False
+        assert not caplog.records  # success path stays quiet
+
+        # Unknown group / missing attrs: a warned no-op, never raises — a
+        # silently-flat group would mean an empty Observation.state.
+        _request_named_obs_terms(cfg, "nonexistent")
+        _request_named_obs_terms(object(), "policy")
+    assert len(caplog.records) == 2
+    assert all("named observation terms" in r.message for r in caplog.records)
