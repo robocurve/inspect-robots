@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -42,16 +43,16 @@ def _golden_log() -> EvalLog:
             duration_s=1.0,
             total_steps=12,
         ),
-        samples=[
+        samples=(
             SceneResult(
                 scene_id="s0",
                 status="success",
                 reduced={"success_at_end": 1.0},
-                epochs=[{"success_at_end": 1.0}],
+                epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
-                operator_judgements=["yes"],
-            )
-        ],
+                operator_judgements=("yes",),
+            ),
+        ),
     )
 
 
@@ -71,7 +72,7 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.eval.git_commit == "deadbeef"
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
-    assert restored.samples[0].operator_judgements == ["yes"]
+    assert restored.samples[0].operator_judgements == ("yes",)
 
 
 def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path) -> None:
@@ -86,7 +87,28 @@ def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path)
     restored = read_eval_log(str(path))
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
-    assert restored.samples[0].operator_judgements == []
+    assert restored.samples[0].operator_judgements == ()
+
+
+def test_eval_log_and_friends_are_frozen() -> None:
+    # An EvalLog is documented as immutable; each dataclass in it must actually
+    # refuse attribute reassignment, and the sequence fields (previously plain
+    # lists) must refuse in-place mutation too.
+    log = _golden_log()
+    with pytest.raises(FrozenInstanceError):
+        log.status = "error"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        log.eval.seed = 1  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        log.results.total_trials = 99  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        log.stats.total_steps = 99  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        log.samples[0].status = "error"  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        log.samples.clear()  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
 
 
 def test_unsupported_schema_version_rejected() -> None:

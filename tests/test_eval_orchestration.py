@@ -337,7 +337,7 @@ def test_before_scoring_runs_before_scorers_and_persists_judgement(tmp_path: Pat
     assert seen == [("s0", 0)]
     # The operator scorer read the verdict, so the hook ran before scoring.
     assert log.results.metrics["operator"] == 1.0
-    assert log.samples[0].operator_judgements == ["yes"]
+    assert log.samples[0].operator_judgements == ("yes",)
     assert log.samples[0].instruction == "reach"
 
 
@@ -361,8 +361,8 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     )
     assert calls == [0]
     scene = log.samples[0]
-    assert scene.epochs == [{"operator": 1.0}, {}]
-    assert scene.operator_judgements == ["yes", None]
+    assert scene.epochs == ({"operator": 1.0}, {})
+    assert scene.operator_judgements == ("yes", None)
 
 
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
@@ -381,7 +381,7 @@ def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
 
 def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> None:
     (log,) = eval(_task(epochs=2), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
-    assert log.samples[0].operator_judgements == [None, None]
+    assert log.samples[0].operator_judgements == (None, None)
 
 
 def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
@@ -396,5 +396,5 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
         before_scoring=judge,
     )
     assert success
-    assert logs[0].samples[0].operator_judgements == ["pass"]
+    assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
