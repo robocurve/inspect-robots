@@ -99,8 +99,8 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
   reset, no privileged success oracle, wall-clock control rate. Simulators just
   offer more (seeding, privileged success, rendering) via opt-in capabilities.
 - **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
-  with the resolved config, git revision, and package versions, re-readable across
-  releases and re-scorable offline.
+  with the resolved config, git revision, and package versions. It is re-readable
+  across releases and re-scorable offline.
 - **Light core.** Depends only on NumPy. Rerun and simulator/VLA backends are
   optional extras and separately installable plugins.
 - **Safe unattended.** An explicit error taxonomy separates "record and continue"
@@ -122,8 +122,8 @@ adapter shipped from this repo as separate packages:
   against an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation
   (`--embodiment isaacsim`).
 - **[inspect-robots-xpolicylab](plugins/inspect-robots-xpolicylab/)**: drive
-  any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy:
-  one adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
+  any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy.
+  One adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
   SmolVLA, ACT, …) behind `--policy xpolicylab -P url=ws://gpu-box:19000`.
 
 ```bash
