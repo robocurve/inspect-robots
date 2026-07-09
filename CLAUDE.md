@@ -29,7 +29,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   entry point, tests, and coverage scope. A uv workspace (`[tool.uv.workspace]`)
   ties them in: `uv sync --all-packages --extra dev` installs core + all plugins
   editable. They never count toward the core 100% gate (coverage is scoped to
-  `inspect_robots`). E.g. `plugins/inspect-robots-isaacsim/` (Isaac Lab embodiment).
+  `inspect_robots`). E.g. `plugins/inspect-robots-isaacsim/` (Isaac Lab
+  embodiment) and `plugins/inspect-robots-xpolicylab/` (policy adapter speaking
+  the XPolicyLab websocket protocol — 40+ served VLAs, no xpolicylab dep).
 
 ## Working here
 
@@ -81,5 +83,5 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
   does not make it blocking.
 - **Releases are one-click**: Actions → Release → Run workflow → pick
   patch/minor/major. The version is derived from the git tag by hatch-vcs —
-  never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: the isaacsim plugin keeps a static version in `plugins/inspect-robots-isaacsim/pyproject.toml`; bump it in a PR and it publishes alongside the next core release (`skip-existing` makes unchanged versions a no-op)). The same
+  never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: `plugins/*` packages keep static versions in their own pyprojects; bump one in a PR and it publishes alongside the next core release via its `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI trusted-publisher environment). The same
   run publishes to PyPI via trusted publishing; nothing is pushed to main.
