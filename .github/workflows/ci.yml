@@ -156,12 +156,41 @@ jobs:
       - name: Pytest (plugin)
         run: uv run --no-sync python -m pytest plugins/inspect-robots-isaacsim/tests -q
 
+  # The XPolicyLab adapter's suite needs no XPolicyLab checkout: an in-process
+  # stub server speaks the real wire protocol, covering codec/client behavior,
+  # observation/action mapping, lifecycle, registry discovery, and compatibility.
+  plugin-xpolicylab:
+    name: plugin · xpolicylab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Sync workspace (core + plugins, dev extras)
+        run: uv sync --locked --python 3.11 --all-packages --extra dev
+      - name: Ruff (plugin)
+        run: uv run --no-sync ruff check plugins/inspect-robots-xpolicylab
+      - name: Mypy (plugin, strict)
+        run: >
+          uv run --no-sync mypy
+          --config-file plugins/inspect-robots-xpolicylab/pyproject.toml
+          plugins/inspect-robots-xpolicylab/src/inspect_robots_xpolicylab
+      - name: Pytest (plugin)
+        run: uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
+
   # Single required status check for branch protection: green iff every job
   # above is green. Add new jobs to 'needs' here or they won't gate merges.
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim]
+    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -174,7 +203,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim]
+    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
     runs-on: ubuntu-latest
     permissions:
       issues: write

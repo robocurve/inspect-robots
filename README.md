@@ -113,6 +113,25 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
   ensembling are built in, with action *semantics* (control mode, rotation
   representation, gripper, frame) that make compatibility and ensembling correct.
 
+## First-party plugins
+
+Both halves of an eval — the "body" and the "brain" — have a ready-made
+adapter shipped from this repo as separate packages:
+
+- **[inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/)** — run evals
+  against an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation
+  (`--embodiment isaacsim`).
+- **[inspect-robots-xpolicylab](plugins/inspect-robots-xpolicylab/)** — drive
+  any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy:
+  one adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
+  SmolVLA, ACT, …) behind `--policy xpolicylab -P url=ws://gpu-box:19000`.
+
+```bash
+# Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
+inspect-robots run --task my-task --embodiment isaacsim \
+    --policy xpolicylab -P url=ws://gpu-box:19000 -P cameras=cam_head:base_rgb
+```
+
 ## How it maps to Inspect AI
 
 If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect Robots.
