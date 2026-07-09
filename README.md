@@ -1,11 +1,11 @@
 <div align="center">
 
-# 🤖 Inspect Robots
+# Inspect Robots
 
 ### An open-source evaluation framework for physical AI and VLA (vision-language-action) models
 
 Define a robotics benchmark once, then run *any* policy against *any* compatible
-embodiment — a real robot or a simulator — with reproducible logs and first-class
+embodiment (a real robot or a simulator) with reproducible logs and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
 If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotics.
@@ -32,17 +32,17 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ## One framework, two swappable inputs
 
-LLM evaluations have a single swappable input: the model. **Robotics evaluations
-have two** — and Inspect Robots makes both first-class and orthogonal:
+LLM evaluations have a single swappable input: the model. Robotics evaluations
+have two, and Inspect Robots makes both first-class and orthogonal:
 
 | | |
 |---|---|
-| 🧠 **`Policy`** — the VLA | The "brain". Maps an observation + instruction to an **action chunk** (a horizon of actions executed open-loop, as π0 / ACT / diffusion policies do). |
-| 🦾 **`Embodiment`** — the robot or sim | The "body + world". Produces observations, executes actions, owns the action/observation spaces and control rate. Real-robot-first; sims are a stricter special case. |
+| **`Policy`**: the VLA | The "brain". Maps an observation + instruction to an action chunk (a horizon of actions executed open-loop, as π0 / ACT / diffusion policies do). |
+| **`Embodiment`**: the robot or sim | The "body + world". Produces observations, executes actions, owns the action/observation spaces and control rate. Real-robot-first; sims are a stricter special case. |
 
-A **`Task`** — a dataset of `Scene`s (initial conditions, instructions, success
-targets) plus scorers — is defined *independently* of both. Before any rollout,
-Inspect Robots checks the `(policy, embodiment)` pair is **compatible** (action/observation
+A **`Task`**, a dataset of `Scene`s (initial conditions, instructions, success
+targets) plus scorers, is defined *independently* of both. Before any rollout,
+Inspect Robots checks the `(policy, embodiment)` pair is compatible (action/observation
 spaces, semantics, control rate, scene realizability) and fails fast if not.
 
 ## Install
@@ -71,7 +71,7 @@ inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 inspect-robots inspect logs/cubepick-reach_*.json            # results table
 ```
 
-And everything is a Python API. No hardware or simulator needed — the
+And everything is a Python API. No hardware or simulator needed: the
 dependency-free `CubePick` mock world exercises the whole stack:
 
 ```python
@@ -95,35 +95,35 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 
 ## Why Inspect Robots
 
-- 🌍 **Real-world first.** Interfaces assume real-robot reality — human-in-the-loop
+- **Real-world first.** Interfaces assume real-robot reality: human-in-the-loop
   reset, no privileged success oracle, wall-clock control rate. Simulators just
   offer more (seeding, privileged success, rendering) via opt-in capabilities.
-- 🔁 **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
-  with the resolved config, git revision, and package versions — re-readable across
-  releases, and re-scorable offline.
-- 🪶 **Light core.** Depends only on NumPy. Rerun and simulator/VLA backends are
+- **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
+  with the resolved config, git revision, and package versions. It is re-readable
+  across releases and re-scorable offline.
+- **Light core.** Depends only on NumPy. Rerun and simulator/VLA backends are
   optional extras and separately installable plugins.
-- 🛑 **Safe unattended.** An explicit error taxonomy separates "record and continue"
+- **Safe unattended.** An explicit error taxonomy separates "record and continue"
   from "halt and require a human", so a faulted robot never auto-advances overnight.
-- 🎞️ **Rerun visualization.** Stream camera images, 3D poses, joint/action
+- **Rerun visualization.** Stream camera images, 3D poses, joint/action
   time-series, and success markers to a `.rrd` recording.
-- 🧩 **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
-  packages — entry points make them appear in `inspect-robots list` automatically.
-- ⚙️ **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
+- **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
+  packages. Entry points make them appear in `inspect-robots list` automatically.
+- **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
   ensembling are built in, with action *semantics* (control mode, rotation
   representation, gripper, frame) that make compatibility and ensembling correct.
 
 ## First-party plugins
 
-Both halves of an eval — the "body" and the "brain" — have a ready-made
+Both halves of an eval (the "body" and the "brain") have a ready-made
 adapter shipped from this repo as separate packages:
 
-- **[inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/)** — run evals
+- **[inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/)**: run evals
   against an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation
   (`--embodiment isaacsim`).
-- **[inspect-robots-xpolicylab](plugins/inspect-robots-xpolicylab/)** — drive
-  any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy:
-  one adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
+- **[inspect-robots-xpolicylab](plugins/inspect-robots-xpolicylab/)**: drive
+  any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy.
+  One adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
   SmolVLA, ACT, …) behind `--policy xpolicylab -P url=ws://gpu-box:19000`.
 
 ```bash
@@ -145,7 +145,7 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task` / `@solver` / `@scorer` + registry | `@task` / `@policy` / `@embodiment` / `@scorer` + entry points |
 
-This repository is the **framework**. Concrete benchmarks live in
+This repository is the framework. Concrete benchmarks live in
 [WorldEvals](https://github.com/robocurve/worldevals), the benchmark catalog,
 and backend adapters live in separate plugin packages.
 
@@ -159,7 +159,7 @@ and [`llms-full.txt`](https://inspectrobots.org/llms-full.txt).
 ## Development
 
 > **Dependency changes:** after editing dependencies in `pyproject.toml`, run
-> `uv lock` and commit the updated lockfile — CI installs with
+> `uv lock` and commit the updated lockfile. CI installs with
 > `uv sync --locked` and fails with "the lockfile needs to be updated" if you
 > forget. Day-to-day conventions (PR-only `main`, the required `ci-ok` check,
 > one-click releases) are documented in [`CLAUDE.md`](CLAUDE.md).
