@@ -61,6 +61,29 @@ jobs:
       - name: Pytest
         run: uv run pytest --cov --cov-report=term-missing
 
+  # RerunSink is otherwise only exercised against a fake `rerun` module
+  # (test_coverage_completion.py) so an SDK API change wouldn't be caught here.
+  # Install the real, uncapped rerun-sdk>=0.20 floor and run the tests that are
+  # skipped everywhere else so real incompatibilities surface in CI.
+  test-rerun:
+    name: test (rerun extra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install from uv.lock (dev + rerun extras)
+        run: uv sync --locked --python 3.12 --extra dev --extra rerun
+      - name: Pytest (rerun-sdk installed)
+        run: uv run pytest tests/test_rerun_sink.py -v
+
   # Non-blocking: extra Python versions, Windows, and the NumPy floor.
   test-extra:
     name: extra (${{ matrix.os }}, py${{ matrix.python-version }}, ${{ matrix.numpy }})
@@ -146,15 +169,25 @@ jobs:
             **/uv.lock
       - name: Sync workspace (core + plugins, dev extras)
         run: uv sync --locked --python 3.11 --all-packages --extra dev
-      - name: Ruff (plugin)
+      - name: Ruff (plugin, lint)
         run: uv run --no-sync ruff check plugins/inspect-robots-isaacsim
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-isaacsim
       - name: Mypy (plugin, strict)
         run: >
           uv run --no-sync mypy
           --config-file plugins/inspect-robots-isaacsim/pyproject.toml
           plugins/inspect-robots-isaacsim/src/inspect_robots_isaacsim
-      - name: Pytest (plugin)
-        run: uv run --no-sync python -m pytest plugins/inspect-robots-isaacsim/tests -q
+      - name: Pytest (plugin, with coverage)
+        # Report-only: unlike the core, the plugin has no 100% gate (its
+        # reset()/step() paths need real Isaac Lab, which CI doesn't have) — but
+        # the number should still be visible instead of unmeasured.
+        # --cov-fail-under=0 overrides the root pyproject's fail_under=100,
+        # which coverage.py would otherwise inherit since this runs from the
+        # repo root (the plugin's own pyproject sets no coverage config).
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-isaacsim/tests -q
+          --cov=inspect_robots_isaacsim --cov-report=term-missing --cov-fail-under=0
 
   # The XPolicyLab adapter's suite needs no XPolicyLab checkout: an in-process
   # stub server speaks the real wire protocol, covering codec/client behavior,
@@ -175,22 +208,29 @@ jobs:
             **/uv.lock
       - name: Sync workspace (core + plugins, dev extras)
         run: uv sync --locked --python 3.11 --all-packages --extra dev
-      - name: Ruff (plugin)
+      - name: Ruff (plugin, lint)
         run: uv run --no-sync ruff check plugins/inspect-robots-xpolicylab
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-xpolicylab
       - name: Mypy (plugin, strict)
         run: >
           uv run --no-sync mypy
           --config-file plugins/inspect-robots-xpolicylab/pyproject.toml
           plugins/inspect-robots-xpolicylab/src/inspect_robots_xpolicylab
-      - name: Pytest (plugin)
-        run: uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
+      - name: Pytest (plugin, with coverage)
+        # Report-only, same rationale as plugin-isaacsim: no 100% gate for
+        # plugins, but the number should be visible. --cov-fail-under=0
+        # overrides the root pyproject's fail_under=100.
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
+          --cov=inspect_robots_xpolicylab --cov-report=term-missing --cov-fail-under=0
 
   # Single required status check for branch protection: green iff every job
   # above is green. Add new jobs to 'needs' here or they won't gate merges.
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
+    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -203,7 +243,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, test, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
+    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab]
     runs-on: ubuntu-latest
     permissions:
       issues: write

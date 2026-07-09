@@ -20,6 +20,11 @@ All notable changes to this project are documented here. The format is based on
   `--store-frames`; the written log's path is printed at the end of a run.
 - Tests are now type-checked under strict mypy (`files = ["src/inspect_robots",
   "tests"]`).
+- CI: a blocking `test-rerun` job installs the real `rerun-sdk` and runs
+  `test_rerun_sink.py` against it — previously `RerunSink` was only exercised
+  against a fake `rerun` module, so a real SDK API change would go unnoticed
+  (#6). The `plugin-isaacsim` CI job gained a `ruff format --check` step and
+  now reports (but does not gate on) its own test coverage.
 
 ### Changed
 
