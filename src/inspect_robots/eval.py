@@ -362,10 +362,10 @@ def _run_eval(
                 scene_id=scene.id,
                 status=scene_status,
                 reduced=reduced,
-                epochs=epoch_dicts,
+                epochs=tuple(epoch_dicts),
                 error=scene_error,
                 instruction=scene.instruction,
-                operator_judgements=judgements,
+                operator_judgements=tuple(judgements),
             )
         )
         if stopped:
@@ -395,7 +395,7 @@ def _run_eval(
             metrics=metrics,
         ),
         stats=stats,
-        samples=scene_results,
+        samples=tuple(scene_results),
         error=error,
     )
     bus.on_eval_end(log)

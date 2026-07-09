@@ -101,7 +101,7 @@ def test_cli_inspect_error_log(tmp_path: Path, capsys: pytest.CaptureFixture[str
         ),
         results=EvalResults(total_scenes=0, total_trials=0),
         stats=EvalStats(started_at="a", completed_at="b", duration_s=0.0, total_steps=0),
-        samples=[],
+        samples=(),
         error="boom",
     )
     path = tmp_path / "err.json"

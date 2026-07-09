@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`EvalLog` and friends are now actually immutable.** `EvalLog`, `EvalSpec`,
+  `EvalStats`, `EvalResults`, and `SceneResult` are frozen dataclasses, and
+  `SceneResult.epochs`/`operator_judgements` and `EvalLog.samples` are tuples
+  instead of lists — previously nothing stopped e.g. `log.samples.clear()`
+  despite the "immutable EvalLog" documentation (#4). `read_eval_log` coerces
+  older on-disk logs (whose JSON arrays deserialize as lists) back into tuples,
+  so the read-back guarantee is unaffected.
 - **isaacsim plugin: real env creation was broken.** `_ensure_env` called
   `gym.make(task_id)` without the mandatory Isaac Lab `cfg` object, so every
   live run failed with `missing 1 required positional argument: 'cfg'`; the
