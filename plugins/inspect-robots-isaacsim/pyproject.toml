@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.18"]
+requires = ["hatchling>=1.18", "hatch-fancy-pypi-readme>=24.1"]
 build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-isaacsim"
 version = "0.1.0"
 description = "IsaacSim / Isaac Lab embodiment adapter for Inspect Robots — run Inspect Robots evals against an Isaac Lab simulation."
-readme = "README.md"
+dynamic = ["readme"]
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
@@ -61,3 +61,31 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["isaaclab.*", "isaaclab_tasks.*", "gymnasium.*", "torch.*"]
 ignore_missing_imports = true
+
+# PyPI readme: identical to README.md except GitHub-only alert syntax
+# (e.g. `> [!NOTE]`) is rewritten to bold blockquotes, which PyPI renders.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!NOTE\][ \t]*$'
+replacement = '> **Note:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!TIP\][ \t]*$'
+replacement = '> **Tip:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!IMPORTANT\][ \t]*$'
+replacement = '> **Important:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!WARNING\][ \t]*$'
+replacement = '> **Warning:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!CAUTION\][ \t]*$'
+replacement = '> **Caution:**'
