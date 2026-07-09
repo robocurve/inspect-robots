@@ -208,15 +208,22 @@ jobs:
             **/uv.lock
       - name: Sync workspace (core + plugins, dev extras)
         run: uv sync --locked --python 3.11 --all-packages --extra dev
-      - name: Ruff (plugin)
+      - name: Ruff (plugin, lint)
         run: uv run --no-sync ruff check plugins/inspect-robots-xpolicylab
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-xpolicylab
       - name: Mypy (plugin, strict)
         run: >
           uv run --no-sync mypy
           --config-file plugins/inspect-robots-xpolicylab/pyproject.toml
           plugins/inspect-robots-xpolicylab/src/inspect_robots_xpolicylab
-      - name: Pytest (plugin)
-        run: uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
+      - name: Pytest (plugin, with coverage)
+        # Report-only, same rationale as plugin-isaacsim: no 100% gate for
+        # plugins, but the number should be visible. --cov-fail-under=0
+        # overrides the root pyproject's fail_under=100.
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
+          --cov=inspect_robots_xpolicylab --cov-report=term-missing --cov-fail-under=0
 
   # Single required status check for branch protection: green iff every job
   # above is green. Add new jobs to 'needs' here or they won't gate merges.
