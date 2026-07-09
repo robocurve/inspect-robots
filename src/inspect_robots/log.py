@@ -4,6 +4,12 @@ Mirrors Inspect AI's ``EvalLog``: ``version`` + ``status`` + ``eval`` spec +
 ``results`` + ``stats`` + per-scene ``samples`` + ``error``. Serialized to JSON
 with a schema version so newer Inspect Robots always reads older logs (a read-back
 guarantee enforced by golden tests in a later step).
+
+Immutability is *shallow*: the dataclasses are frozen and sequence fields are
+tuples, so reassigning a field or mutating the sample list is impossible — but
+dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``)
+remain plain mutable dicts. Treat a log as read-only; nothing deep-freezes it.
 """
 
 from __future__ import annotations
