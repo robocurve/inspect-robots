@@ -5,7 +5,11 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
-## [Unreleased]
+## [0.4.0] - 2026-07-09
+
+Plugin releases alongside this version: `inspect-robots-xpolicylab` 0.1.0
+(first release) and `inspect-robots-isaacsim` 0.1.1 (ships the env-creation
+fix below).
 
 ### Added
 

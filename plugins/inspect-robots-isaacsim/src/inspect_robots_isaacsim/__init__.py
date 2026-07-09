@@ -24,7 +24,7 @@ from inspect_robots_isaacsim.embodiment import IsaacSimEmbodiment
 
 __all__ = ["IsaacSimEmbodiment", "isaacsim_embodiment"]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def isaacsim_embodiment(**kwargs: Any) -> IsaacSimEmbodiment:
