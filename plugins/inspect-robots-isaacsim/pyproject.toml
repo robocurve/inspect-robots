@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-isaacsim"
-version = "0.1.0"
+version = "0.1.1"
 description = "IsaacSim / Isaac Lab embodiment adapter for Inspect Robots — run Inspect Robots evals against an Isaac Lab simulation."
 dynamic = ["readme"]
 requires-python = ">=3.10"

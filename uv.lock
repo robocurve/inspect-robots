@@ -461,7 +461,7 @@ provides-extras = ["all", "dev", "docs", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-isaacsim"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "plugins/inspect-robots-isaacsim" }
 dependencies = [
     { name = "inspect-robots" },
