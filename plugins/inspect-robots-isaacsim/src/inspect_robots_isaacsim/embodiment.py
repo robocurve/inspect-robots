@@ -25,6 +25,7 @@ without editing this file.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,8 @@ _DEFAULT_CAPABILITIES = frozenset({"seedable", "resettable", "privileged_success
 # (which crashes) or leaking one. Cleared by close().
 _ACTIVE_APP: Any | None = None
 
+logger = logging.getLogger(__name__)
+
 
 def _missing_isaac(exc: ImportError) -> RuntimeError:
     return RuntimeError(
@@ -66,6 +69,64 @@ def _missing_isaac(exc: ImportError) -> RuntimeError:
         "reading .info work without it, but reset()/step() require it. "
         "See: https://isaac-sim.github.io/IsaacLab/"
     )
+
+
+def _disable_debug_vis(cfg: Any) -> None:
+    """Recursively switch every ``debug_vis`` flag off on an Isaac Lab env cfg.
+
+    Debug-visualization markers exist for a human watching a viewport — a
+    headless eval has none. Spawning their prototype prims also drags in the
+    shader/material machinery (``Sdr.Registry()`` / MDL discovery), which can
+    hang env creation outright on hosts whose render stack is unhealthy
+    (observed live: a missing ``libGLU.so.1`` killed ``omni.iray.libs`` and
+    the marker's preview-surface material spun forever). Never creating the
+    markers is both faster and more robust.
+    """
+    seen: set[int] = set()
+    stack: list[Any] = [cfg]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen or isinstance(obj, type):
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+            continue
+        if isinstance(obj, (list, tuple, set)):
+            stack.extend(obj)
+            continue
+        obj_vars = getattr(obj, "__dict__", None)
+        if obj_vars is None:
+            continue
+        for key, value in obj_vars.items():
+            if key == "debug_vis" and value is True:
+                setattr(obj, "debug_vis", False)
+            elif isinstance(value, (dict, list, tuple, set)) or hasattr(value, "__dict__"):
+                stack.append(value)
+
+
+def _request_named_obs_terms(env_cfg: Any, obs_group: str) -> None:
+    """Ask Isaac Lab to keep the observation group as a named dict.
+
+    Manager-based envs concatenate a group's terms into one flat tensor by
+    default (``concatenate_terms=True``), which would leave ``_to_observation``
+    with nothing to map onto the adapter's *named* state fields — policies
+    would see an empty ``Observation.state``. The adapter's contract is named
+    proprioception, so request named terms.
+    """
+    groups = getattr(env_cfg, "observations", None)
+    group_cfg = getattr(groups, obs_group, None)
+    if group_cfg is not None and hasattr(group_cfg, "concatenate_terms"):
+        group_cfg.concatenate_terms = False
+    else:
+        # Without named terms the group arrives as one flat tensor and
+        # _to_observation maps nothing -> policies see an empty state.
+        logger.warning(
+            "could not request named observation terms for group %r "
+            "(missing group or no concatenate_terms attribute); "
+            "Observation.state may be empty",
+            obs_group,
+        )
 
 
 def _default_state_fields(num_arm_joints: int) -> tuple[StateField, ...]:
@@ -208,8 +269,16 @@ class IsaacSimEmbodiment:
         # Importing the tasks registers the gym ids; must happen AFTER the app boots.
         import gymnasium as gym
         import isaaclab_tasks  # noqa: F401  (registers Isaac-* gym ids)
+        from isaaclab_tasks.utils import parse_env_cfg
 
-        self._env = gym.make(self.task_id, num_envs=1, render_mode="rgb_array")
+        # Isaac Lab envs take a mandatory cfg object (gym.make(task_id) alone
+        # raises "missing 1 required positional argument: 'cfg'"); parse_env_cfg
+        # is Isaac Lab's own task-id -> config resolution.
+        env_cfg = parse_env_cfg(self.task_id, device=self.device, num_envs=1)
+        if self.headless:
+            _disable_debug_vis(env_cfg)
+        _request_named_obs_terms(env_cfg, self.obs_group)
+        self._env = gym.make(self.task_id, cfg=env_cfg, render_mode="rgb_array")
         return self._env
 
     # ------------------------------------------------------------------ #
