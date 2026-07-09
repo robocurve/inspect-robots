@@ -9,6 +9,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **New plugin: `inspect-robots-xpolicylab`** — a `Policy` adapter for
+  [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policy servers,
+  making its zoo of 40+ served VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
+  SmolVLA, ACT, …) evaluable with any Inspect Robots embodiment
+  (`--policy xpolicylab -P url=ws://host:19000`). Speaks XPolicyLab's
+  msgpack-over-websocket protocol directly — no `xpolicylab` install needed
+  on the eval side.
 - CLI: `inspect-robots run` gained `--epochs`, `--fail-on-error`, and
   `--store-frames`; the written log's path is printed at the end of a run.
 - Tests are now type-checked under strict mypy (`files = ["src/inspect_robots",
