@@ -43,7 +43,7 @@ Inspect AI). Each log is immutable, schema-versioned, and written to `log_dir`.
 
 ## Use registry names
 
-`task`, `policy`, and `embodiment` may also be **registry names** — the same
+`task`, `policy`, and `embodiment` may also be registry names, the same
 mechanism the CLI uses:
 
 ```python
@@ -64,6 +64,6 @@ inspect-robots inspect logs/cubepick-reach_*.json            # print a saved log
 
 ## Next steps
 
-- [Concepts](concepts.md) — the core abstractions.
-- [Writing A Benchmark](writing-a-benchmark.md) — define your own `Task`.
-- [Policies And Embodiments](policies-and-embodiments.md) — plug in a real VLA or robot/sim.
+- [Concepts](concepts.md): the core abstractions.
+- [Writing A Benchmark](writing-a-benchmark.md): define your own `Task`.
+- [Policies And Embodiments](policies-and-embodiments.md): plug in a real VLA or robot/sim.

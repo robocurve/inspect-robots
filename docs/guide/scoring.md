@@ -3,8 +3,8 @@
 A [`Scorer`][inspect_robots.scorer.Scorer] maps a recorded
 [`TrialRecord`][inspect_robots.rollout.TrialRecord] (plus the scene's
 [`Target`][inspect_robots.scene.Target]) to a [`Score`][inspect_robots.scorer.Score]. Scorers
-read the *recorded* trajectory — never a live environment — so scoring is
-**reproducible from a saved log**.
+read the *recorded* trajectory (never a live environment), so scoring is
+reproducible from a saved log.
 
 ## Builtin scorers
 
@@ -39,7 +39,7 @@ Register it with [`scorer`][inspect_robots.registry.scorer] to resolve it by nam
 
 ## Epochs and reducers
 
-When a `Task` runs `epochs > 1`, an **epoch reducer** collapses the per-epoch
+When a `Task` runs `epochs > 1`, an epoch reducer collapses the per-epoch
 scores of a scene before metrics aggregate across scenes. Reducers are namespaced
 separately from metrics and are selected by name on
 [`Epochs`][inspect_robots.task.Epochs]:
@@ -57,8 +57,8 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 
 ## Operator and VLM scoring (real world)
 
-Real robots have no privileged success oracle. The dominant method is a **human
-verdict**, captured *once* during the rollout (as a transcript event) and read
-back by [`operator_scorer`][inspect_robots.scorer.operator_scorer] — keeping scoring reproducible.
+Real robots have no privileged success oracle. The dominant method is a human
+verdict, captured *once* during the rollout (as a transcript event) and read
+back by [`operator_scorer`][inspect_robots.scorer.operator_scorer], keeping scoring reproducible.
 A [`VLMScorer`][inspect_robots.scorer.VLMScorer] interface is reserved for scoring final
 frames with a vision-language classifier.

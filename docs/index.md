@@ -1,12 +1,12 @@
 # Inspect Robots
 
 <p style="font-size: 1.3rem; font-weight: 500; margin-bottom: 0.25rem;">
-The <strong>Inspect AI</strong> for robotics.
+The Inspect AI for robotics.
 </p>
 
-An open-source evaluation framework for **physical AI** and **VLA
-(vision-language-action)** models. Define a robotics benchmark once, then run
-*any* policy against *any* compatible embodiment — a real robot or a simulator —
+An open-source evaluation framework for physical AI and VLA
+(vision-language-action) models. Define a robotics benchmark once, then run
+*any* policy against *any* compatible embodiment (a real robot or a simulator)
 with reproducible logs and first-class [Rerun](https://github.com/rerun-io/rerun)
 visualization.
 
@@ -18,20 +18,20 @@ visualization.
 
 ## One framework, two swappable inputs
 
-LLM evals have a single swappable input: the model. **Robotics evals have two** —
+LLM evals have a single swappable input: the model. Robotics evals have two,
 and Inspect Robots makes both first-class and orthogonal.
 
 <div class="grid cards" markdown>
 
--   :material-brain:{ .lg .middle } __`Policy` — the VLA__
+-   :material-brain:{ .lg .middle } __`Policy`: the VLA__
 
     ---
 
-    The "brain". Maps an observation + a language instruction to an **action
-    chunk** (a horizon of actions executed open-loop, as π0 / ACT / diffusion
+    The "brain". Maps an observation + a language instruction to an action
+    chunk (a horizon of actions executed open-loop, as π0 / ACT / diffusion
     policies do).
 
--   :material-robot-industrial:{ .lg .middle } __`Embodiment` — the robot or sim__
+-   :material-robot-industrial:{ .lg .middle } __`Embodiment`: the robot or sim__
 
     ---
 
@@ -41,9 +41,9 @@ and Inspect Robots makes both first-class and orthogonal.
 
 </div>
 
-A **`Task`** — a dataset of `Scene`s (initial conditions, instructions, success
-targets) plus scorers — is defined *independently* of both. Before any rollout,
-Inspect Robots verifies the `(policy, embodiment)` pair is **compatible** and fails fast
+A **`Task`**, a dataset of `Scene`s (initial conditions, instructions, success
+targets) plus scorers, is defined *independently* of both. Before any rollout,
+Inspect Robots verifies the `(policy, embodiment)` pair is compatible and fails fast
 and loud if not.
 
 ---
@@ -55,7 +55,7 @@ pip install inspect-robots            # core (numpy only)
 pip install "inspect-robots[rerun]"   # + Rerun visualization
 ```
 
-No hardware or simulator required — the dependency-free `CubePick` mock world
+No hardware or simulator required. The dependency-free `CubePick` mock world
 exercises the whole stack:
 
 ```python
@@ -103,7 +103,7 @@ inspect-robots inspect logs/cubepick-reach_*.json     # results table
     ---
 
     Every run yields an immutable, schema-versioned `EvalLog` with the resolved
-    config, git revision, and package versions — re-readable across releases.
+    config, git revision, and package versions, re-readable across releases.
 
 -   :material-feather:{ .lg .middle } __Light core__
 
@@ -130,8 +130,8 @@ inspect-robots inspect logs/cubepick-reach_*.json     # results table
 
     ---
 
-    Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate packages — entry
-    points make them appear in `inspect-robots list` automatically.
+    Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate packages.
+    Entry points make them appear in `inspect-robots list` automatically.
 
 </div>
 

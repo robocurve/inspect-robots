@@ -1,8 +1,8 @@
 # Plugins & the registry
 
-Inspect Robots components register by name and resolve from strings — the mechanism the
+Inspect Robots components register by name and resolve from strings: the mechanism the
 CLI and `eval("...", "...", "...")` use. In-tree builtins register via decorators;
-out-of-tree packages publish **entry points**, so an installed plugin appears in
+out-of-tree packages publish entry points, so an installed plugin appears in
 `inspect-robots list` without being imported first.
 
 ## Decorators
@@ -48,7 +48,7 @@ Groups: `inspect_robots.tasks`, `inspect_robots.policies`, `inspect_robots.embod
 `inspect_robots.scorers`, `inspect_robots.sinks`. After `pip install inspect-robots-maniskill`, it
 shows up in `inspect-robots list` and resolves by name in `eval()` and the CLI.
 
-This is how the ecosystem stays decoupled: this repository is the **framework**;
+This is how the ecosystem stays decoupled: this repository is the framework;
 specific simulators, VLA weights, and benchmarks live in their own packages.
 
 ## First-party plugins
@@ -56,7 +56,7 @@ specific simulators, VLA weights, and benchmarks live in their own packages.
 Two adapters ship from the Inspect Robots repo itself (as separate packages
 under `plugins/*`), covering both halves of an eval:
 
-### `inspect-robots-isaacsim` — the body
+### `inspect-robots-isaacsim`: the body
 
 Wraps an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation as an
 embodiment. Installing it makes `isaacsim` resolvable; only `reset()`/`step()`
@@ -68,7 +68,7 @@ inspect-robots run --task my-task --policy my-vla --embodiment isaacsim \
     -E task_id=Isaac-Lift-Cube-Franka-v0
 ```
 
-### `inspect-robots-xpolicylab` — the brain
+### `inspect-robots-xpolicylab`: the brain
 
 Drives any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served
 policy. XPolicyLab wraps 40+ VLA / imitation-learning policies (π0/π0.5,
