@@ -218,6 +218,53 @@ class _ClosableEmbodiment(CubePickEmbodiment):
 embodiment_decorator("closable-cubepick")(_ClosableEmbodiment)
 
 
+def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
+    """A bind() hook runs after resolution and before compat (plan 0008 §3c).
+
+    The policy starts with a deliberately incompatible action space; only the
+    bind() call adopting the embodiment's spaces lets compat pass, so a green
+    eval proves the ordering.
+    """
+    from inspect_robots.embodiment import EmbodimentInfo
+
+    class _AdaptivePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bound_names: list[str] = []
+            self.info = PolicyInfo(
+                name="adaptive",
+                action_space=Box(shape=(9,), semantics=ActionSemantics("joint_pos")),
+            )
+
+        def bind(self, embodiment_info: EmbodimentInfo) -> None:
+            self.bound_names.append(embodiment_info.name)
+            self.info = PolicyInfo(
+                name="adaptive",
+                action_space=embodiment_info.action_space,
+                observation_space=embodiment_info.observation_space,
+            )
+
+    adaptive = _AdaptivePolicy()
+    logs = eval(_task(max_steps=60), adaptive, CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert adaptive.bound_names == ["cubepick"]
+    assert logs[0].status == "success"
+
+
+def test_policy_base_bind_is_a_noop() -> None:
+    from inspect_robots.embodiment import EmbodimentInfo
+    from inspect_robots.policy import PolicyBase
+
+    class _Minimal(PolicyBase):
+        info = PolicyInfo(name="m", action_space=_BOX)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.zeros(2))])
+
+    obs_space = CubePickEmbodiment().info.observation_space
+    info = EmbodimentInfo(name="e", action_space=_BOX, observation_space=obs_space)
+    _Minimal().bind(info)  # must exist and do nothing
+
+
 def test_eval_closes_string_resolved_embodiment(tmp_path: Path) -> None:
     _CLOSED.clear()
     eval(_task(max_steps=5), ScriptedPolicy(), "closable-cubepick", log_dir=str(tmp_path))

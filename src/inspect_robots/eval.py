@@ -202,6 +202,14 @@ def _run_eval(
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
 
+    # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
+    # runs before the compatibility check so the policy can adopt the
+    # embodiment's spaces. Duck-typed — bind is not part of the Policy
+    # Protocol, so existing policies are untouched.
+    bind = getattr(policy, "bind", None)
+    if callable(bind):
+        bind(embodiment.info)
+
     # Fail fast on incompatible pairings before touching any hardware/sim.
     assert_compatible(policy, embodiment, task, remap=remap)
 
