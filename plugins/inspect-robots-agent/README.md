@@ -44,4 +44,10 @@ its own.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`max_llm_calls`, `temperature`.
+`max_llm_calls`, `temperature`, `effort`.
+
+Reasoning effort defaults to `low`: robot control is latency-sensitive (the
+arm stands still while the model thinks), safety guardrails sit below the
+model either way, and frontier models at low effort remain strong at this
+task shape. Raise it for hard manipulation problems (`-P effort=high`) or
+pass `-P effort=none` to omit the parameter for endpoints that reject it.

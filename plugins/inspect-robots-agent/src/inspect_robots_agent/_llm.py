@@ -144,12 +144,15 @@ class ChatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> AssistantMessage:
         body: dict[str, Any] = {"model": self._provider.model, "messages": messages}
         if tools:
             body["tools"] = tools
         if temperature is not None:
             body["temperature"] = temperature
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
 
         last_error = "unknown error"
         for attempt in range(self._max_retries):

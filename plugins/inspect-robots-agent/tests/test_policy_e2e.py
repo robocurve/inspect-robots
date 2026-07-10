@@ -210,6 +210,26 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
     assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
 
 
+def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    logs = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
+    # Robot control is latency-sensitive: low effort by default (guardrails
+    # sit below the model, so this trades thinking time, not safety).
+    assert script.requests[0]["reasoning_effort"] == "low"
+    assert logs[0].eval.policy_config["effort"] == "low"
+
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort="high"), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == "high"
+
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort=None), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert "reasoning_effort" not in script.requests[0]
+
+    with pytest.raises(ValueError, match="effort"):
+        _policy(_Script([]), effort="turbo")
+
+
 def test_registry_resolves_agent_policy() -> None:
     from inspect_robots.registry import resolve
 

@@ -29,6 +29,10 @@ from inspect_robots_agent._tools import Toolset, build_toolset
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
+# reasoning_effort values accepted across OpenAI-compatible endpoints
+# (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
+_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
 proprioceptive state and camera images. Work toward the user's goal in \
@@ -52,6 +56,7 @@ class AgentPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     max_llm_calls: int = 50
+    effort: str | None = "low"
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -69,6 +74,7 @@ class LLMAgentPolicy(PolicyBase):
         api_key_env: str | None = None,
         max_llm_calls: int = 50,
         temperature: float | None = None,
+        effort: str | None = "low",
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -81,15 +87,24 @@ class LLMAgentPolicy(PolicyBase):
         )
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be >= 1")
+        if effort is not None and effort not in _EFFORT_LEVELS:
+            raise ValueError(
+                f"effort must be one of {sorted(_EFFORT_LEVELS)} or none, got {effort!r}"
+            )
         self._client = ChatClient(provider, transport=transport)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
+        # Robot control is latency-sensitive: default to low reasoning effort
+        # (the arm stands still while the model thinks; safety guardrails sit
+        # below the model, so effort trades thinking time, not safety).
+        self._effort = effort
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
             base_url=provider.base_url,
             api_key_env=api_key_env,
             max_llm_calls=max_llm_calls,
+            effort=effort,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -142,7 +157,10 @@ class LLMAgentPolicy(PolicyBase):
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
             message = self._client.complete(
-                self._messages, toolset.schemas(), temperature=self._temperature
+                self._messages,
+                toolset.schemas(),
+                temperature=self._temperature,
+                reasoning_effort=self._effort,
             )
             self._calls_used += 1
             self._messages.append(message.raw())
