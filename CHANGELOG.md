@@ -5,6 +5,45 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
+## [Unreleased]
+
+### Added
+
+- **New plugin: `inspect-robots-agent`** — frontier LLMs (Claude, GPT,
+  anything behind an OpenAI-compatible API) drive any registered embodiment
+  through tool calls, as the first-class policy `agent`
+  (`--policy agent -P model=anthropic/claude-fable-5`). Each tool call becomes
+  one smooth, approver-checked action chunk (`move_joints` with named partial
+  targets for absolute control, `move_by` for displacement control;
+  `done`/`give_up` end the trial). One `httpx` client speaks the wire format;
+  keys resolve from `$ANTHROPIC_API_KEY` / `$OPENAI_API_KEY` /
+  `$OPENROUTER_API_KEY` or a custom `base_url` (plan 0008).
+- Safety approvers: `DeltaLimitApprover` (semantics-aware "no wild swings"
+  per-step limiting) and `ChainApprover` (sequential composition) join
+  `ClampApprover` in `inspect_robots.approver`.
+- **CLI guardrails on by default**: every `run`/ad-hoc invocation wires
+  `ChainApprover(ClampApprover, DeltaLimitApprover)` from the embodiment's
+  action space; `--disable-guardrails` is the explicit, loudly-warned opt-out
+  and `--max-action-delta` tunes the per-step limit. The chain degrades per
+  component with stderr warnings (never blocking, never silent).
+- CLI: `inspect-robots config set KEY VALUE` / `config show` persist and
+  display `[defaults]` config keys; guided errors now point at `config set`.
+- `ActionSemantics.dim_labels` names action dimensions (validated against the
+  owning `Box`); `ControlMode` gains `"joint_delta"` for joint-space
+  displacement control.
+- Policies may define an optional `bind(embodiment_info)` hook — `eval()`
+  calls it after resolution and before the compatibility check, so
+  embodiment-adaptive policies (like the LLM agent) can adopt the
+  embodiment's spaces.
+- Rollout honors a policy-requested stop via the pre-review action's
+  `meta["request_stop"]` (ends the trial as a truncation; embodiment
+  termination wins; not preserved under ensembling).
+
+### Fixed
+
+- The CLI exits with the guided message (not a traceback) when a component
+  factory raises `ConfigError` during resolution.
+
 ## [0.4.0] - 2026-07-09
 
 Plugin releases alongside this version: `inspect-robots-xpolicylab` 0.1.0
