@@ -212,3 +212,20 @@ def test_config_rerun_rejects_non_bool(tmp_path: Path) -> None:
     _write_config(config_home, "[defaults]\nrerun = viewer\n")
     with pytest.raises(SystemExit, match="rerun"):
         load_defaults({"XDG_CONFIG_HOME": str(config_home)})
+
+
+def test_set_default_requires_config_home() -> None:
+    from inspect_robots._defaults import set_default
+
+    with pytest.raises(SystemExit, match="config home"):
+        set_default({}, "policy", "scripted")
+
+
+def test_set_default_rejects_malformed_existing_config(tmp_path: Path) -> None:
+    from inspect_robots._defaults import set_default
+
+    path = tmp_path / "inspect-robots" / "config.ini"
+    path.parent.mkdir(parents=True)
+    path.write_text("policy = dangling, no section header\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="malformed config"):
+        set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "policy", "scripted")

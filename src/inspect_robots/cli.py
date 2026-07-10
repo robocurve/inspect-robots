@@ -31,18 +31,22 @@ from inspect_robots import __version__
 from inspect_robots._defaults import (
     ADHOC_MAX_STEPS_FALLBACK,
     ADHOC_SCORER_FALLBACK,
+    CONFIG_KEYS,
     ENV_EMBODIMENT,
     ENV_POLICY,
     ENV_SIM_EMBODIMENT,
     Defaults,
     load_defaults,
     parse_value,
+    set_default,
 )
 
 if TYPE_CHECKING:
+    from inspect_robots.approver import Approver
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
+    from inspect_robots.spaces import Box
 
 
 def _styled(text: str, code: str) -> str:
@@ -73,7 +77,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect")
+_SUBCOMMANDS = ("list", "run", "inspect", "config")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -166,9 +170,30 @@ def build_parser() -> argparse.ArgumentParser:
         "viewer window; needs rerun-sdk (--no-rerun overrides a rerun config "
         "default)",
     )
+    p_run.add_argument(
+        "--disable-guardrails",
+        action="store_true",
+        help="turn off the default safety approvers (bounds clamp + per-step "
+        "delta limit); actions reach the embodiment unchecked",
+    )
+    p_run.add_argument(
+        "--max-action-delta",
+        type=float,
+        default=None,
+        metavar="D",
+        help="per-step change limit for the default guardrails, in the action "
+        "space's native units (default: derived from the space's bounds)",
+    )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
     p_inspect.add_argument("log", help="path to an EvalLog JSON file")
+
+    p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
+    config_sub = p_config.add_subparsers(dest="config_command", required=True)
+    p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
+    p_set.add_argument("key", choices=CONFIG_KEYS)
+    p_set.add_argument("value")
+    config_sub.add_parser("show", help="print resolved defaults and their sources")
     return parser
 
 
@@ -201,8 +226,8 @@ def _pick_component(
     raise SystemExit(
         f"no {kind} given and no default configured.\n"
         f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
-        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or add "
-        f"'{kind} = NAME' under [defaults] in ~/.config/inspect-robots/config.ini"
+        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or run "
+        f"'inspect-robots config set {kind} NAME'"
     )
 
 
@@ -221,8 +246,8 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     raise SystemExit(
         "--sim given but no sim embodiment configured.\n"
         f"registered embodiments: {names}\n"
-        f"fix: set ${ENV_SIM_EMBODIMENT}, or add 'sim_embodiment = NAME' under "
-        "[defaults] in ~/.config/inspect-robots/config.ini"
+        f"fix: set ${ENV_SIM_EMBODIMENT}, or run "
+        "'inspect-robots config set sim_embodiment NAME'"
     )
 
 
@@ -234,6 +259,48 @@ def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
         return resolve(kind, name, **kwargs)
     except KeyError as exc:
         raise SystemExit(str(exc.args[0])) from exc
+
+
+def _build_guardrails(
+    space: Box, max_action_delta: float | None
+) -> tuple[Approver, list[str], list[str]]:
+    """The default CLI safety chain for an action space (plan 0008 §3e).
+
+    Returns ``(approver, active, warnings)``. Degrades per component instead
+    of blocking: a component that cannot apply to this space is skipped with
+    a warning naming the actual refusal reason (the constructor's message),
+    so the CLI is never *less* protective than running without guardrails —
+    and never silently unprotected either.
+    """
+    from inspect_robots.approver import (
+        AutoApprover,
+        ChainApprover,
+        ClampApprover,
+        DeltaLimitApprover,
+    )
+
+    parts: list[Approver] = []
+    active: list[str] = []
+    warnings: list[str] = []
+    if space.low is None and space.high is None:
+        warnings.append("bounds clamp skipped: the action space declares no low/high bounds")
+    else:
+        parts.append(ClampApprover(space))
+        active.append("clamp")
+    try:
+        # Catch the constructor's refusal generically — whatever the §3a
+        # reason — rather than pre-checking an enumerated list.
+        parts.append(DeltaLimitApprover(space, max_delta=max_action_delta))
+        active.append("delta-limit")
+    except ValueError as exc:
+        warnings.append(f"delta limit skipped: {exc}")
+    if not parts:
+        warnings.append(
+            "no guardrails are active for this action space; declare bounds/semantics "
+            "on the embodiment or pass --max-action-delta"
+        )
+        return AutoApprover(), active, warnings
+    return ChainApprover(*parts), active, warnings
 
 
 _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
@@ -290,6 +357,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "--sim selects your configured sim_embodiment; "
             "passing --embodiment already picks the embodiment — drop one"
         )
+    if args.disable_guardrails and args.max_action_delta is not None:
+        raise SystemExit(
+            "--max-action-delta tunes the guardrails that --disable-guardrails turns off — drop one"
+        )
 
     defaults = load_defaults(os.environ)
     policy_name, policy_source = _pick_component(
@@ -335,6 +406,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"policy: {policy_name} ({policy_source})")
         print(f"embodiment: {embodiment_name} ({embodiment_source})")
 
+        # Guardrails are on by default (plan 0008 §3e): the approver chain
+        # sits below the policy in rollout, so nothing the policy emits — a
+        # wild VLA action or a misbehaving LLM — reaches hardware unchecked.
+        approver: Approver | None = None
+        if args.disable_guardrails:
+            print(
+                "WARNING: guardrails disabled (--disable-guardrails); actions "
+                "reach the embodiment unchecked.",
+                file=sys.stderr,
+            )
+            print("guardrails: disabled (--disable-guardrails)")
+        else:
+            approver, active, guard_warnings = _build_guardrails(
+                embodiment.info.action_space, args.max_action_delta
+            )
+            for warning in guard_warnings:
+                print(f"guardrails warning: {warning}", file=sys.stderr)
+            print(f"guardrails: {' + '.join(active) if active else 'none active'}")
+
         before_scoring = None
         if (
             is_adhoc
@@ -364,6 +454,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             seed=args.seed,
             sinks=sinks,
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
+            approver=approver,
             store_frames=(
                 args.store_frames if args.store_frames is not None else defaults.store_frames
             ),
@@ -412,6 +503,27 @@ def _cmd_inspect(path: str) -> int:
     return 0 if log.status == "success" else 1
 
 
+def _cmd_config(args: argparse.Namespace) -> int:
+    if args.config_command == "set":
+        path = set_default(os.environ, args.key, args.value)
+        print(f"wrote {args.key} = {args.value} to {path}")
+        return 0
+    defaults = load_defaults(os.environ)
+    rows: list[tuple[str, object, str | None]] = [
+        ("policy", defaults.policy, defaults.policy_source),
+        ("embodiment", defaults.embodiment, defaults.embodiment_source),
+        ("sim_embodiment", defaults.sim_embodiment, defaults.sim_embodiment_source),
+        ("scorer", defaults.scorer, None),
+        ("max_steps", defaults.max_steps, None),
+        ("store_frames", defaults.store_frames, None),
+    ]
+    for key, value, source in rows:
+        shown = "(unset)" if value is None else value
+        suffix = f"  ({source})" if source else ""
+        print(f"{key}: {shown}{suffix}")
+    return 0
+
+
 def _apply_instruction_sugar(argv: list[str]) -> list[str]:
     """``inspect-robots "wipe the table"`` → ``run --instruction "wipe the table"``.
 
@@ -438,6 +550,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log)
+    if args.command == "config":
+        return _cmd_config(args)
     parser.print_help()
     return 0
 
