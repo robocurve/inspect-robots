@@ -23,6 +23,7 @@ import numpy.typing as npt
 ControlMode = Literal[
     "joint_pos",
     "joint_vel",
+    "joint_delta",
     "eef_delta_pose",
     "eef_abs_pose",
     "eef_delta_pos",
@@ -41,12 +42,20 @@ Frame = Literal["base", "world", "camera"]
 
 @dataclass(frozen=True)
 class ActionSemantics:
-    """What an action vector *means*. Attached to an action [`Box`][inspect_robots.spaces.Box]."""
+    """What an action vector *means*. Attached to an action [`Box`][inspect_robots.spaces.Box].
+
+    ``dim_labels`` optionally names each action dimension (e.g.
+    ``("left_j0", ..., "right_gripper")`` for a bimanual arm) so tooling —
+    LLM agent policies, logging, visualization — can address dimensions by
+    name. Length is validated against the owning box in ``Box.__post_init__``
+    (the semantics/shape pairing is only visible there).
+    """
 
     control_mode: ControlMode
     rotation_repr: RotationRepr = "none"
     gripper: GripperKind = "none"
     frame: Frame = "base"
+    dim_labels: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -67,6 +76,12 @@ class Box:
                 )
         if self.low is not None and self.high is not None and bool(np.any(self.low > self.high)):
             raise ValueError("Box low must be elementwise <= high")
+        labels = self.semantics.dim_labels if self.semantics is not None else None
+        if labels is not None and len(labels) != self.dim:
+            raise ValueError(
+                f"ActionSemantics.dim_labels has {len(labels)} entries but the box "
+                f"has {self.dim} dimensions"
+            )
 
     @property
     def dim(self) -> int:

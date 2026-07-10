@@ -524,7 +524,7 @@ def test_sim_without_configuration_exits_with_guidance(
     with pytest.raises(SystemExit, match="no sim embodiment configured") as excinfo:
         main(["run", "--instruction", "reach it", "--sim"])
     message = str(excinfo.value)
-    assert ENV_SIM_EMBODIMENT in message and "sim_embodiment = NAME" in message
+    assert ENV_SIM_EMBODIMENT in message and "config set sim_embodiment NAME" in message
 
 
 def test_sim_works_with_registered_task(
@@ -743,3 +743,251 @@ def test_styled_respects_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
     monkeypatch.setenv("NO_COLOR", "1")
     assert _styled("x", "1") == "x"
+
+
+# --- guardrails by default (plan 0008 §3e) -----------------------------------
+
+
+def _guard_space(**kwargs: object) -> object:
+    from inspect_robots.spaces import Box
+
+    return Box(**kwargs)  # type: ignore[arg-type]
+
+
+def test_build_guardrails_full_chain_on_bounded_displacement_space() -> None:
+    import numpy as np
+
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.types import Action
+
+    space = CubePickEmbodiment().info.action_space
+    approver, active, warnings = _build_guardrails(space, None)
+    assert active == ["clamp", "delta-limit"]
+    assert warnings == []
+    out = approver.review(Action(data=np.array([5.0, 5.0])), {})
+    assert out.meta.get("clamped") is True  # box bounds enforced
+
+
+def test_build_guardrails_threads_max_action_delta() -> None:
+    import numpy as np
+
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.types import Action
+
+    approver, _, _ = _build_guardrails(CubePickEmbodiment().info.action_space, 0.05)
+    out = approver.review(Action(data=np.array([0.08, 0.0])), {})
+    assert float(out.data[0]) == pytest.approx(0.05)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_build_guardrails_degrades_per_component() -> None:
+    import numpy as np
+
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.spaces import ActionSemantics, Box
+
+    # Bounds-less absolute space (the isaacsim shape): nothing is applicable.
+    bare = Box(shape=(2,), semantics=ActionSemantics("joint_pos"))
+    _approver, active, warnings = _build_guardrails(bare, None)
+    assert active == []
+    assert any("no guardrails" in w for w in warnings)
+    # ...but an explicit max delta re-enables the delta limiter.
+    _, active, warnings = _build_guardrails(bare, 0.1)
+    assert active == ["delta-limit"]
+    assert not any("no guardrails" in w for w in warnings)
+
+    # Semantics-less bounded space: clamp works, delta limiter refuses.
+    blind = Box(shape=(2,), low=np.zeros(2), high=np.ones(2))
+    _, active, warnings = _build_guardrails(blind, None)
+    assert active == ["clamp"]
+    assert any("semantics" in w for w in warnings)
+
+    # Quat-repr pose space: the delta limiter names the rotation refusal.
+    quat = Box(
+        shape=(7,),
+        low=np.full(7, -1.0),
+        high=np.full(7, 1.0),
+        semantics=ActionSemantics("eef_abs_pose", rotation_repr="quat_wxyz"),
+    )
+    _, active, warnings = _build_guardrails(quat, None)
+    assert active == ["clamp"]
+    assert any("rotation_repr" in w for w in warnings)
+
+
+def test_cli_run_header_names_active_guardrails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert "guardrails: clamp + delta-limit" in capsys.readouterr().out
+
+
+def test_cli_disable_guardrails_warns_loudly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+            "--disable-guardrails",
+        ]
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "guardrails: disabled" in captured.out
+    assert "WARNING" in captured.err and "guardrails" in captured.err
+
+
+def test_cli_max_action_delta_conflicts_with_disable(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="disable-guardrails"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+                "--disable-guardrails",
+                "--max-action-delta",
+                "0.1",
+            ]
+        )
+
+
+def test_cli_degraded_guardrails_warn_but_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A semantics-less, bounds-less action space: every guardrail component
+    # refuses, the CLI says so on stderr, and the run still proceeds.
+    from dataclasses import replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.spaces import Box
+
+    class _BareSpaceEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(self.info, action_space=Box(shape=(2,)))
+
+    embodiment_decorator("bare-cubepick")(_BareSpaceEmbodiment)
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "bare-cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "guardrails: none active" in captured.out
+    assert "no guardrails" in captured.err
+
+
+def test_guided_error_mentions_config_set() -> None:
+    with pytest.raises(SystemExit, match="inspect-robots config set policy"):
+        main(["run", "--instruction", "reach the cube"])
+
+
+# --- config set / show (plan 0008 §3e) ----------------------------------------
+
+
+def test_cli_config_set_writes_and_show_reads(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["config", "set", "embodiment", "cubepick"]) == 0
+    assert main(["config", "set", "policy", "scripted"]) == 0
+    path = _hermetic_defaults / "inspect-robots" / "config.ini"
+    body = path.read_text(encoding="utf-8")
+    assert "embodiment = cubepick" in body and "policy = scripted" in body
+    capsys.readouterr()
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert f"embodiment: cubepick  ({path})" in out
+    assert "sim_embodiment: (unset)" in out
+
+
+def test_cli_config_set_preserves_unknown_sections(_hermetic_defaults: Path) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\nscorer = success_at_end\n[embodiment.args]\nleft_channel = can2\n",
+    )
+    assert main(["config", "set", "embodiment", "cubepick"]) == 0
+    body = (_hermetic_defaults / "inspect-robots" / "config.ini").read_text(encoding="utf-8")
+    assert "[embodiment.args]" in body and "left_channel = can2" in body
+    assert "scorer = success_at_end" in body
+    assert "embodiment = cubepick" in body
+
+
+def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
+    with pytest.raises(SystemExit, match="max_steps"):
+        main(["config", "set", "max_steps", "zero"])
+    with pytest.raises(SystemExit, match="store_frames"):
+        main(["config", "set", "store_frames", "maybe"])
+    # Unknown keys are rejected by argparse itself (exit code 2).
+    with pytest.raises(SystemExit) as excinfo:
+        main(["config", "set", "frobnicate", "1"])
+    assert excinfo.value.code == 2
+    with pytest.raises(SystemExit, match="rerun"):
+        main(["config", "set", "rerun", "sometimes"])
+    # Valid values round-trip.
+    assert main(["config", "set", "max_steps", "50"]) == 0
+    assert main(["config", "set", "store_frames", "true"]) == 0
+    assert main(["config", "set", "rerun", "true"]) == 0
+
+
+def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
+    """A factory's guided ConfigError must exit cleanly, not print a traceback."""
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.registry import policy as policy_decorator
+
+    @policy_decorator("misconfigured-policy")
+    def _factory(**kwargs: object) -> object:
+        raise ConfigError("no model configured.\nfix: set $SOME_KEY")
+
+    with pytest.raises(SystemExit, match="no model configured") as excinfo:
+        main(
+            [
+                "run",
+                "--instruction",
+                "reach it",
+                "--policy",
+                "misconfigured-policy",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    assert "Traceback" not in str(excinfo.value)

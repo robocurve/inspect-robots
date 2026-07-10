@@ -9,14 +9,14 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 |--------|----------------|
 | `types.py` | `Observation`, `Action`, `ActionChunk`, `StepResult` (frozen, NumPy-native) |
 | `spaces.py` | `Box`, `ObservationSpace`, `ActionSemantics`, `StateSpec` + canonical state vocab |
-| `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig` |
+| `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig`; optional duck-typed `bind(embodiment_info)` hook for embodiment-adaptive policies (called by `eval()` before compat) |
 | `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags |
 | `scene.py` | `Scene` (the Inspect `Sample` analog), `Target`, `ListSceneDataset` |
 | `task.py` | `Task` (scenes + scorer + horizon), `Epochs` |
 | `scorer.py` | `Score`/`Scorer`, epoch reducers, builtin scorers (incl. operator/VLM) |
 | `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
-| `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover` |
-| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding |
+| `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |
+| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
@@ -25,8 +25,8 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
 | `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
-| `cli.py` | `inspect-robots list` / `run` / `inspect`, plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY) |
-| `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file) |
+| `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show`, plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
+| `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants

@@ -147,6 +147,57 @@ def _read_config(path: Path) -> Defaults:
     )
 
 
+# [defaults] keys `inspect-robots config set` may write. Mirrors what
+# _read_config understands; argparse uses this for its choices list.
+CONFIG_KEYS = (
+    "policy",
+    "embodiment",
+    "sim_embodiment",
+    "scorer",
+    "max_steps",
+    "store_frames",
+    "rerun",
+)
+
+
+def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
+    """Persist one ``[defaults]`` key to the user config file; return its path.
+
+    Values are validated with the same rules ``load_defaults`` applies on
+    read, so a bad ``config set`` fails now instead of poisoning every later
+    run. The write is atomic (temp file + rename) and round-trips unknown
+    sections and keys; configparser drops comments, which is the documented
+    trade-off of editing the file through the CLI.
+    """
+    if key == "max_steps":
+        parsed = parse_value(value)
+        if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
+            raise SystemExit(f"max_steps must be an integer >= 1, got {value!r}")
+    if key in ("store_frames", "rerun") and not isinstance(parse_value(value), bool):
+        raise SystemExit(f"{key} must be true or false, got {value!r}")
+
+    path = _config_path(env)
+    if path is None:
+        raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    if path.is_file():
+        try:
+            with path.open(encoding="utf-8") as fh:
+                parser.read_file(fh)
+        except (configparser.Error, UnicodeDecodeError) as exc:
+            raise _die(path, f"malformed config: {exc}") from exc
+    if not parser.has_section("defaults"):
+        parser.add_section("defaults")
+    parser.set("defaults", key, value)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        parser.write(fh)
+    tmp.replace(path)
+    return path
+
+
 def load_defaults(env: Mapping[str, str]) -> Defaults:
     """Load user defaults: environment variables override the config file.
 

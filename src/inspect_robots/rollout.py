@@ -205,6 +205,14 @@ def rollout(
                     t,
                 )
 
+            # Policy-requested stop (plan 0008 §3d), captured from the
+            # PRE-review action so an approver rewrite cannot erase the
+            # intent. Note: EnsemblingController rebuilds actions with chunk
+            # meta, so this channel works under Default/SmoothingController
+            # (which preserve per-action meta), not under ensembling.
+            requested_stop = bool(action.meta.get("request_stop"))
+            stop_reason = str(action.meta.get("stop_reason", "policy_stop"))
+
             try:
                 reviewed = approver.review(action, store)  # may raise SafetyAbort
             except InspectRobotsError as exc:
@@ -213,7 +221,8 @@ def rollout(
             except Exception as exc:
                 raise _record_failure(record, SafetyAbort(str(exc)), t) from exc
             if reviewed is not action:
-                detail = "clamped" if reviewed.meta.get("clamped") else None
+                flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
+                detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
             action = reviewed
 
@@ -242,6 +251,13 @@ def rollout(
             if result.truncated:
                 record.truncated = True
                 record.termination_reason = result.termination_reason or "truncated"
+                break
+            if requested_stop:
+                # Embodiment-reported termination above wins (ground truth);
+                # otherwise the policy's stop ends the trial as a truncation —
+                # scoring stays the scorer's job, done() is not success.
+                record.truncated = True
+                record.termination_reason = stop_reason
                 break
             obs = result.observation
         else:

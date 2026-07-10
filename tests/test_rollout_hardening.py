@@ -147,6 +147,72 @@ def test_clamp_approver_high_only_bound() -> None:
     assert approver.review(unbounded_side, {}) is unbounded_side
 
 
+class _StopPolicy:
+    """Emits one hold-still action carrying the given meta every inference."""
+
+    def __init__(self, meta: dict[str, object]):
+        self.info = PolicyInfo(name="stopper", action_space=_BOX)
+        self.config = PolicyConfig()
+        self._meta = meta
+
+    def reset(self, scene: Scene) -> None:
+        return None
+
+    def act(self, observation: Observation) -> ActionChunk:
+        return ActionChunk(actions=[Action(data=np.zeros(2), meta=dict(self._meta))])
+
+
+def test_policy_request_stop_truncates_with_reason() -> None:
+    policy = _StopPolicy({"request_stop": True, "stop_reason": "done"})
+    record = _run(policy, CubePickEmbodiment())
+    assert record.truncated is True
+    assert record.terminated is False
+    assert record.termination_reason == "done"
+    assert len(record.steps) == 1  # the flagged action still executed, once
+
+
+def test_policy_request_stop_default_reason() -> None:
+    record = _run(_StopPolicy({"request_stop": True}), CubePickEmbodiment())
+    assert record.termination_reason == "policy_stop"
+
+
+def test_request_stop_survives_approver_rewrite() -> None:
+    class _MetaStrippingApprover:
+        def review(self, action: Action, store: dict[str, object]) -> Action:
+            return replace(action, data=np.asarray(action.data) * 0.5, meta={})
+
+    policy = _StopPolicy({"request_stop": True, "stop_reason": "done"})
+    record = _run(policy, CubePickEmbodiment(), approver=_MetaStrippingApprover())
+    assert record.truncated is True
+    assert record.termination_reason == "done"
+
+
+def test_embodiment_termination_wins_over_request_stop() -> None:
+    class _InstantSuccessEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action):  # type: ignore[no-untyped-def]
+            result = super().step(action)
+            return replace(result, terminated=True, termination_reason="success")
+
+    policy = _StopPolicy({"request_stop": True, "stop_reason": "done"})
+    record = _run(policy, _InstantSuccessEmbodiment())
+    assert record.terminated is True
+    assert record.truncated is False
+    assert record.termination_reason == "success"
+
+
+def test_rollout_records_delta_clamped_approval_detail() -> None:
+    from inspect_robots.approver import DeltaLimitApprover
+
+    emb = CubePickEmbodiment()
+    # CubePick's scripted steps are 0.1-magnitude deltas; a tighter explicit
+    # limit forces a clamp so the approval event carries the new detail.
+    approver = DeltaLimitApprover(emb.info.action_space, max_delta=0.05)
+    record = _run(ScriptedPolicy(), emb, approver=approver)
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "delta_clamped"
+
+
 def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     img = np.zeros((2, 2, 3), dtype=np.uint8)

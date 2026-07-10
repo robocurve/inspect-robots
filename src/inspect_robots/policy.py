@@ -16,11 +16,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.types import ActionChunk, Observation
+
+if TYPE_CHECKING:
+    from inspect_robots.embodiment import EmbodimentInfo
 
 
 @dataclass(frozen=True)
@@ -49,7 +52,15 @@ class PolicyInfo:
 
 @runtime_checkable
 class Policy(Protocol):
-    """The VLA contract."""
+    """The VLA contract.
+
+    Policies may additionally define an **optional** ``bind(embodiment_info)``
+    hook (not part of this Protocol, so existing policies stay conformant):
+    ``eval()`` calls it after resolving both components and before the
+    compatibility check, letting embodiment-adaptive policies — e.g. an LLM
+    agent that drives whatever it is paired with — adopt the embodiment's
+    spaces. ``PolicyBase`` ships a no-op default.
+    """
 
     info: PolicyInfo
     config: PolicyConfig
@@ -64,6 +75,9 @@ class PolicyBase(ABC):
 
     info: PolicyInfo
     config: PolicyConfig = PolicyConfig()
+
+    def bind(self, embodiment_info: EmbodimentInfo) -> None:  # noqa: B027 - no-op default
+        """Default: fixed-space policies ignore the embodiment they run on."""
 
     def reset(self, scene: Scene) -> None:  # noqa: B027 - intentional no-op default
         """Default: stateless policies need no per-scene reset."""

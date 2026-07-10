@@ -129,3 +129,26 @@ jobs:
           # The plugin is versioned independently; a core release that doesn't
           # bump it must not fail on the already-uploaded file.
           skip-existing: true
+
+  publish-agent:
+    name: publish inspect-robots-agent
+    needs: [cut]
+    if: ${{ !cancelled() && (github.event_name == 'release' || needs.cut.result == 'success') }}
+    runs-on: ubuntu-latest
+    environment: pypi-agent
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.cut.outputs.tag || github.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build --package inspect-robots-agent
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # The plugin is versioned independently; a core release that doesn't
+          # bump it must not fail on the already-uploaded file.
+          skip-existing: true
