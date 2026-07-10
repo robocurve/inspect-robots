@@ -46,9 +46,12 @@ no-ops, so core never depends on it. Install with `pip install "inspect-robots[r
 ## Frame side-cars
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
-`<log_dir>/frames` through a [`FrameStore`][inspect_robots.frames.FrameStore] and the
-`TrialRecord` keeps lightweight [`FrameRef`][inspect_robots.frames.FrameRef] handles — so
-long, multi-camera episodes stay memory-safe and remain scorable from disk.
+a per-run subdirectory of `<log_dir>/frames` through a
+[`FrameStore`][inspect_robots.frames.FrameStore] and the `TrialRecord` keeps lightweight
+[`FrameRef`][inspect_robots.frames.FrameRef] handles — so long, multi-camera episodes stay
+memory-safe and remain scorable from disk. Trial ids repeat across runs, so
+each eval gets its own directory; read the exact path from the log's
+`stats.frames_dir` rather than globbing `<log_dir>/frames` directly.
 
 ```python
 eval(task, policy, embodiment, log_dir="logs", store_frames=True)

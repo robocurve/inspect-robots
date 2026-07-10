@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -224,7 +225,13 @@ def _run_eval(
 
     frame_store: FrameStore | None = None
     if store_frames:
-        frame_store = FrameStore(str(Path(log_dir) / "frames"))
+        # One subdirectory per run: trial ids repeat across runs (scene-epoch),
+        # so a shared directory would silently overwrite the previous run's
+        # frames. The log's stats.frames_dir records the exact directory.
+        run_stamp = (
+            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+        )
+        frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
 
     spec = EvalSpec(
         task=task.name,

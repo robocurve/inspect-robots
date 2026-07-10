@@ -173,3 +173,23 @@ def test_env_sim_embodiment_overrides_config_but_not_real(tmp_path: Path) -> Non
     assert d.sim_embodiment_args["headless"] is True
     scene_file = d.sim_embodiment_args["scene_file"]
     assert isinstance(scene_file, str) and scene_file.endswith("scenes/kitchen.usd")
+
+
+def test_config_store_frames_parses_bool(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\nstore_frames = true\n")
+    defaults = load_defaults({"XDG_CONFIG_HOME": str(config_home)})
+    assert defaults.store_frames is True
+
+
+def test_config_store_frames_defaults_false(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\npolicy = x\n")
+    assert load_defaults({"XDG_CONFIG_HOME": str(config_home)}).store_frames is False
+
+
+def test_config_store_frames_rejects_non_bool(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\nstore_frames = 12\n")
+    with pytest.raises(SystemExit, match="store_frames"):
+        load_defaults({"XDG_CONFIG_HOME": str(config_home)})

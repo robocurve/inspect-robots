@@ -39,6 +39,7 @@ embodiment = yam-bimanual            ; the default: real hardware
 sim_embodiment = yam-bimanual-isaac  ; what --sim swaps in
 scorer = operator      ; optional, ad-hoc runs only
 max_steps = 300        ; optional, ad-hoc runs only
+store_frames = true    ; optional, capture frames on every run
 
 [policy.args]          ; default -P key=value pairs
 checkpoint = ~/ckpts/molmoact2-yam.pt
@@ -115,8 +116,12 @@ inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P c
 
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
 `PolicyError`s (`1` = first error, `0<X<1` = proportion, `X>1` = count), and
-`--store-frames` streams camera frames to `<log-dir>/frames`. When the run
-finishes, the path of the written log is printed.
+`--store-frames` streams camera frames to a per-run subdirectory of
+`<log-dir>/frames` (trial ids repeat across runs, so each run gets its own
+directory; the log's `stats.frames_dir` records the exact path). A
+`store_frames = true` config default enables capture on every run;
+`--no-store-frames` disables it for one invocation. When the run finishes,
+the path of the written log is printed.
 
 `--policy`/`--embodiment` may be omitted when defaults are configured (see
 the zero-config section above); `--instruction "..."` replaces `--task` to

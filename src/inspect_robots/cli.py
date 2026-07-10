@@ -132,8 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--store-frames",
-        action="store_true",
-        help="stream camera frames to <log-dir>/frames instead of keeping them in memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream camera frames to a per-run directory under <log-dir>/frames "
+        "instead of keeping them in memory (--no-store-frames overrides a "
+        "store_frames config default)",
     )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
@@ -296,37 +299,47 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
     embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
-    if args.epochs is not None:
-        task = replace(task, epochs=args.epochs)
+    try:
+        if args.epochs is not None:
+            task = replace(task, epochs=args.epochs)
 
-    # Defaults must never be silent: say what runs, and why, before it moves.
-    print(f"policy: {policy_name} ({policy_source})")
-    print(f"embodiment: {embodiment_name} ({embodiment_source})")
+        # Defaults must never be silent: say what runs, and why, before it moves.
+        print(f"policy: {policy_name} ({policy_source})")
+        print(f"embodiment: {embodiment_name} ({embodiment_source})")
 
-    before_scoring = None
-    if (
-        is_adhoc
-        and not args.no_prompt
-        and sys.stdin.isatty()
-        and any(s.name == "operator" for s in task.scorers)
-    ):
-        # Ad-hoc runs only: a registered task with an operator scorer keeps
-        # R6's non-blocking, unattended-safe behavior (judgement stays None).
-        before_scoring = _prompt_operator
+        before_scoring = None
+        if (
+            is_adhoc
+            and not args.no_prompt
+            and sys.stdin.isatty()
+            and any(s.name == "operator" for s in task.scorers)
+        ):
+            # Ad-hoc runs only: a registered task with an operator scorer keeps
+            # R6's non-blocking, unattended-safe behavior (judgement stays None).
+            before_scoring = _prompt_operator
 
-    # Construct the sink explicitly so we can tell the user where the log went.
-    sink = JsonLogSink(args.log_dir)
-    logs = eval(
-        task,
-        policy,
-        embodiment,
-        log_dir=args.log_dir,
-        seed=args.seed,
-        sinks=[sink],
-        fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-        store_frames=args.store_frames,
-        before_scoring=before_scoring,
-    )
+        # Construct the sink explicitly so we can tell the user where the log went.
+        sink = JsonLogSink(args.log_dir)
+        logs = eval(
+            task,
+            policy,
+            embodiment,
+            log_dir=args.log_dir,
+            seed=args.seed,
+            sinks=[sink],
+            fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
+            store_frames=(
+                args.store_frames if args.store_frames is not None else defaults.store_frames
+            ),
+            before_scoring=before_scoring,
+        )
+    finally:
+        # The CLI resolved the embodiment itself, so eval() does not own it
+        # ("close what we open"). Real-hardware embodiments release motor
+        # torque in close(); skipping this leaves a robot energized. The span
+        # starts right after resolution: --epochs/scorer validation between
+        # here and eval() can raise, and that must not leak the embodiment.
+        embodiment.close()
     log = logs[0]
     print(f"status: {log.status}")
     print(f"scenes: {log.results.total_scenes}  trials: {log.results.total_trials}")

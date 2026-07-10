@@ -129,7 +129,7 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert rc == 0
     out = capsys.readouterr().out
     assert "trials: 2" in out  # --epochs overrode the task's epoch count
-    assert list((tmp_path / "frames").glob("*.npy"))  # --store-frames streamed
+    assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -561,3 +561,92 @@ def test_sim_ignores_real_embodiment_env_var(
     rc = main(["reach the cube", "--sim", "--scorer", "success_at_end", "--log-dir", str(log_dir)])
     assert rc == 0
     assert "embodiment: cubepick" in capsys.readouterr().out
+
+
+def test_cli_run_closes_the_embodiment_it_resolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The CLI resolves the embodiment itself (so eval() does not own it); it
+    must close what it opened — real-hardware embodiments release motor torque
+    in close(), and skipping it leaves arms energized after the run."""
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closed: list[bool] = []
+
+    class _Tracked(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
+    rc = main(["reach the cube", "--scorer", "success_at_end", "--log-dir", str(tmp_path / "logs")])
+    assert rc == 0
+    assert closed == [True]
+
+
+def test_cli_run_closes_embodiment_when_validation_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure between resolving the embodiment and eval() (here: --epochs 0
+    raising ConfigError) must still close the embodiment — otherwise a bad flag
+    leaves real arms energized."""
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closed: list[bool] = []
+
+    class _Tracked(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
+    with pytest.raises(ConfigError):
+        main(
+            [
+                "reach the cube",
+                "--scorer",
+                "success_at_end",
+                "--epochs",
+                "0",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+    assert closed == [True]
+
+
+def test_config_store_frames_enables_frame_capture(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """store_frames = true in the config file captures frames with no CLI flag."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nstore_frames = true\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert list((log_dir / "frames").rglob("*.npy"))
+    assert _read_only_log(log_dir).stats.frames_dir is not None
+
+
+def test_no_store_frames_flag_overrides_config_default(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """--no-store-frames must win over store_frames = true in the config file."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nstore_frames = true\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--no-store-frames", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert not (log_dir / "frames").exists()
+    assert _read_only_log(log_dir).stats.frames_dir is None
