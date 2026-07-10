@@ -98,7 +98,7 @@ class _RecordingSink(NullSink):
 def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"0": 0.1, "1": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}, "duration_s": 0.5}),
             _tool_response("done", {"summary": "close enough"}),
         ]
     )
@@ -135,7 +135,7 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
     def run(approver: Any) -> TrialRecord:
         script = _Script(
             [
-                _tool_response("move_by", {"deltas": {"0": 5.0}, "duration_s": 0.5}),
+                _tool_response("move_by", {"deltas": {"dx": 5.0}, "duration_s": 0.5}),
                 _tool_response("done", {"summary": "stop"}),
             ]
         )
@@ -162,7 +162,7 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
 
 
 def test_llm_call_budget_forces_give_up(tmp_path: Path) -> None:
-    script = _Script([_tool_response("move_by", {"deltas": {"0": 0.05}, "duration_s": 0.5})])
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.05}, "duration_s": 0.5})])
     sink = _RecordingSink()
     logs = ir_eval(
         _task(),
@@ -192,8 +192,8 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
 def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"7": 0.1}, "duration_s": 0.5}),  # bad dim
-            _tool_response("move_by", {"deltas": {"0": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dz": 0.1}, "duration_s": 0.5}),  # bad dim
+            _tool_response("move_by", {"deltas": {"dx": 0.1}, "duration_s": 0.5}),
             _tool_response("done", {"summary": "recovered"}),
         ]
     )
@@ -207,7 +207,7 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
     tool_messages = [
         m for request in script.requests for m in request["messages"] if m.get("role") == "tool"
     ]
-    assert any("unknown dimension '7'" in str(m["content"]) for m in tool_messages)
+    assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
 
 
 def test_registry_resolves_agent_policy() -> None:
