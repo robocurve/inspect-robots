@@ -1,6 +1,8 @@
 # Command-line interface
 
 The `inspect_robots` CLI wraps the registry and [`eval`][inspect_robots.eval.eval].
+The command is installed as `inspect-robots`, with `inspect-robot` as an alias
+for the common typo; both run the same CLI.
 
 ## Zero-config: `inspect-robots "<instruction>"`
 
