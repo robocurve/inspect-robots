@@ -586,6 +586,40 @@ def test_cli_run_closes_the_embodiment_it_resolved(
     assert closed == [True]
 
 
+def test_cli_run_closes_embodiment_when_validation_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure between resolving the embodiment and eval() (here: --epochs 0
+    raising ConfigError) must still close the embodiment — otherwise a bad flag
+    leaves real arms energized."""
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closed: list[bool] = []
+
+    class _Tracked(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
+    with pytest.raises(ConfigError):
+        main(
+            [
+                "reach the cube",
+                "--scorer",
+                "success_at_end",
+                "--epochs",
+                "0",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+    assert closed == [True]
+
+
 def test_config_store_frames_enables_frame_capture(
     _hermetic_defaults: Path, tmp_path: Path
 ) -> None:

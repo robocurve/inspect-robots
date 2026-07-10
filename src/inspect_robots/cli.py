@@ -299,27 +299,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
     embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
-    if args.epochs is not None:
-        task = replace(task, epochs=args.epochs)
-
-    # Defaults must never be silent: say what runs, and why, before it moves.
-    print(f"policy: {policy_name} ({policy_source})")
-    print(f"embodiment: {embodiment_name} ({embodiment_source})")
-
-    before_scoring = None
-    if (
-        is_adhoc
-        and not args.no_prompt
-        and sys.stdin.isatty()
-        and any(s.name == "operator" for s in task.scorers)
-    ):
-        # Ad-hoc runs only: a registered task with an operator scorer keeps
-        # R6's non-blocking, unattended-safe behavior (judgement stays None).
-        before_scoring = _prompt_operator
-
-    # Construct the sink explicitly so we can tell the user where the log went.
-    sink = JsonLogSink(args.log_dir)
     try:
+        if args.epochs is not None:
+            task = replace(task, epochs=args.epochs)
+
+        # Defaults must never be silent: say what runs, and why, before it moves.
+        print(f"policy: {policy_name} ({policy_source})")
+        print(f"embodiment: {embodiment_name} ({embodiment_source})")
+
+        before_scoring = None
+        if (
+            is_adhoc
+            and not args.no_prompt
+            and sys.stdin.isatty()
+            and any(s.name == "operator" for s in task.scorers)
+        ):
+            # Ad-hoc runs only: a registered task with an operator scorer keeps
+            # R6's non-blocking, unattended-safe behavior (judgement stays None).
+            before_scoring = _prompt_operator
+
+        # Construct the sink explicitly so we can tell the user where the log went.
+        sink = JsonLogSink(args.log_dir)
         logs = eval(
             task,
             policy,
@@ -336,7 +336,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     finally:
         # The CLI resolved the embodiment itself, so eval() does not own it
         # ("close what we open"). Real-hardware embodiments release motor
-        # torque in close(); skipping this leaves a robot energized.
+        # torque in close(); skipping this leaves a robot energized. The span
+        # starts right after resolution: --epochs/scorer validation between
+        # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
     print(f"status: {log.status}")
