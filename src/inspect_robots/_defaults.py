@@ -61,6 +61,7 @@ class Defaults:
     scorer: str | None = None
     max_steps: int | None = None
     store_frames: bool = False
+    rerun: bool = False
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
@@ -119,6 +120,13 @@ def _read_config(path: Path) -> Defaults:
             raise _die(path, f"[defaults] store_frames must be true or false, got {raw_frames!r}")
         store_frames = parsed_frames
 
+    rerun = False
+    if raw_rerun := parser.get("defaults", "rerun", fallback=None):
+        parsed_rerun = parse_value(raw_rerun)
+        if not isinstance(parsed_rerun, bool):
+            raise _die(path, f"[defaults] rerun must be true or false, got {raw_rerun!r}")
+        rerun = parsed_rerun
+
     policy = parser.get("defaults", "policy", fallback=None)
     embodiment = parser.get("defaults", "embodiment", fallback=None)
     sim_embodiment = parser.get("defaults", "sim_embodiment", fallback=None)
@@ -132,6 +140,7 @@ def _read_config(path: Path) -> Defaults:
         scorer=parser.get("defaults", "scorer", fallback=None),
         max_steps=max_steps,
         store_frames=store_frames,
+        rerun=rerun,
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),

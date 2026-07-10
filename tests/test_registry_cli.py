@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -650,3 +651,71 @@ def test_no_store_frames_flag_overrides_config_default(
     assert rc == 0
     assert not (log_dir / "frames").exists()
     assert _read_only_log(log_dir).stats.frames_dir is None
+
+
+class _FakeRerunSink:
+    """Stands in for RerunSink: records construction and step traffic."""
+
+    instances: ClassVar[list[_FakeRerunSink]] = []
+
+    def __init__(self, recording_path: str | None = None, *, spawn: bool = False) -> None:
+        self.spawn = spawn
+        self.steps = 0
+        _FakeRerunSink.instances.append(self)
+
+    def on_eval_start(self, spec: object) -> None: ...
+
+    def on_trial_start(self, scene_id: str, epoch: int) -> None: ...
+
+    def log_step(self, t: int, observation: object, action: object, result: object) -> None:
+        self.steps += 1
+
+    def on_trial_end(self, record: object) -> None: ...
+
+    def on_eval_end(self, log: object) -> None: ...
+
+
+@pytest.fixture()
+def _fake_rerun(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRerunSink]:
+    import inspect_robots.logging.rerun_sink as rrs
+
+    _FakeRerunSink.instances = []
+    monkeypatch.setattr(rrs, "RerunSink", _FakeRerunSink)
+    return _FakeRerunSink
+
+
+def _run_adhoc(config_home: Path, tmp_path: Path, *extra: str) -> int:
+    _write_config(
+        config_home,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\n",
+    )
+    return main(["reach the cube", "--log-dir", str(tmp_path / "logs"), *extra])
+
+
+def test_config_rerun_attaches_live_viewer_sink(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    (sink,) = _fake_rerun.instances  # constructed exactly once
+    assert sink.spawn is True  # live viewer, not just a recording
+    assert sink.steps > 0  # actually received rollout traffic
+
+
+def test_no_rerun_flag_overrides_config(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun") == 0
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_flag_enables_without_config(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
+    assert rc == 0
+    assert len(_fake_rerun.instances) == 1

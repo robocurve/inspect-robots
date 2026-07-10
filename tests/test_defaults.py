@@ -193,3 +193,22 @@ def test_config_store_frames_rejects_non_bool(tmp_path: Path) -> None:
     _write_config(config_home, "[defaults]\nstore_frames = 12\n")
     with pytest.raises(SystemExit, match="store_frames"):
         load_defaults({"XDG_CONFIG_HOME": str(config_home)})
+
+
+def test_config_rerun_parses_bool(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\nrerun = true\n")
+    assert load_defaults({"XDG_CONFIG_HOME": str(config_home)}).rerun is True
+
+
+def test_config_rerun_defaults_false(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\npolicy = x\n")
+    assert load_defaults({"XDG_CONFIG_HOME": str(config_home)}).rerun is False
+
+
+def test_config_rerun_rejects_non_bool(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\nrerun = viewer\n")
+    with pytest.raises(SystemExit, match="rerun"):
+        load_defaults({"XDG_CONFIG_HOME": str(config_home)})

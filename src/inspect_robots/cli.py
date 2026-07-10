@@ -40,6 +40,7 @@ from inspect_robots._defaults import (
 )
 
 if TYPE_CHECKING:
+    from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
 
@@ -137,6 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="stream camera frames to a per-run directory under <log-dir>/frames "
         "instead of keeping them in memory (--no-store-frames overrides a "
         "store_frames config default)",
+    )
+    p_run.add_argument(
+        "--rerun",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream the rollout (cameras, state, actions) to a live Rerun "
+        "viewer window; needs rerun-sdk (--no-rerun overrides a rerun config "
+        "default)",
     )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
@@ -320,13 +329,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
+        sinks: list[LogSink] = [sink]
+        if args.rerun if args.rerun is not None else defaults.rerun:
+            from inspect_robots.logging.rerun_sink import RerunSink
+
+            # spawn=True opens the live viewer; the sink itself degrades to a
+            # warn-once no-op when rerun-sdk is not installed.
+            sinks.append(RerunSink(spawn=True))
+            print("rerun: live viewer")
         logs = eval(
             task,
             policy,
             embodiment,
             log_dir=args.log_dir,
             seed=args.seed,
-            sinks=[sink],
+            sinks=sinks,
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
             store_frames=(
                 args.store_frames if args.store_frames is not None else defaults.store_frames

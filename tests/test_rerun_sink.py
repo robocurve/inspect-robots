@@ -57,3 +57,23 @@ def test_rerun_sink_writes_recording(tmp_path: Path) -> None:
     assert sink.available is True
     eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
     assert rrd.exists()
+
+
+def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
+    """A missing viewer binary (rr.init raising) must not kill the eval."""
+    from inspect_robots.log import EvalSpec
+
+    class _FakeRR:
+        def init(self, *a: object, **k: object) -> None:
+            raise RuntimeError("Failed to find Rerun Viewer executable in PATH.")
+
+    sink = RerunSink(spawn=True)
+    sink._rr = _FakeRR()
+    with pytest.warns(RuntimeWarning, match="RerunSink disabled"):
+        sink.on_eval_start(
+            EvalSpec(
+                task="t", policy="p", embodiment="e", created="now", inspect_robots_version="0"
+            )
+        )
+    assert sink.available is False  # dormant from here on
+    sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
