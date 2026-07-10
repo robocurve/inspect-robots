@@ -47,15 +47,22 @@ spaces, semantics, control rate, scene realizability) and fails fast if not.
 
 ## Install
 
+In a fresh directory (or your existing project), create a virtual environment
+and install (system Pythons on modern distros reject bare `pip install`,
+per PEP 668):
+
 ```bash
-pip install "inspect-robots[rerun]"
+uv venv && uv pip install "inspect-robots[rerun]"
 ```
 
 The `rerun` extra powers the live run viewer. For the numpy-only core:
 
 ```bash
-pip install inspect-robots
+uv venv && uv pip install inspect-robots
 ```
+
+Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
+`pip`); the commands below assume the environment is active or run via `uv run`.
 
 ## Quickstart
 
