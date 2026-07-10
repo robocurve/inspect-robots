@@ -48,45 +48,66 @@ spaces, semantics, control rate, scene realizability) and fails fast if not.
 ## Install
 
 ```bash
-pip install inspect-robots            # core (numpy only)
-pip install "inspect-robots[rerun]"   # + Rerun visualization
+pip install "inspect-robots[rerun]"
+```
+
+The `rerun` extra powers the live run viewer. For the numpy-only core:
+
+```bash
+pip install inspect-robots
 ```
 
 ## Quickstart
 
-With a default policy/embodiment configured once in
-`~/.config/inspect-robots/config.ini`, just tell the robot what to do:
+Set your defaults once. The policy and embodiment names come from installed
+plugins ([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)
+shown here; its README covers the embodiment factory):
 
 ```bash
-inspect-robots "place the fork on the plate"                 # zero-config ad-hoc eval
-inspect-robots "place the fork on the plate" --sim           # same, on your configured sim
-```
-
-A config file makes every knob a default (CLI flags override; `--no-rerun` and
-`--no-store-frames` turn the booleans off for a single run):
-
-```ini
-# ~/.config/inspect-robots/config.ini
+mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
 [defaults]
-policy = molmoact2        # e.g. from the inspect-robots-yam plugin
-embodiment = my_yam_arms  # your rig's embodiment factory (see the plugin's README)
+policy = molmoact2        # from the inspect-robots-yam plugin
+embodiment = my_yam_arms  # your rig's embodiment factory
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
-rerun = true              # live Rerun viewer per run: pip install "inspect-robots[rerun]"
-store_frames = true       # save each run's camera frames under <log-dir>/frames/
+rerun = true              # live viewer of cameras/state/actions each run
+store_frames = true       # save each run's camera frames under logs/frames/
+EOF
 ```
 
-With `rerun = true` every run opens a live viewer streaming the cameras,
-proprioception, and actions straight from the eval pipeline, so you watch
-exactly what the policy sees while the robot moves.
-
-The full command line resolves any registered task/policy/embodiment
-(builtins + installed plugins):
+Then tell the robot what to do:
 
 ```bash
-inspect-robots list                                          # registered components
+inspect-robots "place the fork on the plate"
+```
+
+Every run opens a live Rerun viewer streaming the cameras, proprioception,
+and actions straight from the eval pipeline, so you watch exactly what the
+policy sees while the robot moves. CLI flags override any default
+(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...), and the same
+instruction runs on your configured simulator instead of the real robot:
+
+```bash
+inspect-robots "place the fork on the plate" --sim
+```
+
+The full command line resolves any registered task/policy/embodiment
+(builtins + installed plugins). List what is registered:
+
+```bash
+inspect-robots list
+```
+
+Run a registered task with explicit components:
+
+```bash
 inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
-inspect-robots inspect logs/cubepick-reach_*.json            # results table
+```
+
+Pretty-print a saved eval log:
+
+```bash
+inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
 And everything is a Python API. No hardware or simulator needed: the
