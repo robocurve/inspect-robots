@@ -67,19 +67,24 @@ below and no activation is needed.
 
 ## Quickstart
 
-Set your defaults once. The policy and embodiment names come from installed
-plugins ([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)
-shown here; its README covers the embodiment factory):
+Set your defaults once. The policy and embodiment come from installed plugins
+([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) shown
+here); replace the three camera paths with your rig's V4L2 color nodes:
 
 ```bash
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
 [defaults]
 policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = my_yam_arms  # your rig's embodiment factory
+embodiment = yam_arms     # same plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
 store_frames = true       # save each run's camera frames under logs/frames/
+
+[embodiment.args]
+top_cam_device = /dev/v4l/by-id/YOUR-TOP-CAM
+left_cam_device = /dev/v4l/by-id/YOUR-LEFT-CAM
+right_cam_device = /dev/v4l/by-id/YOUR-RIGHT-CAM
 EOF
 ```
 
