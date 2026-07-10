@@ -40,9 +40,12 @@ class RerunSink:
         self.spawn = spawn
         self._rr: Any | None = None
         self._warned = False
+        self._disabled = False
         self._prefix = "trial"
 
     def _ensure_rerun(self) -> Any | None:
+        if self._disabled:
+            return None
         if self._rr is not None:
             return self._rr
         try:
@@ -82,9 +85,21 @@ class RerunSink:
         rr = self._ensure_rerun()
         if rr is None:
             return
-        rr.init(self.application_id, spawn=self.spawn)
-        if self.recording_path is not None:
-            rr.save(self.recording_path)
+        try:
+            rr.init(self.application_id, spawn=self.spawn)
+            if self.recording_path is not None:
+                rr.save(self.recording_path)
+        except Exception as exc:
+            # A visualization sink must never take the eval down with it — a
+            # missing viewer binary (spawn) or unwritable recording path
+            # degrades to a warned no-op, exactly like a missing rerun-sdk.
+            warnings.warn(
+                f"RerunSink disabled: could not start the Rerun recording/viewer ({exc})",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._rr = None
+            self._disabled = True
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
         # Namespace this trial's entities so trials never overwrite each other.
