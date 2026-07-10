@@ -77,7 +77,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config")
+_SUBCOMMANDS = ("list", "run", "inspect", "config", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -187,6 +187,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
     p_inspect.add_argument("log", help="path to an EvalLog JSON file")
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="check an installed embodiment's declared spaces for adapter conformance",
+    )
+    p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
+    p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
 
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
@@ -511,6 +518,31 @@ def _cmd_inspect(path: str) -> int:
     return 0 if log.status == "success" else 1
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Run the declarative conformance checks against an installed adapter.
+
+    Purely declarative — the embodiment is constructed (adapters keep
+    constructors hardware-free by convention) but never reset or stepped.
+    """
+    from inspect_robots.conformance import check_embodiment
+
+    defaults = load_defaults(os.environ)
+    name, source = _pick_component(
+        "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
+    )
+    kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+    embodiment = _resolve_or_exit("embodiment", name, **kvs)
+    try:
+        report = check_embodiment(embodiment.info)
+    finally:
+        embodiment.close()
+    print(f"embodiment: {name} ({source})")
+    print(report.summary())
+    if not report.ok:
+        print("see the adapter authoring guide: docs/guide/adapters.md")
+    return 0 if report.ok else 1
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
         path = set_default(os.environ, args.key, args.value)
@@ -561,6 +593,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_inspect(args.log)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command == "doctor":
+        return _cmd_doctor(args)
     parser.print_help()
     return 0
 

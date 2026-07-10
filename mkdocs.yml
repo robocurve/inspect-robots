@@ -108,6 +108,7 @@ nav:
       - guide/scoring.md
       - guide/logging-and-rerun.md
       - guide/plugins.md
+      - guide/adapters.md
       - guide/cli.md
   - API reference: api/index.md
 

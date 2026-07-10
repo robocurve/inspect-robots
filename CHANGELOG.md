@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format is based on
   calls it after resolution and before the compatibility check, so
   embodiment-adaptive policies (like the LLM agent) can adopt the
   embodiment's spaces.
+- Adapter conformance kit (`inspect_robots.conformance`):
+  `check_embodiment` / `assert_embodiment_conformant` verify an embodiment's
+  declared spaces are guardrail-ready and agent-ready (semantics, finite
+  bounds, unique `dim_labels`, aligned `StateSpec` for absolute modes,
+  limitable rotation reps). Adapter repos enforce it with one CI test; the
+  new `inspect-robots doctor --embodiment NAME` command audits installed
+  adapters the same way. The `CubePick` mock now labels its dims (`dx`/`dy`)
+  and passes its own kit. See the new adapter authoring guide
+  (`docs/guide/adapters.md`) for the non-mechanical half (honest control
+  modes, per-step delta bounds, hold-behavior verification).
 - Rollout honors a policy-requested stop via the pre-review action's
   `meta["request_stop"]` (ends the trial as a truncation; embodiment
   termination wins; not preserved under ensembling).
