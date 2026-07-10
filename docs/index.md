@@ -41,7 +41,7 @@ and Inspect Robots makes both first-class and orthogonal.
 
 </div>
 
-A **`Task`**, a dataset of `Scene`s (initial conditions, instructions, success
+A `Task`, a dataset of `Scene`s (initial conditions, instructions, success
 targets) plus scorers, is defined *independently* of both. Before any rollout,
 Inspect Robots verifies the `(policy, embodiment)` pair is compatible and fails fast
 and loud if not.

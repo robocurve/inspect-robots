@@ -81,7 +81,7 @@ robot.
 
 An arbitrary instruction has no success oracle, so ad-hoc runs default to the
 `operator` scorer: when run on an interactive terminal, the CLI asks after
-each trial
+each trial,
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure)
