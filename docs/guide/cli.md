@@ -1,6 +1,8 @@
 # Command-line interface
 
 The `inspect_robots` CLI wraps the registry and [`eval`][inspect_robots.eval.eval].
+The command is installed as `inspect-robots`, with `inspect-robot` as an alias
+for the common typo; both run the same CLI.
 
 ## Zero-config: `inspect-robots "<instruction>"`
 
@@ -11,8 +13,8 @@ robot a command is a one-liner:
 inspect-robots "place the spoon on the plate"
 ```
 
-This runs a single **ad-hoc scene** built from that language instruction on
-your default policy/embodiment — sugar for
+This runs a single ad-hoc scene built from that language instruction on
+your default policy/embodiment: sugar for
 `inspect-robots run --instruction "..."`. The resolved components and where
 they came from are printed before the robot moves. Two flags exist only for
 instruction runs: `--max-steps N` (horizon, default 300) and `--scorer NAME`
@@ -25,7 +27,7 @@ a rollout; a single-word instruction needs the explicit
 
 ### Default policy and embodiment
 
-Resolved in order — first hit wins:
+Resolved in order (first hit wins):
 
 1. explicit flags: `--policy` / `--embodiment`
 2. environment: `INSPECT_ROBOTS_POLICY` / `INSPECT_ROBOTS_EMBODIMENT`
@@ -53,7 +55,7 @@ headless = true
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
 `[*.args]` values, and an explicit `-P/-E key=value` flag overrides the
-same-named config key. There is deliberately **no project-local config file**:
+same-named config key. There is deliberately no project-local config file:
 a checked-in file choosing which policy drives your hardware would be a trust
 footgun.
 
@@ -68,11 +70,11 @@ inspect-robots run --task my-benchmark --policy molmoact2-yam --sim
 ```
 
 The sim embodiment resolves as `$INSPECT_ROBOTS_SIM_EMBODIMENT` > config
-`sim_embodiment`, with constructor args from `[sim_embodiment.args]` only —
+`sim_embodiment`, with constructor args from `[sim_embodiment.args]` only:
 real-rig args (`[embodiment.args]`: serial ports, camera IDs) never leak into
 a sim run, and vice versa. `--sim` together with an explicit `--embodiment`
 is an error (they both pick the embodiment); an exported
-`$INSPECT_ROBOTS_EMBODIMENT` is simply not consulted under `--sim` — it's a
+`$INSPECT_ROBOTS_EMBODIMENT` is simply not consulted under `--sim`: it's a
 persistent default for real runs, not a per-invocation intent. The mapping is
 explicit configuration: the framework never guesses which sim matches your
 robot.
@@ -81,13 +83,13 @@ robot.
 
 An arbitrary instruction has no success oracle, so ad-hoc runs default to the
 `operator` scorer: when run on an interactive terminal, the CLI asks after
-each trial —
+each trial,
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 ```
 
-— and records the verdict in the log (`skip` records nothing). Piped/CI
+and records the verdict in the log (`skip` records nothing). Piped/CI
 stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
 runs stay non-blocking, and an unjudged trial honestly scores as failure with
 "no operator judgement recorded".

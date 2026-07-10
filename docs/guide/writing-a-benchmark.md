@@ -1,7 +1,7 @@
 # Writing a benchmark
 
 A benchmark is a [`Task`][inspect_robots.task.Task]: a dataset of scenes plus scorer(s).
-It is **embodiment-agnostic** — it describes *what* to evaluate, not *how* the
+It is embodiment-agnostic: it describes *what* to evaluate, not *how* the
 robot is built.
 
 ```python
@@ -31,15 +31,15 @@ task = Task(
 Each [`Scene`][inspect_robots.scene.Scene] is one initial condition (the Inspect `Sample`
 analog):
 
-- `id` — unique within the task.
-- `instruction` — the language goal handed to the policy.
-- `target` — an optional [`Target`][inspect_robots.scene.Target] the scorer reads; its
+- `id`: unique within the task.
+- `instruction`: the language goal handed to the policy.
+- `target`: an optional [`Target`][inspect_robots.scene.Target] the scorer reads; its
   `kind` is resolved in the *embodiment's* namespace (compatibility checking
   verifies the embodiment can realize it).
-- `init_seed` — combined with the eval seed and epoch index to seed each trial
+- `init_seed`: combined with the eval seed and epoch index to seed each trial
   deterministically. (An eval run with `seed=None` draws a fresh OS seed and
   records it in the log, so even "unseeded" runs are reproducible after the
-  fact — and distinct from `seed=0`.)
+  fact, and distinct from `seed=0`.)
 
 ## Epochs and reducers
 

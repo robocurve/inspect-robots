@@ -1,6 +1,6 @@
 # Policies and embodiments
 
-Both are runtime-checkable Protocols — implement the methods on any class (no
+Both are runtime-checkable Protocols: implement the methods on any class (no
 inheritance required), or subclass the convenience base classes.
 
 ## A policy (VLA)
@@ -88,14 +88,14 @@ class MyArm:
         ...
 ```
 
-Lifecycle: [`eval`][inspect_robots.eval.eval] closes what it resolves — an
-embodiment looked up by **registry name** is closed when the run finishes (even
+Lifecycle: [`eval`][inspect_robots.eval.eval] closes what it resolves. An
+embodiment looked up by registry name is closed when the run finishes (even
 on a halt). If you construct the embodiment object yourself, you own it: call
 `close()` yourself when you are done.
 
 ## Real-robot vs simulator
 
-The interfaces assume **real-robot reality**: no guaranteed privileged success,
+The interfaces assume real-robot reality: no guaranteed privileged success,
 human-in-the-loop reset, wall-clock control. Simulators opt into more via
 `capabilities` (`SEEDABLE`, `AUTO_RESET`, `PRIVILEGED_SUCCESS`, `RENDERABLE`, …).
 A sim may put privileged success into `StepResult.info` for a scorer to read; a

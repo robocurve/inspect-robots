@@ -57,6 +57,8 @@ all = ["inspect-robots[rerun]"]
 
 [project.scripts]
 inspect-robots = "inspect_robots.cli:main"
+# Alias so the common typo `inspect-robot` still works.
+inspect-robot = "inspect_robots.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots"
