@@ -58,9 +58,27 @@ With a default policy/embodiment configured once in
 `~/.config/inspect-robots/config.ini`, just tell the robot what to do:
 
 ```bash
-inspect-robots "place the spoon on the plate"                # zero-config ad-hoc eval
-inspect-robots "place the spoon on the plate" --sim          # same, on your configured sim
+inspect-robots "place the fork on the plate"                 # zero-config ad-hoc eval
+inspect-robots "place the fork on the plate" --sim           # same, on your configured sim
 ```
+
+A config file makes every knob a default (CLI flags override; `--no-rerun` and
+`--no-store-frames` turn the booleans off for a single run):
+
+```ini
+# ~/.config/inspect-robots/config.ini
+[defaults]
+policy = molmoact2        # e.g. from the inspect-robots-yam plugin
+embodiment = my_yam_arms  # your rig's embodiment factory (see the plugin's README)
+scorer = success_at_end
+max_steps = 1200          # 120 s at 10 Hz
+rerun = true              # live Rerun viewer per run: pip install "inspect-robots[rerun]"
+store_frames = true       # save each run's camera frames under <log-dir>/frames/
+```
+
+With `rerun = true` every run opens a live viewer streaming the cameras,
+proprioception, and actions straight from the eval pipeline, so you watch
+exactly what the policy sees while the robot moves.
 
 The full command line resolves any registered task/policy/embodiment
 (builtins + installed plugins):
