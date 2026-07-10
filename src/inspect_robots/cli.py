@@ -132,8 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--store-frames",
-        action="store_true",
-        help="stream camera frames to <log-dir>/frames instead of keeping them in memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream camera frames to a per-run directory under <log-dir>/frames "
+        "instead of keeping them in memory (--no-store-frames overrides a "
+        "store_frames config default)",
     )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
@@ -325,7 +328,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             seed=args.seed,
             sinks=[sink],
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-            store_frames=args.store_frames or defaults.store_frames,
+            store_frames=(
+                args.store_frames if args.store_frames is not None else defaults.store_frames
+            ),
             before_scoring=before_scoring,
         )
     finally:

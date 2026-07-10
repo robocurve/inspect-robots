@@ -600,3 +600,19 @@ def test_config_store_frames_enables_frame_capture(
     assert rc == 0
     assert list((log_dir / "frames").rglob("*.npy"))
     assert _read_only_log(log_dir).stats.frames_dir is not None
+
+
+def test_no_store_frames_flag_overrides_config_default(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """--no-store-frames must win over store_frames = true in the config file."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nstore_frames = true\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--no-store-frames", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert not (log_dir / "frames").exists()
+    assert _read_only_log(log_dir).stats.frames_dir is None
