@@ -62,7 +62,8 @@ uv venv && uv pip install inspect-robots
 ```
 
 Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
-`pip`); the commands below assume the environment is active or run via `uv run`.
+`pip` and console scripts); with uv, run commands through `uv run` as shown
+below and no activation is needed.
 
 ## Quickstart
 
@@ -85,7 +86,7 @@ EOF
 Then tell the robot what to do:
 
 ```bash
-inspect-robots "place the fork on the plate"
+uv run inspect-robots "place the fork on the plate"
 ```
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
@@ -95,26 +96,26 @@ policy sees while the robot moves. CLI flags override any default
 instruction runs on your configured simulator instead of the real robot:
 
 ```bash
-inspect-robots "place the fork on the plate" --sim
+uv run inspect-robots "place the fork on the plate" --sim
 ```
 
 The full command line resolves any registered task/policy/embodiment
 (builtins + installed plugins). List what is registered:
 
 ```bash
-inspect-robots list
+uv run inspect-robots list
 ```
 
 Run a registered task with explicit components:
 
 ```bash
-inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
+uv run inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 ```
 
 Pretty-print a saved eval log:
 
 ```bash
-inspect-robots inspect logs/cubepick-reach_*.json
+uv run inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
 And everything is a Python API. No hardware or simulator needed: the
