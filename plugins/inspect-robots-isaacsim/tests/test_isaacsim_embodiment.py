@@ -273,8 +273,8 @@ def test_disable_debug_vis_walks_nested_configs() -> None:
     _disable_debug_vis(cfg)
 
     assert cfg.commands.object_pose.debug_vis is False
-    assert cfg.commands.extra[0].debug_vis is False
-    assert cfg.commands.extra[1]["nested"].debug_vis is False
+    assert cfg.commands.extra[0].debug_vis is False  # type: ignore[attr-defined]
+    assert cfg.commands.extra[1]["nested"].debug_vis is False  # type: ignore[index]
     assert cfg.not_a_flag.debug_vis is False
     assert cfg.scene.debug_vis is False
     assert cfg.debug_vis == "keep"
@@ -308,3 +308,101 @@ def test_request_named_obs_terms_flips_concatenate_flag(
         _request_named_obs_terms(object(), "policy")
     assert len(caplog.records) == 2
     assert all("named observation terms" in r.message for r in caplog.records)
+
+
+def test_ensure_env_wrapped_import_error() -> None:
+    emb = IsaacSimEmbodiment()
+    # Mock self._ensure_app to do nothing (as if app launcher is already booted/mocked)
+    emb._ensure_app = lambda: None  # type: ignore
+
+    # Force a failure during the imports inside _ensure_env by mocking sys.modules or similar.
+    # Alternatively, we can mock `importlib.import_module` or `builtins.__import__` to raise ImportError
+    # when gymnasium or isaaclab_tasks is imported.
+    import builtins
+
+    original_import = builtins.__import__
+
+    def mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name in ("gymnasium", "isaaclab_tasks"):
+            raise ImportError(f"Mocked import failure for {name}")
+        return original_import(name, *args, **kwargs)
+
+    builtins.__import__ = mock_import
+    try:
+        with pytest.raises(RuntimeError, match="Isaac Sim / Isaac Lab is not importable"):
+            emb._ensure_env()
+    finally:
+        builtins.__import__ = original_import
+
+
+def test_read_success_and_warnings(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    # Test case 1: success key present in info
+    emb = IsaacSimEmbodiment(success_info_key="success")
+    assert emb._read_success({"success": True}, False) is True
+    assert emb._read_success({"success": False}, True) is False
+
+    # Test case 2: success key missing, terminated_implies_success = False (default)
+    # This should warn and return False
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="inspect_robots_isaacsim.embodiment"):
+        assert emb._read_success({}, True) is False
+        assert len(caplog.records) == 1
+        assert "missing the success key" in caplog.records[0].message
+        assert "Scoring as not successful" in caplog.records[0].message
+
+        # Subsequent calls should not warn again
+        caplog.clear()
+        assert emb._read_success({}, True) is False
+        assert not caplog.records
+
+    # Test case 3: success key missing, terminated_implies_success = True
+    # This should warn once and return terminated status (True or False)
+    emb_opt = IsaacSimEmbodiment(terminated_implies_success=True)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="inspect_robots_isaacsim.embodiment"):
+        assert emb_opt._read_success({}, True) is True
+        assert len(caplog.records) == 1
+        assert "missing the success key" in caplog.records[0].message
+        assert "Falling back to treating 'terminated' as success" in caplog.records[0].message
+
+        assert emb_opt._read_success({}, False) is False
+        assert len(caplog.records) == 1  # No new warning
+
+
+def test_to_image_logic() -> None:
+    from inspect_robots_isaacsim.embodiment import _to_image
+
+    # Empty array
+    empty = np.array([], dtype=np.float32)
+    assert _to_image(empty).size == 0
+    assert _to_image(empty).dtype == np.uint8
+
+    # 0-1 float array with fractional values (normalized float)
+    float_01 = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    res_01 = _to_image(float_01)
+    np.testing.assert_array_equal(res_01, [0, 127, 255])
+
+    # 0-255 float array with values > 1.0
+    float_255 = np.array([0.0, 128.0, 255.0], dtype=np.float32)
+    res_255 = _to_image(float_255)
+    np.testing.assert_array_equal(res_255, [0, 128, 255])
+
+    # Legitimately dark 0-255 range float frame (all pixels <= 1.0, e.g. 0.0 and 1.0, but multichannel)
+    # It has no fractional values, is multichannel. We should NOT scale it!
+    dark_multichannel = np.array([[[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]], dtype=np.float32)
+    res_dark = _to_image(dark_multichannel)
+    np.testing.assert_array_equal(res_dark, [[[0, 0, 0], [1, 1, 1]]])
+
+    # Single-channel binary mask (only 0.0 and 1.0). We SHOULD scale it!
+    # Expected shape from env: (num_envs, H, W), so with num_envs=1 it is (1, 1, 2)
+    binary_mask = np.array([[[0.0, 1.0]]], dtype=np.float32)
+    res_mask = _to_image(binary_mask)
+    np.testing.assert_array_equal(res_mask, [[0, 255]])
+
+    # Completely white 3-channel image (all 1.0). We SHOULD scale it!
+    # Expected shape from env: (num_envs, H, W, 3), so with num_envs=1 it is (1, 1, 1, 3)
+    white_img = np.array([[[[1.0, 1.0, 1.0]]]], dtype=np.float32)
+    res_white = _to_image(white_img)
+    np.testing.assert_array_equal(res_white, [[[255, 255, 255]]])
