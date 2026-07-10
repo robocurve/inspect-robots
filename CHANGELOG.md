@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-10
 
 ### Added
 
@@ -53,6 +53,27 @@ All notable changes to this project are documented here. The format is based on
 
 - The CLI exits with the guided message (not a traceback) when a component
   factory raises `ConfigError` during resolution.
+
+## [0.5.0] - 2026-07-10
+
+Backfilled: this version was released tag-only; the entries were reconstructed
+from the merged PRs.
+
+### Added
+
+- CLI: `--rerun` flag and `rerun` config default open a live Rerun viewer
+  streaming cameras, state, and actions for each run (#36).
+- CLI: `store_frames` config default and per-run frame directories under
+  `<log-dir>/frames`; `--store-frames` became tri-state so `--no-store-frames`
+  overrides the config (#30).
+- CLI: minimal ANSI styling on interactive terminals; plain output when piped
+  or `NO_COLOR` is set (#37). `inspect-robot` is accepted as an alias for the
+  common typo (#34).
+
+### Fixed
+
+- The CLI closes the embodiment it resolves, even when `eval()` raises: a
+  real robot never stays energized after a crashed run (#30).
 
 ## [0.4.0] - 2026-07-09
 
