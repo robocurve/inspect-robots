@@ -177,12 +177,29 @@ adapter shipped from this repo as separate packages:
   any [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)-served policy.
   One adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B,
   SmolVLA, ACT, …) behind `--policy xpolicylab -P url=ws://gpu-box:19000`.
+- **[inspect-robots-agent](plugins/inspect-robots-agent/)**: let a frontier
+  LLM (Claude, GPT, anything behind an OpenAI-compatible API) drive any
+  embodiment through tool calls, as a first-class policy. The same
+  `--policy agent` runs ad-hoc instructions and scores on registered tasks
+  next to fine-tuned VLAs.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
 inspect-robots run --task my-task --embodiment isaacsim \
     --policy xpolicylab -P url=ws://gpu-box:19000 -P cameras=cam_head:base_rgb
+
+# Claude driving the mock world, no hardware or GPU required:
+export ANTHROPIC_API_KEY=sk-ant-...
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-fable-5 --embodiment cubepick
 ```
+
+Safety guardrails (a bounds clamp plus a per-step delta limit derived from
+the embodiment's action space) are wired into every CLI run by default, for
+every policy. Turning them off requires an explicit `--disable-guardrails`.
+Persist your usual setup once with `inspect-robots config set embodiment NAME`
+and `inspect-robots config set policy NAME`, then a bare
+`inspect-robots "wipe the table"` does the rest.
 
 ## How it maps to Inspect AI
 

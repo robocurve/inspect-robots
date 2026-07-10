@@ -30,8 +30,10 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   ties them in: `uv sync --all-packages --extra dev` installs core + all plugins
   editable. They never count toward the core 100% gate (coverage is scoped to
   `inspect_robots`). E.g. `plugins/inspect-robots-isaacsim/` (Isaac Lab
-  embodiment) and `plugins/inspect-robots-xpolicylab/` (policy adapter speaking
-  the XPolicyLab websocket protocol — 40+ served VLAs, no xpolicylab dep).
+  embodiment), `plugins/inspect-robots-xpolicylab/` (policy adapter speaking
+  the XPolicyLab websocket protocol — 40+ served VLAs, no xpolicylab dep), and
+  `plugins/inspect-robots-agent/` (LLMs as policies via the OpenAI-compatible
+  wire format — httpx only, no provider SDKs; registered as `agent`).
 
 ## Working here
 

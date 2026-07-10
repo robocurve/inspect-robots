@@ -252,13 +252,21 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
 
 
 def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
-    """Registry resolution with a clean error instead of a KeyError traceback."""
+    """Registry resolution with a clean error instead of a traceback.
+
+    Unknown names raise ``KeyError``; a factory that cannot construct itself
+    (e.g. the agent policy with no model/key configured) raises a guided
+    ``ConfigError``. Both are user-facing messages, not bugs.
+    """
+    from inspect_robots.errors import ConfigError
     from inspect_robots.registry import resolve
 
     try:
         return resolve(kind, name, **kwargs)
     except KeyError as exc:
         raise SystemExit(str(exc.args[0])) from exc
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _build_guardrails(

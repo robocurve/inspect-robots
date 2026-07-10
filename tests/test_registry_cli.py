@@ -962,3 +962,29 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     # Valid values round-trip.
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
+
+
+def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
+    """A factory's guided ConfigError must exit cleanly, not print a traceback."""
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.registry import policy as policy_decorator
+
+    @policy_decorator("misconfigured-policy")
+    def _factory(**kwargs: object) -> object:
+        raise ConfigError("no model configured.\nfix: set $SOME_KEY")
+
+    with pytest.raises(SystemExit, match="no model configured") as excinfo:
+        main(
+            [
+                "run",
+                "--instruction",
+                "reach it",
+                "--policy",
+                "misconfigured-policy",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    assert "Traceback" not in str(excinfo.value)
