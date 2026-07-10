@@ -991,3 +991,54 @@ def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
             ]
         )
     assert "Traceback" not in str(excinfo.value)
+
+
+# --- doctor (adapter conformance) ---------------------------------------------
+
+
+def test_doctor_passes_on_conformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["doctor", "--embodiment", "cubepick"]) == 0
+    assert "conformant" in capsys.readouterr().out
+
+
+def test_doctor_fails_on_nonconformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
+    from dataclasses import replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.spaces import Box
+
+    class _UndeclaredEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(self.info, action_space=Box(shape=(2,)))
+
+    embodiment_decorator("undeclared-cubepick")(_UndeclaredEmbodiment)
+    assert main(["doctor", "--embodiment", "undeclared-cubepick"]) == 1
+    out = capsys.readouterr().out
+    assert "[error] semantics" in out and "[error] bounds" in out
+
+
+def test_doctor_uses_default_embodiment_and_guides_when_unset(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="no embodiment given"):
+        main(["doctor"])
+    monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
+    assert main(["doctor"]) == 0
+    assert "cubepick" in capsys.readouterr().out
+
+
+def test_doctor_closes_the_embodiment_it_constructs() -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    closed: list[str] = []
+
+    class _ClosableCubePick(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append("closed")
+
+    embodiment_decorator("closable-doctor-cubepick")(_ClosableCubePick)
+    assert main(["doctor", "--embodiment", "closable-doctor-cubepick"]) == 0
+    assert closed == ["closed"]

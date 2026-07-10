@@ -50,7 +50,9 @@ class CubePickEmbodiment:
                 shape=(2,),
                 low=np.array([-max_step, -max_step]),
                 high=np.array([max_step, max_step]),
-                semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"),
+                semantics=ActionSemantics(
+                    control_mode="eef_delta_pos", frame="world", dim_labels=("dx", "dy")
+                ),
             ),
             observation_space=ObservationSpace(
                 cameras=(CameraSpec(name="top", height=_IMG, width=_IMG, channels=3),),
