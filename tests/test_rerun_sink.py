@@ -70,6 +70,10 @@ def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
     sink = RerunSink(spawn=True)
     sink._rr = _FakeRR()
     with pytest.warns(RuntimeWarning, match="RerunSink disabled"):
-        sink.on_eval_start(EvalSpec(task="t", policy="p", embodiment="e"))
+        sink.on_eval_start(
+            EvalSpec(
+                task="t", policy="p", embodiment="e", created="now", inspect_robots_version="0"
+            )
+        )
     assert sink.available is False  # dormant from here on
     sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
