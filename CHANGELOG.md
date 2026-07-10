@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
+## [Unreleased]
+
+### Added
+
+- isaacsim plugin: `_ensure_env`'s cfg-wiring contract (`parse_env_cfg`'s
+  args, `gym.make(cfg=...)`, the `headless` → `_disable_debug_vis` gate, and
+  the named-obs-terms request) is now exercised in CI via stubbed
+  `gymnasium`/`isaaclab_tasks` modules. Previously only the fake-env-injected
+  `step()`/`reset()` translation was covered, so a regression in `_ensure_env`
+  itself (e.g. #15's missing `cfg=`) would only have failed live (#25).
+
 ## [0.6.0] - 2026-07-10
 
 ### Added
