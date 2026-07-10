@@ -147,6 +147,19 @@ def test_clamp_approver_high_only_bound() -> None:
     assert approver.review(unbounded_side, {}) is unbounded_side
 
 
+def test_rollout_records_delta_clamped_approval_detail() -> None:
+    from inspect_robots.approver import DeltaLimitApprover
+
+    emb = CubePickEmbodiment()
+    # CubePick's scripted steps are 0.1-magnitude deltas; a tighter explicit
+    # limit forces a clamp so the approval event carries the new detail.
+    approver = DeltaLimitApprover(emb.info.action_space, max_delta=0.05)
+    record = _run(ScriptedPolicy(), emb, approver=approver)
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "delta_clamped"
+
+
 def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     img = np.zeros((2, 2, 3), dtype=np.uint8)

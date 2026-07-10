@@ -213,7 +213,8 @@ def rollout(
             except Exception as exc:
                 raise _record_failure(record, SafetyAbort(str(exc)), t) from exc
             if reviewed is not action:
-                detail = "clamped" if reviewed.meta.get("clamped") else None
+                flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
+                detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
             action = reviewed
 
