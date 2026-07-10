@@ -143,6 +143,20 @@ def test_complete_sends_wire_format_and_parses_tool_calls() -> None:
     assert json.loads(call.arguments)["duration_s"] == 1.0
 
 
+def test_reasoning_effort_is_sent_when_set_and_omitted_when_none() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_tool_call_response())
+
+    client = _client(handler)
+    client.complete(messages=[], tools=[], reasoning_effort="low")
+    client.complete(messages=[], tools=[])
+    assert bodies[0]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in bodies[1]
+
+
 def test_keyless_provider_sends_no_authorization_header() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert "authorization" not in request.headers
