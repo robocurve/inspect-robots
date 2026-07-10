@@ -57,6 +57,22 @@ def test_action_semantics_defaults() -> None:
     assert sem.frame == "base"
 
 
+def test_action_semantics_joint_delta_and_dim_labels() -> None:
+    sem = ActionSemantics(control_mode="joint_delta", dim_labels=("left_j0", "left_gripper"))
+    assert sem.dim_labels == ("left_j0", "left_gripper")
+    # Default stays None so unlabeled spaces keep working.
+    assert ActionSemantics(control_mode="joint_pos").dim_labels is None
+
+
+def test_box_validates_dim_labels_length() -> None:
+    labeled = ActionSemantics(control_mode="joint_pos", dim_labels=("a", "b", "c"))
+    with pytest.raises(ValueError, match="dim_labels"):
+        Box(shape=(2,), semantics=labeled)
+    assert Box(shape=(3,), semantics=labeled).dim == 3
+    # No labels: any dim is fine.
+    Box(shape=(2,), semantics=ActionSemantics(control_mode="joint_pos"))
+
+
 def test_observation_space_derives_state_keys_from_spec() -> None:
     spec = StateSpec(
         fields=(
