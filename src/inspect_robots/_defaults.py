@@ -149,7 +149,15 @@ def _read_config(path: Path) -> Defaults:
 
 # [defaults] keys `inspect-robots config set` may write. Mirrors what
 # _read_config understands; argparse uses this for its choices list.
-CONFIG_KEYS = ("policy", "embodiment", "sim_embodiment", "scorer", "max_steps", "store_frames")
+CONFIG_KEYS = (
+    "policy",
+    "embodiment",
+    "sim_embodiment",
+    "scorer",
+    "max_steps",
+    "store_frames",
+    "rerun",
+)
 
 
 def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
@@ -165,8 +173,8 @@ def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
         parsed = parse_value(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
             raise SystemExit(f"max_steps must be an integer >= 1, got {value!r}")
-    if key == "store_frames" and not isinstance(parse_value(value), bool):
-        raise SystemExit(f"store_frames must be true or false, got {value!r}")
+    if key in ("store_frames", "rerun") and not isinstance(parse_value(value), bool):
+        raise SystemExit(f"{key} must be true or false, got {value!r}")
 
     path = _config_path(env)
     if path is None:

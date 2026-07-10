@@ -959,9 +959,12 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["config", "set", "frobnicate", "1"])
     assert excinfo.value.code == 2
+    with pytest.raises(SystemExit, match="rerun"):
+        main(["config", "set", "rerun", "sometimes"])
     # Valid values round-trip.
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
+    assert main(["config", "set", "rerun", "true"]) == 0
 
 
 def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:

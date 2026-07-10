@@ -524,6 +524,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("scorer", defaults.scorer, None),
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
+        ("rerun", defaults.rerun, None),
     ]
     for key, value, source in rows:
         shown = "(unset)" if value is None else value
