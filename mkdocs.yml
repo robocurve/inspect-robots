@@ -1,6 +1,6 @@
 site_name: Inspect Robots
 site_description: >-
-  The Inspect AI for robotics — an evaluation framework for physical AI and VLA
+  The Inspect AI for robotics: an evaluation framework for physical AI and VLA
   (vision-language-action) models.
 site_url: https://inspectrobots.org/
 repo_url: https://github.com/robocurve/inspect-robots
