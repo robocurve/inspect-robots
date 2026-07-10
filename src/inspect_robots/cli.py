@@ -44,6 +44,25 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
 
+
+def _styled(text: str, code: str) -> str:
+    """Wrap ``text`` in an ANSI style when stdout is an interactive terminal.
+
+    Plain text is returned when piped/redirected or when ``NO_COLOR`` is set,
+    so scripts and CI logs never see escape codes.
+    """
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+_BOLD = "1"
+_DIM = "2"
+_CYAN = "36"
+_GREEN = "32"
+_RED = "31"
+
+
 _KIND_BY_PLURAL = {
     "tasks": "task",
     "policies": "policy",
@@ -336,7 +355,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             # spawn=True opens the live viewer; the sink itself degrades to a
             # warn-once no-op when rerun-sdk is not installed.
             sinks.append(RerunSink(spawn=True))
-            print("rerun: live viewer")
+            print(f"{_styled('rerun:', _CYAN)} live viewer")
         logs = eval(
             task,
             policy,
@@ -358,11 +377,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
-    print(f"status: {log.status}")
-    print(f"scenes: {log.results.total_scenes}  trials: {log.results.total_trials}")
+    status_color = _GREEN if log.status == "success" else _RED
+    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
+    print(
+        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
+        f"trials: {log.results.total_trials}"
+    )
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {value:.4g}")
-    print(f"log: {sink.path}")
+        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+    print(f"{_styled('log:', _CYAN)} {_styled(str(sink.path), _DIM)}")
     return 0 if log.status == "success" else 1
 
 

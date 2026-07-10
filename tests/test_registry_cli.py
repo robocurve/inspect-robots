@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import ClassVar
 
@@ -719,3 +720,26 @@ def test_rerun_flag_enables_without_config(
     rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
     assert rc == 0
     assert len(_fake_rerun.instances) == 1
+
+
+def test_styled_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inspect_robots.cli import _styled
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+    assert _styled("policy:", "36") == "policy:"
+
+
+def test_styled_emits_ansi_on_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inspect_robots.cli import _styled
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert _styled("policy:", "36") == "\x1b[36mpolicy:\x1b[0m"
+
+
+def test_styled_respects_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inspect_robots.cli import _styled
+
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert _styled("x", "1") == "x"
