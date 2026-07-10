@@ -216,15 +216,15 @@ declare success.
   clamp already lands in the transcript/log as an approval event; a
   dedicated `EvalSpec` field is deferred (schema change, not needed for
   safety).
-- **The CLI closes what it constructs**: today the CLI resolves the
-  embodiment itself and passes the object to `eval()`, so `eval()`'s
-  close-what-we-open rule never fires and nothing closes it — acceptable for
-  mocks, not for hardware holding CAN channels. `_cmd_run` (both task and
-  ad-hoc paths) wraps the run in `try/finally: embodiment.close()`, covering
-  Ctrl-C. (The CLI must construct the embodiment anyway to build the
-  guardrail chain from its action space.)
+- **The CLI closes what it constructs** — already landed on main
+  independently of this plan (the `finally: embodiment.close()` in
+  `_cmd_run`, widened to cover post-resolution validation; see the PR #30
+  lead-up commits). Nothing to schedule; the guardrail-chain construction
+  simply slots inside that existing `try`. Noted here because an earlier
+  draft scheduled it and reviewers should not look for it in §9.
 - **`config set KEY VALUE` / `config show`**: writes `policy`, `embodiment`,
-  or `sim_embodiment` under `[defaults]` in
+  `sim_embodiment`, or `store_frames` (added to `[defaults]` on main by
+  PR #30) under `[defaults]` in
   `~/.config/inspect-robots/config.ini` (stdlib `configparser`, atomic
   write-temp-then-rename, unknown sections preserved); `show` prints resolved
   defaults with sources. The existing guided error's fix line gains the
@@ -353,8 +353,9 @@ than at runtime.
   `request_stop`
   (pre-review meta wins over approver rewrite; embodiment termination takes
   precedence; ensembling limitation documented), CLI guardrail default +
-  `--disable-guardrails` + `--max-action-delta`, CLI `finally: close()`
-  (asserted with a recording mock embodiment, including on error), and
+  `--disable-guardrails` + `--max-action-delta` (guardrail construction
+  must not escape the existing close-embodiment `try`, asserted with a
+  recording mock embodiment), and
   `config set/show` (tmp config home) — all pure NumPy/stdlib, straight into
   the 100% gate.
 - **Plugin**: `httpx.MockTransport` scripts LLM conversations (tool calls as
@@ -425,7 +426,8 @@ PyPI trusted-publisher environment for the package.
   shows first-step jumps.
 - **Arm behavior between chunks is an assumption, not a fact** — verified as
   YAM-repo work item §6.4 before any untethered run. Ctrl-C cleanup is now
-  guaranteed by the CLI's `finally: close()` (§3e), not assumed.
+  guaranteed by the CLI's existing `finally: close()` (on main since
+  PR #30's lead-ups; §3e), not assumed.
 - **Prompt injection / model misbehavior** — cannot bypass the approver
   chain (it sits below the model, in rollout); worst case is in-bounds,
   rate-limited motion until a budget trips.
@@ -457,8 +459,8 @@ PyPI trusted-publisher environment for the package.
 4. Core: `request_stop` in rollout (+ tests, docstring noting the ensembling
    limitation).
 5. Core: CLI guardrails-by-default (`--disable-guardrails`,
-   `--max-action-delta`), embodiment `finally: close()`, `config set/show`,
-   guided-error text update (+ tests).
+   `--max-action-delta`; construction inside the existing close-embodiment
+   `try`), `config set/show`, guided-error text update (+ tests).
 6. Plugin scaffold: pyproject, workspace membership, lockfile, CI job,
    release job.
 7. Plugin: `_llm.py` client + provider resolution (mock-transport tests).
