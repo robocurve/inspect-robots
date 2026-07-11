@@ -275,6 +275,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        trial_metadatas: list[dict[str, Any]] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -327,6 +328,7 @@ def _run_eval(
                     # the metric mean). It stays visible via scene status.
                     epoch_dicts.append({})
                     judgements.append(None)
+                    trial_metadatas.append(record.metadata)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -340,6 +342,12 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
+                
+                on_trial_end = getattr(policy, "on_trial_end", None)
+                if callable(on_trial_end):
+                    on_trial_end(record, log_dir)
+                if record.status != "error":
+                    trial_metadatas.append(record.metadata)
                 bus.on_trial_end(record)
 
             if halted:
@@ -381,6 +389,7 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                trial_metadata=tuple(trial_metadatas),
             )
         )
         if stopped:

@@ -83,6 +83,8 @@ class TrialRecord:
     operator_judgement: str | None = None
     # Typed transcript of what happened during the trial.
     events: list[Event] = field(default_factory=list)
+    # Extensible metadata for the trial (e.g. populated by policies).
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _effective_control_hz(
