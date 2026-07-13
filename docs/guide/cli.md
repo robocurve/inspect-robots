@@ -55,7 +55,11 @@ headless = true
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
 `[*.args]` values, and an explicit `-P/-E key=value` flag overrides the
-same-named config key. There is deliberately no project-local config file:
+same-named config key. An `[*.args]` section belongs to the component named
+in `[defaults]`: it applies whenever that same component is the one selected
+(by default, by flag, or by env var), and is ignored with a stderr note when
+a *different* component is selected. Your YAM rig's `rest_pose` never reaches
+`--embodiment kitchen`. There is deliberately no project-local config file:
 a checked-in file choosing which policy drives your hardware would be a trust
 footgun.
 

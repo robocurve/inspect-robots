@@ -5,6 +5,19 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
+## [Unreleased]
+
+### Fixed
+
+- **Config `[*.args]` sections no longer follow a differently-selected
+  component** (#44). `[policy.args]` / `[embodiment.args]` /
+  `[sim_embodiment.args]` now apply only when the selected component matches
+  the `[defaults]` name they were configured alongside; selecting another
+  component (by flag or env var) ignores them with a stderr note instead of
+  crashing its constructor with foreign kwargs. Selecting the configured
+  default explicitly (e.g. `--embodiment` naming the config default) still
+  applies its args.
+
 ## [0.6.0] - 2026-07-10
 
 ### Added

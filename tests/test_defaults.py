@@ -73,8 +73,12 @@ def test_env_vars_override_config_names_but_not_args(tmp_path: Path) -> None:
     assert d.policy_source == f"${ENV_POLICY}"
     assert d.embodiment == "other-arm"
     assert d.embodiment_source == f"${ENV_EMBODIMENT}"
-    # Config-file args still apply to whatever component ends up selected.
+    # Config-file args stay loaded, but their owner stays the *file's* name:
+    # the CLI applies them only when the selected component matches it, so an
+    # env-selected "other-policy" never inherits molmoact2-yam's args (#44).
     assert d.policy_args["temperature"] == 0.5
+    assert d.policy_args_owner == "molmoact2-yam"
+    assert d.embodiment_args_owner == "yam-bimanual"
 
 
 def test_env_vars_work_without_any_config_file(tmp_path: Path) -> None:
@@ -106,7 +110,7 @@ def test_unknown_sections_and_keys_are_ignored(tmp_path: Path) -> None:
     )
     d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
     # Full equality: the unknown key and section contributed nothing at all.
-    assert d == Defaults(policy="p", policy_source=str(path))
+    assert d == Defaults(policy="p", policy_source=str(path), policy_args_owner="p")
 
 
 def test_malformed_ini_raises_system_exit_naming_file(tmp_path: Path) -> None:
@@ -159,6 +163,8 @@ def test_sim_embodiment_config_is_independent_of_real(tmp_path: Path) -> None:
         sim_embodiment_source=str(path),
         embodiment_args={"port": "/dev/ttyUSB0"},
         sim_embodiment_args={"headless": True, "scene_file": scene_file},
+        embodiment_args_owner="yam-bimanual",
+        sim_embodiment_args_owner="yam-bimanual-isaac",
     )
 
 

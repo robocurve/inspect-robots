@@ -238,6 +238,25 @@ def _pick_component(
     )
 
 
+def _config_args(
+    kind: str, name: str, owner: str | None, config_args: dict[str, Any]
+) -> dict[str, Any]:
+    """Config-file ``[<kind>.args]``, gated to the component they were written for.
+
+    An args section is only valid for the ``[defaults]`` component it was
+    configured alongside (its owner); handing it to a differently-selected
+    component injects kwargs that constructor never asked for (issue #44).
+    Dropping is loud on stderr: persisted rig calibration vanishing silently
+    would be a worse failure than the crash this replaces.
+    """
+    if name == owner:
+        return config_args
+    if config_args:
+        reason = f"they apply to {owner!r}" if owner else f"no default {kind} is configured"
+        print(f"note: ignoring [{kind}.args] for {name!r}: {reason}", file=sys.stderr)
+    return {}
+
+
 def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     """The --sim chain: env var > config ``sim_embodiment``, or exit with guidance.
 
@@ -383,15 +402,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if args.sim:
         embodiment_name, embodiment_source = _pick_sim_embodiment(defaults)
-        embodiment_defaults = defaults.sim_embodiment_args
+        embodiment_defaults = _config_args(
+            "sim_embodiment",
+            embodiment_name,
+            defaults.sim_embodiment_args_owner,
+            defaults.sim_embodiment_args,
+        )
     else:
         embodiment_name, embodiment_source = _pick_component(
             "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
         )
-        embodiment_defaults = defaults.embodiment_args
-    # Config-file args apply to whichever component is selected; explicit
-    # -P/-E flags override same-named keys.
-    policy_kvs = {**defaults.policy_args, **_parse_kvs(args.policy_args)}
+        embodiment_defaults = _config_args(
+            "embodiment", embodiment_name, defaults.embodiment_args_owner, defaults.embodiment_args
+        )
+    # Config-file args apply only to the component they were configured
+    # alongside (issue #44); explicit -P/-E flags override same-named keys.
+    policy_config_args = _config_args(
+        "policy", policy_name, defaults.policy_args_owner, defaults.policy_args
+    )
+    policy_kvs = {**policy_config_args, **_parse_kvs(args.policy_args)}
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     if is_adhoc:
@@ -530,7 +559,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     name, source = _pick_component(
         "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
     )
-    kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+    config_kvs = _config_args(
+        "embodiment", name, defaults.embodiment_args_owner, defaults.embodiment_args
+    )
+    kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
