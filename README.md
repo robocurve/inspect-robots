@@ -97,8 +97,20 @@ uv run inspect-robots "place the fork on the plate"
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
 policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...), and the same
-instruction runs on your configured simulator instead of the real robot:
+(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+
+The policy slot is not limited to VLAs. With the
+[inspect-robots-agent](plugins/inspect-robots-agent) plugin installed
+(`uv pip install inspect-robots-agent`) and `$ANTHROPIC_API_KEY` set, a
+frontier LLM drives the same rig through tool calls, one approver-checked
+motion chunk per call:
+
+```bash
+uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
+```
+
+And the same instruction runs on your configured simulator instead of the
+real robot:
 
 ```bash
 uv run inspect-robots "place the fork on the plate" --sim
