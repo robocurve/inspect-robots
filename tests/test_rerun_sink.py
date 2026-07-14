@@ -37,6 +37,12 @@ def test_spawn_and_connect_are_mutually_exclusive() -> None:
         RerunSink(spawn=True, connect_url="rerun+http://127.0.0.1:9876/proxy")
 
 
+def test_spawn_and_recording_are_mutually_exclusive() -> None:
+    """A sink cannot spawn a local viewer and record to .rrd at once."""
+    with pytest.raises(ValueError, match="spawn and recording_path are mutually exclusive"):
+        RerunSink("run.rrd", spawn=True)
+
+
 def test_recording_and_connect_are_mutually_exclusive() -> None:
     """A sink cannot record to .rrd and stream to a remote viewer at once."""
     with pytest.raises(ValueError, match="recording_path and connect_url are mutually exclusive"):
