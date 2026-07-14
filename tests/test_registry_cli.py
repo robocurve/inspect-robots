@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import ClassVar
@@ -12,7 +13,7 @@ import inspect_robots.cli as cli
 import inspect_robots.registry as reg
 from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
-from inspect_robots.log import EvalLog
+from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
 
@@ -366,6 +367,124 @@ def _read_only_log(log_dir: Path) -> EvalLog:
 
     (path,) = log_dir.glob("*.json")
     return read_eval_log(str(path))
+
+
+def _step_limit_log(
+    *,
+    task: str = "adhoc",
+    reasons: tuple[str | None, ...] = ("max_steps",),
+    max_steps: int | None = 1200,
+    control_hz: object = 10.0,
+) -> EvalLog:
+    return EvalLog(
+        version=1,
+        status="success",
+        eval=EvalSpec(
+            task=task,
+            policy="p",
+            embodiment="e",
+            created="x",
+            inspect_robots_version="0",
+            embodiment_info={"control_hz": control_hz},
+            max_steps=max_steps,
+        ),
+        results=EvalResults(
+            total_scenes=1,
+            total_trials=len(reasons),
+            metrics={"success_at_end": 0.0},
+        ),
+        stats=EvalStats(started_at="a", completed_at="b", duration_s=0.0, total_steps=1),
+        samples=(
+            SceneResult(
+                scene_id="s0",
+                status="success",
+                epochs=tuple({} for _ in reasons),
+                termination_reasons=reasons,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("control_hz", "parenthetical"),
+    [
+        (10.0, " (max_steps=1200, ~120s at 10 Hz)"),
+        (None, " (max_steps=1200)"),
+        (0, " (max_steps=1200)"),
+        # bool is an int subclass; a hand-edited log must not print "at 1 Hz".
+        (True, " (max_steps=1200)"),
+    ],
+)
+def test_run_summary_surfaces_step_limit_for_adhoc_runs(
+    control_hz: object,
+    parenthetical: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._print_run_summary(_step_limit_log(control_hz=control_hz), "run.json", is_adhoc=True)
+    out = capsys.readouterr().out
+    note = f"note: 1/1 trials hit the step limit before terminating{parenthetical}"
+    assert note in out
+    assert out.index(note) < out.index("success_at_end")
+    assert ("hint: raise it with --max-steps N or: inspect-robots config set max_steps N") in out
+
+
+def test_run_summary_uses_registered_task_hint(capsys: pytest.CaptureFixture[str]) -> None:
+    cli._print_run_summary(_step_limit_log(task="registered-task"), "run.json", is_adhoc=False)
+    out = capsys.readouterr().out
+    assert "hint: task 'registered-task' defines its own max_steps" in out
+    assert "--max-steps N" not in out
+
+
+def test_run_summary_omits_step_limit_note_without_truncation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._print_run_summary(_step_limit_log(reasons=("success",)), "run.json", is_adhoc=True)
+    out = capsys.readouterr().out
+    assert "step limit" not in out
+    assert "raise it" not in out
+
+
+def test_run_summary_omits_parenthetical_without_horizon(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._print_run_summary(_step_limit_log(max_steps=None), "run.json", is_adhoc=True)
+    out = capsys.readouterr().out
+    assert "note: 1/1 trials hit the step limit before terminating\n" in out
+    assert "max_steps=None" not in out
+
+
+def test_inspect_surfaces_step_limit_note_hint_and_scene_marker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = _step_limit_log(reasons=("max_steps", "success"), control_hz=None)
+    path = tmp_path / "timeout.json"
+    path.write_text(json.dumps(log.to_dict()), encoding="utf-8")
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith(
+        "note: 1/2 trials hit the step limit before terminating (max_steps=1200)\n"
+    )
+    assert "hint: raise it with --max-steps N" in out
+    assert "[success] s0: (1/2 trials hit max_steps)" in out
+
+
+def test_inspect_tolerates_non_numeric_max_steps_in_hand_edited_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # from_dict does no field validation, so a hand-edited log can carry a
+    # string horizon; the note must degrade to no parenthetical, not crash.
+    data = _step_limit_log().to_dict()
+    data["eval"]["max_steps"] = "1200"
+    path = tmp_path / "edited.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "note: 1/1 trials hit the step limit before terminating\n" in out
+    assert "max_steps=1200" not in out
 
 
 def test_bare_instruction_runs_adhoc_task_from_env_defaults(
@@ -841,6 +960,28 @@ def test_prompt_operator_prompts_for_truncated_success_reason(
     assert record.operator_judgement == "n"
     (event,) = record.events
     assert event.data == {"verdict": "n", "source": "prompt"}
+
+
+def test_prompt_operator_warns_before_judging_step_limited_trial(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        truncated=True,
+        termination_reason="max_steps",
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert "trial hit the step limit before terminating" in capsys.readouterr().out
+    assert record.operator_judgement == "n"
 
 
 @pytest.mark.parametrize(

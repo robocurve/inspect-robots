@@ -106,6 +106,10 @@ def test_halted_eval_with_pass_at_k_reducer_still_writes_log(tmp_path: Path) -> 
     assert log.status == "error"
     assert log.error is not None and "motor stalled" in log.error
     assert log.samples[0].error is not None and "reducer" in log.samples[0].error
+    # The halt path keeps the parallel tuples aligned: the faulted trial gets
+    # a None reason next to its empty epoch entry.
+    assert log.samples[0].termination_reasons == ("success", "success", None)
+    assert len(log.samples[0].termination_reasons) == len(log.samples[0].epochs)
     assert list(tmp_path.glob("*.json"))  # the log reached disk
 
 
@@ -139,6 +143,14 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert log.status == "success"  # data survived: partials stay tolerated
     assert log.results.errored_trials == 1
     assert log.results.total_trials == 2
+    assert scene.termination_reasons == ("success", None)
+    assert len(scene.termination_reasons) == len(scene.epochs)
+
+
+def test_step_limit_reason_and_horizon_are_recorded(tmp_path: Path) -> None:
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].termination_reasons == ("max_steps",)
+    assert log.eval.max_steps == 1
 
 
 def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
