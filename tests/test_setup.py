@@ -1451,7 +1451,7 @@ def test_run_setup_path_toggle_is_accepted_when_not_advertised(tmp_path: Path) -
     assert output.count(f"Found 3 camera device(s) under {by_id}:") == 2
     assert output.count(f"Found 3 camera device(s) under {by_path}:") == 1
     assert all("'p'" not in prompt for prompt in role_prompts)
-    assert "only 3 by-id entries" not in output
+    assert "by-path camera nodes have no by-id entry" not in output
     assert f"top_cam_device = {by_id_devices[0]}" in _config_path(tmp_path).read_text(
         encoding="utf-8"
     )
