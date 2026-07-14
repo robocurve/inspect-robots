@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import numpy as np
 import pytest
+from inspect_robots_agent import LLMAgentPolicy
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
@@ -23,7 +24,6 @@ from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
-from inspect_robots_agent import LLMAgentPolicy
 
 # --- scripted-conversation harness ---------------------------------------------
 

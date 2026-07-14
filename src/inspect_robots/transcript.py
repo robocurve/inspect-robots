@@ -31,7 +31,7 @@ def reset_event(seed: int | None) -> Event:
 
 
 def inference_event(t: int, latency_s: float | None, chunk_len: int) -> Event:
-    """Record one policy call's timing and emitted horizon at step ``t``."""
+    """Record one policy call's timing and buffered action count at step ``t``."""
     return Event(kind="inference", t=t, data={"latency_s": latency_s, "chunk_len": chunk_len})
 
 

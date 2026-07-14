@@ -101,7 +101,6 @@ ignore = ["B008", "D105", "D107"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D1"]
 "examples/**" = ["D1"]
-"plugins/*/tests/**" = ["D1"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["inspect_robots"]

@@ -14,14 +14,13 @@ import threading
 from typing import Any
 
 import numpy as np
-from websockets.sync.server import Server, ServerConnection, serve
-
 from inspect_robots_xpolicylab._protocol import (
     Frame,
     MessageType,
     decode_frame,
     encode_frame,
 )
+from websockets.sync.server import Server, ServerConnection, serve
 
 
 class StubPolicyServer:

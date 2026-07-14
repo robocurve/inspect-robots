@@ -108,7 +108,9 @@ class Toolset:
                         },
                         "duration_s": {
                             "type": "number",
-                            "description": f"Motion duration in seconds (0 < d <= {_MAX_DURATION_S})",
+                            "description": (
+                                f"Motion duration in seconds (0 < d <= {_MAX_DURATION_S})"
+                            ),
                         },
                     },
                     "required": [values_key, "duration_s"],
@@ -119,7 +121,9 @@ class Toolset:
             "type": "function",
             "function": {
                 "name": "done",
-                "description": "Declare the task finished. The trial ends; a scorer judges success.",
+                "description": (
+                    "Declare the task finished. The trial ends; a scorer judges success."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {"summary": {"type": "string"}},
@@ -267,7 +271,7 @@ def build_toolset(
     if low is not None and high is not None:
         pairs = ", ".join(
             f"{label}: [{lo:.4g}, {hi:.4g}]"
-            for label, lo, hi in zip(labels, low.tolist(), high.tolist())
+            for label, lo, hi in zip(labels, low.tolist(), high.tolist(), strict=False)
         )
         bounds_text = f"Per-dimension bounds: {pairs}."
     else:

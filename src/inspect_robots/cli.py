@@ -93,7 +93,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the command parser shared by the console entry point and tests."""
+    """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog="inspect-robots",
         description="Inspect Robots — the Inspect AI for robotics.",

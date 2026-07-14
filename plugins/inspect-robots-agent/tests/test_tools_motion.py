@@ -6,11 +6,11 @@ import json
 
 import numpy as np
 import pytest
+from inspect_robots_agent._llm import ToolCall
+from inspect_robots_agent._tools import ToolsetError, build_toolset
 
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
 from inspect_robots.types import Observation
-from inspect_robots_agent._llm import ToolCall
-from inspect_robots_agent._tools import ToolsetError, build_toolset
 
 _ARM_LABELS = tuple(
     f"{side}_{part}"
