@@ -19,6 +19,7 @@ from inspect_robots._setup import (
     SUGGESTED,
     _can_serial,
     _identify_by_replug,
+    _prompt_device_slot,
     _read_raw_config,
     _render_config,
     _scan_cameras,
@@ -45,6 +46,35 @@ def _scripted_input(
         return response
 
     return input_fn, prompts
+
+
+def _prompt_current_device(
+    tmp_path: Path,
+    kind: str,
+    by_id_devices: list[str],
+    by_path_devices: list[str],
+    current: str,
+    responses: list[str | BaseException],
+) -> tuple[str | None, list[str], str]:
+    input_fn, prompts = _scripted_input(responses)
+    out = io.StringIO()
+    selected, _active_is_by_id = _prompt_device_slot(
+        "inspection camera" if kind == "v4l2" else "left CAN channel",
+        kind,
+        by_id_devices,
+        by_path_devices,
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        current,
+        {},
+        False,
+        input_fn=input_fn,
+        out=out,
+        rescan_by_id=lambda: by_id_devices,
+        rescan_by_path=lambda: by_path_devices,
+    )
+    return selected, prompts, out.getvalue()
 
 
 def _config_path(tmp_path: Path) -> Path:
@@ -1397,7 +1427,12 @@ def test_run_setup_path_toggle_is_accepted_when_not_advertised(tmp_path: Path) -
     by_id = tmp_path / "by-id"
     by_path = tmp_path / "by-path"
     by_id_devices = _make_devices(by_id)
-    _make_devices(by_path)
+    by_path.mkdir()
+    try:
+        for device in by_id_devices:
+            (by_path / Path(device).name).symlink_to(device)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
     input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "p", "p", "1", "2", "3"])
     out = io.StringIO()
 
@@ -1440,8 +1475,9 @@ def test_run_setup_advertises_by_path_when_by_id_entries_collide(tmp_path: Path)
     )
 
     explanation = (
-        "only 1 by-id entries for 3 detected cameras — identical cameras without serials "
-        "collide there; by-path names are stable per physical USB port"
+        "3 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "camera-1-video-index0, camera-2-video-index0, camera-3-video-index0; "
+        "by-path names are stable per physical USB port; press 'p' to switch listing"
     )
     role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
     text = _config_path(tmp_path).read_text(encoding="utf-8")
@@ -1450,6 +1486,43 @@ def test_run_setup_advertises_by_path_when_by_id_entries_collide(tmp_path: Path)
     assert all("'p' to switch listing" in prompt for prompt in role_prompts)
     assert f"Found 3 camera device(s) under {by_path}:" in out.getvalue()
     assert all(device in text for device in by_path_devices)
+
+
+def test_run_setup_by_path_hint_omits_toggle_when_listing_is_already_active(
+    tmp_path: Path,
+) -> None:
+    by_path = tmp_path / "by-path"
+    targets = tmp_path / "targets"
+    by_path.mkdir()
+    targets.mkdir()
+    entry_names = [f"pci-camera-{number}" for number in range(1, 4)]
+    try:
+        for name in entry_names:
+            target = targets / name
+            target.touch()
+            (by_path / name).symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=by_path,
+    )
+
+    explanation = (
+        "3 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "pci-camera-1, pci-camera-2, pci-camera-3; "
+        "by-path names are stable per physical USB port"
+    )
+    assert result == 0
+    assert out.getvalue().count(explanation) == 1
+    assert "press 'p' to switch listing" not in out.getvalue()
 
 
 def test_run_setup_declining_duplicate_device_reprompts_role(tmp_path: Path) -> None:
@@ -1533,6 +1606,131 @@ def test_run_setup_enter_accepts_detected_current_camera_defaults(tmp_path: Path
     assert all(device in text for device in devices)
 
 
+def test_prompt_camera_warns_for_probe_false_then_second_enter_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "stale-depth-node"
+    current.touch()
+    probe_paths: list[Path] = []
+
+    def probe(path: Path) -> bool:
+        probe_paths.append(path)
+        return False
+
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", probe)
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [], str(current), ["", ""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 2
+    assert probe_paths == [current]
+    assert output.count("offers no color capture format") == 1
+    assert "likely a depth or metadata node" in output
+    assert "enter a device number" not in output
+
+
+def test_prompt_camera_can_pick_number_after_probe_false_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "stale-depth-node"
+    current.touch()
+    picked = tmp_path / "by-id" / "camera-1"
+    picked.parent.mkdir()
+    picked.touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: False)
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [str(picked)], [], str(current), ["", "1"]
+    )
+
+    assert selected == str(picked)
+    assert len(prompts) == 2
+    assert output.count("offers no color capture format") == 1
+
+
+@pytest.mark.parametrize("verdict", [None, True])
+def test_prompt_camera_silently_accepts_inconclusive_or_true_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: bool | None,
+) -> None:
+    current = tmp_path / "current-camera"
+    current.touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: verdict)
+
+    selected, prompts, output = _prompt_current_device(tmp_path, "v4l2", [], [], str(current), [""])
+
+    assert selected == str(current)
+    assert len(prompts) == 1
+    assert "warning:" not in output
+
+
+def test_prompt_camera_accepts_by_path_member_without_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "by-path" / "camera-1"
+    current.parent.mkdir()
+    current.touch()
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [str(current)], str(current), [""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 1
+    assert probe_paths == []
+    assert "warning:" not in output
+
+
+def test_prompt_camera_warns_for_missing_current_then_second_enter_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "remote-camera"
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [], str(current), ["", ""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 2
+    assert probe_paths == []
+    assert (
+        output.count(
+            f"warning: {current} does not exist here (ok if this config is for another machine)"
+        )
+        == 1
+    )
+    assert "enter a device number" not in output
+
+
+def test_prompt_can_not_detected_current_still_accepts_single_enter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "can", ["can0"], ["can0"], "can9", [""]
+    )
+
+    assert selected == "can9"
+    assert len(prompts) == 1
+    assert probe_paths == []
+    assert "warning:" not in output
+
+
 def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> None:
     by_id = tmp_path / "by-id"
     _make_devices(by_id)
@@ -1548,12 +1746,13 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
         + "\n",
         encoding="utf-8",
     )
-    input_fn, prompts = _scripted_input([""] * 10)
+    input_fn, prompts = _scripted_input([""] * 13)
+    out = io.StringIO()
 
     result = run_setup(
         {"XDG_CONFIG_HOME": str(tmp_path)},
         input_fn=input_fn,
-        out=io.StringIO(),
+        out=out,
         interactive=True,
         by_id_dir=by_id,
         by_path_dir=tmp_path / "none-path",
@@ -1564,6 +1763,11 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
     assert result == 0
     assert all("(current, not detected)" in prompt for prompt in role_prompts)
     assert all(device in text for device in current_devices)
+    assert all(
+        f"warning: {device} does not exist here (ok if this config is for another machine)"
+        in out.getvalue()
+        for device in current_devices
+    )
 
 
 def test_render_config_comment_at_exact_boundary_never_glues(tmp_path: Path) -> None:
@@ -2302,7 +2506,12 @@ def test_run_setup_v4l2_slot_can_switch_to_by_path_listing(
     )
 
     assert result == 0
-    assert "only 1 by-id entries for 2 detected cameras" in out.getvalue()
+    assert (
+        "2 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "camera-1-video-index0, camera-2-video-index0; "
+        "by-path names are stable per physical USB port; press 'p' to switch listing"
+        in out.getvalue()
+    )
     assert any("'s' to skip, 'p' to switch listing" in prompt for prompt in prompts)
     assert f"camera_device = {by_path_devices[1]}" in _config_path(tmp_path).read_text(
         encoding="utf-8"
