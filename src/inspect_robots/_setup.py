@@ -209,6 +209,7 @@ def _prompt_defaults(
             print(
                 _paint(
                     "no display detected (SSH?): the rerun viewer cannot open here; "
+                    "use --rerun-connect to stream to a viewer on another machine; "
                     "frames still record with store_frames",
                     _YELLOW,
                     out,

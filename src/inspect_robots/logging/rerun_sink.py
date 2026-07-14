@@ -1,10 +1,11 @@
 """Optional Rerun visualization sink.
 
-Logs camera images, proprioception, action vectors, and success markers to a
-`Rerun <https://github.com/rerun-io/rerun>`_ recording. ``rerun-sdk`` is imported
-lazily *inside* methods so the core package never depends on it; if it is not
-installed, the sink warns once and becomes a no-op (so unattended runs and the
-core-only import gate are unaffected).
+Logs camera images, proprioception, action vectors, and success markers to
+`Rerun <https://github.com/rerun-io/rerun>`_. The sink can write a ``.rrd``
+recording, spawn a local viewer, or connect over gRPC to a remote viewer.
+``rerun-sdk`` is imported lazily *inside* methods so the core package never
+depends on it; if it is not installed, the sink warns once and becomes a no-op
+(so unattended runs and the core-only import gate are unaffected).
 
 Emission happens on a daemon worker thread: ``log_step`` snapshots the
 transition and enqueues it, so a slow or stalled viewer connection can never
@@ -17,7 +18,7 @@ mid-run loses at most the current trial's queued tail. Camera frames are
 JPEG-compressed by default (``jpeg_quality=75``); pass ``jpeg_quality=None``
 for lossless raw frames. If compression is unavailable (an SDK without
 ``Image.compress``, or pillow missing), the sink warns once and logs raw
-frames. All Rerun SDK calls after ``init``/``save`` happen on
+frames. All Rerun SDK calls after ``init``/``connect_grpc``/``save`` happen on
 the worker because the SDK's timeline state is thread-local; worker state is
 generation-scoped so a worker wedged in a blocked SDK call is disowned at
 shutdown and can never double-consume after a restart.
@@ -71,7 +72,7 @@ class _WorkerState:
 
 
 class RerunSink:
-    """Stream a rollout to a Rerun recording (``.rrd``) or a live viewer."""
+    """Write a ``.rrd``, spawn a local viewer, or connect over gRPC to a remote one."""
 
     def __init__(
         self,
@@ -79,15 +80,25 @@ class RerunSink:
         *,
         application_id: str = "inspect_robots",
         spawn: bool = False,
+        connect_url: str | None = None,
         jpeg_quality: int | None = 75,
         queue_size: int = 64,
         flush_timeout: float = 10.0,
     ):
+        # rerun's save/connect/spawn calls each *replace* the global sink, so
+        # combining any two modes would silently drop one of the streams.
+        if spawn and connect_url is not None:
+            raise ValueError("spawn and connect_url are mutually exclusive")
+        if spawn and recording_path is not None:
+            raise ValueError("spawn and recording_path are mutually exclusive")
+        if recording_path is not None and connect_url is not None:
+            raise ValueError("recording_path and connect_url are mutually exclusive")
         if queue_size < 1:
             raise ValueError(f"queue_size must be >= 1, got {queue_size}")
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
+        self.connect_url = connect_url
         self.jpeg_quality = jpeg_quality
         self.queue_size = queue_size
         self.flush_timeout = flush_timeout
@@ -296,12 +307,15 @@ class RerunSink:
             return
         try:
             rr.init(self.application_id, spawn=self.spawn)
+            if self.connect_url is not None:
+                rr.connect_grpc(self.connect_url)
             if self.recording_path is not None:
                 rr.save(self.recording_path)
         except Exception as exc:
             # A visualization sink must never take the eval down with it — a
-            # missing viewer binary (spawn) or unwritable recording path
-            # degrades to a warned no-op, exactly like a missing rerun-sdk.
+            # missing viewer binary (spawn), unreachable viewer (connect), or
+            # unwritable recording path degrades to a warned no-op, exactly
+            # like a missing rerun-sdk.
             warnings.warn(
                 f"RerunSink disabled: could not start the Rerun recording/viewer ({exc})",
                 RuntimeWarning,

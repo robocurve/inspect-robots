@@ -85,6 +85,8 @@ _SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
+DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
+
 
 def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
@@ -174,6 +176,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="stream the rollout (cameras, state, actions) to a live Rerun "
         "viewer window; needs rerun-sdk (--no-rerun overrides a rerun config "
         "default)",
+    )
+    p_run.add_argument(
+        "--rerun-connect",
+        nargs="?",
+        const=DEFAULT_RERUN_CONNECT_URL,
+        default=None,
+        metavar="URL",
+        help="stream the rollout to a Rerun viewer already running elsewhere "
+        "(e.g. your laptop via an SSH reverse tunnel: ssh -R 9876:localhost:9876 ...); "
+        f"URL defaults to {DEFAULT_RERUN_CONNECT_URL}",
     )
     p_run.add_argument(
         "--disable-guardrails",
@@ -584,7 +596,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
         sinks: list[LogSink] = [sink]
-        if args.rerun if args.rerun is not None else defaults.rerun:
+        if args.rerun_connect is not None:
+            from inspect_robots.logging.rerun_sink import RerunSink
+
+            sinks.append(RerunSink(connect_url=args.rerun_connect))
+            print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}")
+        elif args.rerun if args.rerun is not None else defaults.rerun:
             from inspect_robots.logging.rerun_sink import RerunSink
 
             # spawn=True opens the live viewer; the sink itself degrades to a
