@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
@@ -704,6 +705,69 @@ def _can_serial(sysfs_net: Path, ifname: str) -> str | None:
         return None
 
 
+def _suggest_can_pinning(
+    sysfs_net: Path,
+    slots: tuple[DeviceSlot, ...],
+    assignments: Mapping[str, str],
+    *,
+    out: IO[str],
+) -> None:
+    """Suggest serial-pinned udev names for assigned order-dependent CAN devices."""
+    scanned = _scan_can(sysfs_net)
+    order_dependent = [ifname for ifname in scanned if re.fullmatch(r"can\d+", ifname)]
+    if len(order_dependent) < 2 or not any(
+        assignments.get(slot.arg) in order_dependent for slot in slots if slot.kind == "can"
+    ):
+        return
+    if not any(
+        "usb" in (sysfs_net / ifname / "device").resolve().parts for ifname in order_dependent
+    ):
+        return
+
+    warning = "these CAN interfaces have order-dependent names; a replug can swap them."
+    serials = [_can_serial(sysfs_net, ifname) for ifname in order_dependent]
+    if not all(serials) or len(set(serials)) != len(serials):
+        print(_paint(warning, _YELLOW, out), file=out)
+        return
+
+    derived_names: list[str] = []
+    for ifname in order_dependent:
+        assigned_arg = next(
+            (
+                slot.arg
+                for slot in slots
+                if slot.kind == "can" and assignments.get(slot.arg) == ifname
+            ),
+            None,
+        )
+        if assigned_arg is None:
+            derived_names.append(f"can_{ifname}")
+            continue
+        stem = re.sub(r"_(?:channel|bus)$", "", assigned_arg)
+        derived_names.append(stem if stem.startswith("can") else f"can_{stem}")
+
+    collision = len(set(derived_names)) != len(derived_names) or any(
+        name in scanned for name in derived_names
+    )
+    if collision or any(len(name) > 15 for name in derived_names):
+        derived_names = [f"can_{chr(ord('a') + index)}" for index in range(len(derived_names))]
+
+    serial_values = [serial for serial in serials if serial is not None]
+    rules = [
+        f'  SUBSYSTEM=="net", ACTION=="add", ATTRS{{serial}}=="{serial}", NAME="{name}"'
+        for serial, name in zip(serial_values, derived_names, strict=True)
+    ]
+    block = "\n".join(
+        [
+            warning,
+            "pin them by adapter serial (paste into /etc/udev/rules.d/70-can-names.rules,",
+            "then replug or reboot), and re-run setup to record the pinned names:",
+            *rules,
+        ]
+    )
+    print(_paint(block, _YELLOW, out), file=out)
+
+
 def _read_raw_config(path: Path) -> dict[str, dict[str, str]] | str:
     """Read raw section values, returning parse-error text instead of raising."""
     parser = configparser.ConfigParser(
@@ -858,6 +922,7 @@ def run_setup(
                 input_fn=input_fn,
                 out=out,
             )
+            _suggest_can_pinning(sysfs_net, slots, embodiment_args, out=out)
         else:
             managed_args = CAMERA_KEYS
             embodiment_args = _camera_section(

@@ -19,6 +19,7 @@ from inspect_robots._setup import (
     _scan_cameras,
     _scan_can,
     _scan_serial,
+    _suggest_can_pinning,
     run_setup,
 )
 from inspect_robots.conformance import DeviceSlot
@@ -59,6 +60,26 @@ def _make_can_interfaces(sysfs_net: Path, *names: str) -> None:
         interface = sysfs_net / name
         interface.mkdir(parents=True)
         (interface / "type").write_text("280\n", encoding="utf-8")
+
+
+def _attach_can_adapter(
+    tmp_path: Path,
+    sysfs_net: Path,
+    ifname: str,
+    serial: str | None,
+    *,
+    usb: bool = True,
+) -> None:
+    root = tmp_path / ("usb" if usb else "platform") / ifname / "adapter"
+    root.mkdir(parents=True)
+    if serial is not None:
+        (root / "serial").write_text(serial + "\n", encoding="utf-8")
+    device = root / "net-device"
+    device.mkdir()
+    try:
+        (sysfs_net / ifname / "device").symlink_to(device, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
 
 
 def _register_device_slots(
@@ -2103,3 +2124,140 @@ def test_run_setup_v4l2_slot_can_switch_to_by_path_listing(
     assert f"camera_device = {by_path_devices[1]}" in _config_path(tmp_path).read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_prints_exact_rules_for_distinct_usb_serials(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", "3B004B")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "3B004C")
+    slots = (
+        DeviceSlot("can_left_channel", "can", "left CAN channel"),
+        DeviceSlot("right_bus", "can", "right CAN bus"),
+    )
+    out = io.StringIO()
+
+    _suggest_can_pinning(
+        sysfs_net,
+        slots,
+        {"can_left_channel": "can0", "right_bus": "can1"},
+        out=out,
+    )
+
+    assert out.getvalue() == (
+        "these CAN interfaces have order-dependent names; a replug can swap them.\n"
+        "pin them by adapter serial (paste into /etc/udev/rules.d/70-can-names.rules,\n"
+        "then replug or reboot), and re-run setup to record the pinned names:\n"
+        '  SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="3B004B", NAME="can_left"\n'
+        '  SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="3B004C", NAME="can_right"\n'
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_includes_unassigned_order_dependent_interface(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", "LEFT")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "SPARE")
+    slots = (DeviceSlot("left_channel", "can", "left CAN channel"),)
+    out = io.StringIO()
+
+    _suggest_can_pinning(sysfs_net, slots, {"left_channel": "can0"}, out=out)
+
+    text = out.getvalue()
+    assert 'ATTRS{serial}=="LEFT", NAME="can_left"' in text
+    assert 'ATTRS{serial}=="SPARE", NAME="can_can1"' in text
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+@pytest.mark.parametrize("fallback_reason", ["derived", "scanned", "long"])
+def test_suggest_can_pinning_name_conflict_or_length_falls_back_as_a_set(
+    tmp_path: Path,
+    fallback_reason: str,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    names = ("can0", "can1", "can_left") if fallback_reason == "scanned" else ("can0", "can1")
+    _make_can_interfaces(sysfs_net, *names)
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", "ONE")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "TWO")
+    slots: tuple[DeviceSlot, ...]
+    assignments: dict[str, str]
+    if fallback_reason == "derived":
+        slots = (
+            DeviceSlot("left_channel", "can", "left CAN channel"),
+            DeviceSlot("left_bus", "can", "duplicate stable name"),
+        )
+        assignments = {"left_channel": "can0", "left_bus": "can1"}
+    elif fallback_reason == "scanned":
+        slots = (DeviceSlot("left_channel", "can", "left CAN channel"),)
+        assignments = {"left_channel": "can0"}
+    else:
+        slots = (DeviceSlot("extraordinarily_long_channel", "can", "long CAN channel"),)
+        assignments = {"extraordinarily_long_channel": "can0"}
+    out = io.StringIO()
+
+    _suggest_can_pinning(sysfs_net, slots, assignments, out=out)
+
+    text = out.getvalue()
+    assert 'ATTRS{serial}=="ONE", NAME="can_a"' in text
+    assert 'ATTRS{serial}=="TWO", NAME="can_b"' in text
+    assert 'NAME="can_can1"' not in text
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+@pytest.mark.parametrize("serials", [("SAME", "SAME"), ("ONLY", None)])
+def test_suggest_can_pinning_bad_serials_print_warning_without_rules(
+    tmp_path: Path,
+    serials: tuple[str, str | None],
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", serials[0])
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", serials[1])
+    slots = (DeviceSlot("left_channel", "can", "left CAN channel"),)
+    out = io.StringIO()
+
+    _suggest_can_pinning(sysfs_net, slots, {"left_channel": "can0"}, out=out)
+
+    assert out.getvalue() == (
+        "these CAN interfaces have order-dependent names; a replug can swap them.\n"
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_non_usb_interfaces_are_completely_silent(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", "ONE", usb=False)
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "TWO", usb=False)
+    slots = (DeviceSlot("left_channel", "can", "left CAN channel"),)
+    out = io.StringIO()
+
+    _suggest_can_pinning(sysfs_net, slots, {"left_channel": "can0"}, out=out)
+
+    assert out.getvalue() == ""
+
+
+def test_suggest_can_pinning_pinned_names_or_no_assigned_kernel_name_are_silent(
+    tmp_path: Path,
+) -> None:
+    pinned_net = tmp_path / "pinned-net"
+    _make_can_interfaces(pinned_net, "can_left", "can_right")
+    slots = (DeviceSlot("left_channel", "can", "left CAN channel"),)
+    pinned_out = io.StringIO()
+
+    _suggest_can_pinning(pinned_net, slots, {"left_channel": "can_left"}, out=pinned_out)
+
+    order_net = tmp_path / "order-net"
+    _make_can_interfaces(order_net, "can0", "can1")
+    unassigned_out = io.StringIO()
+    _suggest_can_pinning(order_net, slots, {"left_channel": "can9"}, out=unassigned_out)
+    assert pinned_out.getvalue() == ""
+    assert unassigned_out.getvalue() == ""
