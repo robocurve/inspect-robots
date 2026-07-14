@@ -1,9 +1,10 @@
 # Probe Enter-accepted stale camera devices in the setup wizard
 
 Date: 2026-07-14
-Status: revised after subagent critique round 1 (probe-True acceptance, both
-listings checked before probing, discriminator dropped, dual hint sites,
-explicit test updates); round 2 pending
+Status: approved for implementation; revised after critique round 1
+(probe-True acceptance, both listings checked before probing, discriminator
+dropped, dual hint sites, explicit test updates) and round 2 (verdict ready;
+six clarifications folded in below)
 
 ## Problem
 
@@ -29,7 +30,9 @@ sharp end of #71.
    devices, configs authored for another machine). #71's lesson: only speak
    when the evidence is definitive.
 3. A second Enter always accepts, so scripted or headless Enter-through runs
-   terminate.
+   terminate (unchanged pre-existing exception: the duplicate-assignment
+   confirm at `_setup.py:433-455` defaults to No and can loop on duplicated
+   currents; this PR neither fixes nor worsens that).
 4. A healthy device never triggers new friction, including one configured
    via by-path or a raw `/dev/videoN` path while the by-id listing is
    active ("not detected" is listing-relative).
@@ -45,9 +48,10 @@ In the `elif not entered and current is not None` branch of
 `_prompt_device_slot`, when `kind == "v4l2"`:
 
 - Skip all new logic when `current` is present in either scan
-  (`by_id_devices` or `by_path_devices`), not just the active listing: a
-  device the other listing knows is healthy, and probing it again is
-  pointless (requirement 4).
+  (`by_id_devices` or `by_path_devices`), not just the active listing.
+  Listing membership is the best available healthiness proxy until #71
+  threads per-entry verdicts out of the scan (in fallback mode membership
+  certifies nothing, but erring toward silence is requirement 2's rule).
 - Otherwise, if the path does not exist: warn once in the existing
   foreign-machine tone ("does not exist here (ok if this config is for
   another machine)") and re-prompt; a second Enter keeps the value.
@@ -66,9 +70,10 @@ In the `elif not entered and current is not None` branch of
   `u` rescans within the slot (the verdict is a property of the node, not
   the listing); (iii) the warning path must `continue` before the generic
   instruction block at `_setup.py:413-423` so the operator never gets two
-  stacked messages; (iv) the group-retry loop (`_setup.py:691`) re-invokes
-  `prompt_slot`, resetting the flag and warning again on a fresh pass;
-  acceptable because it is operator-bounded.
+  stacked messages; (iv) both retry loops (`_camera_section`'s go-back loop
+  at `_setup.py:499-535` and `_device_section`'s group-retry at `:691`)
+  re-invoke the slot prompt, resetting the flag and warning again on a
+  fresh pass; acceptable because both are operator-bounded.
 - CAN and serial slots keep today's behavior (no probe exists for them).
 
 ### B. One honest hint, both sites
@@ -78,12 +83,16 @@ The count-mismatch hint prints in two places with identical text:
 (`_setup.py:631-641`). Extract a shared helper (D1 docstring) and change the
 message once:
 
-- Compute how many by-path scan entries resolve (via `Path.resolve()` or
-  `os.path.realpath`) to targets that no by-id scan entry resolves to.
-- When that count is positive and the by-id listing is active, print: N of
-  the detected camera nodes have no by-id entry (udev serial collision or
-  missing symlink); by-path names are stable per physical USB port; press
-  `p` to switch listing.
+- Compute the by-path scan entries that resolve (via `Path.resolve()`,
+  `strict=False`) to targets no by-id scan entry resolves to.
+- When that set is non-empty and the by-id listing is active, print the
+  affected entry names, not just a count (#82 explicitly asks for naming;
+  the motivating operator needed to find `/dev/video16`): these camera
+  nodes have no by-id entry (udev serial collision or missing symlink),
+  followed by the entry basenames, then: by-path names are stable per
+  physical USB port; press `p` to switch listing.
+- `advertise_path_toggle` (`_setup.py:310-314/:473/:586`) stays len-based
+  and unchanged; only the hint's gate moves to the resolved-set test.
 - When the active listing is already by-path (fresh systems where by-id is
   empty: `_setup.py:470/585` set `active_is_by_id = False`), drop the `p`
   clause; the operator is already looking at the right list.
@@ -132,6 +141,15 @@ Existing tests that must be updated (they break by design):
 - `tests/test_setup.py:1442-1449` and `:2305`: assert the exact old
   collision wording; update to the new message (their `_make_devices`
   fixtures live in disjoint tmp dirs, so the by-path-extras branch fires).
+  Expected named entries there: all by-path fixture entries (3 at `:1425`,
+  2 at `:2281`), because regular-file fixtures share no resolve targets.
+- `tests/test_setup.py:1396-1419`
+  `test_run_setup_path_toggle_is_accepted_when_not_advertised`: its 3-vs-3
+  disjoint regular-file fixture would newly trigger the resolved-set hint,
+  leaving its `:1419` no-hint assertion vacuously green under the old
+  wording. Preserve the test's intent: symlink its by-path entries to the
+  by-id targets (count 0, hint stays silent), with the `pytest.skip` on
+  `OSError` pattern for the Windows advisory tier.
 
 ## Constraints
 
