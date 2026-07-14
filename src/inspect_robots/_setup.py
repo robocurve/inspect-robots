@@ -245,6 +245,32 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
         print(f"  {number}. {Path(device).name}", file=out)
 
 
+def _print_camera_path_hint(
+    by_id_devices: list[str],
+    by_path_devices: list[str],
+    active_is_by_id: bool,
+    out: IO[str],
+) -> None:
+    """Name by-path camera nodes whose resolved targets have no by-id entry."""
+    by_id_targets = {Path(device).resolve(strict=False) for device in by_id_devices}
+    extra_by_path = [
+        device
+        for device in by_path_devices
+        if Path(device).resolve(strict=False) not in by_id_targets
+    ]
+    if not extra_by_path:
+        return
+    names = ", ".join(Path(device).name for device in extra_by_path)
+    message = (
+        f"{len(extra_by_path)} by-path camera nodes have no by-id entry "
+        f"(udev serial collision or missing symlink): {names}; "
+        "by-path names are stable per physical USB port"
+    )
+    if active_is_by_id:
+        message += "; press 'p' to switch listing"
+    print(_paint(message, _YELLOW, out), file=out)
+
+
 def _identify_by_replug(
     role: str,
     devices: list[str],
@@ -337,6 +363,7 @@ def _prompt_device_slot(
     camera_role: str | None = None,
 ) -> tuple[str | None, bool]:
     """Prompt for one slot and return its device plus active listing state."""
+    warned_current = False
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
         device_dir = by_id_dir if active_is_by_id else by_path_dir
@@ -379,6 +406,27 @@ def _prompt_device_slot(
             if selected is None:
                 continue
         elif not entered and current is not None:
+            if (
+                kind == "v4l2"
+                and not warned_current
+                and current not in by_id_devices
+                and current not in by_path_devices
+            ):
+                warning: str | None = None
+                if not Path(current).exists():
+                    warning = (
+                        f"warning: {current} does not exist here "
+                        "(ok if this config is for another machine)"
+                    )
+                elif _v4l2_color_capture(Path(current)) is False:
+                    warning = (
+                        f"warning: {current} offers no color capture format "
+                        "(likely a depth or metadata node)"
+                    )
+                if warning is not None:
+                    print(_paint(warning, _YELLOW, out), file=out)
+                    warned_current = True
+                    continue
             selected = current
         elif kind != "can" and (entered.startswith("/") or Path(entered).is_absolute()):
             # startswith("/") keeps POSIX rig paths accepted on Windows
@@ -484,17 +532,7 @@ def _camera_section(
             _paint("no /dev/v4l devices found (not Linux, or no cameras attached)", _YELLOW, out),
             file=out,
         )
-    if advertise_path_toggle:
-        print(
-            _paint(
-                f"only {len(by_id_devices)} by-id entries for "
-                f"{len(by_path_devices)} detected cameras — identical cameras without serials "
-                "collide there; by-path names are stable per physical USB port",
-                _YELLOW,
-                out,
-            ),
-            file=out,
-        )
+    _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
         assignments: dict[str, str] = {}
@@ -628,17 +666,8 @@ def _device_section(
         if slot.kind not in listed_kinds:
             _print_slot_listing(slot.kind, current_devices, current_dir, out)
             listed_kinds.add(slot.kind)
-            if slot.kind == "v4l2" and advertise_path_toggle:
-                print(
-                    _paint(
-                        f"only {len(by_id_devices)} by-id entries for "
-                        f"{len(by_path_devices)} detected cameras — identical cameras without "
-                        "serials collide there; by-path names are stable per physical USB port",
-                        _YELLOW,
-                        out,
-                    ),
-                    file=out,
-                )
+            if slot.kind == "v4l2":
+                _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
         selected, active_is_by_id = _prompt_device_slot(
             slot.label,
