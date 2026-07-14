@@ -195,9 +195,9 @@ def _fake_v4l2_ioctl(
 
     def ioctl(fd: int, request: int, buf: bytearray) -> int:
         if request == _VIDIOC_QUERYCAP:
-            struct.pack_into("<II", buf, 84, capabilities, device_caps)
+            struct.pack_into("=II", buf, 84, capabilities, device_caps)
         elif request == _VIDIOC_ENUM_FMT:
-            index, buf_type = struct.unpack_from("<II", buf, 0)
+            index, buf_type = struct.unpack_from("=II", buf, 0)
             assert buf_type == 1  # V4L2_BUF_TYPE_VIDEO_CAPTURE
             if index >= len(fourccs):
                 raise OSError(errno.EINVAL, "format enumeration exhausted")
@@ -209,12 +209,29 @@ def _fake_v4l2_ioctl(
     return ioctl
 
 
+def _endless_v4l2_ioctl() -> Callable[[int, int, bytearray], int]:
+    """Simulate a misbehaving driver whose format enumeration never ends."""
+
+    def ioctl(fd: int, request: int, buf: bytearray) -> int:
+        if request == _VIDIOC_QUERYCAP:
+            struct.pack_into("=II", buf, 84, _V4L2_CAP_DEVICE_CAPS, _V4L2_CAP_VIDEO_CAPTURE)
+        else:
+            buf[44:48] = b"Z16 "
+        return 0
+
+    return ioctl
+
+
 def _probe_target(tmp_path: Path) -> Path:
     node = tmp_path / "cam"
     node.touch()
     return node
 
 
+_needs_fcntl = pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+
+
+@_needs_fcntl
 def test_v4l2_color_capture_true_for_color_capable_device(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,6 +247,25 @@ def test_v4l2_color_capture_true_for_color_capable_device(
     assert _v4l2_color_capture(_probe_target(tmp_path)) is True
 
 
+@_needs_fcntl
+def test_v4l2_color_capture_true_for_bayer_only_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Raw Bayer nodes are color cameras OpenCV can debayer; hiding them in a
+    # mixed rig would silently drop a working camera from the listing.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS,
+            _V4L2_CAP_VIDEO_CAPTURE,
+            [b"RGGB"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is True
+
+
+@_needs_fcntl
 def test_v4l2_color_capture_false_for_depth_only_device(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -242,6 +278,18 @@ def test_v4l2_color_capture_false_for_depth_only_device(
     assert _v4l2_color_capture(_probe_target(tmp_path)) is False
 
 
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_endless_format_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A driver that never terminates VIDIOC_ENUM_FMT must yield False, not a
+    # hung wizard.
+    monkeypatch.setattr("fcntl.ioctl", _endless_v4l2_ioctl())
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+@_needs_fcntl
 def test_v4l2_color_capture_false_for_metadata_node_without_enumerating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -56,9 +56,25 @@ _VIDIOC_ENUM_FMT = 0xC0405602
 _V4L2_CAP_VIDEO_CAPTURE = 0x00000001
 _V4L2_CAP_DEVICE_CAPS = 0x80000000
 # UYVY/GREY are deliberately absent: RealSense stereo-IR nodes advertise them,
-# and listing those would offer IR streams as cameras.
+# and listing those would offer IR streams as cameras. RGGB/GRBG/GBRG/BA81 are
+# the 8-bit raw Bayer layouts OpenCV debayers to color.
 _V4L2_COLOR_FOURCCS = frozenset(
-    {"YUYV", "MJPG", "JPEG", "H264", "NV12", "NV21", "YU12", "YV12", "RGB3", "BGR3"}
+    {
+        "YUYV",
+        "MJPG",
+        "JPEG",
+        "H264",
+        "NV12",
+        "NV21",
+        "YU12",
+        "YV12",
+        "RGB3",
+        "BGR3",
+        "RGGB",
+        "GRBG",
+        "GBRG",
+        "BA81",
+    }
 )
 
 _DEFAULT_COMMENTS: dict[str, str] = {
@@ -695,15 +711,16 @@ def _v4l2_color_capture(path: Path) -> bool | None:
         except OSError:
             return None
 
-        capabilities, device_caps = struct.unpack_from("<II", capability, 84)
+        capabilities, device_caps = struct.unpack_from("=II", capability, 84)
         effective_caps = device_caps if capabilities & _V4L2_CAP_DEVICE_CAPS else capabilities
         if not effective_caps & _V4L2_CAP_VIDEO_CAPTURE:
             return False
 
-        index = 0
-        while True:
+        # Bounded far above any real device's format count, so a driver that
+        # never ends the enumeration cannot hang the wizard.
+        for index in range(64):
             description = bytearray(64)
-            struct.pack_into("<II", description, 0, index, 1)
+            struct.pack_into("=II", description, 0, index, 1)
             try:
                 fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, description)
             except OSError:
@@ -711,7 +728,7 @@ def _v4l2_color_capture(path: Path) -> bool | None:
             fourcc = description[44:48].decode("ascii", errors="replace")
             if fourcc in _V4L2_COLOR_FOURCCS:
                 return True
-            index += 1
+        return False
     finally:
         os.close(fd)
 
