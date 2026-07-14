@@ -51,6 +51,7 @@ def _golden_log() -> EvalLog:
                 epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
                 operator_judgements=("yes",),
+                trial_metadata=({"foo": "bar"},),
             ),
         ),
     )
@@ -82,12 +83,14 @@ def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path)
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["operator_judgements"]
+        del sample["trial_metadata"]
     path = tmp_path / "old.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     restored = read_eval_log(str(path))
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
+    assert restored.samples[0].trial_metadata == ()
 
 
 def test_eval_log_and_friends_are_frozen() -> None:
@@ -109,6 +112,8 @@ def test_eval_log_and_friends_are_frozen() -> None:
         log.samples.clear()  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        log.samples[0].trial_metadata.append({})  # type: ignore[attr-defined]
 
 
 def test_unsupported_schema_version_rejected() -> None:

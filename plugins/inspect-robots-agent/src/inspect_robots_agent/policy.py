@@ -147,29 +147,28 @@ class LLMAgentPolicy(PolicyBase):
         ]
         self._calls_used = 0
 
-    def on_trial_end(self, record: 'TrialRecord', log_dir: str) -> None:
+    def on_trial_end(self, record: "TrialRecord", log_dir: str, run_id: str) -> None:
         if not self._messages:
             return
-        
-        transcript_dir = Path(log_dir) / "transcripts"
+
+        transcript_dir = Path(log_dir) / "transcripts" / run_id
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        
+
         trial_id = f"{record.scene_id}-e{record.epoch}"
         path = transcript_dir / f"{trial_id}.jsonl"
-        
+
         with path.open("w", encoding="utf-8") as f:
             for msg in self._messages:
                 clean_msg = dict(msg)
                 if isinstance(clean_msg.get("content"), list):
                     clean_content = [
-                        part for part in clean_msg["content"]
-                        if part.get("type") != "image_url"
+                        part for part in clean_msg["content"] if part.get("type") != "image_url"
                     ]
                     clean_msg["content"] = clean_content
                 f.write(json.dumps(clean_msg) + "\n")
-        
+
         # Make path relative to log_dir for portability
-        record.metadata["transcript"] = f"transcripts/{trial_id}.jsonl"
+        record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
 
     # -- the loop ------------------------------------------------------------------
 

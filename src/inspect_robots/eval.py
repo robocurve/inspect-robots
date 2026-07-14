@@ -18,7 +18,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from inspect_robots import __version__
 from inspect_robots.approver import Approver, AutoApprover
@@ -231,14 +231,13 @@ def _run_eval(
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 
+    # One subdirectory per run: trial ids repeat across runs (scene-epoch),
+    # so a shared directory would silently overwrite the previous run's
+    # frames or transcripts.
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+
     frame_store: FrameStore | None = None
     if store_frames:
-        # One subdirectory per run: trial ids repeat across runs (scene-epoch),
-        # so a shared directory would silently overwrite the previous run's
-        # frames. The log's stats.frames_dir records the exact directory.
-        run_stamp = (
-            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
-        )
         frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
 
     spec = EvalSpec(
@@ -342,10 +341,19 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
-                
+
                 on_trial_end = getattr(policy, "on_trial_end", None)
                 if callable(on_trial_end):
-                    on_trial_end(record, log_dir)
+                    try:
+                        on_trial_end(record, log_dir, run_stamp)
+                    except Exception as exc:
+                        note = f"policy.on_trial_end failed: {exc}"
+                        scene_status = "error"
+                        scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                        if status == "success":
+                            status = "error"
+                            error = note
+
                 if record.status != "error":
                     trial_metadatas.append(record.metadata)
                 bus.on_trial_end(record)

@@ -7,8 +7,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+
 ### Added
 
+- **Policy lifecycle hook: `on_trial_end`** — policies can now hook into the end of a trial to persist state or artifacts. The orchestrator calls `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy attaches to `record.metadata` is persisted in the final `EvalLog`. Hook failures are caught and logged as trial errors, preventing them from crashing the overall evaluation.
+- **Agent plugin transcript persistence** — `LLMAgentPolicy` now implements `on_trial_end` to persist its full conversation transcript (tool calls, observations, system prompts) to a JSONL file per trial under `<log-dir>/transcripts/<run_id>/<scene_id>-e<epoch>.jsonl`. Camera images are stripped from the transcript to save space, as they are already recorded in the frame store. The relative path to the transcript is stored in the trial's metadata for easy post-hoc analysis.
 - Plugin-declared embodiment device slots for V4L2 cameras, SocketCAN
   interfaces, and serial devices. `inspect-robots setup` probes and interviews
   declared slots, enforces grouped all-or-none assignments, and suggests udev
@@ -55,7 +58,6 @@ All notable changes to this project are documented here. The format is based on
   applies its args.
 
 ## [0.6.0] - 2026-07-10
-
 ### Added
 
 - **New plugin: `inspect-robots-agent`** — frontier LLMs (Claude, GPT,

@@ -24,6 +24,7 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.embodiment import EmbodimentInfo
+    from inspect_robots.rollout import TrialRecord
 
 
 @dataclass(frozen=True)
@@ -83,8 +84,11 @@ class PolicyBase(ABC):
     def bind(self, embodiment_info: EmbodimentInfo) -> None:  # noqa: B027 - no-op default
         """Default: fixed-space policies ignore the embodiment they run on."""
 
-    def on_trial_end(self, record: TrialRecord, log_dir: str) -> None:  # noqa: B027
-        """Optional: hook called by eval() when a trial completes, allowing the policy to persist artifacts."""
+    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:  # noqa: B027
+        """Optional: hook called by eval() when a trial completes.
+
+        Allows the policy to persist artifacts.
+        """
 
     def reset(self, scene: Scene) -> None:  # noqa: B027 - intentional no-op default
         """Default: stateless policies need no per-scene reset."""

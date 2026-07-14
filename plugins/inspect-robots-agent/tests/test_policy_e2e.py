@@ -243,3 +243,41 @@ def test_unbound_act_raises_clear_error() -> None:
     policy = _policy(_Script([_text_response("hi")]))
     with pytest.raises(RuntimeError, match="bind"):
         policy.act(Observation())
+
+
+def test_on_trial_end_writes_transcript_and_strips_images(tmp_path: Path) -> None:
+    # A test for the on_trial_end hook in the agent policy.
+    # It must strip images out but leave everything else, and store the path
+    # in the trial metadata.
+    script = _Script([_tool_response("done", {"summary": "done"})])
+    sink = _RecordingSink()
+    logs = ir_eval(
+        _task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
+    )
+    assert logs[0].status == "success"
+
+    # Metadata should contain transcript path
+    (record,) = sink.records
+    assert "transcript" in record.metadata
+    transcript_rel = record.metadata["transcript"]
+    assert transcript_rel.startswith("transcripts/")
+
+    # Transcript should exist on disk
+    transcript_path = tmp_path / transcript_rel
+    assert transcript_path.is_file()
+
+    # Verify the JSONL content and image stripping
+    lines = transcript_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 5  # System, Goal, Observation, ToolCall, ToolResponse
+
+    system, goal, obs, asst, tool_resp = [json.loads(line) for line in lines]
+    assert system["role"] == "system"
+    assert goal["role"] == "user"
+    assert obs["role"] == "user"
+    assert asst["role"] == "assistant"
+    assert tool_resp["role"] == "tool"
+
+    # Observation parts should not contain 'image_url' (they were stripped)
+    obs_parts = obs["content"]
+    assert any(p["type"] == "text" for p in obs_parts)
+    assert all(p["type"] != "image_url" for p in obs_parts)

@@ -445,3 +445,34 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# 9. on_trial_end hook: artifact persistence via trial metadata.
+# --------------------------------------------------------------------------- #
+def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: Path) -> None:
+    task = _task(epochs=2)
+    seen_ids: list[str] = []
+
+    class _HookPolicy(ScriptedPolicy):
+        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+            # First epoch works, second raises exception
+            seen_ids.append(run_id)
+            if record.epoch == 0:
+                record.metadata["test_key"] = "test_val"
+            else:
+                raise RuntimeError("hook exploded")
+
+    (log,) = eval(task, _HookPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    # Eval returns an error log (rather than crashing) when a hook throws.
+    assert log.status == "error"
+    assert log.error is not None and "hook exploded" in log.error
+
+    scene = log.samples[0]
+    # The first epoch succeeded so its metadata is retained.
+    # The second epoch failed in the hook, so its metadata contains
+    # whatever was populated before the crash (empty).
+    assert scene.trial_metadata == ({"test_key": "test_val"}, {})
+    assert len(seen_ids) == 2
+    assert seen_ids[0] == seen_ids[1]
