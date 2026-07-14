@@ -371,6 +371,25 @@ patterns).
   style) and that the heredoc block content is unchanged.
 - [ ] Commit `docs: point quickstart at inspect-robots setup`.
 
+### Task 5.5: headless rerun warning (issue #50 ingestion)
+
+Added mid-implementation after field report #50 (five first-run failures on
+a real rig). Only its item 4 (display probe) plus the docs follow-up fit
+this plan's scope; items 1-3 and 5-7 (import preflight, version skew, CAN
+and policy-server probes) are `doctor` follow-ups tracked on #50.
+
+**Files:** modify `src/inspect_robots/_setup.py`, `tests/test_setup.py`.
+
+- [ ] When the wizard reaches the `rerun` prompt and neither `DISPLAY` nor
+  `WAYLAND_DISPLAY` is present in `env`, the suggested default flips to
+  `false` and one line explains why ("no display detected (SSH?): the
+  rerun viewer cannot open here; frames still record with
+  store_frames"). The user can still type `true`. Tests: headless env →
+  default false + note printed; env with DISPLAY → default true, no note;
+  headless but existing config says `rerun = true` → existing value still
+  wins the default (§3.1.3) yet the note is printed.
+- [ ] Gates + commit `feat(setup): warn when rerun is enabled headless`.
+
 ### Task 6: end-to-end sanity + PR
 
 - [ ] `uv sync --all-packages --extra dev` in the worktree, then full gates:

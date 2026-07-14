@@ -6,8 +6,9 @@ for the common typo; both run the same CLI.
 
 ## Zero-config: `inspect-robots "<instruction>"`
 
-Once you have configured a default policy and embodiment (below), giving the
-robot a command is a one-liner:
+Once you have configured a default policy and embodiment (run
+`inspect-robots setup`, or see below), giving the robot a command is a
+one-liner:
 
 ```bash
 inspect-robots "place the spoon on the plate"
@@ -97,6 +98,29 @@ and records the verdict in the log (`skip` records nothing). Piped/CI
 stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
 runs stay non-blocking, and an unjudged trial honestly scores as failure with
 "no operator judgement recorded".
+
+## `inspect-robots setup`
+
+The interactive first-run wizard: it prompts for each `[defaults]` key with
+a suggested value (Enter accepts, typing overrides), warns when a chosen
+policy or embodiment is not registered in the current environment, and then
+helps assign camera devices by listing `/dev/v4l/by-id`. If you do not know
+which physical camera a device path belongs to, answer `u` and unplug that
+camera when asked: the wizard rescans and identifies it from the entry that
+disappeared. When identical cameras without serial numbers collide in the
+by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
+per physical USB port.
+
+```bash
+inspect-robots setup
+```
+
+The result is written to `~/.config/inspect-robots/config.ini`
+(`$XDG_CONFIG_HOME` honored); an existing file is backed up to
+`config.ini.bak` first, and settings the wizard does not manage (such as
+`[policy.args]` or `sim_embodiment`) are carried through unchanged. The
+command requires an interactive terminal; for scripted configuration use
+`inspect-robots config set`.
 
 ## `inspect-robots list`
 

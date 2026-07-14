@@ -9,6 +9,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **`inspect-robots setup`**: an interactive first-run wizard that prompts
+  for the `[defaults]` keys with suggested values, discovers camera devices
+  under `/dev/v4l/by-id` (with unplug-to-identify and a `/dev/v4l/by-path`
+  fallback for serial-less cameras that collide in by-id), and writes
+  `~/.config/inspect-robots/config.ini`. An existing file is backed up to
+  `config.ini.bak` and unmanaged sections/keys are carried through
+  unchanged. Warns before writing `rerun = true` in a headless session
+  (part of #50).
 - Public-docstring coverage gate via Ruff's D1 rules, with a full backfill of
   missing public docstrings.
 

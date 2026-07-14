@@ -54,6 +54,10 @@ from inspect_robots import eval
 
 ## From the command line
 
+On a real rig, configure defaults once with the interactive wizard
+(`inspect-robots setup`, covered in [the CLI guide](cli.md)). The explicit
+form below needs no configuration:
+
 ```bash
 inspect-robots list                                          # all registered components
 inspect-robots list policies                                 # just policies

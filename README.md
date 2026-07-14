@@ -68,9 +68,25 @@ below and no activation is needed.
 
 ## Quickstart
 
-Set your defaults once. The policy and embodiment come from installed plugins
-([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) shown
-here); replace the three camera paths with your rig's V4L2 color nodes:
+Set your defaults once with the interactive wizard:
+
+```bash
+uv run inspect-robots setup
+```
+
+It walks you through the defaults (policy, embodiment, scorer, run length),
+lists the camera devices under `/dev/v4l/by-id`, and can tell you which
+physical camera is which: unplug one when asked and the wizard identifies it
+from the device that disappeared. Press Enter to accept the suggested values
+(the [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)
+plugin shown below) or type your own; install the plugin whose components
+you configure (`uv pip install inspect-robots-yam`) or the wizard will warn
+that the names are not registered. The result lands in
+`~/.config/inspect-robots/config.ini`; note that later `inspect-robots
+config set` edits drop comments from that file.
+
+Prefer to write the file yourself? Replace the three camera paths with your
+rig's V4L2 color nodes:
 
 ```bash
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
