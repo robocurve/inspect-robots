@@ -28,11 +28,15 @@ def read_dotenv(path: Path) -> dict[str, str]:
         if not key:
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
+        if value[:1] in {"'", '"'} and (closing := value.find(value[0], 1)) != -1:
+            # python-dotenv semantics: a quoted value ends at the matching
+            # quote and keeps "#" literally; anything after the closing quote
+            # (typically a comment) is ignored. An unmatched opening quote
+            # falls through and is kept literally.
+            value = value[1:closing]
         else:
             # python-dotenv semantics: an unquoted value ends at the first
-            # whitespace-preceded "#"; quoted values keep "#" literally.
+            # whitespace-preceded "#".
             value = re.split(r"\s#", value, maxsplit=1)[0].rstrip()
         parsed[key] = value
     return parsed

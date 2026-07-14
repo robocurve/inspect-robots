@@ -59,6 +59,20 @@ def test_read_dotenv_strips_unquoted_inline_comments(tmp_path: Path) -> None:
     }
 
 
+def test_read_dotenv_quoted_value_followed_by_comment(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        'DOUBLE="sk-123" # prod key\nSINGLE=\'sk-456\' # staging\nINNER="a # b" # c\n',
+        encoding="utf-8",
+    )
+
+    assert read_dotenv(path) == {
+        "DOUBLE": "sk-123",
+        "SINGLE": "sk-456",
+        "INNER": "a # b",
+    }
+
+
 def test_read_dotenv_strips_utf8_bom(tmp_path: Path) -> None:
     path = tmp_path / ".env"
     path.write_bytes(b"\xef\xbb\xbfANTHROPIC_API_KEY=abc\n")

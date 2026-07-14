@@ -13,7 +13,9 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ``cli.main()`` loads ``./.env`` on every call; without this fixture a
     developer's real keys would leak into the test process and make
     default-resolution assertions depend on their machine. The dotenv wiring
-    test opts back in by restoring the real ``init_dotenv``.
+    test opts back in by restoring the real ``init_dotenv``. Patching only
+    the ``inspect_robots.cli`` name assumes ``main()`` stays the sole entry
+    point that loads ``.env`` — extend this fixture if another appears.
     """
     import inspect_robots.cli
 
