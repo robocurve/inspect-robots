@@ -9,6 +9,7 @@ Subcommands:
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
 - ``inspect-robots inspect LOG.json`` — print a saved eval log.
+- ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -77,7 +78,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config", "doctor")
+_SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -196,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
 
+    sub.add_parser(
+        "setup",
+        help="interactive first-run wizard: pick defaults and discover camera devices, "
+        "then write config.ini",
+    )
+
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
@@ -234,7 +241,8 @@ def _pick_component(
     raise SystemExit(
         f"no {kind} given and no default configured.\n"
         f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
-        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or run "
+        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, "
+        "run 'inspect-robots setup', or "
         f"'inspect-robots config set {kind} NAME'"
     )
 
@@ -576,6 +584,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_setup() -> int:
+    from inspect_robots._setup import run_setup
+
+    return run_setup(
+        os.environ,
+        input_fn=input,
+        out=sys.stdout,
+        interactive=sys.stdin.isatty(),
+    )
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
         path = set_default(os.environ, args.key, args.value)
@@ -627,6 +646,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_inspect(args.log)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command == "setup":
+        return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
     parser.print_help()

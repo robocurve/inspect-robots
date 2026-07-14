@@ -26,8 +26,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
 | `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
-| `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
+| `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
 | `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
+| `_setup.py` | the `inspect-robots setup` wizard (plan 0009): IO-injected prompts for `[defaults]`, V4L2 camera discovery (by-id, by-path fallback, unplug-to-identify), headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants
