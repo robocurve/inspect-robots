@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Plugin-declared embodiment device slots for V4L2 cameras, SocketCAN
+  interfaces, and serial devices. `inspect-robots setup` probes and interviews
+  declared slots, enforces grouped all-or-none assignments, and suggests udev
+  serial pinning for order-dependent USB-CAN names (#61).
 - Runtime-requirement declarations for registered component factories, with
   missing-import preflight checklists in `inspect-robots setup` and
   `inspect-robots doctor` (#59).

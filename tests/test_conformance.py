@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 
 from inspect_robots.conformance import (
+    DeviceSlot,
     assert_embodiment_conformant,
     check_embodiment,
+    device_slots,
     missing_runtime_requirements,
 )
 from inspect_robots.embodiment import EmbodimentInfo
@@ -51,6 +53,65 @@ def _good_absolute() -> EmbodimentInfo:
 
 def _codes(info: EmbodimentInfo) -> dict[str, str]:
     return {i.code: i.severity for i in check_embodiment(info).issues}
+
+
+def test_device_slots_absent_attribute_is_empty() -> None:
+    class _Factory:
+        pass
+
+    assert device_slots(_Factory) == ()
+    assert device_slots(None) == ()
+
+
+def test_device_slots_valid_tuple_round_trips_in_order() -> None:
+    slots = (
+        DeviceSlot("left_channel", "can", "left arm CAN channel", "arms"),
+        DeviceSlot("camera", "v4l2", "camera"),
+        DeviceSlot("tty", "serial", "controller serial port"),
+    )
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = slots
+
+    assert device_slots(_Factory) == slots
+
+
+def test_device_slots_accepts_lists_and_ignores_offending_entries() -> None:
+    valid = DeviceSlot("camera", "v4l2", "camera")
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[list[object]] = [
+            "not a slot",
+            valid,
+            DeviceSlot("mystery", "unknown", "mystery"),
+        ]
+
+    assert device_slots(_Factory) == (valid,)
+
+
+@pytest.mark.parametrize("garbage", [7, None])
+def test_device_slots_whole_value_garbage_is_empty(garbage: object) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[object] = garbage
+
+    assert device_slots(_Factory) == ()
+
+
+def test_device_slots_attribute_or_iteration_failure_is_empty() -> None:
+    class _BrokenAttribute:
+        @property
+        def DEVICE_SLOTS(self) -> object:
+            raise RuntimeError("broken descriptor")
+
+    class _BrokenIteration:
+        def __iter__(self) -> object:
+            raise RuntimeError("broken iterator")
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[object] = _BrokenIteration()
+
+    assert device_slots(_BrokenAttribute()) == ()
+    assert device_slots(_Factory) == ()
 
 
 def test_runtime_requirements_absent_attribute_is_empty() -> None:

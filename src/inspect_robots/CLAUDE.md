@@ -20,7 +20,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
-| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight for setup and doctor |
+| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight; `DeviceSlot`/`device_slots` declare and defensively read embodiment device slots |
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
@@ -28,7 +28,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
 | `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
-| `_setup.py` | the `inspect-robots setup` wizard (plan 0009): IO-injected prompts for `[defaults]`, V4L2 camera discovery (by-id, by-path fallback, unplug-to-identify), headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
+| `_setup.py` | the `inspect-robots setup` wizard (plans 0009 and 0011): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with unplug-to-identify and CAN udev guidance, fallback camera discovery, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants
