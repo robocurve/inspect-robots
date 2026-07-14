@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval, eval_set
-from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError
+from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError, SafetyAbort
 from inspect_robots.eval import _git_commit
 from inspect_robots.log import EvalLog
 from inspect_robots.logging.sink import NullSink
@@ -136,6 +136,30 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert scene.epochs[1] == {}  # ...as an empty (unscored) epoch entry
     # ...but the metric comes from the good epoch only: finite, not inf.
     assert np.isfinite(log.results.metrics["min_distance_to_goal"])
+    assert log.status == "success"  # data survived: partials stay tolerated
+    assert log.results.errored_trials == 1
+    assert log.results.total_trials == 2
+
+
+def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
+    # Issue #73: a run that scored nothing must not report success.
+    (log,) = eval(_task(), _BoomPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error == "all 1 trial(s) errored; nothing was scored"
+    assert log.results.errored_trials == log.results.total_trials == 1
+    assert log.results.metrics == {}
+
+
+def test_halt_error_message_is_not_overwritten_by_all_errored(tmp_path: Path) -> None:
+    # A SafetyAbort halt already sets status/error; the all-errored degrade
+    # must not clobber the more specific message.
+    class _AbortPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise SafetyAbort("operator hit the e-stop")
+
+    (log,) = eval(_task(), _AbortPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error == "SafetyAbort: operator hit the e-stop"  # not the all-errored message
 
 
 # --------------------------------------------------------------------------- #
@@ -155,7 +179,7 @@ def test_policy_error_partial_record_reaches_sinks() -> None:
 
     sink = _RecordingSink()
     (log,) = eval(_task(), _BoomLaterPolicy(), CubePickEmbodiment(), sinks=[sink])
-    assert log.status == "success"  # fail_on_error=False: the eval itself ran
+    assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
     assert len(record.steps) == 4  # the steps walked before the failure survive
@@ -333,7 +357,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         sinks=[sink],
         controller=_EagerErrorController(),
     )
-    assert log.status == "success"  # fail_on_error=False
+    assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
 

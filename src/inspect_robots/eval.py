@@ -138,6 +138,9 @@ def eval(
     as data in the metrics; it stays visible via ``SceneResult.status`` and an
     empty entry in ``SceneResult.epochs``.
 
+    A run in which **every** trial errored (nothing was scored) always ends
+    with ``status == "error"``, regardless of ``fail_on_error``.
+
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
@@ -268,6 +271,7 @@ def _run_eval(
     status = "success"
     error: str | None = None
     error_count = 0
+    errored_trials = 0
 
     halted = False
     stopped = False
@@ -326,6 +330,7 @@ def _run_eval(
                     # masquerade as data (e.g. an inf min-distance poisoning
                     # the metric mean). It stays visible via scene status.
                     epoch_dicts.append({})
+                    errored_trials += 1
                     judgements.append(None)
                 else:
                     if before_scoring is not None:
@@ -386,6 +391,13 @@ def _run_eval(
         if stopped:
             break
 
+    if status == "success" and total_trials > 0 and errored_trials == total_trials:
+        # Every trial errored: there is no surviving data for fail_on_error's
+        # flaky-trial tolerance to protect, and a "success" log would hide a
+        # total failure (issue #73).
+        status = "error"
+        error = f"all {total_trials} trial(s) errored; nothing was scored"
+
     metrics: dict[str, float] = {}
     for scorer in scorers:
         vals = [sr.reduced[scorer.name] for sr in scene_results if scorer.name in sr.reduced]
@@ -408,6 +420,7 @@ def _run_eval(
             total_scenes=len(scene_results),
             total_trials=total_trials,
             metrics=metrics,
+            errored_trials=errored_trials,
         ),
         stats=stats,
         samples=tuple(scene_results),

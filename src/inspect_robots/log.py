@@ -74,6 +74,9 @@ class EvalResults:
     total_scenes: int
     total_trials: int
     metrics: dict[str, float] = field(default_factory=dict)
+    # Trials recorded but never scored (their epoch entries are empty). The
+    # default keeps logs written before this field existed readable.
+    errored_trials: int = 0
 
 
 @dataclass(frozen=True)
