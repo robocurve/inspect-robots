@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import os
+import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
@@ -11,6 +14,8 @@ from typing import ClassVar
 import pytest
 
 from inspect_robots._setup import (
+    _VIDIOC_ENUM_FMT,
+    _VIDIOC_QUERYCAP,
     SUGGESTED,
     _can_serial,
     _identify_by_replug,
@@ -20,6 +25,7 @@ from inspect_robots._setup import (
     _scan_can,
     _scan_serial,
     _suggest_can_pinning,
+    _v4l2_color_capture,
     run_setup,
 )
 from inspect_robots.conformance import DeviceSlot
@@ -106,7 +112,37 @@ def _empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("inspect_robots.registry.registered", lambda _kind: {})
 
 
-def test_scan_cameras_prefers_sorted_absolute_index0_entries(tmp_path: Path) -> None:
+def test_scan_cameras_prefers_color_capture_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    v4l_dir = tmp_path / "by-id"
+    v4l_dir.mkdir()
+    # RealSense-style layout: index0 is the depth node, index2 the IR pair,
+    # index4 the color stream — the name says nothing about capturability.
+    verdicts = {
+        "usb-realsense-video-index0": False,
+        "usb-realsense-video-index2": False,
+        "usb-realsense-video-index4": True,
+        "usb-webcam-video-index0": True,
+        "usb-webcam-video-index1": None,
+    }
+    for name in verdicts:
+        (v4l_dir / name).touch()
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture",
+        lambda path: verdicts[Path(path).name],
+    )
+
+    devices = _scan_cameras(v4l_dir)
+
+    assert devices == [
+        str(v4l_dir / "usb-realsense-video-index4"),
+        str(v4l_dir / "usb-webcam-video-index0"),
+    ]
+    assert all(Path(device).is_absolute() for device in devices)
+
+
+def test_scan_cameras_lists_all_entries_when_probe_is_inconclusive(tmp_path: Path) -> None:
     v4l_dir = tmp_path / "by-id"
     v4l_dir.mkdir()
     for name in (
@@ -121,8 +157,8 @@ def test_scan_cameras_prefers_sorted_absolute_index0_entries(tmp_path: Path) -> 
     assert devices == [
         str(v4l_dir / "usb-camera-a-video-index0"),
         str(v4l_dir / "usb-camera-b-video-index0"),
+        str(v4l_dir / "usb-camera-b-video-index1"),
     ]
-    assert all(Path(device).is_absolute() for device in devices)
 
 
 def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
@@ -140,6 +176,152 @@ def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
 
 def test_scan_cameras_missing_directory_returns_empty(tmp_path: Path) -> None:
     assert _scan_cameras(tmp_path / "missing") == []
+
+
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_META_CAPTURE = 0x00800000
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+
+
+def _fake_v4l2_ioctl(
+    capabilities: int, device_caps: int, fourccs: list[bytes]
+) -> Callable[[int, int, bytearray], int]:
+    """Simulate the kernel's VIDIOC_QUERYCAP / VIDIOC_ENUM_FMT ioctl ABI.
+
+    Buffer offsets follow ``struct v4l2_capability`` (capabilities at byte 84,
+    device_caps at 88) and ``struct v4l2_fmtdesc`` (index/type at 0/4,
+    pixelformat at 44) — fixed kernel layouts, not implementation choices.
+    """
+
+    def ioctl(fd: int, request: int, buf: bytearray) -> int:
+        if request == _VIDIOC_QUERYCAP:
+            struct.pack_into("=II", buf, 84, capabilities, device_caps)
+        elif request == _VIDIOC_ENUM_FMT:
+            index, buf_type = struct.unpack_from("=II", buf, 0)
+            assert buf_type == 1  # V4L2_BUF_TYPE_VIDEO_CAPTURE
+            if index >= len(fourccs):
+                raise OSError(errno.EINVAL, "format enumeration exhausted")
+            buf[44:48] = fourccs[index]
+        else:
+            raise AssertionError(f"unexpected ioctl request {request:#x}")
+        return 0
+
+    return ioctl
+
+
+def _endless_v4l2_ioctl() -> Callable[[int, int, bytearray], int]:
+    """Simulate a misbehaving driver whose format enumeration never ends."""
+
+    def ioctl(fd: int, request: int, buf: bytearray) -> int:
+        if request == _VIDIOC_QUERYCAP:
+            struct.pack_into("=II", buf, 84, _V4L2_CAP_DEVICE_CAPS, _V4L2_CAP_VIDEO_CAPTURE)
+        else:
+            buf[44:48] = b"Z16 "
+        return 0
+
+    return ioctl
+
+
+def _probe_target(tmp_path: Path) -> Path:
+    node = tmp_path / "cam"
+    node.touch()
+    return node
+
+
+_needs_fcntl = pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_true_for_color_capable_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS,
+            _V4L2_CAP_VIDEO_CAPTURE,
+            [b"GREY", b"YUYV"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is True
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_true_for_bayer_only_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Raw Bayer nodes are color cameras OpenCV can debayer; hiding them in a
+    # mixed rig would silently drop a working camera from the listing.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS,
+            _V4L2_CAP_VIDEO_CAPTURE,
+            [b"RGGB"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is True
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_depth_only_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No DEVICE_CAPS flag: the probe must fall back to `capabilities`.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(_V4L2_CAP_VIDEO_CAPTURE, 0, [b"Z16 "]),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_endless_format_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A driver that never terminates VIDIOC_ENUM_FMT must yield False, not a
+    # hung wizard.
+    monkeypatch.setattr("fcntl.ioctl", _endless_v4l2_ioctl())
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_metadata_node_without_enumerating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Color fourccs are on offer, but a node without VIDEO_CAPTURE must be
+    # rejected on capabilities alone — enumerating it would report True.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS | _V4L2_CAP_META_CAPTURE,
+            _V4L2_CAP_META_CAPTURE,
+            [b"YUYV"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+def test_v4l2_color_capture_none_for_unopenable_path(tmp_path: Path) -> None:
+    assert _v4l2_color_capture(tmp_path / "missing") is None
+
+
+def test_v4l2_color_capture_none_for_non_v4l2_file(tmp_path: Path) -> None:
+    # A regular file opens fine but rejects V4L2 ioctls (ENOTTY).
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is None
+
+
+def test_v4l2_color_capture_none_without_fcntl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is None
 
 
 def test_scan_can_filters_type_280_sorts_and_skips_unreadable(tmp_path: Path) -> None:
