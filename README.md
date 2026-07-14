@@ -63,17 +63,18 @@ uv venv && uv pip install inspect-robots
 ```
 
 Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
-`pip` and console scripts). With uv, activate the venv once
-(`source .venv/bin/activate`) and call `inspect-robots` directly, as shown
-below.
+`pip` and console scripts). Either way, activate the venv once
+(`source .venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
+`inspect-robots` directly, as shown below.
 
 > [!NOTE]
 > Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`.
 > Inside a uv project, `uv run` first re-syncs the environment to the
-> project's lockfile, which uninstalls or downgrades whatever the
-> `uv pip install` commands above just added. To use `uv run` anyway, pass
-> `--no-sync`, or declare everything as real dependencies with
-> `uv add inspect-robots` plus your plugins.
+> project's lockfile, downgrading whatever the `uv pip install` commands
+> above just added back to the locked versions; the only trace is an
+> easy-to-miss "Uninstalled N / Installed N packages" line. To use
+> `uv run` anyway, pass `--no-sync`, or declare everything as real
+> dependencies with `uv add inspect-robots` plus your plugins.
 
 ## Quickstart
 
