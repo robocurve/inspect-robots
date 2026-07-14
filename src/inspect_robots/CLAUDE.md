@@ -10,9 +10,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `types.py` | `Observation`, `Action`, `ActionChunk`, `StepResult` (frozen, NumPy-native) |
 | `spaces.py` | `Box`, `ObservationSpace`, `ActionSemantics`, `StateSpec` + canonical state vocab |
 | `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig`; optional duck-typed `bind(embodiment_info)` hook for embodiment-adaptive policies (called by `eval()` before compat) |
-| `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags |
+| `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags; optional duck-typed `bind_task(envelope)` hook for horizon-aware adapters (called by `eval()` before compat; optional input — never fires on direct `rollout()`, keep a fallback) |
 | `scene.py` | `Scene` (the Inspect `Sample` analog), `Target`, `ListSceneDataset` |
-| `task.py` | `Task` (scenes + scorer + horizon), `Epochs` |
+| `task.py` | `Task` (scenes + scorer + horizon), `Epochs`, `TaskEnvelope` (`Task.envelope` — the adapter-safe identity+limits view passed to `bind_task` hooks) |
 | `scorer.py` | `Score`/`Scorer`, epoch reducers, builtin scorers (incl. operator/VLM) |
 | `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
 | `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |

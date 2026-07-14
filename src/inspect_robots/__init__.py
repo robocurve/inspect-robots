@@ -53,7 +53,7 @@ from inspect_robots.spaces import (
     StateField,
     StateSpec,
 )
-from inspect_robots.task import Epochs, Task
+from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 # The public, stability-guaranteed API. Anything not listed here (or prefixed
@@ -88,6 +88,7 @@ __all__ = [
     "StepResult",
     "Target",
     "Task",
+    "TaskEnvelope",
     "TrialRecord",
     "__version__",
     "embodiment",
