@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -153,6 +154,7 @@ def test_images_jpeg_compressed_by_default(monkeypatch: pytest.MonkeyPatch) -> N
     logged = _install_fake_rerun(monkeypatch, image_cls=_CompressibleImage)
     sink = RerunSink()
     _log_one(sink)
+    assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert camera == [("Compressed", 75)]
 
@@ -161,6 +163,7 @@ def test_jpeg_quality_none_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
     logged = _install_fake_rerun(monkeypatch, image_cls=_CompressibleImage)
     sink = RerunSink(jpeg_quality=None)
     _log_one(sink)
+    assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert len(camera) == 1 and isinstance(camera[0], _CompressibleImage)
 
@@ -169,6 +172,7 @@ def test_old_sdk_without_compress_logs_raw(monkeypatch: pytest.MonkeyPatch) -> N
     logged = _install_fake_rerun(monkeypatch, image_cls=_RawImage)
     sink = RerunSink()
     _log_one(sink)
+    assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert len(camera) == 1 and isinstance(camera[0], _RawImage)
 
@@ -177,5 +181,162 @@ def test_compress_failure_falls_back_to_raw(monkeypatch: pytest.MonkeyPatch) -> 
     logged = _install_fake_rerun(monkeypatch, image_cls=_ExplodingImage)
     sink = RerunSink()
     _log_one(sink)
+    assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert len(camera) == 1 and isinstance(camera[0], _ExplodingImage)
+
+
+def test_log_step_never_blocks_when_viewer_stalls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The producer side is bounded: overflow is dropped, never waited on."""
+    gate = threading.Event()
+    _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(queue_size=4)
+    try:
+        _log_one(sink, 0)
+        # Pin payload 0 in-flight so payload 1 enqueues below the image
+        # watermark and keeps its images; a later eviction then
+        # deterministically hits an image-bearing payload.
+        _wait_for_inflight(sink)
+        for t in range(1, 20):
+            _log_one(sink, t)
+        with sink._cond:
+            assert len(sink._queue) <= 4
+        assert sink._dropped_steps > 0
+        assert sink._dropped_frames > 0
+    finally:
+        gate.set()
+    assert sink.flush(timeout=5.0)
+
+
+def test_scalars_survive_frame_drops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under pressure images are stripped but every step's scalars still arrive."""
+    gate = threading.Event()
+    logged = _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(queue_size=8)  # image watermark = 2
+    try:
+        for t in range(6):
+            _log_one(sink, t)
+    finally:
+        gate.set()
+    assert sink.flush(timeout=5.0)
+    state_paths = [p for p, _ in logged if p == "trial/state/q/0"]
+    camera_paths = [p for p, _ in logged if p == "trial/camera/cam"]
+    assert len(state_paths) == 6  # no whole-step drops at queue_size=8
+    assert len(camera_paths) == 6 - sink._dropped_frames
+    # Worker pop timing makes the exact count race between 3 and 4.
+    assert 3 <= sink._dropped_frames <= 4
+
+
+def test_flush_times_out_while_stalled_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = threading.Event()
+    _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink()
+    try:
+        _log_one(sink)
+        assert sink.flush(timeout=0.05) is False
+    finally:
+        gate.set()
+    assert sink.flush(timeout=5.0)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_eval_end_shuts_down_worker_and_log_step_restarts_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    sink = RerunSink()
+    _log_one(sink, 0)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+    assert sink._worker is None
+    _log_one(sink, 1)  # restarts the worker
+    assert sink.flush(timeout=5.0)
+    assert len([p for p, _ in logged if p == "trial/camera/cam"]) == 2
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_emit_failure_warns_once_and_keeps_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_rerun(monkeypatch, log_error=ValueError("boom"))
+    sink = RerunSink()
+    with pytest.warns(RuntimeWarning, match="failed to emit") as record:
+        for t in range(3):
+            _log_one(sink, t)
+        assert sink.flush(timeout=5.0)
+    assert len([w for w in record if "failed to emit" in str(w.message)]) == 1
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_queue_size_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="queue_size"):
+        RerunSink(queue_size=0)
+
+
+def test_trial_end_flushes_queued_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trial boundaries drain the queue so an eval abort loses at most one trial's tail."""
+    logged = _install_fake_rerun(monkeypatch)
+    sink = RerunSink()
+    _log_one(sink, 0)
+    sink.on_trial_end(None)  # type: ignore[arg-type]
+    assert [p for p, _ in logged if p == "trial/camera/cam"] == ["trial/camera/cam"]
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def _wait_for_inflight(sink: RerunSink) -> None:
+    """Spin until the worker has popped a payload and is inside the (gated) SDK call."""
+    state = sink._state
+    assert state is not None
+    for _ in range(500):
+        with sink._cond:
+            if state.inflight:
+                return
+        time.sleep(0.01)
+    pytest.fail("worker never picked up the payload")
+
+
+def test_wedged_worker_is_disowned_and_backlog_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker stuck in the SDK is abandoned; a restarted worker owns the queue alone."""
+    gate = threading.Event()
+    logged = _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(flush_timeout=0.05)
+    try:
+        _log_one(sink, 0)
+        _wait_for_inflight(sink)  # worker A is now wedged inside rr.log on payload 0
+        _log_one(sink, 1)  # payload 1 queued behind the wedge
+        worker_a = sink._worker
+        assert worker_a is not None
+        with pytest.warns(RuntimeWarning) as record:
+            sink.on_eval_end(None)  # type: ignore[arg-type]  # flush+join time out; A disowned
+        messages = [str(w.message) for w in record]
+        assert any("stalled" in m for m in messages)
+        assert any("dropped 1 camera frame(s) and 1 full step(s)" in m for m in messages)
+        assert sink._worker is None and sink._state is None
+        assert sink._dropped_steps == 0  # reported and reset
+        _log_one(sink, 2)  # starts worker B
+    finally:
+        gate.set()
+    assert sink.flush(timeout=5.0)
+    worker_a.join(timeout=5.0)
+    assert not worker_a.is_alive()  # A exited; it never became a second consumer
+    camera = [p for p, _ in logged if p == "trial/camera/cam"]
+    assert len(camera) == 2  # A's in-flight payload 0, B's payload 2; payload 1 dropped
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_eval_end_reports_dropped_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = threading.Event()
+    _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(queue_size=2)
+    try:
+        for t in range(6):
+            _log_one(sink, t)
+    finally:
+        gate.set()
+    with pytest.warns(RuntimeWarning, match="dropped"):
+        sink.on_eval_end(None)  # type: ignore[arg-type]
+    # Counters reset: a quiet follow-up eval must not re-report old drops.
+    assert sink._dropped_frames == 0 and sink._dropped_steps == 0

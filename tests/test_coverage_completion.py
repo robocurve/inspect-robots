@@ -504,6 +504,8 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
         Action(data=np.zeros(2)),
         StepResult(observation=Observation(), reward=None),
     )
+    assert sink.flush(timeout=5.0)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
     # A sink with no recording path skips rr.save (the other on_eval_start branch).
     RerunSink().on_eval_start(None)  # type: ignore[arg-type]

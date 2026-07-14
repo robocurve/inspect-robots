@@ -6,6 +6,20 @@ lazily *inside* methods so the core package never depends on it; if it is not
 installed, the sink warns once and becomes a no-op (so unattended runs and the
 core-only import gate are unaffected).
 
+Emission happens on a daemon worker thread: ``log_step`` snapshots the
+transition and enqueues it, so a slow or stalled viewer connection can never
+block the control-rate rollout loop. Under backpressure the sink degrades
+visualization instead of delaying control: camera frames are dropped first
+(scalar plots stay complete), then whole steps, and the drop counts are
+reported as a ``RuntimeWarning`` when the eval ends. The queue is drained at
+every trial boundary (bounded by ``flush_timeout``), so an eval that aborts
+mid-run loses at most the current trial's queued tail. Camera frames are
+JPEG-compressed by default (``jpeg_quality=75``); pass ``jpeg_quality=None``
+for lossless raw frames. All Rerun SDK calls after ``init``/``save`` happen on
+the worker because the SDK's timeline state is thread-local; worker state is
+generation-scoped so a worker wedged in a blocked SDK call is disowned at
+shutdown and can never double-consume after a restart.
+
 Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
 successive trials never overwrite one another on the shared step timeline.
 
@@ -15,7 +29,9 @@ Install with ``pip install "inspect-robots[rerun]"``.
 from __future__ import annotations
 
 import dataclasses
+import threading
 import warnings
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -43,6 +59,14 @@ class _StepPayload:
     termination_reason: str | None
 
 
+@dataclasses.dataclass
+class _WorkerState:
+    """Per-worker-generation state, so an abandoned worker cannot corrupt its successor."""
+
+    stop: threading.Event
+    inflight: int = 0
+
+
 class RerunSink:
     """Stream a rollout to a Rerun recording (``.rrd``) or a live viewer."""
 
@@ -53,15 +77,29 @@ class RerunSink:
         application_id: str = "inspect_robots",
         spawn: bool = False,
         jpeg_quality: int | None = 75,
+        queue_size: int = 64,
+        flush_timeout: float = 10.0,
     ):
+        if queue_size < 1:
+            raise ValueError(f"queue_size must be >= 1, got {queue_size}")
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
         self.jpeg_quality = jpeg_quality
+        self.queue_size = queue_size
+        self.flush_timeout = flush_timeout
         self._rr: Any | None = None
         self._warned = False
         self._disabled = False
         self._prefix = "trial"
+        self._queue: deque[_StepPayload] = deque()
+        self._cond = threading.Condition()
+        self._worker: threading.Thread | None = None
+        self._state: _WorkerState | None = None
+        self._dropped_frames = 0
+        self._dropped_steps = 0
+        self._image_watermark = max(1, queue_size // 4)
+        self._emit_warned = False
 
     def _ensure_rerun(self) -> Any | None:
         if self._disabled:
@@ -133,6 +171,109 @@ class RerunSink:
                 rr.TextLog(payload.termination_reason or "terminated"),
             )
 
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        state = _WorkerState(stop=threading.Event())
+        self._state = state
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            args=(state,),
+            name="inspect-robots-rerun-sink",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _enqueue(self, payload: _StepPayload) -> None:
+        with self._cond:
+            if payload.images and len(self._queue) >= self._image_watermark:
+                payload = dataclasses.replace(payload, images={})
+                self._dropped_frames += 1
+            if len(self._queue) >= self.queue_size:
+                evicted = self._queue.popleft()
+                self._dropped_steps += 1
+                if evicted.images:
+                    self._dropped_frames += 1
+            self._queue.append(payload)
+            self._cond.notify_all()
+
+    def _worker_loop(self, state: _WorkerState) -> None:
+        while True:
+            with self._cond:
+                while self._state is state and not self._queue and not state.stop.is_set():
+                    self._cond.wait()
+                if self._state is not state or not self._queue:
+                    # Disowned after a wedged shutdown, or stopped and drained:
+                    # either way this generation is done and must not consume.
+                    return
+                payload = self._queue.popleft()
+                state.inflight = 1
+            try:
+                self._emit(self._rr, payload)
+            except Exception as exc:
+                self._warn_emit_failure(exc)
+            finally:
+                with self._cond:
+                    state.inflight = 0
+                    self._cond.notify_all()
+
+    def _warn_emit_failure(self, exc: Exception) -> None:
+        if self._emit_warned:
+            return
+        self._emit_warned = True
+        warnings.warn(
+            f"RerunSink failed to emit a step ({exc}); further emit failures are silent",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def flush(self, timeout: float | None = None) -> bool:
+        """Block until every queued event was handed to the SDK; False on timeout."""
+        with self._cond:
+            return self._cond.wait_for(
+                lambda: not self._queue and (self._state is None or self._state.inflight == 0),
+                timeout,
+            )
+
+    def _shutdown(self) -> None:
+        worker, state = self._worker, self._state
+        if worker is None or state is None:
+            return
+        self.flush(timeout=self.flush_timeout)
+        state.stop.set()
+        with self._cond:
+            self._cond.notify_all()
+        worker.join(timeout=self.flush_timeout)
+        self._worker = None
+        wedged = worker.is_alive()
+        with self._cond:
+            self._state = None
+            if wedged:
+                # Disown the wedged worker: clear its backlog into the drop
+                # counters so a restarted worker never double-consumes it.
+                self._dropped_steps += len(self._queue)
+                self._dropped_frames += sum(1 for p in self._queue if p.images)
+                self._queue.clear()
+        self._emit_warned = False
+        if wedged:
+            warnings.warn(
+                "RerunSink shutdown timed out with visualization data still "
+                "queued; the viewer connection appears stalled",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if self._dropped_frames or self._dropped_steps:
+            warnings.warn(
+                f"RerunSink dropped {self._dropped_frames} camera frame(s) and "
+                f"{self._dropped_steps} full step(s) to keep the control loop "
+                "unblocked; record to a .rrd file or reduce camera bandwidth "
+                "to avoid drops",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._dropped_frames = 0
+            self._dropped_steps = 0
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Initialize recording, disabling this noncritical sink after startup failure."""
         rr = self._ensure_rerun()
@@ -179,12 +320,20 @@ class RerunSink:
             terminated=result.terminated,
             termination_reason=result.termination_reason,
         )
-        self._emit(rr, payload)
+        self._ensure_worker()
+        self._enqueue(payload)
 
     def on_trial_end(self, record: TrialRecord) -> None:
-        """Leave completed trial entities intact for the remainder of the recording."""
-        return None
+        """Drain queued events between trials, bounding loss if the eval aborts mid-run.
+
+        ``eval()`` does not guarantee ``on_eval_end`` on every failure path
+        (scorer/hook exceptions, Ctrl-C), so trial boundaries are the flush
+        points that cap tail loss at one trial. Blocking here is bounded by
+        ``flush_timeout`` and happens between trials, never inside the
+        control-rate loop.
+        """
+        self.flush(timeout=self.flush_timeout)
 
     def on_eval_end(self, log: EvalLog) -> None:
-        """Keep the completed recording available after evaluation ends."""
-        return None
+        """Flush queued data and stop the worker; waits at most ~2x ``flush_timeout``."""
+        self._shutdown()
