@@ -196,7 +196,7 @@ def _camera_section(
     existing_args = carried.get("embodiment.args", {})
     default_enabled = bool(devices) or any(key in existing_args for key in camera_keys)
     if not _ask_yes_no("Configure cameras?", default_enabled, input_fn=input_fn, out=out):
-        return {}
+        return {key: existing_args[key] for key in camera_keys if key in existing_args}
 
     if devices:
         _print_camera_listing(devices, device_dir, out)
@@ -336,11 +336,11 @@ def run_setup(
         return 1
 
     text = _render_config(defaults, embodiment_args, carried)
-    if path.is_file():
-        path.replace(path.with_name(path.name + ".bak"))
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
+    if path.is_file():
+        path.replace(path.with_name(path.name + ".bak"))
     tmp.replace(path)
     print(f"Wrote {path}", file=out)
     print('Next: uv run inspect-robots "place the fork on the plate"', file=out)

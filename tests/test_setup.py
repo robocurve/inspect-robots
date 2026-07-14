@@ -520,7 +520,32 @@ def test_run_setup_carries_unmanaged_defaults_and_embodiment_args(tmp_path: Path
     assert result == 0
     assert "sim_embodiment = cubepick" in text
     assert "left_channel = can2" in text
-    assert "top_cam_device" not in text
+    assert "top_cam_device = /dev/old" in text
+
+
+def test_run_setup_declining_cameras_preserves_existing_assignments(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    camera_lines = [
+        "top_cam_device = /dev/old-top",
+        "left_cam_device = /dev/old-left",
+        "right_cam_device = /dev/old-right",
+    ]
+    path.write_text("[embodiment.args]\n" + "\n".join(camera_lines) + "\n", encoding="utf-8")
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert all(line in text.splitlines() for line in camera_lines)
 
 
 def test_run_setup_camera_choices_manual_paths_skip_and_invalid_entries(
@@ -687,6 +712,35 @@ def test_run_setup_partial_cameras_can_write_none(tmp_path: Path) -> None:
     assert result == 0
     assert "yam_arms needs all three cameras or none" in out.getvalue()
     assert "_cam_device" not in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_partial_cameras_write_none_drops_existing_assignments(
+    tmp_path: Path,
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[embodiment.args]\n"
+        "top_cam_device = /dev/old-top\n"
+        "left_cam_device = /dev/old-left\n"
+        "right_cam_device = /dev/old-right\n",
+        encoding="utf-8",
+    )
+    by_id = tmp_path / "by-id"
+    _make_devices(by_id)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "1", "s", "s", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "_cam_device" not in path.read_text(encoding="utf-8")
 
 
 def test_run_setup_falls_back_to_by_path_devices(tmp_path: Path) -> None:
