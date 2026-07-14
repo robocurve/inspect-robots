@@ -133,6 +133,22 @@ def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
         )
 
 
+def _runtime_requirement_lines(defaults: Mapping[str, str]) -> list[str]:
+    """Build setup checklist lines for registered configured components."""
+    from inspect_robots.conformance import missing_runtime_requirements
+    from inspect_robots.registry import registered
+
+    lines: list[str] = []
+    for kind in ("policy", "embodiment"):
+        name = defaults[kind]
+        factories = registered(kind)
+        if name not in factories:
+            continue
+        for module, remedy in missing_runtime_requirements(factories[name]).items():
+            lines.append(f"  ✗ {module} ({name}) → {remedy}")
+    return lines
+
+
 def _prompt_defaults(
     carried: dict[str, dict[str, str]],
     *,
@@ -606,6 +622,14 @@ def run_setup(
             ),
             file=out,
         )
+    runtime_lines = _runtime_requirement_lines(defaults)
+    if runtime_lines:
+        count = len(runtime_lines)
+        dependency = "dependency is" if count == 1 else "dependencies are"
+        block = "\n".join(
+            [f"setup complete, but {count} runtime {dependency} missing:", *runtime_lines]
+        )
+        print(_paint(block, _YELLOW, out), file=out)
     next_cmd = 'uv run inspect-robots "place the fork on the plate"'
     print(f"Next: {_paint(next_cmd, _CYAN, out)}", file=out)
     return 0

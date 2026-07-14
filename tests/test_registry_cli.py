@@ -1214,6 +1214,58 @@ def test_doctor_passes_on_conformant_embodiment(capsys: pytest.CaptureFixture[st
     assert "conformant" in capsys.readouterr().out
 
 
+def test_doctor_reports_missing_runtime_requirement_before_conformance(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "missing-runtime-doctor-cubepick"
+
+    class _MissingRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz": "uv pip install thing"
+        }
+
+    embodiment_decorator(name)(_MissingRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 1
+    out = capsys.readouterr().out
+    error = "[error] runtime-requirement: definitely_missing_xyz missing → uv pip install thing"
+    assert error in out
+    assert out.index(error) < out.index("conformant")
+
+
+def test_doctor_accepts_present_runtime_requirements(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "present-runtime-doctor-cubepick"
+
+    class _PresentRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install os"}
+
+    embodiment_decorator(name)(_PresentRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 0
+    assert "runtime-requirement" not in capsys.readouterr().out
+
+
+def test_doctor_unknown_embodiment_keeps_guided_exit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "definitely-missing-doctor-embodiment"
+
+    with pytest.raises(SystemExit, match=f"no embodiment named '{name}'") as excinfo:
+        main(["doctor", "--embodiment", name])
+
+    message = str(excinfo.value)
+    assert "available:" in message
+    assert "cubepick" in message
+    assert "Traceback" not in message
+    assert f"embodiment: {name} (--embodiment)" in capsys.readouterr().out
+
+
 def test_doctor_fails_on_nonconformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
     from dataclasses import replace
 

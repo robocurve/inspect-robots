@@ -18,6 +18,8 @@ guide covers the human half.
 
 from __future__ import annotations
 
+import importlib.util
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,6 +27,37 @@ import numpy as np
 from inspect_robots.embodiment import EmbodimentInfo
 
 _ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
+
+
+def missing_runtime_requirements(factory: object) -> dict[str, str]:
+    """The declared runtime modules that are not importable here.
+
+    Reads ``RUNTIME_REQUIREMENTS`` (module name -> remediation command) off
+    ``factory`` and probes each with ``importlib.util.find_spec``. Top-level
+    names (the intended use) are probed without executing anything; a dotted
+    name imports its parent package when present, so declare top-level names.
+    ANY probe failure counts as missing (broad ``except Exception``: a
+    present-but-broken parent package propagates arbitrary errors from its
+    ``__init__``, and this checker must never crash setup or doctor).
+    Entries whose key or value is not ``str``, or a ``RUNTIME_REQUIREMENTS``
+    that is not a ``Mapping``, are ignored (a plugin typo must not crash the
+    preflight). Returns the missing subset, insertion-ordered.
+    """
+    requirements = getattr(factory, "RUNTIME_REQUIREMENTS", None)
+    if not isinstance(requirements, Mapping):
+        return {}
+
+    missing: dict[str, str] = {}
+    for name, remedy in requirements.items():
+        if not isinstance(name, str) or not isinstance(remedy, str):
+            continue
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:
+            spec = None
+        if spec is None:
+            missing[name] = remedy
+    return missing
 
 
 @dataclass(frozen=True)
