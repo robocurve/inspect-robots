@@ -44,6 +44,7 @@ from inspect_robots._defaults import (
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
@@ -286,12 +287,16 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     )
 
 
-def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
+def _resolve_or_exit(
+    kind: str, name: str, args_section: str | None = None, /, **kwargs: Any
+) -> Any:
     """Registry resolution with a clean error instead of a traceback.
 
     Unknown names raise ``KeyError``; a factory that cannot construct itself
     (e.g. the agent policy with no model/key configured) raises a guided
-    ``ConfigError``. Both are user-facing messages, not bugs.
+    ``ConfigError``. Invalid constructor arguments raise ``TypeError``. All
+    three become user-facing messages rather than tracebacks. ``args_section``
+    can identify a config section whose name differs from the registry kind.
     """
     from inspect_robots.errors import ConfigError
     from inspect_robots.registry import resolve
@@ -302,6 +307,13 @@ def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
         raise SystemExit(str(exc.args[0])) from exc
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    except TypeError as exc:
+        if args_section is None:
+            args_section = f"{kind}.args"
+        flag = {"task": "-T", "policy": "-P", "embodiment": "-E"}.get(kind, "the CLI args flag")
+        raise SystemExit(
+            f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
+        ) from exc
 
 
 def _build_guardrails(
@@ -367,6 +379,29 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
         return
     record.operator_judgement = answer
     record.events.append(operator_event(t=len(record.steps), verdict=answer))
+
+
+def _print_run_summary(log: EvalLog, log_path: str) -> None:
+    """Print the compact post-run summary and failure diagnostics."""
+    failed = log.status != "success"
+    status_color = _RED if failed else _GREEN
+    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
+    if failed and log.error is not None:
+        print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
+    if failed:
+        for scene in log.samples:
+            if scene.status == "error":
+                detail = "" if scene.error in (None, log.error) else f": {scene.error}"
+                print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
+    print(
+        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
+        f"trials: {log.results.total_trials}"
+    )
+    for name, value in sorted(log.results.metrics.items()):
+        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+    print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
+    if failed:
+        print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -450,7 +485,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
-    embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    if args.sim:
+        embodiment = _resolve_or_exit(
+            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+        )
+    else:
+        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
     try:
         if args.epochs is not None:
             task = replace(task, epochs=args.epochs)
@@ -521,15 +561,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
-    status_color = _GREEN if log.status == "success" else _RED
-    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
-    print(
-        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
-        f"trials: {log.results.total_trials}"
-    )
-    for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
-    print(f"{_styled('log:', _CYAN)} {_styled(str(sink.path), _DIM)}")
+    _print_run_summary(log, str(sink.path))
     return 0 if log.status == "success" else 1
 
 
@@ -557,12 +589,13 @@ def _cmd_inspect(path: str) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Run the declarative conformance checks against an installed adapter.
+    """Preflight runtime requirements and conformance for an installed adapter.
 
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment
+    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
     name, source = _pick_component(
@@ -572,16 +605,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "embodiment", name, defaults.embodiment_args_owner, defaults.embodiment_args
     )
     kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
+    print(f"embodiment: {name} ({source})")
+    missing = missing_runtime_requirements(registered("embodiment").get(name))
+    for module, remedy in missing.items():
+        print(f"  [error] runtime-requirement: {module} missing → {remedy}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
     finally:
         embodiment.close()
-    print(f"embodiment: {name} ({source})")
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 0 if report.ok else 1
+    return 1 if not report.ok or missing else 0
 
 
 def _cmd_setup() -> int:

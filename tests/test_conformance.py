@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-import numpy as np
+from typing import ClassVar
 
-from inspect_robots.conformance import assert_embodiment_conformant, check_embodiment
+import numpy as np
+import pytest
+
+from inspect_robots.conformance import (
+    DeviceSlot,
+    assert_embodiment_conformant,
+    check_embodiment,
+    device_slots,
+    missing_runtime_requirements,
+)
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import (
@@ -44,6 +53,135 @@ def _good_absolute() -> EmbodimentInfo:
 
 def _codes(info: EmbodimentInfo) -> dict[str, str]:
     return {i.code: i.severity for i in check_embodiment(info).issues}
+
+
+def test_device_slots_absent_attribute_is_empty() -> None:
+    class _Factory:
+        pass
+
+    assert device_slots(_Factory) == ()
+    assert device_slots(None) == ()
+
+
+def test_device_slots_valid_tuple_round_trips_in_order() -> None:
+    slots = (
+        DeviceSlot("left_channel", "can", "left arm CAN channel", "arms"),
+        DeviceSlot("camera", "v4l2", "camera"),
+        DeviceSlot("tty", "serial", "controller serial port"),
+    )
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = slots
+
+    assert device_slots(_Factory) == slots
+
+
+def test_device_slots_accepts_lists_and_ignores_offending_entries() -> None:
+    valid = DeviceSlot("camera", "v4l2", "camera")
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[list[object]] = [
+            "not a slot",
+            valid,
+            DeviceSlot("mystery", "unknown", "mystery"),
+        ]
+
+    assert device_slots(_Factory) == (valid,)
+
+
+@pytest.mark.parametrize("garbage", [7, None])
+def test_device_slots_whole_value_garbage_is_empty(garbage: object) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[object] = garbage
+
+    assert device_slots(_Factory) == ()
+
+
+def test_device_slots_attribute_or_iteration_failure_is_empty() -> None:
+    class _BrokenAttribute:
+        @property
+        def DEVICE_SLOTS(self) -> object:
+            raise RuntimeError("broken descriptor")
+
+    class _BrokenIteration:
+        def __iter__(self) -> object:
+            raise RuntimeError("broken iterator")
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[object] = _BrokenIteration()
+
+    assert device_slots(_BrokenAttribute()) == ()
+    assert device_slots(_Factory) == ()
+
+
+def test_runtime_requirements_absent_attribute_is_empty() -> None:
+    class _Factory:
+        pass
+
+    assert missing_runtime_requirements(_Factory) == {}
+    assert missing_runtime_requirements(None) == {}
+
+
+def test_runtime_requirements_all_present_is_empty() -> None:
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install operating system"}
+
+    assert missing_runtime_requirements(_Factory) == {}
+
+
+def test_runtime_requirements_return_missing_entries_in_declaration_order() -> None:
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz_one": "install one",
+            "os": "already present",
+            "definitely_missing_xyz_two": "install two",
+        }
+
+    assert list(missing_runtime_requirements(_Factory).items()) == [
+        ("definitely_missing_xyz_one", "install one"),
+        ("definitely_missing_xyz_two", "install two"),
+    ]
+
+
+def test_runtime_requirement_with_missing_parent_is_missing() -> None:
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz.sub": "install parent"
+        }
+
+    assert missing_runtime_requirements(_Factory) == {
+        "definitely_missing_xyz.sub": "install parent"
+    }
+
+
+def test_runtime_requirement_probe_exception_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_oserror(_name: str, _package: str | None = None) -> None:
+        raise OSError("broken parent package")
+
+    monkeypatch.setattr("inspect_robots.conformance.importlib.util.find_spec", raise_oserror)
+
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"broken": "repair it"}
+
+    assert missing_runtime_requirements(_Factory) == {"broken": "repair it"}
+
+
+def test_non_mapping_runtime_requirements_are_ignored() -> None:
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[list[str]] = ["definitely_missing_xyz"]
+
+    assert missing_runtime_requirements(_Factory) == {}
+
+
+def test_non_string_runtime_requirement_entries_are_ignored() -> None:
+    class _Factory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[object, object]] = {
+            7: "ignored key",
+            "os": 9,
+            "definitely_missing_xyz": "install valid",
+        }
+
+    assert missing_runtime_requirements(_Factory) == {"definitely_missing_xyz": "install valid"}
 
 
 def test_good_absolute_and_displacement_pass() -> None:
@@ -183,8 +321,6 @@ def test_zero_width_dims_are_a_warning() -> None:
 
 
 def test_assert_helper_raises_with_summary() -> None:
-    import pytest
-
     bad = _info(space=Box(shape=(2,)))
     with pytest.raises(AssertionError, match="semantics"):
         assert_embodiment_conformant(bad)

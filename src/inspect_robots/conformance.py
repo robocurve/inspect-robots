@@ -18,6 +18,8 @@ guide covers the human half.
 
 from __future__ import annotations
 
+import importlib.util
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,6 +27,78 @@ import numpy as np
 from inspect_robots.embodiment import EmbodimentInfo
 
 _ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
+DEVICE_KINDS = ("v4l2", "can", "serial")
+
+
+@dataclass(frozen=True)
+class DeviceSlot:
+    """One device-shaped constructor argument the setup wizard interviews.
+
+    ``arg`` is the ``[embodiment.args]`` key to write; ``kind`` selects the
+    probe (``"v4l2"``: /dev/v4l listings with unplug-identify; ``"can"``:
+    SocketCAN netdevs from sysfs with unplug-identify; ``"serial"``:
+    /dev/serial/by-id listing). ``label`` is the human prompt ("left arm CAN
+    channel"). Slots sharing a non-None ``group`` are all-or-none: the
+    wizard refuses to write a partial subset of the group.
+    """
+
+    arg: str
+    kind: str
+    label: str
+    group: str | None = None
+
+
+def device_slots(factory: object) -> tuple[DeviceSlot, ...]:
+    """The declared device slots, defensively read.
+
+    Reads ``DEVICE_SLOTS`` off ``factory``; anything that is not an iterable
+    of ``DeviceSlot`` instances (or contains a slot whose ``kind`` is not
+    recognized) has the offending entries ignored, never crashes the wizard.
+    Returns a tuple in declaration order.
+    """
+    try:
+        slots = getattr(factory, "DEVICE_SLOTS", None)
+    except Exception:
+        return ()
+    if not isinstance(slots, Iterable):
+        return ()
+    try:
+        return tuple(
+            slot for slot in slots if isinstance(slot, DeviceSlot) and slot.kind in DEVICE_KINDS
+        )
+    except Exception:
+        return ()
+
+
+def missing_runtime_requirements(factory: object) -> dict[str, str]:
+    """The declared runtime modules that are not importable here.
+
+    Reads ``RUNTIME_REQUIREMENTS`` (module name -> remediation command) off
+    ``factory`` and probes each with ``importlib.util.find_spec``. Top-level
+    names (the intended use) are probed without executing anything; a dotted
+    name imports its parent package when present, so declare top-level names.
+    ANY probe failure counts as missing (broad ``except Exception``: a
+    present-but-broken parent package propagates arbitrary errors from its
+    ``__init__``, and this checker must never crash setup or doctor).
+    Entries whose key or value is not ``str``, or a ``RUNTIME_REQUIREMENTS``
+    that is not a ``Mapping``, are ignored (a plugin typo must not crash the
+    preflight). Returns the missing subset, insertion-ordered.
+    """
+    requirements = getattr(factory, "RUNTIME_REQUIREMENTS", None)
+    if not isinstance(requirements, Mapping):
+        return {}
+
+    missing: dict[str, str] = {}
+    for name, remedy in requirements.items():
+        if not isinstance(name, str) or not isinstance(remedy, str):
+            continue
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception:
+            spec = None
+        if spec is None:
+            missing[name] = remedy
+    return missing
 
 
 @dataclass(frozen=True)

@@ -104,6 +104,98 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "success_at_end" in out
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
+    assert "error:" not in out
+    assert "hint:" not in out
+
+
+def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Observation
+
+    class _FaultOnSecondScene(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("reset exploded")
+            return super().reset(scene, seed=seed)
+
+    name = "fault-on-second-scene-for-cli-test"
+    embodiment_decorator(name)(_FaultOnSecondScene)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=2",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "error: EmbodimentFault: reset exploded" in out
+    assert "  [error] scene-1\n" in out
+    assert "scene-0" not in out  # successful scenes are not failure context
+    assert out.count("EmbodimentFault: reset exploded") == 1
+    (written,) = tmp_path.glob("*.json")
+    assert f"hint: inspect-robots inspect {written}" in out
+
+
+def test_cli_run_prints_distinct_scene_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _ResetFailurePolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("policy reset exploded")
+
+    name = "reset-failure-for-cli-test"
+    policy_decorator(name)(_ResetFailurePolicy)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--fail-on-error",
+                "1",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error: fail_on_error threshold exceeded (1 errors)" in out
+    assert "[error] scene-0: PolicyError: policy reset exploded" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(
@@ -632,6 +724,31 @@ def test_sim_embodiment_args_reach_constructor_and_e_flag_overrides(
     capsys.readouterr()
 
 
+def test_env_selected_sim_drops_args_owned_by_configured_sim(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "sim_embodiment = other-sim\n"
+        "scorer = success_at_end\n"
+        "[sim_embodiment.args]\n"
+        "bogus_sim_knob = 1\n",
+    )
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    log_dir = tmp_path / "logs"
+
+    assert main(["reach the cube", "--sim", "--log-dir", str(log_dir)]) == 0
+    assert (
+        "note: ignoring [sim_embodiment.args] for 'cubepick': they apply to 'other-sim'"
+    ) in capsys.readouterr().err
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 1.0
+
+
 def test_sim_conflicts_with_explicit_embodiment() -> None:
     with pytest.raises(SystemExit, match="drop one"):
         main(["run", "--instruction", "reach it", "--sim", "--embodiment", "cubepick"])
@@ -1114,12 +1231,135 @@ def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
     assert "Traceback" not in str(excinfo.value)
 
 
+def test_component_type_error_from_config_args_exits_cleanly(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid persisted kwargs must identify their component and both sources."""
+    from inspect_robots.registry import policy as policy_decorator
+
+    name = "strict-args-policy-for-cli-test"
+
+    @policy_decorator(name)
+    def _factory() -> ScriptedPolicy:
+        return ScriptedPolicy()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        f"policy = {name}\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for policy {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "[policy.args]" in message and "-P k=v" in message
+    assert "Traceback" not in message
+
+
+def test_sim_embodiment_type_error_names_sim_args_section(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid sim kwargs must identify the sim-specific config section."""
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "strict-args-sim-embodiment-for-cli-test"
+
+    @embodiment_decorator(name)
+    def _factory() -> CubePickEmbodiment:
+        return CubePickEmbodiment()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "scorer = success_at_end\n"
+        f"sim_embodiment = {name}\n"
+        "[sim_embodiment.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--sim", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for embodiment {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "check [sim_embodiment.args]" in message
+    assert "-E k=v" in message
+    assert "check [embodiment.args]" not in message
+    assert "Traceback" not in message
+
+
 # --- doctor (adapter conformance) ---------------------------------------------
 
 
 def test_doctor_passes_on_conformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["doctor", "--embodiment", "cubepick"]) == 0
     assert "conformant" in capsys.readouterr().out
+
+
+def test_doctor_reports_missing_runtime_requirement_before_conformance(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "missing-runtime-doctor-cubepick"
+
+    class _MissingRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz": "uv pip install thing"
+        }
+
+    embodiment_decorator(name)(_MissingRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 1
+    out = capsys.readouterr().out
+    error = "[error] runtime-requirement: definitely_missing_xyz missing → uv pip install thing"
+    assert error in out
+    assert out.index(error) < out.index("conformant")
+
+
+def test_doctor_accepts_present_runtime_requirements(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "present-runtime-doctor-cubepick"
+
+    class _PresentRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install os"}
+
+    embodiment_decorator(name)(_PresentRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 0
+    assert "runtime-requirement" not in capsys.readouterr().out
+
+
+def test_doctor_unknown_embodiment_keeps_guided_exit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "definitely-missing-doctor-embodiment"
+
+    with pytest.raises(SystemExit, match=f"no embodiment named '{name}'") as excinfo:
+        main(["doctor", "--embodiment", name])
+
+    message = str(excinfo.value)
+    assert "available:" in message
+    assert "cubepick" in message
+    assert "Traceback" not in message
+    assert f"embodiment: {name} (--embodiment)" in capsys.readouterr().out
 
 
 def test_doctor_fails_on_nonconformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:

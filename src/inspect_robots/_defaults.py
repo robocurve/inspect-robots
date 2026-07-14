@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,7 +107,7 @@ def _parse_args_section(parser: configparser.ConfigParser, section: str) -> dict
 
 
 def _read_config(path: Path) -> Defaults:
-    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     try:
         with path.open(encoding="utf-8") as fh:
             parser.read_file(fh)
@@ -190,7 +191,7 @@ def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
     path = _config_path(env)
     if path is None:
         raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
-    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     if path.is_file():
         try:
             with path.open(encoding="utf-8") as fh:
@@ -199,6 +200,21 @@ def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
             raise _die(path, f"malformed config: {exc}") from exc
     if not parser.has_section("defaults"):
         parser.add_section("defaults")
+    if key in ("policy", "embodiment", "sim_embodiment"):
+        old_value = parser.get("defaults", key, fallback=None)
+        args_section = f"{key}.args"
+        if (
+            old_value is not None
+            and old_value != value
+            and parser.has_section(args_section)
+            and parser.items(args_section)
+        ):
+            print(
+                f"warning: [{args_section}] was configured for {old_value!r}; "
+                f"it will be ignored for {value!r}: update or remove it "
+                f"in {path}",
+                file=sys.stderr,
+            )
     parser.set("defaults", key, value)
 
     path.parent.mkdir(parents=True, exist_ok=True)

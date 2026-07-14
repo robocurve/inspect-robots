@@ -111,6 +111,12 @@ disappeared. When identical cameras without serial numbers collide in the
 by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
 per physical USB port.
 
+When the selected registered embodiment declares device slots, those slots
+drive one device interview for cameras, CAN interfaces, and serial devices.
+CAN slots list SocketCAN interfaces and support unplug-to-identify; rigs with
+multiple USB adapters named `can0`, `can1`, and so on also receive a udev
+pinning suggestion so replug order cannot swap physical devices.
+
 ```bash
 inspect-robots setup
 ```
@@ -118,9 +124,34 @@ inspect-robots setup
 The result is written to `~/.config/inspect-robots/config.ini`
 (`$XDG_CONFIG_HOME` honored); an existing file is backed up to
 `config.ini.bak` first, and settings the wizard does not manage (such as
-`[policy.args]` or `sim_embodiment`) are carried through unchanged. The
-command requires an interactive terminal; for scripted configuration use
-`inspect-robots config set`.
+`[policy.args]` or `sim_embodiment`) are carried through unchanged. Note
+that later `inspect-robots config set` edits drop comments from the file.
+The setup command requires an interactive terminal; for scripted
+configuration use `inspect-robots config set`.
+After writing the config, setup lists missing runtime requirements declared by
+the selected registered policy and embodiment, together with their remediation
+commands.
+
+Prefer to write the file yourself? This is the wizard's output for a YAM
+rig; replace the three camera paths with your rig's V4L2 color nodes
+(stable `/dev/v4l/by-id/...` or udev-symlink paths):
+
+```bash
+mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
+[defaults]
+policy = molmoact2        # from the inspect-robots-yam plugin
+embodiment = yam_arms     # same plugin; cameras configured below
+scorer = success_at_end
+max_steps = 1200          # 120 s at 10 Hz
+rerun = true              # live viewer of cameras/state/actions each run
+store_frames = true       # save each run's camera frames under logs/frames/
+
+[embodiment.args]
+top_cam_device = /dev/v4l/by-id/YOUR-TOP-CAM
+left_cam_device = /dev/v4l/by-id/YOUR-LEFT-CAM
+right_cam_device = /dev/v4l/by-id/YOUR-RIGHT-CAM
+EOF
+```
 
 ## `inspect-robots list`
 
@@ -158,6 +189,15 @@ the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise.
+
+## `inspect-robots doctor`
+
+`doctor` reports a registered embodiment's missing declared runtime modules
+before constructing it, then checks its spaces for adapter conformance.
+
+```bash
+inspect-robots doctor --embodiment my_arms
+```
 
 ## `inspect-robots inspect`
 
