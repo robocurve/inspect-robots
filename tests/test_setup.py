@@ -1303,3 +1303,45 @@ def test_run_setup_multiline_current_camera_still_parses(tmp_path: Path) -> None
     assert not isinstance(rewritten, str)
     lines = [line.lstrip() for line in rewritten["embodiment.args"]["top_cam_device"].splitlines()]
     assert lines == ["/dev/one", "/dev/one-continued"]
+
+
+def test_run_setup_prints_intro_header_and_enter_hint(tmp_path: Path) -> None:
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    assert f"inspect-robots setup — writes {_config_path(tmp_path)}" in text
+    assert "press Enter to accept it, or type a replacement" in text
+    assert "Found an existing config" not in text
+
+
+def test_run_setup_intro_names_existing_config_and_backup(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text("[defaults]\npolicy = configured\n", encoding="utf-8")
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    assert "Found an existing config; its values are the suggestions" in text
+    assert "config.ini.bak" in text
