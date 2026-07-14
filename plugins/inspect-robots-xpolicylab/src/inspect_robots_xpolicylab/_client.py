@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -74,7 +75,7 @@ class PolicyClient:
             try:
                 self._ws = ws_connect(self.url, max_size=None, open_timeout=self.connect_timeout_s)
                 break
-            except Exception as exc:  # noqa: BLE001 - retry any connect failure
+            except Exception as exc:
                 last_err = exc
                 logger.debug(
                     "connect attempt %s/%s to %s failed: %s",
@@ -188,11 +189,11 @@ class PolicyClient:
             return
         try:
             self.request(MessageType.CLOSE, {"reason": "client closed"})
-        except Exception:  # noqa: BLE001 - close must never raise
+        except Exception:
             logger.debug("close frame to %s failed", self.url, exc_info=True)
         try:
             ws.close()
-        except Exception:  # noqa: BLE001 - close must never raise
+        except Exception:
             logger.debug("socket close to %s failed", self.url, exc_info=True)
         finally:
             self._ws = None
@@ -202,7 +203,5 @@ class PolicyClient:
         ws = self._ws
         self._ws = None
         if ws is not None:
-            try:
+            with suppress(Exception):
                 ws.close()
-            except Exception:  # noqa: BLE001 - already dead
-                pass

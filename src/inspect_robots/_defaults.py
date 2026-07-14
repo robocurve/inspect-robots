@@ -65,6 +65,14 @@ class Defaults:
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
+    # The [<kind>.args] sections are written alongside the config file's
+    # [defaults] component names; each args dict is only valid for that
+    # component (its "owner", issue #44). Env vars override the names above
+    # but never the owners: the file's args must not follow an env-selected
+    # component of a different name.
+    policy_args_owner: str | None = None
+    embodiment_args_owner: str | None = None
+    sim_embodiment_args_owner: str | None = None
 
 
 def _config_path(env: Mapping[str, str]) -> Path | None:
@@ -144,6 +152,9 @@ def _read_config(path: Path) -> Defaults:
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
+        policy_args_owner=policy,
+        embodiment_args_owner=embodiment,
+        sim_embodiment_args_owner=sim_embodiment,
     )
 
 

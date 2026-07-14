@@ -10,11 +10,11 @@ from __future__ import annotations
 import time
 
 from inspect_robots import Embodiment
-
 from inspect_robots_isaacsim import IsaacSimEmbodiment
 
 
 def main() -> int:
+    """Launch, exercise, and close the real Isaac Sim application as a boot proof."""
     emb = IsaacSimEmbodiment(headless=True)
     # Sanity: the adapter is a valid Inspect Robots Embodiment and its info is readable
     # without any Isaac import.

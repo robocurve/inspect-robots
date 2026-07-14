@@ -131,6 +131,7 @@ class LLMAgentPolicy(PolicyBase):
         )
 
     def reset(self, scene: Scene) -> None:
+        """Start a fresh per-trial conversation with the scene goal and call budget."""
         self._messages = [
             {
                 "role": "system",
@@ -145,6 +146,7 @@ class LLMAgentPolicy(PolicyBase):
     # -- the loop ------------------------------------------------------------------
 
     def act(self, observation: Observation) -> ActionChunk:
+        """Run LLM turns until one validated tool call yields an action chunk."""
         toolset = self._toolset
         if toolset is None:
             raise RuntimeError(

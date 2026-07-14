@@ -9,6 +9,7 @@ Subcommands:
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
 - ``inspect-robots inspect LOG.json`` — print a saved eval log.
+- ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -77,7 +78,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config", "doctor")
+_SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -93,6 +94,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog="inspect-robots",
         description="Inspect Robots — the Inspect AI for robotics.",
@@ -195,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
 
+    sub.add_parser(
+        "setup",
+        help="interactive first-run wizard: pick defaults and discover camera devices, "
+        "then write config.ini",
+    )
+
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
@@ -233,9 +241,29 @@ def _pick_component(
     raise SystemExit(
         f"no {kind} given and no default configured.\n"
         f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
-        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or run "
+        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, "
+        "run 'inspect-robots setup', or "
         f"'inspect-robots config set {kind} NAME'"
     )
+
+
+def _config_args(
+    kind: str, name: str, owner: str | None, config_args: dict[str, Any]
+) -> dict[str, Any]:
+    """Config-file ``[<kind>.args]``, gated to the component they were written for.
+
+    An args section is only valid for the ``[defaults]`` component it was
+    configured alongside (its owner); handing it to a differently-selected
+    component injects kwargs that constructor never asked for (issue #44).
+    Dropping is loud on stderr: persisted rig calibration vanishing silently
+    would be a worse failure than the crash this replaces.
+    """
+    if name == owner:
+        return config_args
+    if config_args:
+        reason = f"they apply to {owner!r}" if owner else f"no default {kind} is configured"
+        print(f"note: ignoring [{kind}.args] for {name!r}: {reason}", file=sys.stderr)
+    return {}
 
 
 def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
@@ -383,15 +411,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if args.sim:
         embodiment_name, embodiment_source = _pick_sim_embodiment(defaults)
-        embodiment_defaults = defaults.sim_embodiment_args
+        embodiment_defaults = _config_args(
+            "sim_embodiment",
+            embodiment_name,
+            defaults.sim_embodiment_args_owner,
+            defaults.sim_embodiment_args,
+        )
     else:
         embodiment_name, embodiment_source = _pick_component(
             "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
         )
-        embodiment_defaults = defaults.embodiment_args
-    # Config-file args apply to whichever component is selected; explicit
-    # -P/-E flags override same-named keys.
-    policy_kvs = {**defaults.policy_args, **_parse_kvs(args.policy_args)}
+        embodiment_defaults = _config_args(
+            "embodiment", embodiment_name, defaults.embodiment_args_owner, defaults.embodiment_args
+        )
+    # Config-file args apply only to the component they were configured
+    # alongside (issue #44); explicit -P/-E flags override same-named keys.
+    policy_config_args = _config_args(
+        "policy", policy_name, defaults.policy_args_owner, defaults.policy_args
+    )
+    policy_kvs = {**policy_config_args, **_parse_kvs(args.policy_args)}
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     if is_adhoc:
@@ -530,7 +568,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     name, source = _pick_component(
         "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
     )
-    kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+    config_kvs = _config_args(
+        "embodiment", name, defaults.embodiment_args_owner, defaults.embodiment_args
+    )
+    kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
@@ -541,6 +582,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
     return 0 if report.ok else 1
+
+
+def _cmd_setup() -> int:
+    from inspect_robots._setup import run_setup
+
+    return run_setup(
+        os.environ,
+        input_fn=input,
+        out=sys.stdout,
+        interactive=sys.stdin.isatty(),
+    )
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
@@ -582,6 +634,7 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse arguments, dispatch one subcommand, and return its process exit code."""
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
@@ -593,6 +646,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_inspect(args.log)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command == "setup":
+        return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
     parser.print_help()
