@@ -95,11 +95,13 @@ if callable(bind_task):
     bind_task(task.envelope)
 ```
 
-Error semantics match the policy hook (verified): the call sits before sink
-construction and `bus.on_eval_start`, so a raising `bind_task` propagates
-and aborts with no log written — the same observable behavior as a
-`CompatibilityError`, and no conflict with the "always persist a log once
-rollouts have started" invariant (none has).
+Error semantics match the policy hook (verified): the call sits before
+`bus.on_eval_start`, and `JsonLogSink` writes nothing until `on_eval_end`,
+so a raising `bind_task` propagates and aborts with no log written on every
+entry path (the CLI constructs its sinks before `eval()`, so "before sink
+construction" would not hold there — the no-`on_eval_start` argument does).
+Same observable behavior as a `CompatibilityError`; no conflict with the
+"always persist a log once rollouts have started" invariant (none has).
 
 ### The adapter contract (goes in the hook docstrings)
 
@@ -162,7 +164,9 @@ TDD; gates: 100% coverage, mypy strict, ruff (D1 docstrings).
 - `eval()` runs unchanged for embodiments without the hook (the existing
   suite covers this for free) and for a non-callable `bind_task` attribute.
 - A raising `bind_task` aborts the eval before any rollout, with no log
-  written (matching a compat failure).
+  written (matching a compat failure), and a registry-owned embodiment is
+  still closed (the `finally` guarantees it; pin it like the existing
+  compat-failure ownership test).
 - `EmbodimentBase.bind_task` default is a no-op (coverage).
 - API snapshot updated alongside `__all__`.
 
