@@ -287,12 +287,16 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     )
 
 
-def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
+def _resolve_or_exit(
+    kind: str, name: str, args_section: str | None = None, /, **kwargs: Any
+) -> Any:
     """Registry resolution with a clean error instead of a traceback.
 
     Unknown names raise ``KeyError``; a factory that cannot construct itself
     (e.g. the agent policy with no model/key configured) raises a guided
-    ``ConfigError``. Both are user-facing messages, not bugs.
+    ``ConfigError``. Invalid constructor arguments raise ``TypeError``. All
+    three become user-facing messages rather than tracebacks. ``args_section``
+    can identify a config section whose name differs from the registry kind.
     """
     from inspect_robots.errors import ConfigError
     from inspect_robots.registry import resolve
@@ -303,6 +307,13 @@ def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
         raise SystemExit(str(exc.args[0])) from exc
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    except TypeError as exc:
+        if args_section is None:
+            args_section = f"{kind}.args"
+        flag = {"task": "-T", "policy": "-P", "embodiment": "-E"}.get(kind, "the CLI args flag")
+        raise SystemExit(
+            f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
+        ) from exc
 
 
 def _build_guardrails(
@@ -474,7 +485,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
-    embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    if args.sim:
+        embodiment = _resolve_or_exit(
+            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+        )
+    else:
+        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
     try:
         if args.epochs is not None:
             task = replace(task, epochs=args.epochs)
