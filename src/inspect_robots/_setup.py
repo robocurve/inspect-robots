@@ -525,7 +525,9 @@ def _print_slot_listing(
         _print_camera_listing(devices, directory, out)
         return
     noun = "CAN interface" if kind == "can" else "serial device"
-    display_dir = SYSFS_NET if kind == "can" else SERIAL_BY_ID
+    # as_posix: these are canonical Linux locations; Windows str(Path) would
+    # render them with backslashes.
+    display_dir = (SYSFS_NET if kind == "can" else SERIAL_BY_ID).as_posix()
     print(f"Found {len(devices)} {noun}(s) under {display_dir}:", file=out)
     for number, device in enumerate(devices, start=1):
         name = device if kind == "can" else Path(device).name
