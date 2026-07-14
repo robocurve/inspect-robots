@@ -37,6 +37,12 @@ def test_spawn_and_connect_are_mutually_exclusive() -> None:
         RerunSink(spawn=True, connect_url="rerun+http://127.0.0.1:9876/proxy")
 
 
+def test_recording_and_connect_are_mutually_exclusive() -> None:
+    """A sink cannot record to .rrd and stream to a remote viewer at once."""
+    with pytest.raises(ValueError, match="recording_path and connect_url are mutually exclusive"):
+        RerunSink("run.rrd", connect_url="rerun+http://127.0.0.1:9876/proxy")
+
+
 def test_connect_grpc_is_called_only_when_configured() -> None:
     """Startup connects to the configured URL and skips gRPC when it is unset."""
 

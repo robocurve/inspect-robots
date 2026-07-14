@@ -39,6 +39,10 @@ class RerunSink:
     ):
         if spawn and connect_url is not None:
             raise ValueError("spawn and connect_url are mutually exclusive")
+        if recording_path is not None and connect_url is not None:
+            # rerun's save/connect/spawn calls each *replace* the global sink,
+            # so combining them would silently drop the live stream.
+            raise ValueError("recording_path and connect_url are mutually exclusive")
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
