@@ -20,8 +20,8 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
 [**Documentation**](https://inspectrobots.org/) ·
-[Quickstart](https://inspectrobots.org/guide/quickstart.html) ·
-[Concepts](https://inspectrobots.org/guide/concepts.html) ·
+[Quickstart](https://inspectrobots.org/guide/quickstart/) ·
+[Concepts](https://inspectrobots.org/guide/concepts/) ·
 [For LLMs](https://inspectrobots.org/llms.txt)
 
 </div>
@@ -68,42 +68,19 @@ below and no activation is needed.
 
 ## Quickstart
 
-Set your defaults once with the interactive wizard:
+Install the plugin for your rig (the wizard suggests this one's components)
+and set your defaults once:
 
 ```bash
+uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms rig
 uv run inspect-robots setup
 ```
 
-It walks you through the defaults (policy, embodiment, scorer, run length),
-lists the camera devices under `/dev/v4l/by-id`, and can tell you which
-physical camera is which: unplug one when asked and the wizard identifies it
-from the device that disappeared. Press Enter to accept the suggested values
-(the [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)
-plugin shown below) or type your own; install the plugin whose components
-you configure (`uv pip install inspect-robots-yam`) or the wizard will warn
-that the names are not registered. The result lands in
-`~/.config/inspect-robots/config.ini`; note that later `inspect-robots
-config set` edits drop comments from that file.
-
-Prefer to write the file yourself? Replace the three camera paths with your
-rig's V4L2 color nodes:
-
-```bash
-mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
-[defaults]
-policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = yam_arms     # same plugin; cameras configured below
-scorer = success_at_end
-max_steps = 1200          # 120 s at 10 Hz
-rerun = true              # live viewer of cameras/state/actions each run
-store_frames = true       # save each run's camera frames under logs/frames/
-
-[embodiment.args]
-top_cam_device = /dev/v4l/by-id/YOUR-TOP-CAM
-left_cam_device = /dev/v4l/by-id/YOUR-LEFT-CAM
-right_cam_device = /dev/v4l/by-id/YOUR-RIGHT-CAM
-EOF
-```
+The wizard picks your defaults and finds your cameras (unplug one when asked
+and it identifies which is which), then writes
+`~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
+instead and type its component names at the prompts; to write the config file
+by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
 
 Then tell the robot what to do:
 
