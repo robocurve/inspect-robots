@@ -397,7 +397,10 @@ def _render_config(
     for key in SUGGESTED:
         if key not in defaults:
             continue
-        line = f"{key} = {defaults[key]}"
+        # Prompted values can be multiline too: a continuation-line value in
+        # an existing config passes free-text validation and survives Enter.
+        value = defaults[key].replace("\n", "\n\t")
+        line = f"{key} = {value}"
         if comment := _DEFAULT_COMMENTS.get(key):
             line = f"{line:<26}# {comment}" if len(line) < 26 else f"{line}  # {comment}"
         default_lines.append(line)
@@ -412,7 +415,10 @@ def _render_config(
     embodiment_lines: list[str] = []
     for key in camera_keys:
         if key in embodiment_args:
-            embodiment_lines.append(f"{key} = {embodiment_args[key]}")
+            # Enter-accepted "(current)" values come from the raw read and
+            # can be multiline like any carried value.
+            value = embodiment_args[key].replace("\n", "\n\t")
+            embodiment_lines.append(f"{key} = {value}")
     for key, value in carried.get("embodiment.args", {}).items():
         if key not in camera_keys:
             value = value.replace("\n", "\n\t")

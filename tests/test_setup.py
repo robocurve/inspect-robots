@@ -1236,3 +1236,70 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
     assert result == 0
     assert all("(current, not detected)" in prompt for prompt in role_prompts)
     assert all(device in text for device in current_devices)
+
+
+def test_render_config_comment_at_exact_boundary_never_glues(tmp_path: Path) -> None:
+    policy = "policy-with-17chr"  # "policy = " + 17 chars == 26, the pad width
+    assert len(f"policy = {policy}") == 26
+    path = tmp_path / "config.ini"
+    path.write_text(_render_config({"policy": policy}, {}, {}), encoding="utf-8")
+
+    carried = _read_raw_config(path)
+
+    assert not isinstance(carried, str)
+    assert carried["defaults"]["policy"] == policy
+    assert f"policy = {policy}  # " in path.read_text(encoding="utf-8")
+
+
+def test_run_setup_multiline_prompted_default_still_parses(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nscorer = line one\n    line two\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    rewritten = _read_raw_config(path)
+    assert result == 0
+    assert not isinstance(rewritten, str)
+    lines = [line.lstrip() for line in rewritten["defaults"]["scorer"].splitlines()]
+    assert lines == ["line one", "line two"]
+
+
+def test_run_setup_multiline_current_camera_still_parses(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\npolicy = molmoact2\n\n"
+        "[embodiment.args]\n"
+        "top_cam_device = /dev/one\n    /dev/one-continued\n"
+        "left_cam_device = /dev/two\n"
+        "right_cam_device = /dev/three\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    rewritten = _read_raw_config(path)
+    assert result == 0
+    assert not isinstance(rewritten, str)
+    lines = [line.lstrip() for line in rewritten["embodiment.args"]["top_cam_device"].splitlines()]
+    assert lines == ["/dev/one", "/dev/one-continued"]
