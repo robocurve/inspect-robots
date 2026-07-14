@@ -41,6 +41,8 @@ SUGGESTED: dict[str, str] = {
 CAM_ROLES: tuple[str, ...] = ("top", "left", "right")  # -> {role}_cam_device in [embodiment.args]
 V4L_BY_ID: Path = Path("/dev/v4l/by-id")
 V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
+SYSFS_NET: Path = Path("/sys/class/net")
+SERIAL_BY_ID: Path = Path("/dev/serial/by-id")
 
 _DEFAULT_COMMENTS: dict[str, str] = {
     "policy": "from the inspect-robots-yam plugin",
@@ -455,6 +457,41 @@ def _scan_cameras(v4l_dir: Path) -> list[str]:
     return [str(entry) for entry in color_entries or entries]
 
 
+def _scan_can(sysfs_net: Path) -> list[str]:
+    """Return sorted SocketCAN interface names from a sysfs net directory."""
+    try:
+        entries = sorted(sysfs_net.iterdir())
+    except OSError:
+        return []
+    interfaces: list[str] = []
+    for entry in entries:
+        try:
+            interface_type = (entry / "type").read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if interface_type == "280":
+            interfaces.append(entry.name)
+    return interfaces
+
+
+def _scan_serial(serial_by_id_dir: Path) -> list[str]:
+    """Return sorted absolute paths from a serial by-id directory."""
+    try:
+        entries = sorted(serial_by_id_dir.iterdir())
+    except OSError:
+        return []
+    return [str(entry.absolute()) for entry in entries]
+
+
+def _can_serial(sysfs_net: Path, ifname: str) -> str | None:
+    """Read a CAN adapter serial through its sysfs device link, if available."""
+    try:
+        serial_path = (sysfs_net / ifname / "device").resolve().parent / "serial"
+        return serial_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+
+
 def _read_raw_config(path: Path) -> dict[str, dict[str, str]] | str:
     """Read raw section values, returning parse-error text instead of raising."""
     parser = configparser.ConfigParser(
@@ -531,6 +568,8 @@ def run_setup(
     interactive: bool,
     by_id_dir: Path = V4L_BY_ID,
     by_path_dir: Path = V4L_BY_PATH,
+    sysfs_net: Path = SYSFS_NET,
+    serial_by_id_dir: Path = SERIAL_BY_ID,
 ) -> int:
     """Drive the interactive setup wizard and return its process exit code."""
     if not interactive:

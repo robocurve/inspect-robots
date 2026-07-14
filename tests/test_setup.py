@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
@@ -11,10 +12,13 @@ import pytest
 
 from inspect_robots._setup import (
     SUGGESTED,
+    _can_serial,
     _identify_by_replug,
     _read_raw_config,
     _render_config,
     _scan_cameras,
+    _scan_can,
+    _scan_serial,
     run_setup,
 )
 
@@ -88,6 +92,67 @@ def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
 
 def test_scan_cameras_missing_directory_returns_empty(tmp_path: Path) -> None:
     assert _scan_cameras(tmp_path / "missing") == []
+
+
+def test_scan_can_filters_type_280_sorts_and_skips_unreadable(tmp_path: Path) -> None:
+    sysfs_net = tmp_path / "net"
+    for ifname, interface_type in (("can9", "280\n"), ("eth0", "1\n"), ("can1", "280")):
+        interface = sysfs_net / ifname
+        interface.mkdir(parents=True)
+        (interface / "type").write_text(interface_type, encoding="utf-8")
+    (sysfs_net / "broken").mkdir()
+
+    assert _scan_can(sysfs_net) == ["can1", "can9"]
+
+
+def test_scan_can_missing_directory_returns_empty(tmp_path: Path) -> None:
+    assert _scan_can(tmp_path / "missing") == []
+
+
+def test_scan_can_skips_undecodable_type_file(tmp_path: Path) -> None:
+    interface = tmp_path / "net" / "can0"
+    interface.mkdir(parents=True)
+    (interface / "type").write_bytes(b"\xff")
+
+    assert _scan_can(tmp_path / "net") == []
+
+
+def test_scan_serial_lists_sorted_absolute_paths(tmp_path: Path) -> None:
+    serial_by_id = tmp_path / "serial-by-id"
+    serial_by_id.mkdir()
+    for name in ("usb-controller-z", "usb-controller-a"):
+        (serial_by_id / name).touch()
+
+    assert _scan_serial(serial_by_id) == [
+        str(serial_by_id / "usb-controller-a"),
+        str(serial_by_id / "usb-controller-z"),
+    ]
+
+
+def test_scan_serial_missing_directory_returns_empty(tmp_path: Path) -> None:
+    assert _scan_serial(tmp_path / "missing") == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_can_serial_reads_through_device_symlink(tmp_path: Path) -> None:
+    sysfs_net = tmp_path / "net"
+    interface = sysfs_net / "can0"
+    interface.mkdir(parents=True)
+    adapter = tmp_path / "usb" / "adapter"
+    adapter.mkdir(parents=True)
+    (adapter / "serial").write_text(" 3B004B\n", encoding="utf-8")
+    device = adapter / "net-device"
+    device.mkdir()
+    try:
+        (interface / "device").symlink_to(device, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    assert _can_serial(sysfs_net, "can0") == "3B004B"
+
+
+def test_can_serial_missing_serial_returns_none(tmp_path: Path) -> None:
+    assert _can_serial(tmp_path / "net", "can0") is None
 
 
 def test_read_raw_config_preserves_percent_and_literal_tilde(tmp_path: Path) -> None:
