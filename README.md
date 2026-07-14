@@ -20,8 +20,8 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
 [**Documentation**](https://inspectrobots.org/) ·
-[Quickstart](https://inspectrobots.org/guide/quickstart.html) ·
-[Concepts](https://inspectrobots.org/guide/concepts.html) ·
+[Quickstart](https://inspectrobots.org/guide/quickstart/) ·
+[Concepts](https://inspectrobots.org/guide/concepts/) ·
 [For LLMs](https://inspectrobots.org/llms.txt)
 
 </div>

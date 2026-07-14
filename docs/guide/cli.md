@@ -120,8 +120,8 @@ The result is written to `~/.config/inspect-robots/config.ini`
 `config.ini.bak` first, and settings the wizard does not manage (such as
 `[policy.args]` or `sim_embodiment`) are carried through unchanged. Note
 that later `inspect-robots config set` edits drop comments from the file.
-The command requires an interactive terminal; for scripted configuration
-use `inspect-robots config set`.
+The setup command requires an interactive terminal; for scripted
+configuration use `inspect-robots config set`.
 
 Prefer to write the file yourself? This is the wizard's output for a YAM
 rig; replace the three camera paths with your rig's V4L2 color nodes

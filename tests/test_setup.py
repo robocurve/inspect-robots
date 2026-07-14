@@ -1416,7 +1416,8 @@ def test_run_setup_repeats_plugin_reminder_after_writing(tmp_path: Path) -> None
     assert result == 0
     reminder = (
         "reminder: policy 'molmoact2' and embodiment 'yam_arms' not registered "
-        "here; run `uv pip install inspect-robots-yam` before your first run"
+        "here; install the plugin (e.g. `uv pip install inspect-robots-yam`) "
+        "before your first run"
     )
     assert reminder in text
     assert text.index("Wrote ") < text.index("reminder: ")

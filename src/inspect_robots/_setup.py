@@ -598,8 +598,9 @@ def run_setup(
     if missing:
         print(
             _paint(
-                f"reminder: {' and '.join(missing)} not registered here; run "
-                "`uv pip install inspect-robots-yam` before your first run",
+                f"reminder: {' and '.join(missing)} not registered here; install "
+                "the plugin (e.g. `uv pip install inspect-robots-yam`) before "
+                "your first run",
                 _YELLOW,
                 out,
             ),
