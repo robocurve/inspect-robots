@@ -315,8 +315,8 @@ def test_ensure_env_wrapped_import_error() -> None:
     emb._ensure_app = lambda: None  # type: ignore
 
     # Force a failure during the imports inside _ensure_env by mocking sys.modules or similar.
-    # Alternatively, we can mock `importlib.import_module` or `builtins.__import__` to raise ImportError
-    # when gymnasium or isaaclab_tasks is imported.
+    # Alternatively, we can mock `importlib.import_module` or `builtins.__import__`
+    # to raise ImportError when gymnasium or isaaclab_tasks is imported.
     import builtins
 
     original_import = builtins.__import__
@@ -383,10 +383,10 @@ def test_to_image_logic() -> None:
     res_01 = _to_image(float_01)
     np.testing.assert_array_equal(res_01, [0, 127, 255])
 
-    # 0-255 float array with values > 1.0
+    # 0-255 float array with values > 1.0 (should clip to [0, 255, 255])
     float_255 = np.array([0.0, 128.0, 255.0], dtype=np.float32)
     res_255 = _to_image(float_255)
-    np.testing.assert_array_equal(res_255, [0, 128, 255])
+    np.testing.assert_array_equal(res_255, [0, 255, 255])
 
 
 # --------------------------------------------------------------------------- #

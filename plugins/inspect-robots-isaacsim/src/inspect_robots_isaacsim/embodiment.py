@@ -377,7 +377,8 @@ class IsaacSimEmbodiment:
             if self.terminated_implies_success:
                 logger.warning(
                     "Isaac Lab task info dictionary is missing the success key '%s'. "
-                    "Falling back to treating 'terminated' as success because 'terminated_implies_success' is enabled.",
+                    "Falling back to treating 'terminated' as success because "
+                    "'terminated_implies_success' is enabled.",
                     self.success_info_key,
                 )
             else:
@@ -418,8 +419,8 @@ def _to_float_array(value: Any) -> np.ndarray:
 def _to_image(value: Any) -> np.ndarray:
     """Convert input value to a uint8 HWC image array.
 
-    Empty arrays are returned as-is. Floats are treated as normalized [0.0, 1.0]
-    (and scaled to [0, 255]) if the maximum value in the array is <= 1.0.
+    Empty arrays are returned as-is. Floats are treated as normalized [0, 1] and
+    scaled to [0, 255]; values outside that range are clipped.
     """
     arr = _np(value)
     if arr.size == 0:
@@ -429,5 +430,5 @@ def _to_image(value: Any) -> np.ndarray:
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
         arr = np.transpose(arr, (1, 2, 0))  # CHW -> HWC
     if np.issubdtype(arr.dtype, np.floating):
-        arr = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255)
+        arr = np.clip(arr, 0.0, 1.0) * 255.0
     return arr.astype(np.uint8)
