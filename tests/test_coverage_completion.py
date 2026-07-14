@@ -487,7 +487,8 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
 
     from inspect_robots.logging.rerun_sink import RerunSink
 
-    sink = RerunSink(str(tmp_path / "run.rrd"))
+    # jpeg_quality=None: this fake's Image has no compress; silence the fallback warning.
+    sink = RerunSink(str(tmp_path / "run.rrd"), jpeg_quality=None)
     assert sink.available is True  # imports the fake backend
     assert sink.available is True  # cached self._rr path
 
@@ -504,6 +505,8 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
         Action(data=np.zeros(2)),
         StepResult(observation=Observation(), reward=None),
     )
+    assert sink.flush(timeout=5.0)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
     # A sink with no recording path skips rr.save (the other on_eval_start branch).
     RerunSink().on_eval_start(None)  # type: ignore[arg-type]
@@ -518,7 +521,7 @@ def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> Non
 
     from inspect_robots.logging.rerun_sink import RerunSink
 
-    sink = RerunSink()
+    sink = RerunSink(jpeg_quality=None)
     (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
     assert log.status == "success"
     assert "time" in calls  # rr.set_time (>=0.23) was used
