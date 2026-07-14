@@ -66,6 +66,7 @@ class CubePickEmbodiment:
         )
 
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        """Place a seeded cube, restore the effector start, and expose the instruction."""
         rng = np.random.RandomState(seed if seed is not None else 0)
         # Place the cube reachably in the far quadrant; deterministic per seed.
         self._cube = rng.uniform(0.6, 0.9, size=2)
@@ -74,6 +75,7 @@ class CubePickEmbodiment:
         return self._observe(scene.instruction)
 
     def step(self, action: Action) -> StepResult:
+        """Apply one bounded delta and terminate when the effector reaches the cube."""
         self.num_steps += 1
         delta = np.clip(np.asarray(action.data, dtype=np.float64), -self.max_step, self.max_step)
         self._eef = np.clip(self._eef + delta, 0.0, 1.0)
@@ -89,6 +91,7 @@ class CubePickEmbodiment:
         )
 
     def close(self) -> None:
+        """Release no resources because the toy world is entirely in memory."""
         return None
 
     def _observe(self, instruction: str | None) -> Observation:

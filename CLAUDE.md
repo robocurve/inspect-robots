@@ -46,6 +46,8 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   py3.11-3.12 as **blocking, required PR checks** (coverage below 100% fails the
   build), plus a **non-blocking** `test-extra` tier for py3.10/py3.13, Windows,
   and the NumPy floor — together covering the py3.10–3.13 range pyproject claims.
+- Ruff's D1 rules require a docstring on every public module, class, and function.
+  State the contract or invariant the caller needs; do not restate the symbol name.
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.

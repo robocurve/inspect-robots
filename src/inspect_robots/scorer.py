@@ -54,9 +54,13 @@ class Scorer(Protocol):
     """Maps a recorded trajectory + scene target to a [`Score`][inspect_robots.scorer.Score]."""
 
     @property
-    def name(self) -> str: ...
+    def name(self) -> str:
+        """Stable identifier used as the score key in evaluation results."""
+        ...
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score: ...
+    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+        """Assign one score from the recorded trajectory and optional target."""
+        ...
 
 
 # --------------------------------------------------------------------------- #
@@ -84,18 +88,22 @@ def _numeric(value: ScoreValue) -> float:
 
 
 def reduce_mean(scores: Sequence[Score]) -> Score:
+    """Collapse numeric epoch values with the arithmetic mean."""
     return Score(value=_mean(_numeric(s.value) for s in scores))
 
 
 def reduce_median(scores: Sequence[Score]) -> Score:
+    """Collapse numeric epoch values with the median."""
     return Score(value=_median(_numeric(s.value) for s in scores))
 
 
 def reduce_max(scores: Sequence[Score]) -> Score:
+    """Keep the largest numeric epoch value."""
     return Score(value=max(_numeric(s.value) for s in scores))
 
 
 def reduce_min(scores: Sequence[Score]) -> Score:
+    """Keep the smallest numeric epoch value."""
     return Score(value=min(_numeric(s.value) for s in scores))
 
 
@@ -134,6 +142,7 @@ _REDUCERS: dict[str, Reducer] = {
 
 
 def get_reducer(name: str) -> Reducer:
+    """Resolve a builtin reducer or parse a dynamic ``pass_at_<k>`` name."""
     if name in _REDUCERS:
         return _REDUCERS[name]
     if name.startswith("pass_at_"):
@@ -145,6 +154,7 @@ def get_reducer(name: str) -> Reducer:
 
 
 def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
+    """Apply the named epoch reducer to one scene's scores."""
     return get_reducer(name)(scores)
 
 
@@ -255,6 +265,7 @@ class VLMScorer:
     name = "vlm"
 
     def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+        """Fail explicitly because VLM scoring is reserved but not implemented."""
         raise NotImplementedError(
             "VLMScorer is a reserved interface; not implemented in this release"
         )

@@ -65,6 +65,7 @@ class RerunSink:
 
     @property
     def available(self) -> bool:
+        """Whether the optional SDK can currently accept visualization events."""
         return self._ensure_rerun() is not None
 
     @staticmethod
@@ -82,6 +83,7 @@ class RerunSink:
         return rr.Scalar(value)  # older SDKs
 
     def on_eval_start(self, spec: EvalSpec) -> None:
+        """Initialize recording, disabling this noncritical sink after startup failure."""
         rr = self._ensure_rerun()
         if rr is None:
             return
@@ -102,12 +104,14 @@ class RerunSink:
             self._disabled = True
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
+        """Select the entity namespace for the incoming scene and epoch."""
         # Namespace this trial's entities so trials never overwrite each other.
         self._prefix = f"trial/{scene_id}/e{epoch}"
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
+        """Stream one transition's observations, action, reward, and termination marker."""
         rr = self._ensure_rerun()
         if rr is None:
             return
@@ -129,7 +133,9 @@ class RerunSink:
             )
 
     def on_trial_end(self, record: TrialRecord) -> None:
+        """Leave completed trial entities intact for the remainder of the recording."""
         return None
 
     def on_eval_end(self, log: EvalLog) -> None:
+        """Keep the completed recording available after evaluation ends."""
         return None

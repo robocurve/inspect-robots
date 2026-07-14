@@ -37,7 +37,9 @@ class Controller(Protocol):
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
-    ) -> Action: ...
+    ) -> Action:
+        """Choose step ``t``'s action, using ``store`` for trial-local controller state."""
+        ...
 
 
 class DefaultController:
@@ -51,6 +53,7 @@ class DefaultController:
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
+        """Reuse buffered chunk actions until the configured replanning boundary."""
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
         if not buffer:
             chunk = policy.act(observation)
@@ -84,6 +87,7 @@ class SmoothingController:
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
+        """Apply an exponential moving average to the wrapped controller's output."""
         action = self.inner.next_action(policy, observation, t, store)
         raw = np.asarray(action.data, dtype=np.float64)
         prev = store.get(_SMOOTH_KEY)
@@ -150,6 +154,7 @@ class EnsemblingController:
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
+        """Query once for step ``t`` and blend every retained prediction for that step."""
         chunk = policy.act(observation)
         store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(chunk)))
 
