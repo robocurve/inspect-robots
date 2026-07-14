@@ -34,8 +34,7 @@ class LogSink(Protocol):
         ...
 
     def on_trial_end(self, record: TrialRecord) -> None:
-        """Receive the trial's recorded trajectory (partial if the trial errored) after its
-        last step."""
+        """Receive the recorded trajectory (partial on error) after the trial's last step."""
         ...
 
     def on_eval_end(self, log: EvalLog) -> None:
