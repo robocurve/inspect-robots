@@ -111,6 +111,12 @@ disappeared. When identical cameras without serial numbers collide in the
 by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
 per physical USB port.
 
+When the selected registered embodiment declares device slots, those slots
+drive one device interview for cameras, CAN interfaces, and serial devices.
+CAN slots list SocketCAN interfaces and support unplug-to-identify; rigs with
+multiple USB adapters named `can0`, `can1`, and so on also receive a udev
+pinning suggestion so replug order cannot swap physical devices.
+
 ```bash
 inspect-robots setup
 ```

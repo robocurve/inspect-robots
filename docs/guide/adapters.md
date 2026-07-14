@@ -31,6 +31,54 @@ registered, while `doctor` checks its selected embodiment before construction. B
 `importlib.util.find_spec` without importing the declared top-level modules and
 print each remediation command verbatim when a module is missing.
 
+## Declare device slots:
+
+Declare device-shaped constructor arguments on the registered embodiment
+factory. Import `DeviceSlot` from the `inspect_robots.conformance` submodule:
+
+```python
+from inspect_robots.conformance import DeviceSlot
+
+DEVICE_SLOTS = (
+    DeviceSlot(
+        arg="left_channel",
+        kind="can",
+        label="left arm CAN channel",
+        group="arms",
+    ),
+    DeviceSlot(
+        arg="right_channel",
+        kind="can",
+        label="right arm CAN channel",
+        group="arms",
+    ),
+    DeviceSlot(
+        arg="top_cam_device",
+        kind="v4l2",
+        label="top camera",
+        group="cameras",
+    ),
+    DeviceSlot(
+        arg="left_cam_device",
+        kind="v4l2",
+        label="left camera",
+        group="cameras",
+    ),
+    DeviceSlot(
+        arg="right_cam_device",
+        kind="v4l2",
+        label="right camera",
+        group="cameras",
+    ),
+)
+```
+
+The recognized kinds are `v4l2` for stable camera paths, `can` for SocketCAN
+interface names, and `serial` for absolute `/dev/serial/by-id` paths. The setup
+wizard probes and interviews slots in declaration order, then writes each
+selection to its `arg` key under `[embodiment.args]`. Slots with the same
+non-`None` `group` are all-or-none. Ungrouped slots remain independent.
+
 ## The conformance kit
 
 Add one test to your adapter repo:
