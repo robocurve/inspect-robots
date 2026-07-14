@@ -100,7 +100,7 @@ policy sees while the robot moves. CLI flags override any default
 (`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 The policy slot is not limited to VLAs. With the
-[inspect-robots-agent](plugins/inspect-robots-agent) plugin installed
+[inspect-robots-agent](plugins/inspect-robots-agent/) plugin installed
 (`uv pip install inspect-robots-agent`) and `$ANTHROPIC_API_KEY` set, a
 frontier LLM drives the same rig through tool calls, one approver-checked
 motion chunk per call:
