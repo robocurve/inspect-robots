@@ -50,8 +50,8 @@ robocurve/inspect-robots-yam#30):
 
 ```python
 DEVICE_SLOTS = (
-    DeviceSlot(arg="left_channel",  kind="can",  label="left arm CAN channel"),
-    DeviceSlot(arg="right_channel", kind="can",  label="right arm CAN channel"),
+    DeviceSlot(arg="left_channel",  kind="can",  label="left arm CAN channel", group="arms"),
+    DeviceSlot(arg="right_channel", kind="can",  label="right arm CAN channel", group="arms"),
     DeviceSlot(arg="top_cam_device",   kind="v4l2", label="top camera", group="cameras"),
     DeviceSlot(arg="left_cam_device",  kind="v4l2", label="left camera", group="cameras"),
     DeviceSlot(arg="right_cam_device", kind="v4l2", label="right camera", group="cameras"),
@@ -134,7 +134,9 @@ non-managed `[embodiment.args]` keys pass through raw, all exactly as today.
 
 After slot-mode assignment, when the SCAN found two or more CAN
 interfaces with kernel-default order-dependent names (regex `^can\d+$`)
-AND at least one of them was assigned to a slot (the issue's trigger is
+AND at least one of them was assigned to a slot (decline-preserved
+existing assignments count: the risk is about what the written config
+names, not how it got there; the issue's trigger is
 "two identical adapters with order-dependent names": with two adapters
 present, even a single `left_channel = can0` assignment silently rebinds
 to the other physical arm on replug; a true single-adapter rig, where
@@ -144,14 +146,17 @@ to the other physical arm on replug; a true single-adapter rig, where
   `_can_serial` (unassigned ones included: pinning half a pair is no fix).
 - All readable and pairwise distinct → print (yellow) a warning that
   order-dependent names can swap which physical arm receives commands on
-  replug, then the exact rules snippet, one line per scanned interface.
+  replug, then the exact rules snippet, one line per order-dependent
+  scanned interface (already-pinned names get no line).
   Assigned interfaces get a stable name derived from their slot arg
   (`left_channel` → `can_left`: strip a trailing `_channel`/`_bus`, prefix
   `can_` unless the remainder already starts with `can`); unassigned ones
   get `can_<ifname>` (e.g. `can_can1` is ugly but valid; the text says the
-  names are suggestions to edit). If derivation yields duplicate names or
-  a name over Linux's 15-char IFNAMSIZ, fall back to `can_a`, `can_b`, ...
-  in scan order (deterministic, always valid):
+  names are suggestions to edit). If ANY derived name collides with
+  another derived name or with any scanned interface name, or exceeds
+  Linux's 15-char IFNAMSIZ, the WHOLE SET falls back to `can_a`, `can_b`,
+  ... in scan order (per-name fallback could re-collide; deterministic,
+  always valid):
 
 ```
 these CAN interfaces have order-dependent names; a replug can swap them.
@@ -162,7 +167,11 @@ then replug or reboot), and re-run setup to record the pinned names:
 ```
 
 - Serials unreadable or duplicated (identical adapters without unique
-  serials) → print only the swap warning, no snippet.
+  serials) → print only the swap warning, no snippet. Platform CAN
+  (flexcan, SPI controllers) has no USB serial and its `can0`/`can1` are
+  deterministic, so the warning would be a false positive: skip the whole
+  suggestion (warning included) when NO order-dependent interface's
+  `device` symlink resolves under a `usb` path segment.
 - Pinned names (anything not matching `^can\d+$`) → nothing printed.
 
 The wizard never writes to `/etc` (sudo); this is guidance text only.
@@ -203,8 +212,9 @@ where os.symlink needs privileges, keeping the advisory Windows tier green):
 - A `serial`-kind slot end to end: listing header, number pick, and
   absolute-path manual entry.
 - Duplicate guard in slot mode: same-kind duplicate → confirm prompt;
-  cross-kind identical strings cannot occur (paths vs names) but the
-  same-kind scoping branch is exercised.
+  a cross-kind duplicate (v4l2 and serial both take absolute paths) is
+  deliberately unguarded (different arg semantics), and the same-kind
+  scoping branch is exercised.
 - CAN manual entry: bare name accepted with advisory warning when unlisted;
   absolute-path entry rejected vocabulary (re-prompt) since CAN wants a
   name; v4l2/serial keep path entry.
@@ -214,8 +224,12 @@ where os.symlink needs privileges, keeping the advisory Windows tier green):
 - Decline preserves existing slot-arg assignments; carried non-managed keys
   survive (managed_args parameterization).
 - udev suggestion: two `can\d+` assignments with distinct serials → warning
-  + two rule lines with the right serials and derived names; identical
-  serials → warning only; pinned names → silence.
+  + two rule lines with the right serials and derived names; two scanned
+  but only one assigned → the unassigned interface still gets a
+  `can_<ifname>` line; derivation collision or over-IFNAMSIZ name → the
+  whole set falls back to `can_a`/`can_b`; identical serials → warning
+  only; non-USB (no `usb` segment in the resolved device path) → complete
+  silence; pinned names → silence.
 - `(current)` default for a slot arg.
 
 `tests/test_registry_cli.py`: none needed (doctor untouched).
