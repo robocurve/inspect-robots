@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import os
 import re
+import struct
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
@@ -46,6 +47,19 @@ V4L_BY_ID: Path = Path("/dev/v4l/by-id")
 V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
 SYSFS_NET: Path = Path("/sys/class/net")
 SERIAL_BY_ID: Path = Path("/dev/serial/by-id")
+
+# Kernel V4L2 ABI: ioctl request numbers and the byte offsets used below
+# (capabilities at 84 in struct v4l2_capability, pixelformat at 44 in
+# struct v4l2_fmtdesc) are fixed by <linux/videodev2.h>.
+_VIDIOC_QUERYCAP = 0x80685600
+_VIDIOC_ENUM_FMT = 0xC0405602
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+# UYVY/GREY are deliberately absent: RealSense stereo-IR nodes advertise them,
+# and listing those would offer IR streams as cameras.
+_V4L2_COLOR_FOURCCS = frozenset(
+    {"YUYV", "MJPG", "JPEG", "H264", "NV12", "NV21", "YU12", "YV12", "RGB3", "BGR3"}
+)
 
 _DEFAULT_COMMENTS: dict[str, str] = {
     "policy": "from the inspect-robots-yam plugin",
@@ -662,13 +676,53 @@ def _device_section(
     return assignments
 
 
+def _v4l2_color_capture(path: Path) -> bool | None:
+    """Return whether a node captures color, or ``None`` when probing is inconclusive."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return None
+
+    try:
+        capability = bytearray(104)
+        try:
+            fcntl.ioctl(fd, _VIDIOC_QUERYCAP, capability)
+        except OSError:
+            return None
+
+        capabilities, device_caps = struct.unpack_from("<II", capability, 84)
+        effective_caps = device_caps if capabilities & _V4L2_CAP_DEVICE_CAPS else capabilities
+        if not effective_caps & _V4L2_CAP_VIDEO_CAPTURE:
+            return False
+
+        index = 0
+        while True:
+            description = bytearray(64)
+            struct.pack_into("<II", description, 0, index, 1)
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, description)
+            except OSError:
+                return False
+            fourcc = description[44:48].decode("ascii", errors="replace")
+            if fourcc in _V4L2_COLOR_FOURCCS:
+                return True
+            index += 1
+    finally:
+        os.close(fd)
+
+
 def _scan_cameras(v4l_dir: Path) -> list[str]:
-    """Return sorted device paths, preferring V4L2 color-stream entries."""
+    """Return V4L2-probed color paths, or all sorted entries when none are confirmed."""
     try:
         entries = sorted(v4l_dir.iterdir())
     except FileNotFoundError:
         return []
-    color_entries = [entry for entry in entries if entry.name.endswith("-video-index0")]
+    color_entries = [entry for entry in entries if _v4l2_color_capture(entry) is True]
     return [str(entry) for entry in color_entries or entries]
 
 
