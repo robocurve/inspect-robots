@@ -1,10 +1,11 @@
 """Optional Rerun visualization sink.
 
-Logs camera images, proprioception, action vectors, and success markers to a
-`Rerun <https://github.com/rerun-io/rerun>`_ recording. ``rerun-sdk`` is imported
-lazily *inside* methods so the core package never depends on it; if it is not
-installed, the sink warns once and becomes a no-op (so unattended runs and the
-core-only import gate are unaffected).
+Logs camera images, proprioception, action vectors, and success markers to
+`Rerun <https://github.com/rerun-io/rerun>`_. The sink can write a ``.rrd``
+recording, spawn a local viewer, or connect over gRPC to a remote viewer.
+``rerun-sdk`` is imported lazily *inside* methods so the core package never
+depends on it; if it is not installed, the sink warns once and becomes a no-op
+(so unattended runs and the core-only import gate are unaffected).
 
 Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
 successive trials never overwrite one another on the shared step timeline.
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 
 class RerunSink:
-    """Stream a rollout to a Rerun recording (``.rrd``) or a live viewer."""
+    """Write a ``.rrd``, spawn a local viewer, or connect over gRPC to a remote one."""
 
     def __init__(
         self,
@@ -34,10 +35,14 @@ class RerunSink:
         *,
         application_id: str = "inspect_robots",
         spawn: bool = False,
+        connect_url: str | None = None,
     ):
+        if spawn and connect_url is not None:
+            raise ValueError("spawn and connect_url are mutually exclusive")
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
+        self.connect_url = connect_url
         self._rr: Any | None = None
         self._warned = False
         self._disabled = False
@@ -89,12 +94,15 @@ class RerunSink:
             return
         try:
             rr.init(self.application_id, spawn=self.spawn)
+            if self.connect_url is not None:
+                rr.connect_grpc(self.connect_url)
             if self.recording_path is not None:
                 rr.save(self.recording_path)
         except Exception as exc:
             # A visualization sink must never take the eval down with it — a
-            # missing viewer binary (spawn) or unwritable recording path
-            # degrades to a warned no-op, exactly like a missing rerun-sdk.
+            # missing viewer binary (spawn), unreachable viewer (connect), or
+            # unwritable recording path degrades to a warned no-op, exactly
+            # like a missing rerun-sdk.
             warnings.warn(
                 f"RerunSink disabled: could not start the Rerun recording/viewer ({exc})",
                 RuntimeWarning,

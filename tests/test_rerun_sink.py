@@ -31,6 +31,39 @@ def test_rerun_sink_registered() -> None:
     assert "rerun" in registered("sink")
 
 
+def test_spawn_and_connect_are_mutually_exclusive() -> None:
+    """A sink cannot spawn locally and connect to a remote viewer."""
+    with pytest.raises(ValueError, match="spawn and connect_url are mutually exclusive"):
+        RerunSink(spawn=True, connect_url="rerun+http://127.0.0.1:9876/proxy")
+
+
+def test_connect_grpc_is_called_only_when_configured() -> None:
+    """Startup connects to the configured URL and skips gRPC when it is unset."""
+
+    class _FakeRR:
+        def __init__(self) -> None:
+            self.init_count = 0
+            self.connect_urls: list[str] = []
+
+        def init(self, *args: object, **kwargs: object) -> None:
+            self.init_count += 1
+
+        def connect_grpc(self, url: str) -> None:
+            self.connect_urls.append(url)
+
+    url = "rerun+http://127.0.0.1:9876/proxy"
+    fake = _FakeRR()
+    connected = RerunSink(connect_url=url)
+    connected._rr = fake
+    connected.on_eval_start(None)  # type: ignore[arg-type]
+    unconnected = RerunSink()
+    unconnected._rr = fake
+    unconnected.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.init_count == 2
+    assert fake.connect_urls == [url]
+
+
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
 def test_noop_and_warns_when_absent() -> None:
     sink = RerunSink()
@@ -77,3 +110,20 @@ def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
         )
     assert sink.available is False  # dormant from here on
     sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
+
+
+def test_connection_failure_disables_sink_instead_of_crashing() -> None:
+    """An unreachable gRPC viewer must warn and leave the sink dormant."""
+
+    class _FakeRR:
+        def init(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def connect_grpc(self, url: str) -> None:
+            raise RuntimeError(f"could not connect to {url}")
+
+    sink = RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")
+    sink._rr = _FakeRR()
+    with pytest.warns(RuntimeWarning, match="RerunSink disabled"):
+        sink.on_eval_start(None)  # type: ignore[arg-type]
+    assert sink.available is False

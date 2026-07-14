@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Remote Rerun streaming via `inspect-robots run --rerun-connect [URL]`, so
+  headless evaluations can connect over gRPC to a viewer on another machine
+  (including through an SSH reverse tunnel) (#86).
 - Plugin-declared embodiment device slots for V4L2 cameras, SocketCAN
   interfaces, and serial devices. `inspect-robots setup` probes and interviews
   declared slots, enforces grouped all-or-none assignments, and suggests udev

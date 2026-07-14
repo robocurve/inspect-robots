@@ -1284,8 +1284,15 @@ class _FakeRerunSink:
 
     instances: ClassVar[list[_FakeRerunSink]] = []
 
-    def __init__(self, recording_path: str | None = None, *, spawn: bool = False) -> None:
+    def __init__(
+        self,
+        recording_path: str | None = None,
+        *,
+        spawn: bool = False,
+        connect_url: str | None = None,
+    ) -> None:
         self.spawn = spawn
+        self.connect_url = connect_url
         self.steps = 0
         _FakeRerunSink.instances.append(self)
 
@@ -1345,6 +1352,36 @@ def test_rerun_flag_enables_without_config(
     rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
     assert rc == 0
     assert len(_fake_rerun.instances) == 1
+
+
+def test_bare_rerun_connect_uses_default_url(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A bare --rerun-connect streams to the documented localhost URL."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-connect") == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
+    assert sink.spawn is False
+
+
+def test_rerun_connect_honors_explicit_url(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """An explicit --rerun-connect URL is passed through to RerunSink."""
+    url = "rerun+http://viewer.example:9988/proxy"
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-connect", url) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == url
+
+
+def test_rerun_connect_takes_precedence_over_rerun(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """Remote connection wins when both --rerun modes are requested."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--rerun", "--rerun-connect") == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
+    assert sink.spawn is False
 
 
 def test_styled_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
