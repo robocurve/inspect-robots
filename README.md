@@ -101,7 +101,8 @@ drives the same rig through tool calls, one approver-checked motion chunk
 per call.
 
 Create a `.env` file with your API key (the CLI loads it automatically; real
-environment variables take precedence over its values):
+environment variables take precedence over its values; working from a clone,
+copy [.env.example](.env.example) instead):
 
 ```bash
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
