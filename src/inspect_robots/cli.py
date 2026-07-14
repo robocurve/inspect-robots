@@ -362,11 +362,31 @@ _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 
 
+def _reuse_embodiment_verdict(record: TrialRecord) -> bool:
+    """Record a definitive embodiment outcome and report whether one existed."""
+    if not record.terminated or record.termination_reason is None:
+        return False
+    from inspect_robots.transcript import operator_event
+
+    verdict = "yes" if record.termination_reason == "success" else "no"
+    record.operator_judgement = verdict
+    record.events.append(operator_event(t=len(record.steps), verdict=verdict, source="embodiment"))
+    return True
+
+
+def _record_embodiment_verdict(record: TrialRecord, scene: Scene) -> None:
+    """Reuse an embodiment verdict without ever prompting the terminal."""
+    del scene
+    _reuse_embodiment_verdict(record)
+
+
 def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
-    """Capture the terminal operator's verdict on the record (R6)."""
+    """Capture exactly one operator verdict on the record (R6)."""
     from inspect_robots.transcript import operator_event
 
     del scene
+    if _reuse_embodiment_verdict(record):
+        return
     while True:
         try:
             answer = input(_PROMPT).strip().lower()
@@ -519,15 +539,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f"guardrails: {' + '.join(active) if active else 'none active'}")
 
         before_scoring = None
-        if (
-            is_adhoc
-            and not args.no_prompt
-            and sys.stdin.isatty()
-            and any(s.name == "operator" for s in task.scorers)
-        ):
-            # Ad-hoc runs only: a registered task with an operator scorer keeps
-            # R6's non-blocking, unattended-safe behavior (judgement stays None).
-            before_scoring = _prompt_operator
+        if is_adhoc and any(s.name == "operator" for s in task.scorers):
+            # Always preserve a verdict the embodiment already captured. Only
+            # the fallback terminal prompt depends on TTY / --no-prompt.
+            before_scoring = (
+                _prompt_operator
+                if not args.no_prompt and sys.stdin.isatty()
+                else _record_embodiment_verdict
+            )
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)

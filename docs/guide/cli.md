@@ -97,7 +97,11 @@ did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 and records the verdict in the log (`skip` records nothing). Piped/CI
 stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
 runs stay non-blocking, and an unjudged trial honestly scores as failure with
-"no operator judgement recorded".
+"no operator judgement recorded". If the embodiment already ended with an
+explicit terminal outcome, the CLI records that verdict with embodiment
+provenance instead of asking the operator a second time. This reuse also applies
+with non-interactive stdin or `--no-prompt`; those settings disable terminal
+input, not an existing verdict.
 
 ## `inspect-robots setup`
 

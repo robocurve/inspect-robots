@@ -543,13 +543,17 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv(ENV_POLICY, "scripted")
+    # A max-steps truncation carries no embodiment verdict, so the terminal
+    # operator remains the source of truth.
+    monkeypatch.setenv(ENV_POLICY, "noop")
     monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
     _tty_stdin(monkeypatch)
     answers = iter(["yse", "y"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     log_dir = tmp_path / "logs"
-    rc = main(["reach the cube", "--log-dir", str(log_dir)])  # default scorer: operator
+    rc = main(
+        ["reach the cube", "--max-steps", "1", "--log-dir", str(log_dir)]
+    )  # default scorer: operator
     assert rc == 0
     assert "unrecognized answer 'yse'" in capsys.readouterr().out
     log = _read_only_log(log_dir)
@@ -557,10 +561,36 @@ def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     assert log.results.metrics["operator"] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("stdin_is_tty", "extra_args"),
+    [(True, []), (False, []), (True, ["--no-prompt"])],
+)
+def test_operator_prompt_reuses_successful_embodiment_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    stdin_is_tty: bool,
+    extra_args: list[str],
+) -> None:
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: stdin_is_tty)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("embodiment verdict must prevent a prompt")
+    )
+
+    log_dir = tmp_path / "logs"
+    assert main(["reach the cube", *extra_args, "--log-dir", str(log_dir)]) == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("yes",)
+    assert log.results.metrics["operator"] == 1.0
+    capsys.readouterr()
+
+
 def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_POLICY, "noop")
     monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
     monkeypatch.setattr(
         "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
@@ -569,13 +599,25 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     # Non-TTY stdin (the pytest default): never prompts.
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     log_dir_a = tmp_path / "a"
-    assert main(["reach the cube", "--log-dir", str(log_dir_a)]) == 0
+    assert main(["reach the cube", "--max-steps", "1", "--log-dir", str(log_dir_a)]) == 0
     assert _read_only_log(log_dir_a).samples[0].operator_judgements == (None,)
 
     # TTY but --no-prompt: never prompts either.
     _tty_stdin(monkeypatch)
     log_dir_b = tmp_path / "b"
-    assert main(["reach the cube", "--no-prompt", "--log-dir", str(log_dir_b)]) == 0
+    assert (
+        main(
+            [
+                "reach the cube",
+                "--max-steps",
+                "1",
+                "--no-prompt",
+                "--log-dir",
+                str(log_dir_b),
+            ]
+        )
+        == 0
+    )
     log = _read_only_log(log_dir_b)
     assert log.samples[0].operator_judgements == (None,)
     assert log.results.metrics["operator"] == 0.0  # unjudged scores honestly as failure
@@ -647,6 +689,33 @@ def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None
     assert event.kind == "operator"
     assert event.t == 3
     assert event.data["verdict"] == "partial"
+
+    # A self-confirming embodiment's terminal verdict is adopted without
+    # asking the operator a second time, and its provenance is retained.
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("embodiment verdict must prevent a prompt")
+    )
+    for reason, verdict in (("success", "yes"), ("failure", "no"), ("collision", "no")):
+        record = _record()
+        record.terminated = True
+        record.termination_reason = reason
+        _prompt_operator(record, scene)
+        assert record.operator_judgement == verdict
+        (event,) = record.events
+        assert event.kind == "operator"
+        assert event.t == 3
+        assert event.data == {"verdict": verdict, "source": "embodiment"}
+
+    # A terminated result without a reason carries no verdict, so the terminal
+    # operator still decides.
+    record = _record()
+    record.terminated = True
+    record.termination_reason = None
+    monkeypatch.setattr("builtins.input", lambda _prompt: "partial")
+    _prompt_operator(record, scene)
+    assert record.operator_judgement == "partial"
+    (event,) = record.events
+    assert event.data == {"verdict": "partial"}
 
     # skip: no judgement, no event.
     record = _record()

@@ -300,7 +300,7 @@ def test_list_scene_dataset() -> None:
 # --------------------------------------------------------------------------- #
 def test_transcript_event_helpers() -> None:
     assert approval_event(1, modified=True, detail="clamped").kind == "approval"
-    assert operator_event(2, "success").data["verdict"] == "success"
+    assert operator_event(2, "success").data == {"verdict": "success"}
 
 
 # --------------------------------------------------------------------------- #

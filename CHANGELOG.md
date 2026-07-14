@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Self-confirming embodiments no longer trigger a duplicate operator prompt**
+  during ad-hoc runs. The CLI records an existing terminal outcome with
+  embodiment provenance, even without a TTY or with `--no-prompt`, and prompts
+  only when no such verdict exists (#53).
 - **Literal percent signs in config values now round-trip unchanged** (#54).
   Config reads no longer treat `%` as interpolation syntax, so values such as
   `policy = 50%off` work with `config set`, `config show`, and normal runs.
