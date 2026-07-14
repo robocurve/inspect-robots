@@ -104,6 +104,98 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "success_at_end" in out
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
+    assert "error:" not in out
+    assert "hint:" not in out
+
+
+def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Observation
+
+    class _FaultOnSecondScene(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("reset exploded")
+            return super().reset(scene, seed=seed)
+
+    name = "fault-on-second-scene-for-cli-test"
+    embodiment_decorator(name)(_FaultOnSecondScene)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=2",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "error: EmbodimentFault: reset exploded" in out
+    assert "  [error] scene-1\n" in out
+    assert "scene-0" not in out  # successful scenes are not failure context
+    assert out.count("EmbodimentFault: reset exploded") == 1
+    (written,) = tmp_path.glob("*.json")
+    assert f"hint: inspect-robots inspect {written}" in out
+
+
+def test_cli_run_prints_distinct_scene_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _ResetFailurePolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("policy reset exploded")
+
+    name = "reset-failure-for-cli-test"
+    policy_decorator(name)(_ResetFailurePolicy)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--fail-on-error",
+                "1",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error: fail_on_error threshold exceeded (1 errors)" in out
+    assert "[error] scene-0: PolicyError: policy reset exploded" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(

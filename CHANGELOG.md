@@ -28,6 +28,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`inspect-robots run` now surfaces evaluation failures in its summary**:
+  top-level errors, per-scene failure context, and a ready-to-run postmortem
+  `inspect` command are printed after unsuccessful runs (#57).
 - **Config `[*.args]` sections no longer follow a differently-selected
   component** (#44). `[policy.args]` / `[embodiment.args]` /
   `[sim_embodiment.args]` now apply only when the selected component matches
