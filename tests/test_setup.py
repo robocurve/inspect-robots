@@ -21,6 +21,7 @@ from inspect_robots._setup import (
     _scan_serial,
     run_setup,
 )
+from inspect_robots.conformance import DeviceSlot
 
 
 def _scripted_input(
@@ -51,6 +52,31 @@ def _make_devices(directory: Path, count: int = 3) -> list[str]:
         path.touch()
         devices.append(str(path))
     return devices
+
+
+def _make_can_interfaces(sysfs_net: Path, *names: str) -> None:
+    for name in names:
+        interface = sysfs_net / name
+        interface.mkdir(parents=True)
+        (interface / "type").write_text("280\n", encoding="utf-8")
+
+
+def _register_device_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    slots: tuple[DeviceSlot, ...],
+    name: str = "slot-body",
+) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = slots
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {name: _Factory} if kind == "embodiment" else {},
+    )
+
+
+def _slot_defaults(name: str = "slot-body") -> list[str]:
+    return ["", name, "", "", "", ""]
 
 
 @pytest.fixture(autouse=True)
@@ -1032,6 +1058,38 @@ def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
     assert "That was: camera-left" in out.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("noun", "retry_noun", "label", "expected"),
+    [
+        ("CAN interface", "CAN interface", "left CAN channel", "no CAN interface disappeared"),
+        ("serial device", "serial device", "arm serial port", "no serial device disappeared"),
+    ],
+)
+def test_identify_by_replug_parameterizes_non_camera_nouns(
+    noun: str,
+    retry_noun: str,
+    label: str,
+    expected: str,
+) -> None:
+    input_fn, prompts = _scripted_input([""])
+    out = io.StringIO()
+
+    identified = _identify_by_replug(
+        label,
+        ["device0"],
+        input_fn=input_fn,
+        out=out,
+        rescan=lambda: ["device0"],
+        noun=noun,
+        retry_noun=retry_noun,
+        unplug_label=label,
+    )
+
+    assert identified is None
+    assert prompts == [f"Unplug the {label} now, then press Enter..."]
+    assert expected in out.getvalue()
+
+
 @pytest.mark.parametrize("detected_on_retry", [True, False])
 def test_identify_by_replug_retries_replug_scan_once(
     detected_on_retry: bool,
@@ -1641,3 +1699,407 @@ def test_run_setup_reminder_names_only_the_missing_component(tmp_path: Path) -> 
     assert result == 0
     assert "reminder: embodiment 'yam_arms' not registered here" in text
     assert "policy 'molmoact2'" not in text.split("Wrote ")[1]
+
+
+def test_run_setup_registered_device_slots_use_labels_and_can_number_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left arm CAN channel"),),
+    )
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can_left")
+    input_fn, prompts = _scripted_input([*_slot_defaults(), "", "1"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        sysfs_net=sysfs_net,
+        serial_by_id_dir=tmp_path / "serial",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert "Found 1 CAN interface(s) under /sys/class/net:" in out.getvalue()
+    assert "  1. can_left" in out.getvalue()
+    assert any(
+        prompt == "left arm CAN channel — number, 'u' to identify by unplugging, 's' to skip: "
+        for prompt in prompts
+    )
+    assert "left_channel = can_left" in text
+
+
+@pytest.mark.parametrize("registered_without_slots", [False, True])
+def test_run_setup_falls_back_to_cameras_without_registered_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registered_without_slots: bool,
+) -> None:
+    if registered_without_slots:
+
+        class _Factory:
+            pass
+
+        monkeypatch.setattr(
+            "inspect_robots.registry.registered",
+            lambda kind: {"slot-body": _Factory} if kind == "embodiment" else {},
+        )
+    input_fn, prompts = _scripted_input([*_slot_defaults(), ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert any(prompt.startswith("Configure cameras?") for prompt in prompts)
+    assert not any(prompt.startswith("Configure devices?") for prompt in prompts)
+
+
+def test_run_setup_device_gate_defaults_no_without_probe_or_existing_arg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left arm CAN channel"),),
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults(), ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    assert result == 0
+    assert "Configure devices? [y/N] " in prompts
+    assert not any(prompt.startswith("left arm CAN channel") for prompt in prompts)
+
+
+def test_run_setup_serial_slots_support_number_and_manual_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (
+            DeviceSlot("controller_port", "serial", "controller serial port"),
+            DeviceSlot("debug_port", "serial", "debug serial port"),
+        ),
+    )
+    serial_by_id = tmp_path / "serial-by-id"
+    serial_by_id.mkdir()
+    listed = serial_by_id / "usb-controller"
+    listed.touch()
+    manual = "/remote/serial-controller"
+    input_fn, _ = _scripted_input([*_slot_defaults(), "", "1", manual])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        serial_by_id_dir=serial_by_id,
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert out.getvalue().count("Found 1 serial device(s) under /dev/serial/by-id:") == 1
+    assert f"controller_port = {listed}" in text
+    assert f"debug_port = {manual}" in text
+    assert f"warning: {manual} does not exist here" in out.getvalue()
+
+
+def test_run_setup_slot_duplicate_guard_is_same_kind_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (
+            DeviceSlot("top_cam", "v4l2", "top camera"),
+            DeviceSlot("side_cam", "v4l2", "side camera"),
+            DeviceSlot("controller_port", "serial", "controller serial port"),
+        ),
+    )
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id, count=2)
+    serial_by_id = tmp_path / "serial"
+    serial_by_id.mkdir()
+    (serial_by_id / "listed").touch()
+    input_fn, prompts = _scripted_input(
+        [*_slot_defaults(), "", devices[0], devices[0], "n", devices[1], devices[0]]
+    )
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+        serial_by_id_dir=serial_by_id,
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"warning: {devices[0]} is already assigned to top camera" in out.getvalue()
+    assert (
+        sum(
+            "Use " in prompt and "for both top camera and side camera?" in prompt
+            for prompt in prompts
+        )
+        == 1
+    )
+    assert f"top_cam = {devices[0]}" in text
+    assert f"side_cam = {devices[1]}" in text
+    assert f"controller_port = {devices[0]}" in text
+
+
+def test_run_setup_can_manual_entry_rejects_paths_and_warns_when_unlisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left arm CAN channel"),),
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults(), "y", "/dev/can0", "can_remote"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    assert result == 0
+    assert sum(prompt.startswith("left arm CAN channel") for prompt in prompts) == 2
+    assert "enter an interface number, bare interface name" in out.getvalue()
+    assert "warning: can_remote is not in the scanned CAN interfaces" in out.getvalue()
+    assert "left_channel = can_remote" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_can_manual_entry_accepts_a_listed_name_without_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left CAN channel"),),
+    )
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0")
+    input_fn, _ = _scripted_input([*_slot_defaults(), "", "can0"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        sysfs_net=sysfs_net,
+    )
+
+    assert result == 0
+    assert "not in the scanned CAN interfaces" not in out.getvalue()
+    assert "left_channel = can0" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_can_slot_identifies_by_unplug_rescan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left arm CAN channel"),),
+    )
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0")
+    pending = [*_slot_defaults(), "", "u", "", ""]
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        if prompt.startswith("Unplug the left arm CAN channel"):
+            (sysfs_net / "can0" / "type").write_text("1\n", encoding="utf-8")
+        elif prompt.startswith("Plug it back in"):
+            (sysfs_net / "can0" / "type").write_text("280\n", encoding="utf-8")
+        return pending.pop(0)
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=sysfs_net,
+    )
+
+    assert result == 0
+    assert "Unplug the left arm CAN channel now, then press Enter..." in prompts
+    assert "left_channel = can0" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("go_back", [False, True])
+def test_run_setup_device_group_all_or_none_keeps_ungrouped_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    go_back: bool,
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (
+            DeviceSlot("left_channel", "can", "left CAN channel", "arms"),
+            DeviceSlot("right_channel", "can", "right CAN channel", "arms"),
+            DeviceSlot("controller_port", "serial", "controller serial port"),
+        ),
+    )
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    serial_by_id = tmp_path / "serial"
+    serial_by_id.mkdir()
+    serial = serial_by_id / "controller"
+    serial.touch()
+    if not go_back:
+        path = _config_path(tmp_path)
+        path.parent.mkdir()
+        path.write_text(
+            "[defaults]\nembodiment = slot-body\n\n"
+            "[embodiment.args]\nleft_channel = old-left\nright_channel = old-right\n",
+            encoding="utf-8",
+        )
+    responses: list[str | BaseException] = [
+        *_slot_defaults(),
+        "",
+        "1",
+        "s",
+        "1",
+        "" if go_back else "n",
+    ]
+    if go_back:
+        responses += ["1", "2"]
+    input_fn, prompts = _scripted_input(responses)
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        sysfs_net=sysfs_net,
+        serial_by_id_dir=serial_by_id,
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert (
+        "slot-body needs all arms slots or none; writing none unless you go back" in out.getvalue()
+    )
+    assert f"controller_port = {serial}" in text
+    assert sum(prompt.startswith("controller serial port") for prompt in prompts) == 1
+    assert ("left_channel = can0" in text) is go_back
+    assert ("right_channel = can1" in text) is go_back
+    assert "old-left" not in text
+    assert "old-right" not in text
+
+
+def test_run_setup_declining_devices_preserves_slot_args_and_unmanaged_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left CAN channel"),),
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = slot-body\n\n"
+        "[embodiment.args]\nleft_channel = can9\ncalibration = preserved\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert "Configure devices? [Y/n] " in prompts
+    assert "left_channel = can9" in text
+    assert "calibration = preserved" in text
+    assert not any(prompt.startswith("left CAN channel") for prompt in prompts)
+
+
+def test_run_setup_slot_enter_accepts_current_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("left_channel", "can", "left CAN channel"),),
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = slot-body\n\n[embodiment.args]\nleft_channel = can0\n",
+        encoding="utf-8",
+    )
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0")
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=sysfs_net,
+    )
+
+    assert result == 0
+    assert any("[can0 (current)]" in prompt for prompt in prompts)
+    assert "left_channel = can0" in path.read_text(encoding="utf-8")
+
+
+def test_run_setup_v4l2_slot_can_switch_to_by_path_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("camera_device", "v4l2", "inspection camera"),),
+    )
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    _make_devices(by_id, count=1)
+    by_path_devices = _make_devices(by_path, count=2)
+    input_fn, prompts = _scripted_input([*_slot_defaults(), "", "p", "2"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert result == 0
+    assert "only 1 by-id entries for 2 detected cameras" in out.getvalue()
+    assert any("'s' to skip, 'p' to switch listing" in prompt for prompt in prompts)
+    assert f"camera_device = {by_path_devices[1]}" in _config_path(tmp_path).read_text(
+        encoding="utf-8"
+    )

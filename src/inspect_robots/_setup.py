@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import IO
 
 from inspect_robots._defaults import _config_path, parse_value
+from inspect_robots.conformance import DeviceSlot, device_slots
 
 # Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
 _BOLD = "1"
@@ -39,6 +40,7 @@ SUGGESTED: dict[str, str] = {
     "store_frames": "true",
 }
 CAM_ROLES: tuple[str, ...] = ("top", "left", "right")  # -> {role}_cam_device in [embodiment.args]
+CAMERA_KEYS: tuple[str, ...] = tuple(f"{role}_cam_device" for role in CAM_ROLES)
 V4L_BY_ID: Path = Path("/dev/v4l/by-id")
 V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
 SYSFS_NET: Path = Path("/sys/class/net")
@@ -219,21 +221,26 @@ def _identify_by_replug(
     input_fn: Callable[[str], str],
     out: IO[str],
     rescan: Callable[[], list[str]],
+    noun: str = "camera device",
+    plural_noun: str = "camera devices",
+    retry_noun: str = "camera",
+    unplug_label: str | None = None,
 ) -> str | None:
     """Identify one device by diffing the listing while it is unplugged."""
-    input_fn(f"Unplug the {role} camera now, then press Enter...")
+    label = unplug_label if unplug_label is not None else f"{role} camera"
+    input_fn(f"Unplug the {label} now, then press Enter...")
     unplugged_devices = rescan()
     disappeared = [device for device in devices if device not in unplugged_devices]
     if not disappeared:
         print(
-            _paint("no camera device disappeared; unplug one camera and try again", _YELLOW, out),
+            _paint(f"no {noun} disappeared; unplug one {retry_noun} and try again", _YELLOW, out),
             file=out,
         )
         return None
     if len(disappeared) > 1:
         print(
             _paint(
-                f"{len(disappeared)} camera devices disappeared; unplug only one and try again",
+                f"{len(disappeared)} {plural_noun} disappeared; unplug only one and try again",
                 _YELLOW,
                 out,
             ),
@@ -257,67 +264,92 @@ def _identify_by_replug(
     return identified
 
 
-def _camera_role_prompt(
-    role: str,
+def _device_slot_prompt(
+    label: str,
+    kind: str,
     devices: list[str],
     current: str | None,
     advertise_path_toggle: bool,
     *,
     out: IO[str],
+    camera_fallback: bool = False,
 ) -> str:
-    """Prompt text for one camera role, with the Enter-accept current value."""
-    choices = f"{role} camera — number, 'u' to identify by unplugging"
-    if advertise_path_toggle:
+    """Build one kind-aware device prompt with an Enter-accept current value."""
+    choices = f"{label} — number, 'u' to identify by unplugging"
+    if camera_fallback and advertise_path_toggle:
         choices += ", 'p' to switch listing"
     choices += ", 's' to skip"
+    if not camera_fallback and kind == "v4l2" and advertise_path_toggle:
+        choices += ", 'p' to switch listing"
     if current is None:
         return choices + ": "
     status = "current" if current in devices else "current, not detected"
     return f"{choices} [{_paint(f'{current} ({status})', _CYAN, out)}]: "
 
 
-def _prompt_camera_role(
-    role: str,
+def _prompt_device_slot(
+    label: str,
+    kind: str,
     by_id_devices: list[str],
     by_path_devices: list[str],
     active_is_by_id: bool,
     by_id_dir: Path,
     by_path_dir: Path,
     current: str | None,
-    assigned: dict[str, str],
+    assigned: dict[str, tuple[str, str, str]],
     advertise_path_toggle: bool,
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
+    rescan_by_id: Callable[[], list[str]],
+    rescan_by_path: Callable[[], list[str]],
+    camera_role: str | None = None,
 ) -> tuple[str | None, bool]:
-    """Prompt for one role and return its device plus active listing state."""
+    """Prompt for one slot and return its device plus active listing state."""
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
         device_dir = by_id_dir if active_is_by_id else by_path_dir
-        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle, out=out)
+        prompt = _device_slot_prompt(
+            label,
+            kind,
+            devices,
+            current,
+            advertise_path_toggle,
+            out=out,
+            camera_fallback=camera_role is not None,
+        )
         entered = input_fn(prompt).strip()
         selected: str | None = None
         if entered.lower() == "s":
             return None, active_is_by_id
-        if entered.lower() == "p":
+        if entered.lower() == "p" and kind == "v4l2":
             active_is_by_id = not active_is_by_id
             devices = by_id_devices if active_is_by_id else by_path_devices
             device_dir = by_id_dir if active_is_by_id else by_path_dir
             _print_camera_listing(devices, device_dir, out)
             continue
         if entered.lower() == "u":
+            nouns = {
+                "v4l2": ("camera device", "camera devices", "camera"),
+                "can": ("CAN interface", "CAN interfaces", "CAN interface"),
+                "serial": ("serial device", "serial devices", "serial device"),
+            }
             selected = _identify_by_replug(
-                role,
+                camera_role or label,
                 devices,
                 input_fn=input_fn,
                 out=out,
-                rescan=partial(_scan_cameras, device_dir),
+                rescan=rescan_by_id if active_is_by_id else rescan_by_path,
+                noun=nouns[kind][0],
+                plural_noun=nouns[kind][1],
+                retry_noun=nouns[kind][2],
+                unplug_label=None if camera_role is not None else label,
             )
             if selected is None:
                 continue
         elif not entered and current is not None:
             selected = current
-        elif entered.startswith("/") or Path(entered).is_absolute():
+        elif kind != "can" and (entered.startswith("/") or Path(entered).is_absolute()):
             # startswith("/") keeps POSIX rig paths accepted on Windows
             # workstations, where "/dev/v4l/..." is not drive-absolute.
             if not Path(entered).exists():
@@ -335,36 +367,56 @@ def _prompt_camera_role(
             number = int(entered)
             if 1 <= number <= len(devices):
                 selected = devices[number - 1]
+        elif kind == "can" and entered and "/" not in entered:
+            if entered not in devices:
+                print(
+                    _paint(
+                        f"warning: {entered} is not in the scanned CAN interfaces "
+                        "(ok if this config is for another machine)",
+                        _YELLOW,
+                        out,
+                    ),
+                    file=out,
+                )
+            selected = entered
         if selected is None:
+            instruction = (
+                "enter an interface number, bare interface name, 'u' to identify, or 's' to skip"
+                if kind == "can"
+                else "enter a device number, absolute path, 'u' to identify, or 's' to skip"
+            )
             print(
-                _paint(
-                    "enter a device number, absolute path, 'u' to identify, or 's' to skip",
-                    _YELLOW,
-                    out,
-                ),
+                _paint(instruction, _YELLOW, out),
                 file=out,
             )
             continue
 
-        other_role = next(
+        other = next(
             (
-                assigned_key.removesuffix("_cam_device")
-                for assigned_key, device in assigned.items()
-                if device == selected
+                (assigned_label, device)
+                for assigned_kind, assigned_label, device in assigned.values()
+                if assigned_kind == kind and device == selected
             ),
             None,
         )
-        if other_role is not None:
+        if other is not None:
+            other_label, _device = other
+            if camera_role is not None:
+                warning_label = f"the {other_label} camera"
+                question = f"Use {selected} for both {other_label} and {camera_role} cameras?"
+            else:
+                warning_label = other_label
+                question = f"Use {selected} for both {other_label} and {label}?"
             print(
                 _paint(
-                    f"warning: {selected} is already assigned to the {other_role} camera",
+                    f"warning: {selected} is already assigned to {warning_label}",
                     _YELLOW,
                     out,
                 ),
                 file=out,
             )
             if not _ask_yes_no(
-                f"Use {selected} for both {other_role} and {role} cameras?",
+                question,
                 False,
                 input_fn=input_fn,
                 out=out,
@@ -389,11 +441,10 @@ def _camera_section(
     device_dir = by_id_dir if active_is_by_id else by_path_dir
     advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
 
-    camera_keys = tuple(f"{role}_cam_device" for role in CAM_ROLES)
     existing_args = carried.get("embodiment.args", {})
-    default_enabled = bool(devices) or any(key in existing_args for key in camera_keys)
+    default_enabled = bool(devices) or any(key in existing_args for key in CAMERA_KEYS)
     if not _ask_yes_no("Configure cameras?", default_enabled, input_fn=input_fn, out=out):
-        return {key: existing_args[key] for key in camera_keys if key in existing_args}
+        return _preserve_managed_args(carried)
 
     if devices:
         _print_camera_listing(devices, device_dir, out)
@@ -416,23 +467,29 @@ def _camera_section(
 
     while True:
         assignments: dict[str, str] = {}
+        assigned_devices: dict[str, tuple[str, str, str]] = {}
         for role in CAM_ROLES:
             key = f"{role}_cam_device"
-            selected, active_is_by_id = _prompt_camera_role(
-                role,
+            selected, active_is_by_id = _prompt_device_slot(
+                f"{role} camera",
+                "v4l2",
                 by_id_devices,
                 by_path_devices,
                 active_is_by_id,
                 by_id_dir,
                 by_path_dir,
                 existing_args.get(key),
-                assignments,
+                assigned_devices,
                 advertise_path_toggle,
                 input_fn=input_fn,
                 out=out,
+                rescan_by_id=partial(_scan_cameras, by_id_dir),
+                rescan_by_path=partial(_scan_cameras, by_path_dir),
+                camera_role=role,
             )
             if selected is not None:
                 assignments[key] = selected
+                assigned_devices[key] = ("v4l2", role, selected)
         if len(assignments) in (0, len(CAM_ROLES)):
             return assignments
         print(
@@ -445,6 +502,161 @@ def _camera_section(
         )
         if not _ask_yes_no("Go back and choose cameras again?", True, input_fn=input_fn, out=out):
             return {}
+
+
+def _preserve_managed_args(
+    carried: dict[str, dict[str, str]],
+    managed_args: tuple[str, ...] = CAMERA_KEYS,
+) -> dict[str, str]:
+    """Return existing assignments for the keys managed by a device section."""
+    existing_args = carried.get("embodiment.args", {})
+    return {key: existing_args[key] for key in managed_args if key in existing_args}
+
+
+def _print_slot_listing(
+    kind: str,
+    devices: list[str],
+    directory: Path,
+    out: IO[str],
+) -> None:
+    """Print the first-use listing for one declared device kind."""
+    if kind == "v4l2":
+        _print_camera_listing(devices, directory, out)
+        return
+    noun = "CAN interface" if kind == "can" else "serial device"
+    display_dir = SYSFS_NET if kind == "can" else SERIAL_BY_ID
+    print(f"Found {len(devices)} {noun}(s) under {display_dir}:", file=out)
+    for number, device in enumerate(devices, start=1):
+        name = device if kind == "can" else Path(device).name
+        print(f"  {number}. {name}", file=out)
+
+
+def _device_section(
+    embodiment: str,
+    slots: tuple[DeviceSlot, ...],
+    carried: dict[str, dict[str, str]],
+    by_id_dir: Path,
+    by_path_dir: Path,
+    sysfs_net: Path,
+    serial_by_id_dir: Path,
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+) -> dict[str, str]:
+    """Offer and collect assignments for plugin-declared device slots."""
+    kinds = {slot.kind for slot in slots}
+    by_id_devices = _scan_cameras(by_id_dir) if "v4l2" in kinds else []
+    by_path_devices = _scan_cameras(by_path_dir) if "v4l2" in kinds else []
+    can_devices = _scan_can(sysfs_net) if "can" in kinds else []
+    serial_devices = _scan_serial(serial_by_id_dir) if "serial" in kinds else []
+    active_is_by_id = bool(by_id_devices) or not by_path_devices
+    advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
+    devices_by_kind = {
+        "v4l2": by_id_devices if active_is_by_id else by_path_devices,
+        "can": can_devices,
+        "serial": serial_devices,
+    }
+    managed_args = tuple(slot.arg for slot in slots)
+    existing_args = carried.get("embodiment.args", {})
+    default_enabled = any(devices_by_kind[kind] for kind in kinds) or any(
+        arg in existing_args for arg in managed_args
+    )
+    if not _ask_yes_no("Configure devices?", default_enabled, input_fn=input_fn, out=out):
+        return _preserve_managed_args(carried, managed_args)
+
+    listed_kinds: set[str] = set()
+    assignments: dict[str, str] = {}
+    assigned_devices: dict[str, tuple[str, str, str]] = {}
+
+    def prompt_slot(slot: DeviceSlot) -> None:
+        nonlocal active_is_by_id
+        if slot.kind == "v4l2":
+            primary_devices = by_id_devices
+            secondary_devices = by_path_devices
+            primary_dir = by_id_dir
+            secondary_dir = by_path_dir
+            current_devices = primary_devices if active_is_by_id else secondary_devices
+            current_dir = primary_dir if active_is_by_id else secondary_dir
+            rescan_primary = partial(_scan_cameras, primary_dir)
+            rescan_secondary = partial(_scan_cameras, secondary_dir)
+        elif slot.kind == "can":
+            primary_devices = secondary_devices = can_devices
+            primary_dir = secondary_dir = SYSFS_NET
+            current_devices = can_devices
+            current_dir = SYSFS_NET
+            rescan_primary = rescan_secondary = partial(_scan_can, sysfs_net)
+        else:
+            primary_devices = secondary_devices = serial_devices
+            primary_dir = secondary_dir = SERIAL_BY_ID
+            current_devices = serial_devices
+            current_dir = SERIAL_BY_ID
+            rescan_primary = rescan_secondary = partial(_scan_serial, serial_by_id_dir)
+
+        if slot.kind not in listed_kinds:
+            _print_slot_listing(slot.kind, current_devices, current_dir, out)
+            listed_kinds.add(slot.kind)
+            if slot.kind == "v4l2" and advertise_path_toggle:
+                print(
+                    _paint(
+                        f"only {len(by_id_devices)} by-id entries for "
+                        f"{len(by_path_devices)} detected cameras — identical cameras without "
+                        "serials collide there; by-path names are stable per physical USB port",
+                        _YELLOW,
+                        out,
+                    ),
+                    file=out,
+                )
+
+        selected, active_is_by_id = _prompt_device_slot(
+            slot.label,
+            slot.kind,
+            primary_devices,
+            secondary_devices,
+            active_is_by_id,
+            primary_dir,
+            secondary_dir,
+            existing_args.get(slot.arg),
+            assigned_devices,
+            advertise_path_toggle,
+            input_fn=input_fn,
+            out=out,
+            rescan_by_id=rescan_primary,
+            rescan_by_path=rescan_secondary,
+        )
+        assignments.pop(slot.arg, None)
+        assigned_devices.pop(slot.arg, None)
+        if selected is not None:
+            assignments[slot.arg] = selected
+            assigned_devices[slot.arg] = (slot.kind, slot.label, selected)
+
+    for slot in slots:
+        prompt_slot(slot)
+
+    groups = tuple(dict.fromkeys(slot.group for slot in slots if slot.group is not None))
+    for group in groups:
+        group_slots = tuple(slot for slot in slots if slot.group == group)
+        while 0 < sum(slot.arg in assignments for slot in group_slots) < len(group_slots):
+            print(
+                _paint(
+                    f"{embodiment} needs all {group} slots or none; "
+                    "writing none unless you go back",
+                    _YELLOW,
+                    out,
+                ),
+                file=out,
+            )
+            if not _ask_yes_no(
+                "Go back and choose devices again?", True, input_fn=input_fn, out=out
+            ):
+                for slot in group_slots:
+                    assignments.pop(slot.arg, None)
+                    assigned_devices.pop(slot.arg, None)
+                break
+            for slot in group_slots:
+                assignments.pop(slot.arg, None)
+                assigned_devices.pop(slot.arg, None)
+                prompt_slot(slot)
+    return assignments
 
 
 def _scan_cameras(v4l_dir: Path) -> list[str]:
@@ -510,6 +722,7 @@ def _render_config(
     defaults: dict[str, str],
     embodiment_args: dict[str, str],
     carried: dict[str, dict[str, str]],
+    managed_args: tuple[str, ...] = CAMERA_KEYS,
 ) -> str:
     """Render a full commented config while carrying unmanaged raw values."""
     sections: list[str] = []
@@ -532,16 +745,15 @@ def _render_config(
     if default_lines:
         sections.append("[defaults]\n" + "\n".join(default_lines))
 
-    camera_keys = tuple(f"{role}_cam_device" for role in CAM_ROLES)
     embodiment_lines: list[str] = []
-    for key in camera_keys:
+    for key in managed_args:
         if key in embodiment_args:
             # Enter-accepted "(current)" values come from the raw read and
             # can be multiline like any carried value.
             value = embodiment_args[key].replace("\n", "\n\t")
             embodiment_lines.append(f"{key} = {value}")
     for key, value in carried.get("embodiment.args", {}).items():
-        if key not in camera_keys:
+        if key not in managed_args:
             value = value.replace("\n", "\n\t")
             embodiment_lines.append(f"{key} = {value}")
     if embodiment_lines:
@@ -624,18 +836,42 @@ def run_setup(
             input_fn=input_fn,
             out=out,
         )
-        embodiment_args = _camera_section(
-            carried,
-            by_id_dir,
-            by_path_dir,
-            input_fn=input_fn,
-            out=out,
+        from inspect_robots.registry import registered
+
+        embodiment_factories = registered("embodiment")
+        configured_embodiment = defaults["embodiment"]
+        slots = (
+            device_slots(embodiment_factories[configured_embodiment])
+            if configured_embodiment in embodiment_factories
+            else ()
         )
+        if slots:
+            managed_args = tuple(slot.arg for slot in slots)
+            embodiment_args = _device_section(
+                configured_embodiment,
+                slots,
+                carried,
+                by_id_dir,
+                by_path_dir,
+                sysfs_net,
+                serial_by_id_dir,
+                input_fn=input_fn,
+                out=out,
+            )
+        else:
+            managed_args = CAMERA_KEYS
+            embodiment_args = _camera_section(
+                carried,
+                by_id_dir,
+                by_path_dir,
+                input_fn=input_fn,
+                out=out,
+            )
     except (EOFError, KeyboardInterrupt):
         print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)
         return 1
 
-    text = _render_config(defaults, embodiment_args, carried)
+    text = _render_config(defaults, embodiment_args, carried, managed_args)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
