@@ -107,6 +107,7 @@ def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
 def _prompt_defaults(
     carried: dict[str, dict[str, str]],
     *,
+    headless: bool,
     input_fn: Callable[[str], str],
     out: IO[str],
 ) -> dict[str, str]:
@@ -123,6 +124,13 @@ def _prompt_defaults(
     defaults: dict[str, str] = {}
     for key, suggestion in SUGGESTED.items():
         validate, constraint = validators[key]
+        if key == "rerun" and headless:
+            suggestion = "false"
+            print(
+                "no display detected (SSH?): the rerun viewer cannot open here; "
+                "frames still record with store_frames",
+                file=out,
+            )
         default = suggestion
         if key in raw_defaults:
             configured = raw_defaults[key]
@@ -452,7 +460,13 @@ def run_setup(
             else:
                 carried = raw_config
 
-        defaults = _prompt_defaults(carried, input_fn=input_fn, out=out)
+        headless = "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env
+        defaults = _prompt_defaults(
+            carried,
+            headless=headless,
+            input_fn=input_fn,
+            out=out,
+        )
         embodiment_args = _camera_section(
             carried,
             by_id_dir,

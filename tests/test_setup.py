@@ -220,7 +220,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     out = io.StringIO()
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -244,6 +244,81 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
     assert 'Next: uv run inspect-robots "place the fork on the plate"' in output
+
+
+def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:
+    scripted_input, prompts = _scripted_input([""] * 7)
+    out = io.StringIO()
+    note = (
+        "no display detected (SSH?): the rerun viewer cannot open here; "
+        "frames still record with store_frames"
+    )
+
+    def input_fn(prompt: str) -> str:
+        if prompt.startswith("live rerun viewer"):
+            assert note in out.getvalue().splitlines()
+        return scripted_input(prompt)
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "live rerun viewer [false]" in prompts[4]
+    assert out.getvalue().splitlines().count(note) == 1
+    assert "rerun = false" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("display_variable", ["DISPLAY", "WAYLAND_DISPLAY"])
+def test_run_setup_with_display_defaults_rerun_true_without_note(
+    tmp_path: Path,
+    display_variable: str,
+) -> None:
+    input_fn, prompts = _scripted_input([""] * 7)
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), display_variable: ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "live rerun viewer [true]" in prompts[4]
+    assert "no display detected (SSH?)" not in out.getvalue()
+    assert "rerun = true" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_headless_existing_rerun_true_wins_and_note_is_printed(
+    tmp_path: Path,
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text("[defaults]\nrerun = true\n", encoding="utf-8")
+    input_fn, prompts = _scripted_input([""] * 7)
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "live rerun viewer [true]" in prompts[4]
+    assert "no display detected (SSH?)" in out.getvalue()
+    assert "rerun = true" in path.read_text(encoding="utf-8")
 
 
 def test_run_setup_typed_overrides_land_in_file(tmp_path: Path) -> None:
@@ -276,7 +351,7 @@ def test_run_setup_reprompts_invalid_typed_values(tmp_path: Path) -> None:
     out = io.StringIO()
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -377,7 +452,7 @@ def test_run_setup_repairs_malformed_config_and_backs_it_up(tmp_path: Path, answ
     out = io.StringIO()
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -441,7 +516,7 @@ def test_run_setup_ignores_only_invalid_existing_prompt_values(tmp_path: Path) -
     assert "ignoring invalid rerun 'perhaps' from config.ini" in out.getvalue()
     assert any("policy [kept-policy]" in prompt for prompt in prompts)
     assert any("max steps [1200]" in prompt for prompt in prompts)
-    assert any("live rerun viewer [true]" in prompt for prompt in prompts)
+    assert any("live rerun viewer [false]" in prompt for prompt in prompts)
     assert any("store camera frames [false]" in prompt for prompt in prompts)
 
 
