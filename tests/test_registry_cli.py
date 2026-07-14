@@ -198,6 +198,101 @@ def test_cli_run_prints_distinct_scene_error(
     assert "[error] scene-0: PolicyError: policy reset exploded" in out
 
 
+def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Issue #73: a run in which every trial errored must not look healthy.
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _AlwaysBoomPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("invalid API key")
+
+    name = "always-boom-for-cli-test"
+    policy_decorator(name)(_AlwaysBoomPolicy)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "error: all 1 trial(s) errored; nothing was scored" in out
+    assert "[error] scene-0: PolicyError: invalid API key" in out
+    assert "trials: 1 (1 errored)" in out
+    (written,) = tmp_path.glob("*.json")
+    assert f"hint: inspect-robots inspect {written}" in out
+    # And `inspect` on the written log shows the same headline facts.
+    assert main(["inspect", str(written)]) == 1
+    out = capsys.readouterr().out
+    assert "status:      error" in out
+    assert "trials: 1 (1 errored)" in out
+
+
+def test_cli_partial_errors_stay_success_but_are_visible(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Issue #73: errored trials in an overall-success run must still be legible.
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _BoomOnSecondScenePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("policy reset exploded")
+            super().reset(scene)
+
+    name = "boom-on-second-scene-for-cli-test"
+    policy_decorator(name)(_BoomOnSecondScenePolicy)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=2",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    assert rc == 0  # data survived; library semantics unchanged for partials
+    out = capsys.readouterr().out
+    assert "status: success" in out
+    assert "trials: 2 (1 errored)" in out
+    assert "[error] scene-1: PolicyError: policy reset exploded" in out
+    (written,) = tmp_path.glob("*.json")
+    assert f"hint: inspect-robots inspect {written}" in out
+
+
 def test_cli_run_epochs_fail_on_error_store_frames(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

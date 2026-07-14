@@ -192,7 +192,9 @@ the path of the written log is printed.
 the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene.
 
-The exit code is `0` on a successful eval, `1` otherwise.
+The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
+the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
+scene; a run in which every trial errored reports `status: error` and exits `1`.
 
 ## `inspect-robots doctor`
 

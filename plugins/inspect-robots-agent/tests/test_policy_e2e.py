@@ -182,9 +182,11 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
     logs = ir_eval(
         _task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
     )
-    # A PolicyError marks the trial errored (never scored); the eval survives.
+    # A PolicyError marks the trial errored (never scored); the eval still
+    # returns a log, and with its only trial errored the log reports "error".
     (sample,) = logs[0].samples
     assert sample.status == "error"
+    assert logs[0].status == "error"
     (record,) = sink.records
     assert record.error is not None and "no tool call" in record.error
 

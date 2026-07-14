@@ -398,23 +398,26 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
 def _print_run_summary(log: EvalLog, log_path: str) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
+    errored_count = log.results.errored_trials
     status_color = _RED if failed else _GREEN
     print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
     if failed and log.error is not None:
         print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
-    if failed:
+    if failed or errored_count:
+        # Errored scenes are failure context even when the run as a whole
+        # succeeded (issue #73): a partially-errored "success" must be legible.
         for scene in log.samples:
             if scene.status == "error":
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
                 print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
-    print(
-        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
-        f"trials: {log.results.total_trials}"
-    )
+    trials = f"trials: {log.results.total_trials}"
+    if errored_count:
+        trials += f" ({errored_count} errored)"
+    print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
-    if failed:
+    if failed or errored_count:
         print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
 
 
@@ -589,7 +592,10 @@ def _cmd_inspect(path: str) -> int:
     print(f"status:      {log.status}")
     print(f"created:     {log.eval.created}")
     print(f"git:         {log.eval.git_commit}")
-    print(f"scenes:      {log.results.total_scenes}   trials: {log.results.total_trials}")
+    trials = f"trials: {log.results.total_trials}"
+    if log.results.errored_trials:
+        trials += f" ({log.results.errored_trials} errored)"
+    print(f"scenes:      {log.results.total_scenes}   {trials}")
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {value:.4g}")

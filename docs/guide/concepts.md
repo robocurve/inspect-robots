@@ -77,6 +77,9 @@ Every error raised from inside a trial carries the partial
 [`TrialRecord`][inspect_robots.rollout.TrialRecord] on its `record` attribute, so the
 steps that did run are delivered to sinks. Errored trials are recorded but
 never scored: a failed trial cannot masquerade as data in the metrics.
+A finished run in which every trial errored ends with `status: "error"` even
+under the default `fail_on_error=False`: a run that scored nothing is not a
+success.
 
 ## The eval log
 

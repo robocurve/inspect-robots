@@ -44,7 +44,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
   inside a trial carries the partial `TrialRecord` on `exc.record`.
 - `eval()` must always return/persist an `EvalLog` once rollouts have started —
   scorer/reducer failures degrade to an error log, never a crash. Errored
-  trials are recorded (and delivered to sinks) but **never scored**.
+  trials are recorded (and delivered to sinks) but **never scored**. A run in
+  which every trial errored ends with `status == "error"` even under the
+  default `fail_on_error=False`.
 - `eval()` closes embodiments it resolved from registry names ("close what we
   open"); caller-constructed objects are caller-owned.
 - `mock/` and core must never import `rerun`/`torch` at module top.

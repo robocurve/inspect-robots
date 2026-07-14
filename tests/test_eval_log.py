@@ -63,6 +63,14 @@ def test_eval_log_round_trips_through_dict() -> None:
     assert restored.results.metrics["success_at_end"] == 1.0
 
 
+def test_results_without_errored_trials_reads_with_default() -> None:
+    """Logs written before EvalResults.errored_trials existed must still read."""
+    data = _golden_log().to_dict()
+    data["results"].pop("errored_trials", None)
+    log = EvalLog.from_dict(data)
+    assert log.results.errored_trials == 0
+
+
 def test_golden_log_reads_back(tmp_path: Path) -> None:
     # A log written today must remain readable: persist, then read.
     path = tmp_path / "golden.json"
