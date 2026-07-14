@@ -456,6 +456,12 @@ def run_setup(
     if path is None:
         raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
 
+    print(f"inspect-robots setup — writes {path}", file=out)
+    print(
+        "Each prompt shows a [suggested] value: press Enter to accept it, or type a replacement.",
+        file=out,
+    )
+
     try:
         carried: dict[str, dict[str, str]] = {}
         if path.is_file():
@@ -473,6 +479,11 @@ def run_setup(
                     return 1
             else:
                 carried = raw_config
+                print(
+                    "Found an existing config; its values are the suggestions "
+                    f"below (the old file will be saved as {path.name}.bak).",
+                    file=out,
+                )
 
         headless = "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env
         defaults = _prompt_defaults(
