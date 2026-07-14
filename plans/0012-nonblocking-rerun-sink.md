@@ -850,6 +850,21 @@ git commit -m "docs(rerun): document non-blocking sink and drop policy"
 
 ---
 
+## Post-review amendments (PR #85)
+
+The fresh-eye PR review approved the design and requested four small changes,
+applied on top of the tasks above:
+
+- `_image` warns once (per sink) when JPEG compression falls back to raw
+  frames — a user who asked for compression should not silently get raw.
+- Drop counters count frames per camera (`len(payload.images)`), not
+  image-bearing payloads, so multi-camera rigs are not under-reported.
+- `on_trial_end` remembers a timed-out flush on `_WorkerState.stalled` and
+  skips the wait at later trial boundaries of the same generation, so a
+  permanently wedged viewer costs one `flush_timeout`, not one per trial.
+- `docs/guide/logging-and-rerun.md` documents the non-blocking behavior, the
+  drop policy, and the JPEG default with its `jpeg_quality=None` escape hatch.
+
 ## Explicit non-goals (YAGNI)
 
 - No CLI flags for `jpeg_quality`/`queue_size`; the defaults are chosen to be correct for the live-viewer path and callers constructing `RerunSink` directly can pass kwargs.

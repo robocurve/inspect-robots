@@ -157,6 +157,7 @@ def test_images_jpeg_compressed_by_default(monkeypatch: pytest.MonkeyPatch) -> N
     assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert camera == [("Compressed", 75)]
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 def test_jpeg_quality_none_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,24 +167,36 @@ def test_jpeg_quality_none_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert len(camera) == 1 and isinstance(camera[0], _CompressibleImage)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
-def test_old_sdk_without_compress_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_old_sdk_without_compress_warns_once_and_logs_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     logged = _install_fake_rerun(monkeypatch, image_cls=_RawImage)
     sink = RerunSink()
-    _log_one(sink)
-    assert sink.flush(timeout=5.0)
+    with pytest.warns(RuntimeWarning, match="could not JPEG-compress") as record:
+        _log_one(sink, 0)
+        _log_one(sink, 1)
+        assert sink.flush(timeout=5.0)
+    # Warned once for the whole sink, not once per frame.
+    assert len([w for w in record if "JPEG-compress" in str(w.message)]) == 1
     camera = [v for p, v in logged if p == "trial/camera/cam"]
-    assert len(camera) == 1 and isinstance(camera[0], _RawImage)
+    assert len(camera) == 2 and all(isinstance(c, _RawImage) for c in camera)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
-def test_compress_failure_falls_back_to_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_compress_failure_warns_and_falls_back_to_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     logged = _install_fake_rerun(monkeypatch, image_cls=_ExplodingImage)
     sink = RerunSink()
-    _log_one(sink)
-    assert sink.flush(timeout=5.0)
+    with pytest.warns(RuntimeWarning, match="could not JPEG-compress"):
+        _log_one(sink)
+        assert sink.flush(timeout=5.0)
     camera = [v for p, v in logged if p == "trial/camera/cam"]
     assert len(camera) == 1 and isinstance(camera[0], _ExplodingImage)
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 def test_log_step_never_blocks_when_viewer_stalls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,3 +353,30 @@ def test_eval_end_reports_dropped_data(monkeypatch: pytest.MonkeyPatch) -> None:
         sink.on_eval_end(None)  # type: ignore[arg-type]
     # Counters reset: a quiet follow-up eval must not re-report old drops.
     assert sink._dropped_frames == 0 and sink._dropped_steps == 0
+
+
+def test_trial_end_skips_flush_once_stalled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After one timed-out flush, later trial boundaries stop re-paying the timeout."""
+    gate = threading.Event()
+    _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(flush_timeout=0.05)
+    try:
+        _log_one(sink, 0)
+        _wait_for_inflight(sink)  # worker wedged: the flush below must time out
+        flush_timeouts: list[float | None] = []
+        original_flush = sink.flush
+
+        def _counting_flush(timeout: float | None = None) -> bool:
+            flush_timeouts.append(timeout)
+            return original_flush(timeout)
+
+        monkeypatch.setattr(sink, "flush", _counting_flush)
+        sink.on_trial_end(None)  # type: ignore[arg-type]  # times out, marks stalled
+        state = sink._state
+        assert state is not None and state.stalled
+        sink.on_trial_end(None)  # type: ignore[arg-type]  # skipped: no second flush
+        assert len(flush_timeouts) == 1
+    finally:
+        gate.set()
+    assert sink.flush(timeout=5.0)
+    sink.on_eval_end(None)  # type: ignore[arg-type]

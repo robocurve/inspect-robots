@@ -173,8 +173,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
   from "halt and require a human", so a faulted robot never auto-advances overnight.
 - **Rerun visualization.** Stream camera images, 3D poses, joint/action
   time-series, and success markers to a `.rrd` recording. Logging is non-blocking:
-  a slow viewer connection drops frames instead of stalling the robot control loop,
-  and camera streams are JPEG-compressed by default.
+  a slow viewer connection drops camera frames first (whole steps only under
+  sustained stall) instead of delaying the robot control loop, and camera
+  streams are JPEG-compressed by default.
 - **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
   packages. Entry points make them appear in `inspect-robots list` automatically.
 - **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal

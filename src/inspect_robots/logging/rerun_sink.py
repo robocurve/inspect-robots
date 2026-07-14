@@ -15,7 +15,9 @@ reported as a ``RuntimeWarning`` when the eval ends. The queue is drained at
 every trial boundary (bounded by ``flush_timeout``), so an eval that aborts
 mid-run loses at most the current trial's queued tail. Camera frames are
 JPEG-compressed by default (``jpeg_quality=75``); pass ``jpeg_quality=None``
-for lossless raw frames. All Rerun SDK calls after ``init``/``save`` happen on
+for lossless raw frames. If compression is unavailable (an SDK without
+``Image.compress``, or pillow missing), the sink warns once and logs raw
+frames. All Rerun SDK calls after ``init``/``save`` happen on
 the worker because the SDK's timeline state is thread-local; worker state is
 generation-scoped so a worker wedged in a blocked SDK call is disowned at
 shutdown and can never double-consume after a restart.
@@ -65,6 +67,7 @@ class _WorkerState:
 
     stop: threading.Event
     inflight: int = 0
+    stalled: bool = False
 
 
 class RerunSink:
@@ -100,6 +103,7 @@ class RerunSink:
         self._dropped_steps = 0
         self._image_watermark = max(1, queue_size // 4)
         self._emit_warned = False
+        self._compress_warned = False
 
     def _ensure_rerun(self) -> Any | None:
         if self._disabled:
@@ -140,24 +144,36 @@ class RerunSink:
             return scalars(value)
         return rr.Scalar(value)  # older SDKs
 
-    @staticmethod
-    def _image(rr: Any, image: ImageArray, jpeg_quality: int | None) -> Any:
+    def _image(self, rr: Any, image: ImageArray) -> Any:
         img = rr.Image(image)
-        if jpeg_quality is None:
+        if self.jpeg_quality is None:
             return img
         compress = getattr(img, "compress", None)
         if compress is None:  # pre-compress SDK surface: log raw
+            self._warn_compress_fallback("this rerun-sdk has no Image.compress")
             return img
         try:
-            return compress(jpeg_quality=jpeg_quality)
-        except Exception:  # encode failure (e.g. missing PIL): log raw
+            return compress(jpeg_quality=self.jpeg_quality)
+        except Exception as exc:  # encode failure (e.g. missing pillow): log raw
+            self._warn_compress_fallback(str(exc))
             return img
+
+    def _warn_compress_fallback(self, reason: str) -> None:
+        if self._compress_warned:
+            return
+        self._compress_warned = True
+        warnings.warn(
+            f"RerunSink could not JPEG-compress camera frames ({reason}); "
+            "logging raw frames instead. Install pillow for compression.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def _emit(self, rr: Any, payload: _StepPayload) -> None:
         self._set_step(rr, payload.t)
         pre = payload.prefix
         for cam, image in payload.images.items():
-            rr.log(f"{pre}/camera/{cam}", self._image(rr, image, self.jpeg_quality))
+            rr.log(f"{pre}/camera/{cam}", self._image(rr, image))
         for key, vec in payload.state.items():
             for i, scalar in enumerate(vec):
                 rr.log(f"{pre}/state/{key}/{i}", self._scalar(rr, float(scalar)))
@@ -187,13 +203,12 @@ class RerunSink:
     def _enqueue(self, payload: _StepPayload) -> None:
         with self._cond:
             if payload.images and len(self._queue) >= self._image_watermark:
+                self._dropped_frames += len(payload.images)
                 payload = dataclasses.replace(payload, images={})
-                self._dropped_frames += 1
             if len(self._queue) >= self.queue_size:
                 evicted = self._queue.popleft()
                 self._dropped_steps += 1
-                if evicted.images:
-                    self._dropped_frames += 1
+                self._dropped_frames += len(evicted.images)
             self._queue.append(payload)
             self._cond.notify_all()
 
@@ -252,7 +267,7 @@ class RerunSink:
                 # Disown the wedged worker: clear its backlog into the drop
                 # counters so a restarted worker never double-consumes it.
                 self._dropped_steps += len(self._queue)
-                self._dropped_frames += sum(1 for p in self._queue if p.images)
+                self._dropped_frames += sum(len(p.images) for p in self._queue)
                 self._queue.clear()
         self._emit_warned = False
         if wedged:
@@ -330,9 +345,16 @@ class RerunSink:
         (scorer/hook exceptions, Ctrl-C), so trial boundaries are the flush
         points that cap tail loss at one trial. Blocking here is bounded by
         ``flush_timeout`` and happens between trials, never inside the
-        control-rate loop.
+        control-rate loop. Once a flush times out, the connection is treated
+        as stalled for the rest of this worker generation and later trial
+        boundaries return immediately instead of re-paying the timeout; the
+        eval-end drop report still accounts for whatever never drained.
         """
-        self.flush(timeout=self.flush_timeout)
+        state = self._state
+        if state is not None and state.stalled:
+            return
+        if not self.flush(timeout=self.flush_timeout) and state is not None:
+            state.stalled = True
 
     def on_eval_end(self, log: EvalLog) -> None:
         """Flush queued data and stop the worker; waits at most ~2x ``flush_timeout``."""
