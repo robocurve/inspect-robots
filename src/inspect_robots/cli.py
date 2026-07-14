@@ -44,6 +44,7 @@ from inspect_robots._defaults import (
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
@@ -369,6 +370,29 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     record.events.append(operator_event(t=len(record.steps), verdict=answer))
 
 
+def _print_run_summary(log: EvalLog, log_path: str) -> None:
+    """Print the compact post-run summary and failure diagnostics."""
+    failed = log.status != "success"
+    status_color = _RED if failed else _GREEN
+    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
+    if failed and log.error is not None:
+        print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
+    if failed:
+        for scene in log.samples:
+            if scene.status == "error":
+                detail = "" if scene.error in (None, log.error) else f": {scene.error}"
+                print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
+    print(
+        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
+        f"trials: {log.results.total_trials}"
+    )
+    for name, value in sorted(log.results.metrics.items()):
+        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+    print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
+    if failed:
+        print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
@@ -521,15 +545,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
-    status_color = _GREEN if log.status == "success" else _RED
-    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
-    print(
-        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
-        f"trials: {log.results.total_trials}"
-    )
-    for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
-    print(f"{_styled('log:', _CYAN)} {_styled(str(sink.path), _DIM)}")
+    _print_run_summary(log, str(sink.path))
     return 0 if log.status == "success" else 1
 
 
