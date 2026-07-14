@@ -258,6 +258,7 @@ def _run_eval(
             "capabilities": sorted(embodiment.info.capabilities),
         },
         seed=seed,
+        max_steps=task.max_steps,
     )
     bus.on_eval_start(spec)
 
@@ -279,6 +280,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        termination_reasons: list[str | None] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -332,6 +334,7 @@ def _run_eval(
                     epoch_dicts.append({})
                     errored_trials += 1
                     judgements.append(None)
+                    termination_reasons.append(record.termination_reason)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -345,6 +348,7 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
+                    termination_reasons.append(record.termination_reason)
                 bus.on_trial_end(record)
 
             if halted:
@@ -386,6 +390,7 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                termination_reasons=tuple(termination_reasons),
             )
         )
         if stopped:

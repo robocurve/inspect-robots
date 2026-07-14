@@ -139,6 +139,14 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert log.status == "success"  # data survived: partials stay tolerated
     assert log.results.errored_trials == 1
     assert log.results.total_trials == 2
+    assert scene.termination_reasons == ("success", None)
+    assert len(scene.termination_reasons) == len(scene.epochs)
+
+
+def test_step_limit_reason_and_horizon_are_recorded(tmp_path: Path) -> None:
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].termination_reasons == ("max_steps",)
+    assert log.eval.max_steps == 1
 
 
 def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
