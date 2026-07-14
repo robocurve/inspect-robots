@@ -64,7 +64,7 @@ DEVICE_SLOTS = (
 - **can**: `_scan_can(sysfs_net: Path) -> list[str]` — a CAN interface is a
   netdev with ARPHRD type 280, so listing is a sysfs read: every child of
   `/sys/class/net` whose `type` file reads `280`. Sorted interface names
-  (`can_left`, `can0`, ...). No privileges, no subprocess. Missing dir or
+  (`can0`, `can_left`, ...). No privileges, no subprocess. Missing dir or
   unreadable `type` files → skipped/`[]`. `run_setup` gains
   `sysfs_net: Path = Path("/sys/class/net")`.
 - **serial**: `_scan_serial(serial_by_id_dir: Path) -> list[str]` — sorted
@@ -101,6 +101,10 @@ Slot mode reuses the existing role-prompt machinery, generalized:
   by-id/by-path toggle exists only for v4l2. Manual entry: absolute path
   for v4l2/serial (advisory existence warning, as today); for CAN a bare
   interface name (no `/`), advisory warning when not in the listing.
+  `_identify_by_replug`'s messages parameterize their noun ("no camera
+  device disappeared" stays byte-identical for v4l2, since fallback tests
+  assert it verbatim; CAN says "no CAN interface disappeared", serial "no
+  serial device disappeared").
 - "(current)" Enter-accept defaults from the existing config, per slot arg,
   as today.
 - Duplicate-assignment confirm works across all slots of the same kind.
@@ -109,9 +113,10 @@ Slot mode reuses the existing role-prompt machinery, generalized:
   go back"`). Ungrouped slots are independent.
 
 Managed keys become dynamic: `_render_config` and the decline-preserve path
-currently hardcode `camera_keys`; both take the interviewed keys as a
-parameter (`managed_args: tuple[str, ...]`). Slot mode passes the declared
-slot args; fallback mode passes the camera keys (behavior unchanged).
+currently hardcode `camera_keys`; both gain a `managed_args: tuple[str, ...]`
+parameter that DEFAULTS to the camera keys, so the eight existing direct
+`_render_config(...)` test call sites keep compiling and passing unchanged.
+Slot mode passes the declared slot args; fallback mode uses the default.
 Declining the section preserves existing assignments for managed args, the
 all-or-none "write none" branch drops the group's args, and carried
 non-managed `[embodiment.args]` keys pass through raw, all exactly as today.
@@ -127,16 +132,26 @@ non-managed `[embodiment.args]` keys pass through raw, all exactly as today.
 
 ## 5. udev pinning suggestion (issue Layer 3, print-only)
 
-After slot-mode assignment, when TWO OR MORE assigned CAN interfaces have
-kernel-default order-dependent names (regex `^can\d+$`):
+After slot-mode assignment, when the SCAN found two or more CAN
+interfaces with kernel-default order-dependent names (regex `^can\d+$`)
+AND at least one of them was assigned to a slot (the issue's trigger is
+"two identical adapters with order-dependent names": with two adapters
+present, even a single `left_channel = can0` assignment silently rebinds
+to the other physical arm on replug; a true single-adapter rig, where
+`can0` is deterministic, stays quiet):
 
-- Read each one's adapter serial via `_can_serial`.
+- Read the adapter serial of every order-dependent SCANNED interface via
+  `_can_serial` (unassigned ones included: pinning half a pair is no fix).
 - All readable and pairwise distinct → print (yellow) a warning that
   order-dependent names can swap which physical arm receives commands on
-  replug, then the exact rules snippet, one line per assignment, with a
-  suggested stable name derived from the slot arg (`left_channel` →
-  `can_left`: strip a trailing `_channel`/`_bus`, prefix `can_` unless the
-  remainder already starts with `can`):
+  replug, then the exact rules snippet, one line per scanned interface.
+  Assigned interfaces get a stable name derived from their slot arg
+  (`left_channel` → `can_left`: strip a trailing `_channel`/`_bus`, prefix
+  `can_` unless the remainder already starts with `can`); unassigned ones
+  get `can_<ifname>` (e.g. `can_can1` is ugly but valid; the text says the
+  names are suggestions to edit). If derivation yields duplicate names or
+  a name over Linux's 15-char IFNAMSIZ, fall back to `can_a`, `can_b`, ...
+  in scan order (deterministic, always valid):
 
 ```
 these CAN interfaces have order-dependent names; a replug can swap them.
@@ -172,14 +187,24 @@ The wizard never writes to `/etc` (sudo); this is guidance text only.
 
 `tests/test_setup.py` (fake sysfs tree in tmp_path: `net/<if>/type` files
 with `280`/`1`, `net/<if>/device` symlink into a `usb/...` dir whose parent
-holds `serial`):
+holds `serial`; symlink-dependent tests carry a skip guard for platforms
+where os.symlink needs privileges, keeping the advisory Windows tier green):
 - `_scan_can`: filters type==280, sorted, missing dir → `[]`, unreadable
   type file skipped. `_scan_serial`: listing, missing dir → `[]`.
   `_can_serial`: reads through the device symlink; missing serial → None.
 - Slot mode activates: registered factory with DEVICE_SLOTS → prompts use
   labels, CAN listing printed, number pick writes `left_channel = can_left`
   into `[embodiment.args]`; fallback mode when unregistered or no
-  declaration (existing camera tests keep passing untouched).
+  declaration (existing camera tests keep passing; the only mechanical
+  change they may need is none, thanks to the managed_args default).
+- Slot-mode "Configure devices?" gate: default no when no probe found
+  devices and no existing slot arg; default yes from existing config;
+  declining → section skipped.
+- A `serial`-kind slot end to end: listing header, number pick, and
+  absolute-path manual entry.
+- Duplicate guard in slot mode: same-kind duplicate → confirm prompt;
+  cross-kind identical strings cannot occur (paths vs names) but the
+  same-kind scoping branch is exercised.
 - CAN manual entry: bare name accepted with advisory warning when unlisted;
   absolute-path entry rejected vocabulary (re-prompt) since CAN wants a
   name; v4l2/serial keep path entry.
@@ -197,8 +222,8 @@ holds `serial`):
 
 ## 8. Execution
 
-Single PR on `feat/device-slots`, stacked on `feat/runtime-requirements`
-(rebase onto main once #62 merges). Commits: (1) protocol + probes,
+Single PR on `feat/device-slots`, branched from main (#62 already
+merged). Commits: (1) protocol + probes,
 (2) slot-driven interview + managed-args generalization, (3) udev
 suggestion, (4) docs. Gates per commit; Fable review-edit loop before
 merge.
