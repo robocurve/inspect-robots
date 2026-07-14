@@ -1,8 +1,10 @@
-# Embodiment `bind(task_info)`: let the body learn the rollout horizon
+# Embodiment `bind_task(envelope)`: let the body learn the rollout horizon
 
 Date: 2026-07-14
-Status: draft (headed for subagent critique loop; Jay approved the direction:
-kill the yam `max_steps_hint` duplication with a real core channel)
+Status: revised after subagent critique round 1 (renamed `TaskInfo` →
+`TaskEnvelope` to keep the Inspect-faithful name free, hook renamed
+`bind` → `bind_task`, dropped `control_hz`, added the optional-input adapter
+contract and yam migration notes)
 
 ## Problem
 
@@ -21,105 +23,153 @@ unset, the countdown silently drops the horizon (`t = 42s` instead of
 
 ## Design
 
-Mirror the existing policy-side precedent (plan 0008 §3c) exactly.
+Mirror the mechanics of the policy-side precedent (plan 0008 §3c): an
+optional duck-typed hook, not part of the Protocol, no-op default on the
+base class, called by `eval()` before the compatibility check.
 
-### `task.py` — `TaskInfo` and `Task.info`
+### `task.py` — `TaskEnvelope` and `Task.envelope`
 
-A small frozen dataclass carrying what a component may legitimately learn
+A small frozen dataclass carrying what an adapter may legitimately learn
 about the task it is running:
 
 ```python
 @dataclass(frozen=True)
-class TaskInfo:
-    """Identity and rollout envelope of a task, safe to hand to adapters."""
+class TaskEnvelope:
+    """Identity and rollout limits of a task, safe to hand to adapters."""
 
     name: str
     max_steps: int
-    control_hz: float | None = None
 ```
 
-`Task.info` is a property returning it, mirroring `policy.info` /
-`embodiment.info`. `control_hz` is the task's own rate (may be `None`); the
-embodiment already knows its own rate, and the chunk-level rate of R1's
-precedence chain cannot be known before inference, so `TaskInfo` does not
-pretend to resolve R1 — it reports the task layer only.
+`Task.envelope` is a property returning it (matching `Task`'s existing
+derived-view properties `scorers` / `epoch_spec`).
 
-No `epochs`, scenes, or scorers in `TaskInfo` (YAGNI; scoring and dataset
-contents are none of the embodiment's business).
+Naming: NOT `TaskInfo` — Inspect AI exports a `TaskInfo` (`file`/`name`/
+`attribs`, the `list_tasks()` listing entry), and plan 0001 §11 makes
+Inspect API fidelity binding, so that name stays reserved for a future
+faithful mirror. "Envelope" says what it is: the identity plus the limits of
+the run.
+
+No `control_hz`: the rollout loop does no pacing today (R1's chain is
+explicitly unwired, `rollout._effective_control_hz`), a `SELF_PACED`
+embodiment like yam paces at its own configured rate, and the chunk-level
+rate that tops R1's precedence cannot be known before inference — so a
+task-layer rate would only mislead adapters into wrong seconds math. Fields
+can be added compatibly later; removing an exported one cannot. No `epochs`,
+scenes, or scorers either (scoring and dataset contents are none of the
+embodiment's business).
 
 ### `embodiment.py` — optional duck-typed hook
 
-Exactly like `Policy`: the `Embodiment` Protocol is unchanged; its docstring
-documents an optional `bind(task_info)` hook that is not part of the
-Protocol, so every existing embodiment stays conformant. `EmbodimentBase`
-ships a no-op default:
+The `Embodiment` Protocol is unchanged; its docstring documents an optional
+`bind_task(envelope)` hook that is not part of the Protocol, so every
+existing embodiment stays conformant. `EmbodimentBase` ships a no-op
+default:
 
 ```python
-def bind(self, task_info: TaskInfo) -> None:  # noqa: B027 - no-op default
-    """Default: embodiments that don't display or pre-allocate per-task ignore it."""
+def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
+    """Default: embodiments with nothing to display or pre-allocate ignore it."""
 ```
+
+`TaskEnvelope` is imported under `TYPE_CHECKING` (the same mechanics
+`policy.py` uses for `EmbodimentInfo`) — no runtime import edge from
+`embodiment.py` to `task.py`.
+
+Naming: NOT bare `bind` — `policy.bind(embodiment_info)` means "receive your
+counterpart's info"; an embodiment hook receiving the *task* is a different
+relation, and reusing the name would leave it unavailable when policies
+later want the envelope too (the agent plugin's `_max_llm_calls` knob is the
+same duplication smell on the policy side). `bind_task` is unambiguous, can
+be adopted by policies with the identical signature later, and avoids
+duck-typing on `bind`, a common method name on transport-ish objects an
+embodiment might proxy.
 
 ### `eval.py` — call site
 
 Immediately next to the policy bind, before `assert_compatible` (fail fast
-before touching hardware), once per eval:
+before touching hardware), once per `eval()`:
 
 ```python
-bind_embodiment = getattr(embodiment, "bind", None)
-if callable(bind_embodiment):
-    bind_embodiment(task.info)
+bind_task = getattr(embodiment, "bind_task", None)
+if callable(bind_task):
+    bind_task(task.envelope)
 ```
 
-Error semantics match the policy hook: an exception from `bind` propagates
-and aborts the eval before any rollout starts (no trial exists yet, so
-nothing is recorded — same as a failing `assert_compatible`).
+Error semantics match the policy hook (verified): the call sits before sink
+construction and `bus.on_eval_start`, so a raising `bind_task` propagates
+and aborts with no log written — the same observable behavior as a
+`CompatibilityError`, and no conflict with the "always persist a log once
+rollouts have started" invariant (none has).
+
+### The adapter contract (goes in the hook docstrings)
+
+- **Optional input, not a guarantee:** the hook never fires on direct
+  `rollout()` calls or on older cores that predate it. Adapters must keep a
+  graceful fallback (yam: no horizon shown, exactly today's hint-unset
+  behavior).
+- **Re-bind, latest wins:** the hook fires once per `eval()`, which can be
+  several times over an embodiment's lifetime (`eval_set`, or a caller
+  reusing one instance across `eval()` calls). Each call replaces the
+  previous envelope.
 
 ### Public API
 
-`TaskInfo` is exported: add to `inspect_robots.__all__` and update
-`tests/test_api_snapshot.py` together (the repo rule). `Task` is already
-public.
+`TaskEnvelope` is exported: `__init__.py` import + `__all__` +
+`tests/test_api_snapshot.py` `EXPECTED` move together (any one missing fails
+the suite). Docs self-render via mkdocstrings (`docs/api/index.md` already
+includes `::: inspect_robots.task`).
 
 ### Out of scope (follow-up in `inspect-robots-yam`)
 
-The yam embodiment implements `bind(task_info)` to drive the countdown from
-the real horizon (`max_steps / control_hz`, preferring its own configured
-rate as today) and drops the `max_steps_hint` config knob entirely — it
-bounds nothing and is now auto-populated. That is a separate PR in the yam
-repo, gated the same way.
+The yam embodiment implements `bind_task` and computes the countdown as
+`envelope.max_steps / cfg.control_hz` — its own configured rate, which is
+correct because yam is `SELF_PACED` and that rate is the one it actually
+sleeps to. Migration constraints for that PR, recorded here because the core
+design creates them:
+
+- `max_steps_hint` cannot be deleted outright: `YamConfig.from_kwargs`
+  raises `TypeError` on unknown keys, so operators with the key in
+  `config.ini` would crash on upgrade. Deprecate first: accept the key,
+  warn, use it only as the fallback when `bind_task` never fires; delete in
+  a later release.
+- Version coupling: yam pins `inspect-robots>=0.8`. Either bump the floor to
+  the core release that ships `TaskEnvelope`, or keep the import under
+  `TYPE_CHECKING` (yam already uses `from __future__ import annotations`) so
+  the module still imports on older cores.
 
 ## Compatibility notes
 
 - Not a Protocol change: `runtime_checkable` `isinstance` checks and all
   existing embodiments (in-tree mock, isaacsim plugin, out-of-tree) are
-  untouched.
-- Name-collision risk (an existing embodiment with an unrelated `bind`
-  attribute) is the same risk the policy side accepted; symmetry wins.
-- `conformance.py` needs no change: the hook is optional, and
-  `check_embodiment` checks declarative readiness, not optional hooks.
-- Binding resolutions: R1 untouched (see above); the hook adds no rate
-  authority. Nothing in plans/0001 §9–§11 reserves the embodiment surface.
+  untouched; none defines `bind_task`.
+- `conformance.py` needs no change: `check_embodiment` checks declarative
+  readiness from `EmbodimentInfo`, and the attribute-scanning helpers read
+  only `DEVICE_SLOTS`/`RUNTIME_REQUIREMENTS`.
+- Binding resolutions: R1 untouched (the envelope carries no rate
+  authority); §11's Inspect-name fidelity is respected by avoiding
+  `TaskInfo`.
 
 ## Testing
 
 TDD; gates: 100% coverage, mypy strict, ruff (D1 docstrings).
 
-- `Task.info` returns the name/max_steps/control_hz of the task, frozen.
-- `eval()` calls `bind` on an embodiment that defines it, with the task's
-  `TaskInfo`, before `reset` is ever called (ordering assert), and exactly
-  once for multi-scene/multi-epoch tasks.
-- `eval()` runs unchanged for embodiments without `bind` (the mock world
-  keeps passing untouched — regression suite covers this for free) and for a
-  non-callable `bind` attribute.
-- A raising `bind` aborts the eval before any rollout (no log written —
-  matching a compat failure).
-- `EmbodimentBase.bind` default is a no-op (coverage).
+- `Task.envelope` returns the task's name and `max_steps`, frozen.
+- `eval()` calls `bind_task` on an embodiment that defines it, with the
+  task's envelope, before `reset` is ever called (ordering assert), and
+  exactly once per eval for multi-scene/multi-epoch tasks.
+- Two sequential `eval()` calls against one embodiment instance re-bind with
+  each task's envelope (latest wins).
+- `eval()` runs unchanged for embodiments without the hook (the existing
+  suite covers this for free) and for a non-callable `bind_task` attribute.
+- A raising `bind_task` aborts the eval before any rollout, with no log
+  written (matching a compat failure).
+- `EmbodimentBase.bind_task` default is a no-op (coverage).
 - API snapshot updated alongside `__all__`.
 
 ## Documentation
 
-- `embodiment.py` Protocol docstring documents the hook (mirroring
-  `Policy`'s wording).
-- `src/inspect_robots/CLAUDE.md` module-map rows for `task.py`,
-  `embodiment.py` (and `policy.py`'s row already mentions its hook — keep
-  the two rows parallel).
+- `embodiment.py` Protocol docstring documents the hook and the adapter
+  contract above (mirroring the wording style of `Policy`'s).
+- `src/inspect_robots/CLAUDE.md` module-map rows for `task.py` and
+  `embodiment.py` mention the envelope/hook, keeping parity with
+  `policy.py`'s row.
