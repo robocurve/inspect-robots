@@ -80,8 +80,8 @@ class MyArm:
         ...
 
     def step(self, action: Action) -> StepResult:
-        # Returns as soon as the command is issued; the framework paces the loop
-        # unless this embodiment declares the "self_paced" capability.
+        # The rollout applies no wall-clock pacing of its own. If this embodiment
+        # needs real-time cadence, pace it here and declare "self_paced".
         ...
 
     def close(self) -> None:

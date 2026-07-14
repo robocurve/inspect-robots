@@ -2,7 +2,7 @@
 
 Mirrors Inspect AI's ``Task = dataset + scorer + epochs/reducer``, adapted for
 robotics: the dataset is a sequence of [`Scene`][inspect_robots.scene.Scene] initial
-conditions and the rollout horizon (``max_steps``) and control rate live here.
+conditions and the rollout horizon (``max_steps``) lives here.
 """
 
 from __future__ import annotations
@@ -45,7 +45,6 @@ class Task:
     scorer: Scorer | str | Sequence[Scorer | str]
     max_steps: int
     epochs: int | Epochs = 1
-    control_hz: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

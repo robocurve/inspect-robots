@@ -293,7 +293,6 @@ def _run_eval(
                     controller=controller,
                     approver=approver,
                     sink=bus,
-                    control_hz=task.control_hz,
                     frame_store=frame_store,
                 )
             except (EmbodimentFault, SafetyAbort) as exc:
