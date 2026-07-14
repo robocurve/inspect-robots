@@ -3,12 +3,32 @@
 from __future__ import annotations
 
 import configparser
+import os
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import IO
 
 from inspect_robots._defaults import _config_path, parse_value
+
+# Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
+_BOLD = "1"
+_DIM = "2"
+_CYAN = "36"
+_GREEN = "32"
+_YELLOW = "33"
+
+
+def _paint(text: str, code: str, out: IO[str]) -> str:
+    """ANSI-wrap ``text`` when ``out`` is an interactive terminal.
+
+    Mirrors cli.py's ``_styled`` but tests the injected stream, so scripted
+    test runs (StringIO) and piped output stay escape-free.
+    """
+    if os.environ.get("NO_COLOR") or not out.isatty():
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
 
 SUGGESTED: dict[str, str] = {
     "policy": "molmoact2",
@@ -65,11 +85,11 @@ def _ask(
 ) -> str:
     """Ask for one value, accepting Enter as the displayed default."""
     while True:
-        entered = input_fn(f"{prompt} [{default}]: ").strip()
+        entered = input_fn(f"{prompt} [{_paint(default, _CYAN, out)}]: ").strip()
         value = entered if entered else default
         if validate(value):
             return value
-        print(constraint, file=out)
+        print(_paint(constraint, _YELLOW, out), file=out)
 
 
 def _ask_yes_no(
@@ -89,7 +109,7 @@ def _ask_yes_no(
             return True
         if entered in ("n", "no"):
             return False
-        print("please answer yes or no", file=out)
+        print(_paint("please answer yes or no", _YELLOW, out), file=out)
 
 
 def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
@@ -98,8 +118,12 @@ def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
 
     if name not in registered(kind):
         print(
-            f"'{name}' is not registered here — install its plugin, e.g. "
-            "`uv pip install inspect-robots-yam`",
+            _paint(
+                f"'{name}' is not registered here — install its plugin, e.g. "
+                "`uv pip install inspect-robots-yam`",
+                _YELLOW,
+                out,
+            ),
             file=out,
         )
 
@@ -127,8 +151,12 @@ def _prompt_defaults(
         if key == "rerun" and headless:
             suggestion = "false"
             print(
-                "no display detected (SSH?): the rerun viewer cannot open here; "
-                "frames still record with store_frames",
+                _paint(
+                    "no display detected (SSH?): the rerun viewer cannot open here; "
+                    "frames still record with store_frames",
+                    _YELLOW,
+                    out,
+                ),
                 file=out,
             )
         default = suggestion
@@ -137,7 +165,10 @@ def _prompt_defaults(
             if validate(configured):
                 default = configured
             else:
-                print(f"ignoring invalid {key} {configured!r} from config.ini", file=out)
+                print(
+                    _paint(f"ignoring invalid {key} {configured!r} from config.ini", _YELLOW, out),
+                    file=out,
+                )
         value = _ask(
             _PROMPT_LABELS[key],
             default,
@@ -171,24 +202,33 @@ def _identify_by_replug(
     unplugged_devices = rescan()
     disappeared = [device for device in devices if device not in unplugged_devices]
     if not disappeared:
-        print("no camera device disappeared; unplug one camera and try again", file=out)
+        print(
+            _paint("no camera device disappeared; unplug one camera and try again", _YELLOW, out),
+            file=out,
+        )
         return None
     if len(disappeared) > 1:
         print(
-            f"{len(disappeared)} camera devices disappeared; unplug only one and try again",
+            _paint(
+                f"{len(disappeared)} camera devices disappeared; unplug only one and try again",
+                _YELLOW,
+                out,
+            ),
             file=out,
         )
         return None
 
     identified = disappeared[0]
     name = Path(identified).name
-    print(f"That was: {name}", file=out)
+    print(f"That was: {_paint(name, _GREEN, out)}", file=out)
     input_fn("Plug it back in, then press Enter...")
     if identified not in rescan():
         input_fn(f"{name} was not detected; press Enter to rescan...")
         if identified not in rescan():
             print(
-                f"warning: {name} was still not detected; keeping the assignment",
+                _paint(
+                    f"warning: {name} was still not detected; keeping the assignment", _YELLOW, out
+                ),
                 file=out,
             )
     return identified
@@ -199,6 +239,7 @@ def _camera_role_prompt(
     devices: list[str],
     current: str | None,
     advertise_path_toggle: bool,
+    out: IO[str],
 ) -> str:
     choices = f"{role} camera — number, 'u' to identify by unplugging"
     if advertise_path_toggle:
@@ -207,7 +248,7 @@ def _camera_role_prompt(
     if current is None:
         return choices + ": "
     status = "current" if current in devices else "current, not detected"
-    return f"{choices} [{current} ({status})]: "
+    return f"{choices} [{_paint(f'{current} ({status})', _CYAN, out)}]: "
 
 
 def _prompt_camera_role(
@@ -228,7 +269,7 @@ def _prompt_camera_role(
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
         device_dir = by_id_dir if active_is_by_id else by_path_dir
-        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle)
+        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle, out)
         entered = input_fn(prompt).strip()
         selected: str | None = None
         if entered.lower() == "s":
@@ -256,8 +297,12 @@ def _prompt_camera_role(
             # workstations, where "/dev/v4l/..." is not drive-absolute.
             if not Path(entered).exists():
                 print(
-                    f"warning: {entered} does not exist here "
-                    "(ok if this config is for another machine)",
+                    _paint(
+                        f"warning: {entered} does not exist here "
+                        "(ok if this config is for another machine)",
+                        _YELLOW,
+                        out,
+                    ),
                     file=out,
                 )
             selected = entered
@@ -267,7 +312,11 @@ def _prompt_camera_role(
                 selected = devices[number - 1]
         if selected is None:
             print(
-                "enter a device number, absolute path, 'u' to identify, or 's' to skip",
+                _paint(
+                    "enter a device number, absolute path, 'u' to identify, or 's' to skip",
+                    _YELLOW,
+                    out,
+                ),
                 file=out,
             )
             continue
@@ -282,7 +331,11 @@ def _prompt_camera_role(
         )
         if other_role is not None:
             print(
-                f"warning: {selected} is already assigned to the {other_role} camera",
+                _paint(
+                    f"warning: {selected} is already assigned to the {other_role} camera",
+                    _YELLOW,
+                    out,
+                ),
                 file=out,
             )
             if not _ask_yes_no(
@@ -321,14 +374,18 @@ def _camera_section(
         _print_camera_listing(devices, device_dir, out)
     else:
         print(
-            "no /dev/v4l devices found (not Linux, or no cameras attached)",
+            _paint("no /dev/v4l devices found (not Linux, or no cameras attached)", _YELLOW, out),
             file=out,
         )
     if advertise_path_toggle:
         print(
-            f"only {len(by_id_devices)} by-id entries for "
-            f"{len(by_path_devices)} detected cameras — identical cameras without serials "
-            "collide there; by-path names are stable per physical USB port",
+            _paint(
+                f"only {len(by_id_devices)} by-id entries for "
+                f"{len(by_path_devices)} detected cameras — identical cameras without serials "
+                "collide there; by-path names are stable per physical USB port",
+                _YELLOW,
+                out,
+            ),
             file=out,
         )
 
@@ -354,7 +411,11 @@ def _camera_section(
         if len(assignments) in (0, len(CAM_ROLES)):
             return assignments
         print(
-            "yam_arms needs all three cameras or none; writing none unless you go back",
+            _paint(
+                "yam_arms needs all three cameras or none; writing none unless you go back",
+                _YELLOW,
+                out,
+            ),
             file=out,
         )
         if not _ask_yes_no("Go back and choose cameras again?", True, input_fn=input_fn, out=out):
@@ -456,9 +517,14 @@ def run_setup(
     if path is None:
         raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
 
-    print(f"inspect-robots setup — writes {path}", file=out)
+    print(f"{_paint('inspect-robots setup', _BOLD, out)} — writes {path}", file=out)
     print(
-        "Each prompt shows a [suggested] value: press Enter to accept it, or type a replacement.",
+        _paint(
+            "Each prompt shows a [suggested] value: press Enter to accept it, "
+            "or type a replacement.",
+            _DIM,
+            out,
+        ),
         file=out,
     )
 
@@ -467,7 +533,7 @@ def run_setup(
         if path.is_file():
             raw_config = _read_raw_config(path)
             if isinstance(raw_config, str):
-                print(raw_config, file=out)
+                print(_paint(raw_config, _YELLOW, out), file=out)
                 repair = _ask_yes_no(
                     "Back up the broken file and start fresh?",
                     True,
@@ -475,13 +541,17 @@ def run_setup(
                     out=out,
                 )
                 if not repair:
-                    print("setup aborted; nothing written", file=out)
+                    print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)
                     return 1
             else:
                 carried = raw_config
                 print(
-                    "Found an existing config; its values are the suggestions "
-                    f"below (the old file will be saved as {path.name}.bak).",
+                    _paint(
+                        "Found an existing config; its values are the suggestions "
+                        f"below (the old file will be saved as {path.name}.bak).",
+                        _DIM,
+                        out,
+                    ),
                     file=out,
                 )
 
@@ -500,7 +570,7 @@ def run_setup(
             out=out,
         )
     except (EOFError, KeyboardInterrupt):
-        print("setup aborted; nothing written", file=out)
+        print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)
         return 1
 
     text = _render_config(defaults, embodiment_args, carried)
@@ -510,6 +580,7 @@ def run_setup(
     if path.is_file():
         path.replace(path.with_name(path.name + ".bak"))
     tmp.replace(path)
-    print(f"Wrote {path}", file=out)
-    print('Next: uv run inspect-robots "place the fork on the plate"', file=out)
+    print(_paint(f"Wrote {path}", _GREEN, out), file=out)
+    next_cmd = 'uv run inspect-robots "place the fork on the plate"'
+    print(f"Next: {_paint(next_cmd, _CYAN, out)}", file=out)
     return 0
