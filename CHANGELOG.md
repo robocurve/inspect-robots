@@ -31,6 +31,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Literal percent signs in config values now round-trip unchanged** (#54).
+  Config reads no longer treat `%` as interpolation syntax, so values such as
+  `policy = 50%off` work with `config set`, `config show`, and normal runs.
+- **Component argument mistakes now fail cleanly and stale args are flagged**
+  (#47). Changing a configured component warns when its non-empty args section
+  still belongs to the old name, and invalid constructor kwargs exit with
+  guidance to check the config section or CLI args flag instead of a traceback.
 - **`inspect-robots run` now surfaces evaluation failures in its summary**:
   top-level errors, per-scene failure context, and a ready-to-run postmortem
   `inspect` command are printed after unsuccessful runs (#57).

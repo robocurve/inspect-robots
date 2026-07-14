@@ -724,6 +724,31 @@ def test_sim_embodiment_args_reach_constructor_and_e_flag_overrides(
     capsys.readouterr()
 
 
+def test_env_selected_sim_drops_args_owned_by_configured_sim(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "sim_embodiment = other-sim\n"
+        "scorer = success_at_end\n"
+        "[sim_embodiment.args]\n"
+        "bogus_sim_knob = 1\n",
+    )
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    log_dir = tmp_path / "logs"
+
+    assert main(["reach the cube", "--sim", "--log-dir", str(log_dir)]) == 0
+    assert (
+        "note: ignoring [sim_embodiment.args] for 'cubepick': they apply to 'other-sim'"
+    ) in capsys.readouterr().err
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 1.0
+
+
 def test_sim_conflicts_with_explicit_embodiment() -> None:
     with pytest.raises(SystemExit, match="drop one"):
         main(["run", "--instruction", "reach it", "--sim", "--embodiment", "cubepick"])
@@ -1204,6 +1229,77 @@ def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
             ]
         )
     assert "Traceback" not in str(excinfo.value)
+
+
+def test_component_type_error_from_config_args_exits_cleanly(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid persisted kwargs must identify their component and both sources."""
+    from inspect_robots.registry import policy as policy_decorator
+
+    name = "strict-args-policy-for-cli-test"
+
+    @policy_decorator(name)
+    def _factory() -> ScriptedPolicy:
+        return ScriptedPolicy()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        f"policy = {name}\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for policy {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "[policy.args]" in message and "-P k=v" in message
+    assert "Traceback" not in message
+
+
+def test_sim_embodiment_type_error_names_sim_args_section(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid sim kwargs must identify the sim-specific config section."""
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "strict-args-sim-embodiment-for-cli-test"
+
+    @embodiment_decorator(name)
+    def _factory() -> CubePickEmbodiment:
+        return CubePickEmbodiment()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "scorer = success_at_end\n"
+        f"sim_embodiment = {name}\n"
+        "[sim_embodiment.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--sim", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for embodiment {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "check [sim_embodiment.args]" in message
+    assert "-E k=v" in message
+    assert "check [embodiment.args]" not in message
+    assert "Traceback" not in message
 
 
 # --- doctor (adapter conformance) ---------------------------------------------
