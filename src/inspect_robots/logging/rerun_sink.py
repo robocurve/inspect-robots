@@ -14,15 +14,33 @@ Install with ``pip install "inspect-robots[rerun]"``.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
+
+from inspect_robots.types import ImageArray
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog, EvalSpec
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.types import Action, Observation, StepResult
+
+
+@dataclasses.dataclass(frozen=True)
+class _StepPayload:
+    """One transition, snapshotted so no live buffers are shared across threads."""
+
+    prefix: str
+    t: int
+    images: dict[str, ImageArray]
+    state: dict[str, npt.NDArray[np.float64]]
+    action: npt.NDArray[np.float64]
+    reward: float | None
+    terminated: bool
+    termination_reason: str | None
 
 
 class RerunSink:
@@ -34,10 +52,12 @@ class RerunSink:
         *,
         application_id: str = "inspect_robots",
         spawn: bool = False,
+        jpeg_quality: int | None = 75,
     ):
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
+        self.jpeg_quality = jpeg_quality
         self._rr: Any | None = None
         self._warned = False
         self._disabled = False
@@ -82,6 +102,37 @@ class RerunSink:
             return scalars(value)
         return rr.Scalar(value)  # older SDKs
 
+    @staticmethod
+    def _image(rr: Any, image: ImageArray, jpeg_quality: int | None) -> Any:
+        img = rr.Image(image)
+        if jpeg_quality is None:
+            return img
+        compress = getattr(img, "compress", None)
+        if compress is None:  # pre-compress SDK surface: log raw
+            return img
+        try:
+            return compress(jpeg_quality=jpeg_quality)
+        except Exception:  # encode failure (e.g. missing PIL): log raw
+            return img
+
+    def _emit(self, rr: Any, payload: _StepPayload) -> None:
+        self._set_step(rr, payload.t)
+        pre = payload.prefix
+        for cam, image in payload.images.items():
+            rr.log(f"{pre}/camera/{cam}", self._image(rr, image, self.jpeg_quality))
+        for key, vec in payload.state.items():
+            for i, scalar in enumerate(vec):
+                rr.log(f"{pre}/state/{key}/{i}", self._scalar(rr, float(scalar)))
+        for i, scalar in enumerate(payload.action):
+            rr.log(f"{pre}/action/{i}", self._scalar(rr, float(scalar)))
+        if payload.reward is not None:
+            rr.log(f"{pre}/reward", self._scalar(rr, payload.reward))
+        if payload.terminated:
+            rr.log(
+                f"{pre}/event/terminated",
+                rr.TextLog(payload.termination_reason or "terminated"),
+            )
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Initialize recording, disabling this noncritical sink after startup failure."""
         rr = self._ensure_rerun()
@@ -111,26 +162,24 @@ class RerunSink:
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
-        """Stream one transition's observations, action, reward, and termination marker."""
+        """Snapshot one transition's observations, action, reward, and termination marker."""
         rr = self._ensure_rerun()
         if rr is None:
             return
-        self._set_step(rr, t)
-        pre = self._prefix
-        for cam, image in observation.images.items():
-            rr.log(f"{pre}/camera/{cam}", rr.Image(image))
-        for key, value in observation.state.items():
-            for i, scalar in enumerate(np.atleast_1d(np.asarray(value, dtype=np.float64))):
-                rr.log(f"{pre}/state/{key}/{i}", self._scalar(rr, float(scalar)))
-        for i, scalar in enumerate(np.atleast_1d(np.asarray(action.data, dtype=np.float64))):
-            rr.log(f"{pre}/action/{i}", self._scalar(rr, float(scalar)))
-        if result.reward is not None:
-            rr.log(f"{pre}/reward", self._scalar(rr, float(result.reward)))
-        if result.terminated:
-            rr.log(
-                f"{pre}/event/terminated",
-                rr.TextLog(result.termination_reason or "terminated"),
-            )
+        payload = _StepPayload(
+            prefix=self._prefix,
+            t=t,
+            images={cam: np.array(img) for cam, img in observation.images.items()},
+            state={
+                key: np.atleast_1d(np.array(value, dtype=np.float64))
+                for key, value in observation.state.items()
+            },
+            action=np.atleast_1d(np.array(action.data, dtype=np.float64)),
+            reward=None if result.reward is None else float(result.reward),
+            terminated=result.terminated,
+            termination_reason=result.termination_reason,
+        )
+        self._emit(rr, payload)
 
     def on_trial_end(self, record: TrialRecord) -> None:
         """Leave completed trial entities intact for the remainder of the recording."""

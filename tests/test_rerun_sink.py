@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+import threading
+import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from inspect_robots import eval
@@ -14,6 +18,7 @@ from inspect_robots.registry import registered
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
+from inspect_robots.types import Action, Observation, StepResult
 
 _RERUN_INSTALLED = importlib.util.find_spec("rerun") is not None
 
@@ -77,3 +82,100 @@ def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
         )
     assert sink.available is False  # dormant from here on
     sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
+
+
+class _RawImage:
+    """Fake rr.Image archetype without a compress method (old SDK surface)."""
+
+    def __init__(self, img: object) -> None:
+        self.img = img
+
+
+class _CompressibleImage(_RawImage):
+    """Fake rr.Image archetype whose compress returns a marker value."""
+
+    def compress(self, *, jpeg_quality: int) -> tuple[str, int]:
+        """Return a marker so tests can assert compression was applied."""
+        return ("Compressed", jpeg_quality)
+
+
+class _ExplodingImage(_RawImage):
+    """Fake rr.Image archetype whose compress always fails."""
+
+    def compress(self, *, jpeg_quality: int) -> tuple[str, int]:
+        """Raise to exercise the raw-image fallback."""
+        raise ValueError("cannot encode")
+
+
+def _install_fake_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    image_cls: type[_RawImage] = _CompressibleImage,
+    gate: threading.Event | None = None,
+    log_error: Exception | None = None,
+) -> list[tuple[str, object]]:
+    """Install a fake ``rerun`` module (new-API surface); return the (path, value) log."""
+    logged: list[tuple[str, object]] = []
+    fake = types.ModuleType("rerun")
+
+    def _log(path: str, value: object = None, **_kwargs: object) -> None:
+        if gate is not None:
+            gate.wait(timeout=30.0)
+        if log_error is not None:
+            raise log_error
+        logged.append((path, value))
+
+    fake.init = lambda *a, **k: None  # type: ignore[attr-defined]
+    fake.save = lambda p: None  # type: ignore[attr-defined]
+    fake.set_time = lambda *a, **k: None  # type: ignore[attr-defined]
+    fake.log = _log  # type: ignore[attr-defined]
+    fake.Image = image_cls  # type: ignore[attr-defined]
+    fake.Scalars = lambda v: ("Scalars", v)  # type: ignore[attr-defined]
+    fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "rerun", fake)
+    return logged
+
+
+def _obs(*, with_image: bool = True) -> Observation:
+    images = {"cam": np.zeros((4, 4, 3), dtype=np.uint8)} if with_image else {}
+    return Observation(images=images, state={"q": np.array([1.0])})
+
+
+def _step_result() -> StepResult:
+    return StepResult(observation=Observation(), reward=1.0)
+
+
+def _log_one(sink: RerunSink, t: int = 0, *, with_image: bool = True) -> None:
+    sink.log_step(t, _obs(with_image=with_image), Action(data=np.array([0.5])), _step_result())
+
+
+def test_images_jpeg_compressed_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _install_fake_rerun(monkeypatch, image_cls=_CompressibleImage)
+    sink = RerunSink()
+    _log_one(sink)
+    camera = [v for p, v in logged if p == "trial/camera/cam"]
+    assert camera == [("Compressed", 75)]
+
+
+def test_jpeg_quality_none_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _install_fake_rerun(monkeypatch, image_cls=_CompressibleImage)
+    sink = RerunSink(jpeg_quality=None)
+    _log_one(sink)
+    camera = [v for p, v in logged if p == "trial/camera/cam"]
+    assert len(camera) == 1 and isinstance(camera[0], _CompressibleImage)
+
+
+def test_old_sdk_without_compress_logs_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _install_fake_rerun(monkeypatch, image_cls=_RawImage)
+    sink = RerunSink()
+    _log_one(sink)
+    camera = [v for p, v in logged if p == "trial/camera/cam"]
+    assert len(camera) == 1 and isinstance(camera[0], _RawImage)
+
+
+def test_compress_failure_falls_back_to_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _install_fake_rerun(monkeypatch, image_cls=_ExplodingImage)
+    sink = RerunSink()
+    _log_one(sink)
+    camera = [v for p, v in logged if p == "trial/camera/cam"]
+    assert len(camera) == 1 and isinstance(camera[0], _ExplodingImage)
