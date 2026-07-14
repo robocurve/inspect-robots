@@ -2,14 +2,54 @@
 
 from __future__ import annotations
 
+import io
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from inspect_robots._setup import (
     SUGGESTED,
     _read_raw_config,
     _render_config,
     _scan_cameras,
+    run_setup,
 )
+
+
+def _scripted_input(
+    responses: list[str | BaseException],
+) -> tuple[Callable[[str], str], list[str]]:
+    pending = responses.copy()
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        response = pending.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    return input_fn, prompts
+
+
+def _config_path(tmp_path: Path) -> Path:
+    return tmp_path / "inspect-robots" / "config.ini"
+
+
+def _make_devices(directory: Path, count: int = 3) -> list[str]:
+    directory.mkdir(parents=True)
+    devices: list[str] = []
+    for number in range(1, count + 1):
+        path = directory / f"camera-{number}-video-index0"
+        path.touch()
+        devices.append(str(path))
+    return devices
+
+
+@pytest.fixture(autouse=True)
+def _empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("inspect_robots.registry.registered", lambda _kind: {})
 
 
 def test_scan_cameras_prefers_sorted_absolute_index0_entries(tmp_path: Path) -> None:
@@ -170,3 +210,541 @@ def test_render_config_carries_unmanaged_content_without_managed_duplicates(
     assert "/dev/old-top" not in rendered
     assert rendered.index("[defaults]") < rendered.index("[embodiment.args]")
     assert rendered.index("[embodiment.args]") < rendered.index("[policy.args]")
+
+
+def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    path = _config_path(tmp_path)
+    assert result == 0
+    assert path.read_text(encoding="utf-8") == _render_config(
+        dict(SUGGESTED),
+        {
+            "top_cam_device": devices[0],
+            "left_cam_device": devices[1],
+            "right_cam_device": devices[2],
+        },
+        {},
+    )
+    output = out.getvalue()
+    assert f"Found 3 camera device(s) under {by_id}:" in output
+    assert f"  1. {Path(devices[0]).name}" in output
+    assert f"Wrote {path}" in output
+    assert 'Next: uv run inspect-robots "place the fork on the plate"' in output
+
+
+def test_run_setup_typed_overrides_land_in_file(tmp_path: Path) -> None:
+    input_fn, _ = _scripted_input(["my-policy", "my-body", "my-scorer", "42", "false", "false", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert "policy = my-policy" in text
+    assert "embodiment = my-body" in text
+    assert "scorer = my-scorer" in text
+    assert "max_steps = 42" in text
+    assert "rerun = false" in text
+    assert "store_frames = false" in text
+    assert "[embodiment.args]" not in text
+
+
+def test_run_setup_reprompts_invalid_typed_values(tmp_path: Path) -> None:
+    input_fn, prompts = _scripted_input(
+        ["", "", "", "abc", "0", "7", "maybe", "false", "1", "true", ""]
+    )
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert sum(prompt.startswith("max steps ") for prompt in prompts) == 3
+    assert sum(prompt.startswith("live rerun viewer ") for prompt in prompts) == 2
+    assert sum(prompt.startswith("store camera frames ") for prompt in prompts) == 2
+    assert out.getvalue().count("must be an integer >= 1") == 2
+    assert out.getvalue().count("must be true or false") == 2
+
+
+def test_run_setup_noninteractive_raises() -> None:
+    input_fn, _ = _scripted_input([])
+
+    with pytest.raises(
+        SystemExit,
+        match=r"^setup is interactive; see the README for manual config$",
+    ):
+        run_setup({}, input_fn=input_fn, out=io.StringIO(), interactive=False)
+
+
+def test_run_setup_without_config_home_raises() -> None:
+    input_fn, _ = _scripted_input([])
+
+    with pytest.raises(
+        SystemExit,
+        match=r"^cannot locate a config home: set \$XDG_CONFIG_HOME or \$HOME$",
+    ):
+        run_setup({}, input_fn=input_fn, out=io.StringIO(), interactive=True)
+
+
+@pytest.mark.parametrize("interruption", [EOFError(), KeyboardInterrupt()])
+def test_run_setup_interruption_aborts_without_writing(
+    tmp_path: Path, interruption: BaseException
+) -> None:
+    input_fn, _ = _scripted_input(["", interruption])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 1
+    assert "setup aborted; nothing written" in out.getvalue()
+    assert not _config_path(tmp_path).exists()
+    assert not _config_path(tmp_path).with_name("config.ini.bak").exists()
+
+
+def test_run_setup_existing_valid_config_supplies_prompt_defaults_and_backup(
+    tmp_path: Path,
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    old = (
+        "[defaults]\n"
+        "policy = old-policy\n"
+        "embodiment = old-body\n"
+        "scorer = old-scorer\n"
+        "max_steps = 88\n"
+        "rerun = false\n"
+        "store_frames = false\n"
+    )
+    path.write_text(old, encoding="utf-8")
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    for expected in ("old-policy", "old-body", "old-scorer", "88", "false"):
+        assert any(f"[{expected}]" in prompt for prompt in prompts)
+    assert "policy = old-policy" in path.read_text(encoding="utf-8")
+    assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == old
+
+
+@pytest.mark.parametrize("answer", ["y", ""])
+def test_run_setup_repairs_malformed_config_and_backs_it_up(tmp_path: Path, answer: str) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    broken = "key = value without a section\n"
+    path.write_text(broken, encoding="utf-8")
+    input_fn, prompts = _scripted_input([answer, "", "", "", "", "", "", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "File contains no section headers" in out.getvalue()
+    assert "Back up the broken file and start fresh? [Y/n]" in prompts[0]
+    assert path.read_text(encoding="utf-8") == _render_config(dict(SUGGESTED), {}, {})
+    assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == broken
+
+
+def test_run_setup_declines_malformed_config_repair(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    broken = "not an ini file\n"
+    path.write_text(broken, encoding="utf-8")
+    input_fn, _ = _scripted_input(["n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+    )
+
+    assert result == 1
+    assert "File contains no section headers" in out.getvalue()
+    assert path.read_text(encoding="utf-8") == broken
+    assert not path.with_name("config.ini.bak").exists()
+
+
+def test_run_setup_ignores_only_invalid_existing_prompt_values(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\n"
+        "policy = kept-policy\n"
+        "max_steps = abc\n"
+        "rerun = perhaps\n"
+        "store_frames = false\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "ignoring invalid max_steps 'abc' from config.ini" in out.getvalue()
+    assert "ignoring invalid rerun 'perhaps' from config.ini" in out.getvalue()
+    assert any("policy [kept-policy]" in prompt for prompt in prompts)
+    assert any("max steps [1200]" in prompt for prompt in prompts)
+    assert any("live rerun viewer [true]" in prompt for prompt in prompts)
+    assert any("store camera frames [false]" in prompt for prompt in prompts)
+
+
+def test_run_setup_warns_only_for_unregistered_policy_and_embodiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"known-policy" if kind == "policy" else "known-body": object()},
+    )
+    input_fn, _ = _scripted_input(
+        ["missing-policy", "missing-body", "missing-scorer", "", "", "", ""]
+    )
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    warning = (
+        "is not registered here — install its plugin, e.g. `uv pip install inspect-robots-yam`"
+    )
+    assert f"'missing-policy' {warning}" in out.getvalue()
+    assert f"'missing-body' {warning}" in out.getvalue()
+    assert "missing-scorer' is not registered" not in out.getvalue()
+
+
+def test_run_setup_registered_names_do_not_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"known-policy": object()} if kind == "policy" else {"known-body": object()},
+    )
+    input_fn, _ = _scripted_input(["known-policy", "known-body", "", "", "", "", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "is not registered here" not in out.getvalue()
+
+
+def test_run_setup_carries_unmanaged_defaults_and_embodiment_args(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\npolicy = old\nsim_embodiment = cubepick\n"
+        "\n[embodiment.args]\nleft_channel = can2\ntop_cam_device = /dev/old\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert "sim_embodiment = cubepick" in text
+    assert "left_channel = can2" in text
+    assert "top_cam_device" not in text
+
+
+def test_run_setup_camera_choices_manual_paths_skip_and_invalid_entries(
+    tmp_path: Path,
+) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    missing = "/another-machine/top-camera"
+    input_fn, prompts = _scripted_input(
+        [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "garbage",
+            "9",
+            "relative/path",
+            missing,
+            devices[1],
+            "3",
+        ]
+    )
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {missing}" in text
+    assert f"left_cam_device = {devices[1]}" in text
+    assert f"right_cam_device = {devices[2]}" in text
+    assert f"warning: {missing} does not exist here " in out.getvalue()
+    assert f"warning: {devices[1]} does not exist here" not in out.getvalue()
+    assert out.getvalue().count("enter a device number, absolute path, or 's'") == 3
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 4
+
+
+def test_run_setup_skipping_every_camera_writes_no_camera_keys(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    _make_devices(by_id)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "s", "s", "s"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "_cam_device" not in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_camera_offer_defaults_yes_when_devices_found(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    _make_devices(by_id)
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "s", "s", "s"])
+
+    run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert "[Y/n]" in prompts[6]
+    assert any(prompt.startswith("top camera") for prompt in prompts)
+
+
+def test_run_setup_camera_offer_defaults_yes_for_existing_camera_keys(
+    tmp_path: Path,
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text("[embodiment.args]\ntop_cam_device = /dev/old\n", encoding="utf-8")
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "s", "s", "s"])
+
+    run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert "[Y/n]" in prompts[6]
+    assert "_cam_device" not in path.read_text(encoding="utf-8")
+
+
+def test_run_setup_camera_offer_defaults_no_without_devices_or_config(tmp_path: Path) -> None:
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", ""])
+    out = io.StringIO()
+
+    run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert "[y/N]" in prompts[6]
+    assert "no /dev/v4l devices found" not in out.getvalue()
+
+
+def test_run_setup_partial_cameras_can_go_back_and_assign_all(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    input_fn, prompts = _scripted_input(
+        ["", "", "", "", "", "", "", "1", "s", "s", "", "1", "2", "3"]
+    )
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert "yam_arms needs all three cameras or none" in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 2
+    assert all(
+        f"{role}_cam_device = {device}" in text
+        for role, device in zip(("top", "left", "right"), devices, strict=True)
+    )
+
+
+def test_run_setup_partial_cameras_can_write_none(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    _make_devices(by_id)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "1", "s", "s", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "yam_arms needs all three cameras or none" in out.getvalue()
+    assert "_cam_device" not in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_falls_back_to_by_path_devices(tmp_path: Path) -> None:
+    by_path = tmp_path / "by-path"
+    devices = _make_devices(by_path)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=by_path,
+    )
+
+    assert result == 0
+    assert f"Found 3 camera device(s) under {by_path}:" in out.getvalue()
+    assert f"top_cam_device = {devices[0]}" in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_without_detected_devices_accepts_manual_paths(tmp_path: Path) -> None:
+    manual = ["/remote/top", "/remote/left", "/remote/right"]
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "y", *manual])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert "no /dev/v4l devices found (not Linux, or no cameras attached)" in out.getvalue()
+    assert all(
+        f"{role}_cam_device = {path}" in text
+        for role, path in zip(("top", "left", "right"), manual, strict=True)
+    )
+
+
+def test_run_setup_yes_no_prompts_reprompt_invalid_answers(tmp_path: Path) -> None:
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "perhaps", "yes", "s", "s", "s"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert sum("Configure cameras?" in prompt for prompt in prompts) == 2
+    assert "please answer yes or no" in out.getvalue()
