@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Operator scoring no longer prompts twice for self-confirming embodiments**
+  (#53). On interactive ad-hoc runs, definitive `success` or `failure`
+  termination verdicts are adopted as the operator judgement, announced on the
+  terminal, and identified as embodiment-sourced in the in-memory transcript.
 - **Literal percent signs in config values now round-trip unchanged** (#54).
   Config reads no longer treat `%` as interpolation syntax, so values such as
   `policy = 50%off` work with `config set`, `config show`, and normal runs.

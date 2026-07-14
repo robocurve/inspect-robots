@@ -87,17 +87,21 @@ robot.
 ### Operator scoring
 
 An arbitrary instruction has no success oracle, so ad-hoc runs default to the
-`operator` scorer: when run on an interactive terminal, the CLI asks after
-each trial,
+`operator` scorer. When run on an interactive terminal, the CLI asks after each
+trial unless the embodiment already terminated the episode with a definitive
+`success` or `failure` verdict. In that case, the CLI records the embodiment's
+verdict as the operator judgement instead of asking the operator a second time,
+and prints `operator verdict adopted from embodiment: success` (or `failure`) so
+the operator can catch a mistaken adoption live.
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 ```
 
-and records the verdict in the log (`skip` records nothing). Piped/CI
-stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
-runs stay non-blocking, and an unjudged trial honestly scores as failure with
-"no operator judgement recorded".
+Prompted verdicts are recorded in the log (`skip` records nothing). Piped/CI
+stdin, `--no-prompt`, or a registered `--task` run never prompt or adopt an
+embodiment verdict: unattended runs stay non-blocking, and an unjudged trial
+honestly scores as failure with "no operator judgement recorded".
 
 ## `inspect-robots setup`
 
