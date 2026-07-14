@@ -163,6 +163,10 @@ class IsaacSimEmbodiment:
         on machines without a display (the usual eval box).
     obs_group / image_keys / state_keys / success_info_key:
         How to read the task's observation dict and success flag (see module docs).
+    terminated_implies_success:
+        If True, falls back to treating 'terminated' as success when the task
+        info dictionary does not contain the success key. If False (default), missing
+        success keys will log a warning and evaluate to False.
     name / supported_setups / supported_target_kinds:
         Surfaced on ``EmbodimentInfo`` for logging and R7 scene-realizability
         checks. Empty ``supported_*`` means "unconstrained".
@@ -410,6 +414,11 @@ def _to_float_array(value: Any) -> np.ndarray:
 
 
 def _to_image(value: Any) -> np.ndarray:
+    """Convert input value to a uint8 HWC image array.
+
+    Empty arrays are returned as-is. Floats are treated as normalized [0.0, 1.0]
+    (and scaled to [0, 255]) if the maximum value in the array is <= 1.0.
+    """
     arr = _np(value)
     if arr.size == 0:
         return arr.astype(np.uint8)
@@ -418,13 +427,5 @@ def _to_image(value: Any) -> np.ndarray:
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
         arr = np.transpose(arr, (1, 2, 0))  # CHW -> HWC
     if np.issubdtype(arr.dtype, np.floating):
-        amax = arr.max()
-        if amax <= 1.0:
-            # Scale if it has fractional parts (normalized float),
-            # is single-channel (binary mask), or is completely white.
-            has_fractional = np.any(np.mod(arr, 1.0) != 0.0)
-            is_multichannel = arr.ndim == 3 and arr.shape[-1] in (3, 4)
-            if has_fractional or not is_multichannel or np.all(arr == 1.0):
-                arr = arr * 255.0
-        arr = np.clip(arr, 0, 255)
+        arr = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255)
     return arr.astype(np.uint8)

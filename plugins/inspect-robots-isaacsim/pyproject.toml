@@ -24,7 +24,7 @@ classifiers = [
 # the user's NVIDIA Omniverse / Isaac Lab environment (and need a GPU). This adapter
 # imports them lazily so the package installs, registers, and is discoverable
 # (`inspect-robots list embodiments`) on any machine; only `reset()`/`step()` require Isaac.
-dependencies = ["inspect-robots>=0.2", "numpy>=1.24", "gymnasium"]
+dependencies = ["inspect-robots>=0.2", "numpy>=1.24"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]

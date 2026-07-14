@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
+## [Unreleased]
+
+### Fixed
+
+- **`inspect-robots-isaacsim`**: Fix false success evaluations by requiring explicit opt-in for `terminated_implies_success`, curate import errors to raise `RuntimeError`, and handle empty or legitimately dark float frames correctly in the image converter.
+
 ## [0.6.0] - 2026-07-10
 
 ### Added

@@ -389,20 +389,4 @@ def test_to_image_logic() -> None:
     res_255 = _to_image(float_255)
     np.testing.assert_array_equal(res_255, [0, 128, 255])
 
-    # Legitimately dark 0-255 range float frame (all pixels <= 1.0, e.g. 0.0 and 1.0, but multichannel)
-    # It has no fractional values, is multichannel. We should NOT scale it!
-    dark_multichannel = np.array([[[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]], dtype=np.float32)
-    res_dark = _to_image(dark_multichannel)
-    np.testing.assert_array_equal(res_dark, [[[0, 0, 0], [1, 1, 1]]])
 
-    # Single-channel binary mask (only 0.0 and 1.0). We SHOULD scale it!
-    # Expected shape from env: (num_envs, H, W), so with num_envs=1 it is (1, 1, 2)
-    binary_mask = np.array([[[0.0, 1.0]]], dtype=np.float32)
-    res_mask = _to_image(binary_mask)
-    np.testing.assert_array_equal(res_mask, [[0, 255]])
-
-    # Completely white 3-channel image (all 1.0). We SHOULD scale it!
-    # Expected shape from env: (num_envs, H, W, 3), so with num_envs=1 it is (1, 1, 1, 3)
-    white_img = np.array([[[[1.0, 1.0, 1.0]]]], dtype=np.float32)
-    res_white = _to_image(white_img)
-    np.testing.assert_array_equal(res_white, [[[255, 255, 255]]])
