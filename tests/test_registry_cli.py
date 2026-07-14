@@ -549,9 +549,34 @@ def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     answers = iter(["yse", "y"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     log_dir = tmp_path / "logs"
-    rc = main(["reach the cube", "--log-dir", str(log_dir)])  # default scorer: operator
+    rc = main(
+        ["reach the cube", "--max-steps", "3", "--log-dir", str(log_dir)]
+    )  # default scorer: operator
     assert rc == 0
     assert "unrecognized answer 'yse'" in capsys.readouterr().out
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.results.metrics["operator"] == 1.0
+
+
+def test_operator_prompt_adopts_self_confirming_embodiment_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
+    _tty_stdin(monkeypatch)
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _answer)
+    log_dir = tmp_path / "logs"
+    rc = main(["reach the cube", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert prompts == []
+    assert "operator verdict adopted from embodiment: success" in capsys.readouterr().out
     log = _read_only_log(log_dir)
     assert log.samples[0].operator_judgements == ("y",)
     assert log.results.metrics["operator"] == 1.0
@@ -624,6 +649,133 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
     assert rc == 0
     assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
     capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("termination_reason", "expected_verdict"),
+    [("success", "y"), ("failure", "n")],
+)
+def test_prompt_operator_adopts_definitive_embodiment_verdict(
+    termination_reason: str,
+    expected_verdict: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason=termination_reason,
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
+    )
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert record.operator_judgement == expected_verdict
+    (event,) = record.events
+    assert event.kind == "operator"
+    assert event.t == 0
+    assert event.data == {"verdict": expected_verdict, "source": "embodiment"}
+
+
+@pytest.mark.parametrize(
+    ("terminated", "termination_reason"),
+    [
+        (False, None),
+        (False, "max_steps"),
+        (False, "policy_stop"),
+        (True, None),
+    ],
+)
+def test_prompt_operator_still_prompts_without_definitive_verdict(
+    terminated: bool,
+    termination_reason: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=terminated,
+        termination_reason=termination_reason,
+    )
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", _answer)
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert len(prompts) == 1
+    assert record.operator_judgement == "y"
+    (event,) = record.events
+    assert event.data == {"verdict": "y", "source": "prompt"}
+
+
+def test_prompt_operator_prompts_for_truncated_success_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=False,
+        truncated=True,
+        termination_reason="success",
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert record.operator_judgement == "n"
+    (event,) = record.events
+    assert event.data == {"verdict": "n", "source": "prompt"}
+
+
+@pytest.mark.parametrize(
+    ("termination_reason", "expected_score"),
+    [("success", True), ("failure", False)],
+)
+def test_operator_scorer_reads_adopted_embodiment_verdict(
+    termination_reason: str,
+    expected_score: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import operator_scorer
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason=termination_reason,
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
+    )
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert operator_scorer()(record, None).value is expected_score
 
 
 def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None:

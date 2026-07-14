@@ -360,13 +360,26 @@ def _build_guardrails(
 
 _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
+_DEFINITIVE_REASONS = frozenset({"success", "failure"})
 
 
 def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
-    """Capture the terminal operator's verdict on the record (R6)."""
+    """Capture or adopt the terminal operator's verdict on the record (R6).
+
+    A terminated episode with a definitive embodiment verdict adopts and announces that
+    verdict instead of asking the operator to confirm the same outcome a second time.
+    """
     from inspect_robots.transcript import operator_event
 
     del scene
+    if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
+        verdict = "y" if record.termination_reason == "success" else "n"
+        record.operator_judgement = verdict
+        record.events.append(
+            operator_event(t=len(record.steps), verdict=verdict, source="embodiment")
+        )
+        print(f"operator verdict adopted from embodiment: {record.termination_reason}")
+        return
     while True:
         try:
             answer = input(_PROMPT).strip().lower()
