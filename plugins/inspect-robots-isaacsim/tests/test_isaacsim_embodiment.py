@@ -349,9 +349,16 @@ def _install_fake_isaac_lab_modules(
         calls["parse_env_cfg"] = (task_id, device, num_envs)
         return fake_cfg
 
-    def fake_make(task_id: str, *, cfg: Any, render_mode: str) -> str:
+    def fake_make(task_id: str, *, cfg: Any, render_mode: str) -> object:
         calls["gym_make"] = (task_id, cfg, render_mode)
-        return "fake-env"
+        calls["gym_make_count"] = calls.get("gym_make_count", 0) + 1
+        # Snapshot cfg state at make-time: Isaac consumes the cfg during
+        # gym.make, so wiring applied after make would be a silent live no-op.
+        calls["debug_vis_at_make"] = cfg.debug_vis
+        calls["concatenate_terms_at_make"] = cfg.observations.policy.concatenate_terms
+        env = object()  # fresh per call: identity distinguishes a re-make from the cache
+        calls["env"] = env
+        return env
 
     fake_gym = types.ModuleType("gymnasium")
     fake_gym.make = fake_make  # type: ignore[attr-defined]
@@ -376,22 +383,23 @@ def test_ensure_env_wires_cfg_correctly_when_headless(monkeypatch: pytest.Monkey
 
     env = emb._ensure_env()
 
-    assert env == "fake-env"
+    assert env is calls["env"]
     assert calls["parse_env_cfg"] == ("Isaac-Lift-Cube-Franka-v0", "cuda:0", 1)
     assert calls["gym_make"] == ("Isaac-Lift-Cube-Franka-v0", fake_cfg, "rgb_array")
-    assert fake_cfg.debug_vis is False  # headless=True -> _disable_debug_vis ran
-    assert fake_cfg.observations.policy.concatenate_terms is False  # named terms requested
+    assert calls["debug_vis_at_make"] is False  # headless=True -> _disable_debug_vis ran
+    assert calls["concatenate_terms_at_make"] is False  # named terms requested before make
     assert emb._ensure_env() is env  # cached: second call doesn't re-wire
+    assert calls["gym_make_count"] == 1
 
 
 def test_ensure_env_skips_debug_vis_disable_when_not_headless(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _calls, fake_cfg = _install_fake_isaac_lab_modules(monkeypatch)
+    calls, _fake_cfg = _install_fake_isaac_lab_modules(monkeypatch)
     emb = IsaacSimEmbodiment(headless=False)
     monkeypatch.setattr(emb, "_ensure_app", lambda: None)
 
     emb._ensure_env()
 
-    assert fake_cfg.debug_vis is True  # untouched: headless=False skips _disable_debug_vis
-    assert fake_cfg.observations.policy.concatenate_terms is False  # still requested either way
+    assert calls["debug_vis_at_make"] is True  # untouched: headless=False skips the disable
+    assert calls["concatenate_terms_at_make"] is False  # still requested either way
