@@ -100,11 +100,13 @@ The policy slot is not limited to VLAs. With the
 drives the same rig through tool calls, one approver-checked motion chunk
 per call.
 
-Create a `.env` file with your API key (the CLI loads it automatically; real
-environment variables take precedence over its values):
+Put a `.env` with your API key in the working directory, reusing one you
+already have or copying the [.env.example](.env.example) template (the CLI
+loads it automatically; real environment variables take precedence over its
+values):
 
-```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+```ini
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Install the add-on:
