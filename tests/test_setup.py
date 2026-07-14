@@ -1345,3 +1345,55 @@ def test_run_setup_intro_names_existing_config_and_backup(tmp_path: Path) -> Non
     assert result == 0
     assert "Found an existing config; its values are the suggestions" in text
     assert "config.ini.bak" in text
+
+
+class _TtyStringIO(io.StringIO):
+    """StringIO that claims to be a terminal, to exercise the ANSI branch."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def test_run_setup_paints_output_on_a_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "n"])
+    out = _TtyStringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    assert "\x1b[1minspect-robots setup\x1b[0m" in text
+    assert f"\x1b[32mWrote {_config_path(tmp_path)}\x1b[0m" in text
+    assert "\x1b[33m" in text  # headless note and unregistered warnings
+    assert any("[\x1b[36mmolmoact2\x1b[0m]" in prompt for prompt in prompts)
+    written = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert "\x1b[" not in written
+
+
+def test_run_setup_honors_no_color_on_a_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "n"])
+    out = _TtyStringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "\x1b[" not in out.getvalue()
+    assert all("\x1b[" not in prompt for prompt in prompts)
