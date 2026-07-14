@@ -105,12 +105,16 @@ motion chunk per call:
 uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
 ```
 
-And the same instruction runs on your configured simulator instead of the
+### Run in simulation
+
+The same instruction runs on your configured simulator instead of the
 real robot:
 
 ```bash
 uv run inspect-robots "place the fork on the plate" --sim
 ```
+
+### More CLI commands
 
 The full command line resolves any registered task/policy/embodiment
 (builtins + installed plugins). List what is registered:
@@ -131,7 +135,9 @@ Pretty-print a saved eval log:
 uv run inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
-And everything is a Python API. No hardware or simulator needed: the
+### Python API
+
+Everything is a Python API. No hardware or simulator needed: the
 dependency-free `CubePick` mock world exercises the whole stack:
 
 ```python
