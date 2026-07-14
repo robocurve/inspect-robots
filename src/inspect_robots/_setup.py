@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import IO
 
@@ -149,32 +150,139 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
         print(f"  {number}. {Path(device).name}", file=out)
 
 
-def _prompt_camera_role(
+def _identify_by_replug(
     role: str,
     devices: list[str],
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
+    rescan: Callable[[], list[str]],
 ) -> str | None:
-    """Prompt for a numbered device, an absolute path, or a skipped role."""
-    prompt = f"{role} camera — number, absolute path, or 's' to skip: "
+    """Identify one device by diffing the listing while it is unplugged."""
+    input_fn(f"Unplug the {role} camera now, then press Enter...")
+    unplugged_devices = rescan()
+    disappeared = [device for device in devices if device not in unplugged_devices]
+    if not disappeared:
+        print("no camera device disappeared; unplug one camera and try again", file=out)
+        return None
+    if len(disappeared) > 1:
+        print(
+            f"{len(disappeared)} camera devices disappeared; unplug only one and try again",
+            file=out,
+        )
+        return None
+
+    identified = disappeared[0]
+    name = Path(identified).name
+    print(f"That was: {name}", file=out)
+    input_fn("Plug it back in, then press Enter...")
+    if identified not in rescan():
+        input_fn(f"{name} was not detected; press Enter to rescan...")
+        if identified not in rescan():
+            print(
+                f"warning: {name} was still not detected; keeping the assignment",
+                file=out,
+            )
+    return identified
+
+
+def _camera_role_prompt(
+    role: str,
+    devices: list[str],
+    current: str | None,
+    advertise_path_toggle: bool,
+) -> str:
+    choices = f"{role} camera — number, 'u' to identify by unplugging"
+    if advertise_path_toggle:
+        choices += ", 'p' to switch listing"
+    choices += ", 's' to skip"
+    if current is None:
+        return choices + ": "
+    status = "current" if current in devices else "current, not detected"
+    return f"{choices} [{current} ({status})]: "
+
+
+def _prompt_camera_role(
+    role: str,
+    by_id_devices: list[str],
+    by_path_devices: list[str],
+    active_is_by_id: bool,
+    by_id_dir: Path,
+    by_path_dir: Path,
+    current: str | None,
+    assigned: dict[str, str],
+    advertise_path_toggle: bool,
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+) -> tuple[str | None, bool]:
+    """Prompt for one role and return its device plus active listing state."""
     while True:
+        devices = by_id_devices if active_is_by_id else by_path_devices
+        device_dir = by_id_dir if active_is_by_id else by_path_dir
+        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle)
         entered = input_fn(prompt).strip()
+        selected: str | None = None
         if entered.lower() == "s":
-            return None
-        if entered.startswith("/"):
+            return None, active_is_by_id
+        if entered.lower() == "p":
+            active_is_by_id = not active_is_by_id
+            devices = by_id_devices if active_is_by_id else by_path_devices
+            device_dir = by_id_dir if active_is_by_id else by_path_dir
+            _print_camera_listing(devices, device_dir, out)
+            continue
+        if entered.lower() == "u":
+            selected = _identify_by_replug(
+                role,
+                devices,
+                input_fn=input_fn,
+                out=out,
+                rescan=partial(_scan_cameras, device_dir),
+            )
+            if selected is None:
+                continue
+        elif not entered and current is not None:
+            selected = current
+        elif entered.startswith("/"):
             if not Path(entered).exists():
                 print(
                     f"warning: {entered} does not exist here "
                     "(ok if this config is for another machine)",
                     file=out,
                 )
-            return entered
-        if entered.isdigit():
+            selected = entered
+        elif entered.isdigit():
             number = int(entered)
             if 1 <= number <= len(devices):
-                return devices[number - 1]
-        print("enter a device number, absolute path, or 's' to skip", file=out)
+                selected = devices[number - 1]
+        if selected is None:
+            print(
+                "enter a device number, absolute path, 'u' to identify, or 's' to skip",
+                file=out,
+            )
+            continue
+
+        other_role = next(
+            (
+                assigned_key.removesuffix("_cam_device")
+                for assigned_key, device in assigned.items()
+                if device == selected
+            ),
+            None,
+        )
+        if other_role is not None:
+            print(
+                f"warning: {selected} is already assigned to the {other_role} camera",
+                file=out,
+            )
+            if not _ask_yes_no(
+                f"Use {selected} for both {other_role} and {role} cameras?",
+                False,
+                input_fn=input_fn,
+                out=out,
+            ):
+                continue
+        return selected, active_is_by_id
 
 
 def _camera_section(
@@ -185,12 +293,13 @@ def _camera_section(
     input_fn: Callable[[str], str],
     out: IO[str],
 ) -> dict[str, str]:
-    """Offer and collect the Task 2 camera assignments."""
-    devices = _scan_cameras(by_id_dir)
-    device_dir = by_id_dir
-    if not devices:
-        devices = _scan_cameras(by_path_dir)
-        device_dir = by_path_dir
+    """Offer and collect camera assignments from both stable V4L listings."""
+    by_id_devices = _scan_cameras(by_id_dir)
+    by_path_devices = _scan_cameras(by_path_dir)
+    active_is_by_id = bool(by_id_devices) or not by_path_devices
+    devices = by_id_devices if active_is_by_id else by_path_devices
+    device_dir = by_id_dir if active_is_by_id else by_path_dir
+    advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
 
     camera_keys = tuple(f"{role}_cam_device" for role in CAM_ROLES)
     existing_args = carried.get("embodiment.args", {})
@@ -205,13 +314,33 @@ def _camera_section(
             "no /dev/v4l devices found (not Linux, or no cameras attached)",
             file=out,
         )
+    if advertise_path_toggle:
+        print(
+            f"only {len(by_id_devices)} by-id entries for "
+            f"{len(by_path_devices)} detected cameras — identical cameras without serials "
+            "collide there; by-path names are stable per physical USB port",
+            file=out,
+        )
 
     while True:
         assignments: dict[str, str] = {}
         for role in CAM_ROLES:
-            selected = _prompt_camera_role(role, devices, input_fn=input_fn, out=out)
+            key = f"{role}_cam_device"
+            selected, active_is_by_id = _prompt_camera_role(
+                role,
+                by_id_devices,
+                by_path_devices,
+                active_is_by_id,
+                by_id_dir,
+                by_path_dir,
+                existing_args.get(key),
+                assignments,
+                advertise_path_toggle,
+                input_fn=input_fn,
+                out=out,
+            )
             if selected is not None:
-                assignments[f"{role}_cam_device"] = selected
+                assignments[key] = selected
         if len(assignments) in (0, len(CAM_ROLES)):
             return assignments
         print(

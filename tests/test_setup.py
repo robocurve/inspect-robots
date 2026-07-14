@@ -10,6 +10,7 @@ import pytest
 
 from inspect_robots._setup import (
     SUGGESTED,
+    _identify_by_replug,
     _read_raw_config,
     _render_config,
     _scan_cameras,
@@ -589,7 +590,9 @@ def test_run_setup_camera_choices_manual_paths_skip_and_invalid_entries(
     assert f"right_cam_device = {devices[2]}" in text
     assert f"warning: {missing} does not exist here " in out.getvalue()
     assert f"warning: {devices[1]} does not exist here" not in out.getvalue()
-    assert out.getvalue().count("enter a device number, absolute path, or 's'") == 3
+    assert (
+        out.getvalue().count("enter a device number, absolute path, 'u' to identify, or 's'") == 3
+    )
     assert sum(prompt.startswith("top camera") for prompt in prompts) == 4
 
 
@@ -802,3 +805,302 @@ def test_run_setup_yes_no_prompts_reprompt_invalid_answers(tmp_path: Path) -> No
     assert result == 0
     assert sum("Configure cameras?" in prompt for prompt in prompts) == 2
     assert "please answer yes or no" in out.getvalue()
+
+
+def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
+    devices = ["/dev/camera-top", "/dev/camera-left", "/dev/camera-right"]
+    scans = iter(
+        [
+            [devices[0], devices[2]],
+            devices,
+        ]
+    )
+    input_fn, prompts = _scripted_input(["", ""])
+    out = io.StringIO()
+
+    identified = _identify_by_replug(
+        "left",
+        devices,
+        input_fn=input_fn,
+        out=out,
+        rescan=lambda: next(scans),
+    )
+
+    assert identified == devices[1]
+    assert prompts == [
+        "Unplug the left camera now, then press Enter...",
+        "Plug it back in, then press Enter...",
+    ]
+    assert "That was: camera-left" in out.getvalue()
+
+
+@pytest.mark.parametrize("detected_on_retry", [True, False])
+def test_identify_by_replug_retries_replug_scan_once(
+    detected_on_retry: bool,
+) -> None:
+    devices = ["/dev/camera-top", "/dev/camera-left"]
+    without_top = [devices[1]]
+    scans = iter(
+        [
+            without_top,
+            without_top,
+            devices if detected_on_retry else without_top,
+        ]
+    )
+    input_fn, prompts = _scripted_input(["", "", ""])
+    out = io.StringIO()
+
+    identified = _identify_by_replug(
+        "top",
+        devices,
+        input_fn=input_fn,
+        out=out,
+        rescan=lambda: next(scans),
+    )
+
+    assert identified == devices[0]
+    assert prompts[-1] == "camera-top was not detected; press Enter to rescan..."
+    warning = "warning: camera-top was still not detected; keeping the assignment"
+    assert (warning in out.getvalue()) is not detected_on_retry
+
+
+def test_run_setup_identifies_camera_by_real_directory_replug(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    pending = ["", "", "", "", "", "", "", "u", "", "", "1", "3"]
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        if prompt.startswith("Unplug the top camera"):
+            Path(devices[1]).unlink()
+        elif prompt.startswith("Plug it back in"):
+            Path(devices[1]).touch()
+        return pending.pop(0)
+
+    out = io.StringIO()
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {devices[1]}" in text
+    assert f"left_cam_device = {devices[0]}" in text
+    assert f"right_cam_device = {devices[2]}" in text
+    assert f"That was: {Path(devices[1]).name}" in out.getvalue()
+    assert Path(devices[1]).exists()
+    assert "Plug it back in, then press Enter..." in prompts
+
+
+@pytest.mark.parametrize("missing_count", [0, 2])
+def test_run_setup_ambiguous_unplug_diff_explains_and_reprompts_role(
+    tmp_path: Path,
+    missing_count: int,
+) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    pending = ["", "", "", "", "", "", "", "u", "", "1", "2", "3"]
+    prompts: list[str] = []
+
+    def input_fn(prompt: str) -> str:
+        prompts.append(prompt)
+        if prompt.startswith("Unplug the top camera"):
+            for device in devices[:missing_count]:
+                Path(device).unlink()
+        return pending.pop(0)
+
+    out = io.StringIO()
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 2
+    explanation = (
+        "no camera device disappeared" if missing_count == 0 else "2 camera devices disappeared"
+    )
+    assert explanation in out.getvalue()
+
+
+def test_run_setup_path_toggle_is_accepted_when_not_advertised(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    by_id_devices = _make_devices(by_id)
+    _make_devices(by_path)
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "p", "p", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    output = out.getvalue()
+    role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
+    assert result == 0
+    assert output.count(f"Found 3 camera device(s) under {by_id}:") == 2
+    assert output.count(f"Found 3 camera device(s) under {by_path}:") == 1
+    assert all("'p'" not in prompt for prompt in role_prompts)
+    assert "only 3 by-id entries" not in output
+    assert f"top_cam_device = {by_id_devices[0]}" in _config_path(tmp_path).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_run_setup_advertises_by_path_when_by_id_entries_collide(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    _make_devices(by_id, count=1)
+    by_path_devices = _make_devices(by_path)
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "p", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    explanation = (
+        "only 1 by-id entries for 3 detected cameras — identical cameras without serials "
+        "collide there; by-path names are stable per physical USB port"
+    )
+    role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert out.getvalue().count(explanation) == 1
+    assert all("'p' to switch listing" in prompt for prompt in role_prompts)
+    assert f"Found 3 camera device(s) under {by_path}:" in out.getvalue()
+    assert all(device in text for device in by_path_devices)
+
+
+def test_run_setup_declining_duplicate_device_reprompts_role(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "1", "1", "n", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"warning: {devices[0]} is already assigned to the top camera" in out.getvalue()
+    assert any(
+        "Use " in prompt and "for both top and left cameras? [y/N]" in prompt for prompt in prompts
+    )
+    assert sum(prompt.startswith("left camera") for prompt in prompts) == 2
+    assert f"left_cam_device = {devices[1]}" in text
+
+
+def test_run_setup_accepting_duplicate_device_assigns_both_roles(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "", "1", "1", "y", "2"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {devices[0]}" in text
+    assert f"left_cam_device = {devices[0]}" in text
+    assert f"right_cam_device = {devices[1]}" in text
+
+
+def test_run_setup_enter_accepts_detected_current_camera_defaults(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[embodiment.args]\n"
+        + "\n".join(
+            f"{role}_cam_device = {device}"
+            for role, device in zip(("top", "left", "right"), devices, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([""] * 10)
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
+    assert result == 0
+    assert all(
+        f"[{device} (current)]" in prompt
+        for device, prompt in zip(devices, role_prompts, strict=True)
+    )
+    assert all(device in text for device in devices)
+
+
+def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> None:
+    by_id = tmp_path / "by-id"
+    _make_devices(by_id)
+    current_devices = ["/remote/top", "/remote/left", "/remote/right"]
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[embodiment.args]\n"
+        + "\n".join(
+            f"{role}_cam_device = {device}"
+            for role, device in zip(("top", "left", "right"), current_devices, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([""] * 10)
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert all("(current, not detected)" in prompt for prompt in role_prompts)
+    assert all(device in text for device in current_devices)
