@@ -150,6 +150,17 @@ def test_render_config_matches_readme_quickstart_block() -> None:
     )
 
 
+def test_render_config_long_commented_value_round_trips(tmp_path: Path) -> None:
+    policy = "my_custom_policy_v2"
+    path = tmp_path / "config.ini"
+    path.write_text(_render_config({"policy": policy}, {}, {}), encoding="utf-8")
+
+    carried = _read_raw_config(path)
+
+    assert not isinstance(carried, str)
+    assert carried["defaults"]["policy"] == policy
+
+
 def test_render_config_omits_skipped_keys_and_empty_sections() -> None:
     rendered = _render_config(
         {"policy": "custom-policy"},
@@ -321,8 +332,10 @@ def test_run_setup_headless_existing_rerun_true_wins_and_note_is_printed(
     assert "rerun = true" in path.read_text(encoding="utf-8")
 
 
-def test_run_setup_typed_overrides_land_in_file(tmp_path: Path) -> None:
-    input_fn, _ = _scripted_input(["my-policy", "my-body", "my-scorer", "42", "false", "false", ""])
+def test_run_setup_strips_typed_overrides_and_whitespace_uses_default(tmp_path: Path) -> None:
+    input_fn, _ = _scripted_input(
+        ["  my-policy  ", "  my-body  ", "   ", " 42 ", " false ", " false ", ""]
+    )
 
     result = run_setup(
         {"XDG_CONFIG_HOME": str(tmp_path)},
@@ -337,7 +350,7 @@ def test_run_setup_typed_overrides_land_in_file(tmp_path: Path) -> None:
     assert result == 0
     assert "policy = my-policy" in text
     assert "embodiment = my-body" in text
-    assert "scorer = my-scorer" in text
+    assert "scorer = success_at_end" in text
     assert "max_steps = 42" in text
     assert "rerun = false" in text
     assert "store_frames = false" in text
@@ -484,6 +497,7 @@ def test_run_setup_declines_malformed_config_repair(tmp_path: Path) -> None:
 
     assert result == 1
     assert "File contains no section headers" in out.getvalue()
+    assert "setup aborted; nothing written" in out.getvalue()
     assert path.read_text(encoding="utf-8") == broken
     assert not path.with_name("config.ini.bak").exists()
 
@@ -597,6 +611,49 @@ def test_run_setup_carries_unmanaged_defaults_and_embodiment_args(tmp_path: Path
     assert "sim_embodiment = cubepick" in text
     assert "left_channel = can2" in text
     assert "top_cam_device = /dev/old" in text
+
+
+def test_run_setup_carries_multiline_values_in_all_sections(tmp_path: Path) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\n"
+        "notes = defaults line 1\n"
+        "    defaults line 2\n"
+        "\n"
+        "[embodiment.args]\n"
+        "calibration = args line 1\n"
+        "    args line 2\n"
+        "\n"
+        "[policy.args]\n"
+        "notes = policy line 1\n"
+        "    policy line 2\n",
+        encoding="utf-8",
+    )
+    original = _read_raw_config(path)
+    assert not isinstance(original, str)
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    rewritten = _read_raw_config(path)
+    assert result == 0
+    assert not isinstance(rewritten, str)
+    for section, key in (
+        ("defaults", "notes"),
+        ("embodiment.args", "calibration"),
+        ("policy.args", "notes"),
+    ):
+        original_lines = [line.lstrip() for line in original[section][key].splitlines()]
+        rewritten_lines = [line.lstrip() for line in rewritten[section][key].splitlines()]
+        assert rewritten_lines == original_lines
 
 
 def test_run_setup_declining_cameras_preserves_existing_assignments(tmp_path: Path) -> None:

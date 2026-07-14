@@ -65,7 +65,7 @@ def _ask(
 ) -> str:
     """Ask for one value, accepting Enter as the displayed default."""
     while True:
-        entered = input_fn(f"{prompt} [{default}]: ")
+        entered = input_fn(f"{prompt} [{default}]: ").strip()
         value = entered if entered else default
         if validate(value):
             return value
@@ -399,10 +399,11 @@ def _render_config(
             continue
         line = f"{key} = {defaults[key]}"
         if comment := _DEFAULT_COMMENTS.get(key):
-            line = f"{line:<26}# {comment}"
+            line = f"{line:<26}# {comment}" if len(line) < 26 else f"{line}  # {comment}"
         default_lines.append(line)
     for key, value in carried.get("defaults", {}).items():
         if key not in SUGGESTED:
+            value = value.replace("\n", "\n\t")
             default_lines.append(f"{key} = {value}")
     if default_lines:
         sections.append("[defaults]\n" + "\n".join(default_lines))
@@ -414,6 +415,7 @@ def _render_config(
             embodiment_lines.append(f"{key} = {embodiment_args[key]}")
     for key, value in carried.get("embodiment.args", {}).items():
         if key not in camera_keys:
+            value = value.replace("\n", "\n\t")
             embodiment_lines.append(f"{key} = {value}")
     if embodiment_lines:
         sections.append("[embodiment.args]\n" + "\n".join(embodiment_lines))
@@ -422,7 +424,10 @@ def _render_config(
         if section in ("defaults", "embodiment.args"):
             continue
         if values:
-            lines = [f"{key} = {value}" for key, value in values.items()]
+            lines = []
+            for key, value in values.items():
+                value = value.replace("\n", "\n\t")
+                lines.append(f"{key} = {value}")
             sections.append(f"[{section}]\n" + "\n".join(lines))
 
     return "\n\n".join(sections) + "\n"
@@ -458,6 +463,7 @@ def run_setup(
                     out=out,
                 )
                 if not repair:
+                    print("setup aborted; nothing written", file=out)
                     return 1
             else:
                 carried = raw_config
