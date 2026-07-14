@@ -7,9 +7,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`inspect-robots setup`**: an interactive first-run wizard that prompts
+  for the `[defaults]` keys with suggested values, discovers camera devices
+  under `/dev/v4l/by-id` (with unplug-to-identify and a `/dev/v4l/by-path`
+  fallback for serial-less cameras that collide in by-id), and writes
+  `~/.config/inspect-robots/config.ini`. An existing file is backed up to
+  `config.ini.bak` and unmanaged sections/keys are carried through
+  unchanged. Warns before writing `rerun = true` in a headless session
+  (part of #50).
+- Public-docstring coverage gate via Ruff's D1 rules, with a full backfill of
+  missing public docstrings.
+
 ### Fixed
 
-- **`inspect-robots-isaacsim`**: Fix false success evaluations by requiring explicit opt-in for `terminated_implies_success`, curate import errors to raise `RuntimeError`, and handle empty or legitimately dark float frames correctly in the image converter.
+- **Config `[*.args]` sections no longer follow a differently-selected
+  component** (#44). `[policy.args]` / `[embodiment.args]` /
+  `[sim_embodiment.args]` now apply only when the selected component matches
+  the `[defaults]` name they were configured alongside; selecting another
+  component (by flag or env var) ignores them with a stderr note instead of
+  crashing its constructor with foreign kwargs. Selecting the configured
+  default explicitly (e.g. `--embodiment` naming the config default) still
+  applies its args.
 
 ## [0.6.0] - 2026-07-10
 

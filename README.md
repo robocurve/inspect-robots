@@ -17,6 +17,7 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
+[![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
 [**Documentation**](https://inspectrobots.org/) ·
 [Quickstart](https://inspectrobots.org/guide/quickstart.html) ·
@@ -67,9 +68,25 @@ below and no activation is needed.
 
 ## Quickstart
 
-Set your defaults once. The policy and embodiment come from installed plugins
-([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) shown
-here); replace the three camera paths with your rig's V4L2 color nodes:
+Set your defaults once with the interactive wizard:
+
+```bash
+uv run inspect-robots setup
+```
+
+It walks you through the defaults (policy, embodiment, scorer, run length),
+lists the camera devices under `/dev/v4l/by-id`, and can tell you which
+physical camera is which: unplug one when asked and the wizard identifies it
+from the device that disappeared. Press Enter to accept the suggested values
+(the [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)
+plugin shown below) or type your own; install the plugin whose components
+you configure (`uv pip install inspect-robots-yam`) or the wizard will warn
+that the names are not registered. The result lands in
+`~/.config/inspect-robots/config.ini`; note that later `inspect-robots
+config set` edits drop comments from that file.
+
+Prefer to write the file yourself? Replace the three camera paths with your
+rig's V4L2 color nodes:
 
 ```bash
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
@@ -97,8 +114,20 @@ uv run inspect-robots "place the fork on the plate"
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
 policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...), and the same
-instruction runs on your configured simulator instead of the real robot:
+(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+
+The policy slot is not limited to VLAs. With the
+[inspect-robots-agent](plugins/inspect-robots-agent/) plugin installed
+(`uv pip install inspect-robots-agent`) and `$ANTHROPIC_API_KEY` set, a
+frontier LLM drives the same rig through tool calls, one approver-checked
+motion chunk per call:
+
+```bash
+uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
+```
+
+And the same instruction runs on your configured simulator instead of the
+real robot:
 
 ```bash
 uv run inspect-robots "place the fork on the plate" --sim

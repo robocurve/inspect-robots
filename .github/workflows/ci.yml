@@ -27,14 +27,19 @@ jobs:
           cache-dependency-glob: |
             **/pyproject.toml
             **/uv.lock
-      - name: Install from uv.lock (dev extras)
-        run: uv sync --locked --python 3.11 --extra dev
+      - name: Install from uv.lock (dev + docs extras)
+        run: uv sync --locked --python 3.11 --extra dev --extra docs
       - name: Ruff (lint)
         run: uv run ruff check .
       - name: Ruff (format check)
         run: uv run ruff format --check .
       - name: Mypy (strict)
         run: uv run mypy
+      # Gated here because docs.yml's build job is in a different workflow and
+      # can't join ci-ok's needs list: a dead link that fails the strict docs
+      # build must not be mergeable.
+      - name: Docs build (strict)
+        run: uv run mkdocs build --strict
 
   # Blocking test gate across the supported OS x Python matrix.
   test:

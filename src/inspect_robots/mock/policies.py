@@ -38,9 +38,11 @@ class ScriptedPolicy:
         self.config = PolicyConfig(action_horizon=chunk_size)
 
     def reset(self, scene: Scene) -> None:
+        """Clear the inference counter before a new oracle trajectory."""
         self.num_inferences = 0
 
     def act(self, observation: Observation) -> ActionChunk:
+        """Simulate a bounded straight-line trajectory from effector to cube."""
         self.num_inferences += 1
         eef = np.asarray(observation.state["eef_pos"], dtype=np.float64).copy()
         cube = np.asarray(observation.state["cube_pos"], dtype=np.float64)
@@ -72,12 +74,14 @@ class RandomPolicy:
         self.config = PolicyConfig(action_horizon=chunk_size)
 
     def reset(self, scene: Scene) -> None:
+        """Advance to a deterministic per-scene random stream and clear the counter."""
         # Re-seed per scene for reproducibility while still varying across scenes.
         self._rng = np.random.RandomState(self._base_seed + self._reset_count)
         self._reset_count += 1
         self.num_inferences = 0
 
     def act(self, observation: Observation) -> ActionChunk:
+        """Sample one chunk of uniformly bounded 2D deltas."""
         self.num_inferences += 1
         actions = [
             Action(data=self._rng.uniform(-self.max_step, self.max_step, size=2))
@@ -96,8 +100,10 @@ class NoopPolicy:
         self.config = PolicyConfig(action_horizon=chunk_size)
 
     def reset(self, scene: Scene) -> None:
+        """Clear the inference counter before a new stationary trajectory."""
         self.num_inferences = 0
 
     def act(self, observation: Observation) -> ActionChunk:
+        """Emit a full horizon of zero 2D deltas."""
         self.num_inferences += 1
         return ActionChunk(actions=[Action(data=np.zeros(2)) for _ in range(self.chunk_size)])

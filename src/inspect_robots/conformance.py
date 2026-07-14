@@ -45,9 +45,11 @@ class ConformanceReport:
 
     @property
     def ok(self) -> bool:
+        """Whether all declarations satisfy the required invariants."""
         return not any(i.severity == "error" for i in self.issues)
 
     def summary(self) -> str:
+        """Render a CLI-ready multiline summary of the findings."""
         if not self.issues:
             return f"{self.embodiment}: conformant (no issues)"
         lines = [f"{self.embodiment}: {len(self.issues)} issue(s)"]

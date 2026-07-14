@@ -24,6 +24,8 @@ _RATE_TOL = 1e-6
 
 @dataclass(frozen=True)
 class CompatIssue:
+    """One compatibility finding with a stable code and human-readable detail."""
+
     severity: str  # "error" | "warning"
     code: str
     message: str
@@ -38,17 +40,21 @@ class CompatibilityReport:
 
     @property
     def errors(self) -> list[CompatIssue]:
+        """Hard mismatches that prevent the requested rollout."""
         return [i for i in self.issues if i.severity == "error"]
 
     @property
     def warnings(self) -> list[CompatIssue]:
+        """Soft mismatches that allow rollout with reduced guarantees."""
         return [i for i in self.issues if i.severity == "warning"]
 
     @property
     def ok(self) -> bool:
+        """Whether the report contains no hard mismatches."""
         return not self.errors
 
     def raise_for_errors(self) -> None:
+        """Raise ``CompatibilityError`` containing every hard mismatch."""
         if self.errors:
             lines = "\n".join(f"  - [{i.code}] {i.message}" for i in self.errors)
             raise CompatibilityError(f"incompatible policy/embodiment:\n{lines}")
