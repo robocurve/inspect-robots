@@ -122,6 +122,9 @@ The result is written to `~/.config/inspect-robots/config.ini`
 that later `inspect-robots config set` edits drop comments from the file.
 The setup command requires an interactive terminal; for scripted
 configuration use `inspect-robots config set`.
+After writing the config, setup lists missing runtime requirements declared by
+the selected registered policy and embodiment, together with their remediation
+commands.
 
 Prefer to write the file yourself? This is the wizard's output for a YAM
 rig; replace the three camera paths with your rig's V4L2 color nodes
@@ -180,6 +183,15 @@ the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise.
+
+## `inspect-robots doctor`
+
+`doctor` reports a registered embodiment's missing declared runtime modules
+before constructing it, then checks its spaces for adapter conformance.
+
+```bash
+inspect-robots doctor --embodiment my_arms
+```
 
 ## `inspect-robots inspect`
 

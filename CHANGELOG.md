@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Runtime-requirement declarations for registered component factories, with
+  missing-import preflight checklists in `inspect-robots setup` and
+  `inspect-robots doctor` (#59).
 - isaacsim plugin: `_ensure_env`'s cfg-wiring contract (`parse_env_cfg`'s
   args, `gym.make(cfg=...)`, the `headless` → `_disable_debug_vis` gate, and
   the named-obs-terms request) is now exercised in CI via stubbed

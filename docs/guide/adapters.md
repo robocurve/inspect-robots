@@ -14,6 +14,23 @@ those declarations load-bearing:
 An adapter with missing or dishonest declarations silently degrades both.
 This page is the contract; the conformance kit makes most of it mechanical.
 
+## Declare runtime requirements
+
+Declare imports that cannot be expressed by package metadata on the registered
+component factory:
+
+```python
+RUNTIME_REQUIREMENTS = {
+    "i2rt": 'uv pip install "i2rt @ git+https://github.com/i2rt-robotics/i2rt"',
+    "cv2": 'uv pip install "inspect-robots-yam[cameras]"',
+}
+```
+
+The setup wizard checks registered policies and embodiments, while `doctor`
+checks its selected embodiment before construction. Both use
+`importlib.util.find_spec` without importing the declared top-level modules and
+print each remediation command verbatim when a module is missing.
+
 ## The conformance kit
 
 Add one test to your adapter repo:

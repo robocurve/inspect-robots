@@ -573,12 +573,13 @@ def _cmd_inspect(path: str) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Run the declarative conformance checks against an installed adapter.
+    """Preflight runtime requirements and conformance for an installed adapter.
 
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment
+    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
     name, source = _pick_component(
@@ -588,16 +589,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "embodiment", name, defaults.embodiment_args_owner, defaults.embodiment_args
     )
     kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
+    print(f"embodiment: {name} ({source})")
+    missing = missing_runtime_requirements(registered("embodiment").get(name))
+    for module, remedy in missing.items():
+        print(f"  [error] runtime-requirement: {module} missing → {remedy}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
     finally:
         embodiment.close()
-    print(f"embodiment: {name} ({source})")
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 0 if report.ok else 1
+    return 1 if not report.ok or missing else 0
 
 
 def _cmd_setup() -> int:
