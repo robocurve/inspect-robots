@@ -13,16 +13,6 @@ import msgpack_numpy
 import numpy as np
 import pytest
 from _stub_server import StubPolicyServer
-from inspect_robots_xpolicylab import XPolicyLabPolicy, xpolicylab_policy
-from inspect_robots_xpolicylab._client import PolicyClient
-from inspect_robots_xpolicylab._protocol import (
-    Frame,
-    MessageType,
-    WsError,
-    decode_frame,
-    decode_wire,
-    encode_frame,
-)
 
 from inspect_robots import (
     ActionSemantics,
@@ -38,6 +28,16 @@ from inspect_robots.compat import check_compatibility
 from inspect_robots.errors import CompatibilityError
 from inspect_robots.registry import registered, resolve
 from inspect_robots.types import Observation
+from inspect_robots_xpolicylab import XPolicyLabPolicy, xpolicylab_policy
+from inspect_robots_xpolicylab._client import PolicyClient
+from inspect_robots_xpolicylab._protocol import (
+    Frame,
+    MessageType,
+    WsError,
+    decode_frame,
+    decode_wire,
+    encode_frame,
+)
 
 _SCENE = Scene(id="s0", instruction="stack the bowls")
 

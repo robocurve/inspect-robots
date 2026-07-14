@@ -63,6 +63,9 @@ include = ["src/inspect_robots_xpolicylab", "tests", "README.md"]
 [tool.ruff]
 extend = "../../pyproject.toml"
 
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_xpolicylab"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D1"]
 

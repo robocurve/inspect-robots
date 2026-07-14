@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import time
 
-from inspect_robots_isaacsim import IsaacSimEmbodiment
-
 from inspect_robots import Embodiment
+from inspect_robots_isaacsim import IsaacSimEmbodiment
 
 
 def main() -> int:

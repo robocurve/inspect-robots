@@ -7,9 +7,9 @@ from typing import Any
 
 import httpx
 import pytest
-from inspect_robots_agent._llm import ChatClient, resolve_provider
 
 from inspect_robots.errors import ConfigError
+from inspect_robots_agent._llm import ChatClient, resolve_provider
 
 # --- provider resolution ladder ----------------------------------------------
 
