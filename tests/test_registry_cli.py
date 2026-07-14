@@ -227,6 +227,346 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
+def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
+    from inspect_robots.registry import task as task_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import success_at_end
+    from inspect_robots.task import Task
+
+    @task_decorator(name)
+    def _factory() -> Task:
+        return Task(
+            name=name,
+            scenes=[Scene(id=f"s{i}", instruction="reach", init_seed=i) for i in range(num_scenes)],
+            scorer=success_at_end(),
+            max_steps=max_steps,
+        )
+
+
+def test_cli_eval_set_runs_multiple_exact_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out
+    assert "status: success" in out
+    assert "[success] kb/a" in out
+    assert "[success] kb/b" in out
+    assert out.count("log dir:") == 1  # one shared line, not one per task
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_cli_eval_set_glob_matches_by_prefix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    _register_task("other/c")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/*",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+        reg._FACTORIES["task"].pop("other/c", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out
+    assert "other/c" not in out
+
+
+def test_cli_eval_set_dedups_overlapping_patterns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/*",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out  # kb/a not repeated despite matching twice
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_cli_eval_set_unmatched_pattern_errors() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "eval-set",
+                "does-not-exist/*",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+            ]
+        )
+    message = str(excinfo.value)
+    assert "no task matches 'does-not-exist/*'" in message
+    assert "registered tasks: " in message
+
+
+def test_cli_eval_set_epochs_override_applies_to_every_task(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                "2",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    from inspect_robots import read_eval_log
+
+    logs = [read_eval_log(str(p)) for p in tmp_path.glob("*.json")]
+    assert len(logs) == 2
+    assert all(log.results.total_trials == 2 for log in logs)  # --epochs overrode both tasks
+
+
+def test_cli_eval_set_sim_and_embodiment_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(["eval-set", "cubepick-reach", "--sim", "--embodiment", "cubepick"])
+
+
+def test_cli_eval_set_guardrail_flags_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--disable-guardrails",
+                "--max-action-delta",
+                "0.1",
+            ]
+        )
+
+
+def test_cli_eval_set_disable_guardrails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "eval-set",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--disable-guardrails",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert "guardrails: disabled (--disable-guardrails)" in out
+    assert "WARNING: guardrails disabled" in err
+
+
+def test_cli_eval_set_degraded_guardrails_warn_but_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same bare-space case as test_cli_degraded_guardrails_warn_but_run, via eval-set.
+    from dataclasses import replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.spaces import Box
+
+    class _BareSpaceEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(self.info, action_space=Box(shape=(2,)))
+
+    name = "bare-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_BareSpaceEmbodiment)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "guardrails: none active" in captured.out
+    assert "no guardrails" in captured.err
+
+
+def test_cli_eval_set_sim_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    rc = main(
+        [
+            "eval-set",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--sim",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
+
+
+def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Observation
+
+    class _FaultOnSecondTask(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("reset exploded")
+            return super().reset(scene, seed=seed)
+
+    name = "fault-on-second-task-for-eval-set-test"
+    embodiment_decorator(name)(_FaultOnSecondTask)
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "[success] kb/a" in out
+    assert "[error] kb/b" in out
+    assert "reset exploded" in out
+
+
+def test_cli_eval_set_policy_errors_every_reset_without_fail_on_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No metrics, no top-level error: PolicyError-class failures without
+    --fail-on-error degrade every scene silently, so the eval-set summary
+    row has neither a metric nor an error to show (see _print_eval_set_summary).
+    """
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _AlwaysFailsPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("policy reset exploded")
+
+    name = "always-fails-for-eval-set-test"
+    policy_decorator(name)(_AlwaysFailsPolicy)
+    _register_task("kb/a")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name, None)
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 0  # PolicyErrors without --fail-on-error never flip the top-level status
+    out = capsys.readouterr().out
+    assert "status: success" in out
+    assert "[success] kb/a\n" in out  # no trailing metric/error detail
+
+
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     assert "Inspect Robots" in capsys.readouterr().out

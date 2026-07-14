@@ -8,6 +8,11 @@ Subcommands:
   components from the registry. Pass constructor args with ``-T/-P/-E k=v``;
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
+- ``inspect-robots eval-set TASK [TASK ...] --policy P --embodiment E`` — run several
+  registered tasks (exact names or ``fnmatch`` globs, e.g. ``'kitchenbench/*'``) against
+  one resolved policy/embodiment pair via
+  [`eval_set`][inspect_robots.eval.eval_set]. Prints one status line and a compact
+  per-task row instead of a full summary per task.
 - ``inspect-robots inspect LOG.json`` — print a saved eval log.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
@@ -23,6 +28,7 @@ single-word instructions use the explicit ``run --instruction`` form.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import sys
 from collections.abc import Sequence
@@ -79,7 +85,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
+_SUBCOMMANDS = ("list", "run", "eval-set", "inspect", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -188,6 +194,67 @@ def build_parser() -> argparse.ArgumentParser:
         "space's native units (default: derived from the space's bounds)",
     )
 
+    p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
+    p_eval_set.add_argument(
+        "tasks",
+        nargs="+",
+        metavar="TASK",
+        help="registered task name(s); shell-quoted globs match by prefix, e.g. 'kitchenbench/*'",
+    )
+    p_eval_set.add_argument("--policy", help="registered policy name (default: user config)")
+    p_eval_set.add_argument(
+        "--embodiment", help="registered embodiment name (default: user config)"
+    )
+    p_eval_set.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
+    p_eval_set.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    p_eval_set.add_argument("--log-dir", default="logs")
+    p_eval_set.add_argument("--seed", type=int, default=0)
+    p_eval_set.add_argument(
+        "--epochs", type=int, default=None, help="override every matched task's epoch count"
+    )
+    p_eval_set.add_argument(
+        "--sim",
+        action="store_true",
+        help="run on the configured sim_embodiment instead of the default "
+        "(real-hardware) embodiment",
+    )
+    p_eval_set.add_argument(
+        "--fail-on-error",
+        type=float,
+        default=None,
+        metavar="X",
+        help="halt on PolicyErrors: 1 = first error, 0<X<1 = proportion, X>1 = count",
+    )
+    p_eval_set.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=0,
+        help="passed through to eval_set(); resumption of a partial run is "
+        "accepted but not yet honored",
+    )
+    p_eval_set.add_argument(
+        "--store-frames",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream camera frames to a per-run directory under <log-dir>/frames "
+        "instead of keeping them in memory (--no-store-frames overrides a "
+        "store_frames config default)",
+    )
+    p_eval_set.add_argument(
+        "--disable-guardrails",
+        action="store_true",
+        help="turn off the default safety approvers (bounds clamp + per-step "
+        "delta limit); actions reach the embodiment unchecked",
+    )
+    p_eval_set.add_argument(
+        "--max-action-delta",
+        type=float,
+        default=None,
+        metavar="D",
+        help="per-step change limit for the default guardrails, in the action "
+        "space's native units (default: derived from the space's bounds)",
+    )
+
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
     p_inspect.add_argument("log", help="path to an EvalLog JSON file")
 
@@ -246,6 +313,31 @@ def _pick_component(
         "run 'inspect-robots setup', or "
         f"'inspect-robots config set {kind} NAME'"
     )
+
+
+def _match_tasks(patterns: Sequence[str]) -> list[str]:
+    """Resolve task-name patterns (exact names or ``fnmatch`` globs) against the registry.
+
+    Preserves first-match order across patterns, deduplicated, so
+    ``eval-set 'kb/*' 'kb/pour'`` does not run ``kb/pour`` twice. A pattern
+    that matches nothing is an error naming every registered task, mirroring
+    ``_pick_component``'s guidance-over-traceback style.
+    """
+    from inspect_robots.registry import registered
+
+    names = sorted(registered("task"))
+    matched: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        hits = [n for n in names if fnmatch.fnmatchcase(n, pattern)]
+        if not hits:
+            available = ", ".join(names) or "(none)"
+            raise SystemExit(f"no task matches {pattern!r}.\nregistered tasks: {available}")
+        for n in hits:
+            if n not in seen:
+                seen.add(n)
+                matched.append(n)
+    return matched
 
 
 def _config_args(
@@ -565,6 +657,131 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0 if log.status == "success" else 1
 
 
+def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str) -> None:
+    """Print one overall status line, a compact row per task, then the shared log dir.
+
+    Deliberately not N full ``_print_run_summary``s: a 10-task benchmark run
+    should not scroll 10 screens of near-identical output.
+    """
+    status = "success" if success else "error"
+    print(f"{_styled('status:', _CYAN)} {_styled(status, _GREEN if success else _RED)}")
+    for log in logs:
+        failed = log.status != "success"
+        metrics = ", ".join(
+            f"{name}={value:.4g}" for name, value in sorted(log.results.metrics.items())
+        )
+        detail = metrics or (log.error or "")
+        row = f"  [{_styled(log.status, _RED if failed else _GREEN)}] {log.eval.task}"
+        print(f"{row}  {detail}" if detail else row)
+    print(f"{_styled('log dir:', _CYAN)} {_styled(log_dir, _DIM)}")
+    if not success:
+        print(_styled(f"hint: inspect-robots inspect {log_dir}/<task>_<id>.json", _DIM))
+
+
+def _cmd_eval_set(args: argparse.Namespace) -> int:
+    """Resolve one policy/embodiment once, then drive every matched task through it.
+
+    A thin wrapper over [`eval_set`][inspect_robots.eval.eval_set]: unlike
+    calling ``eval_set()`` with string components (which resolves and closes
+    the embodiment once per task), the CLI resolves the embodiment exactly
+    once for the whole set, so a real robot is not reconnected between tasks.
+    """
+    from dataclasses import replace
+
+    from inspect_robots import eval_set
+
+    if args.sim and args.embodiment:
+        raise SystemExit(
+            "--sim selects your configured sim_embodiment; "
+            "passing --embodiment already picks the embodiment — drop one"
+        )
+    if args.disable_guardrails and args.max_action_delta is not None:
+        raise SystemExit(
+            "--max-action-delta tunes the guardrails that --disable-guardrails turns off — drop one"
+        )
+
+    task_names = _match_tasks(args.tasks)
+
+    defaults = load_defaults(os.environ)
+    policy_name, policy_source = _pick_component(
+        "policy", args.policy, defaults.policy, defaults.policy_source
+    )
+    if args.sim:
+        embodiment_name, embodiment_source = _pick_sim_embodiment(defaults)
+        embodiment_defaults = _config_args(
+            "sim_embodiment",
+            embodiment_name,
+            defaults.sim_embodiment_args_owner,
+            defaults.sim_embodiment_args,
+        )
+    else:
+        embodiment_name, embodiment_source = _pick_component(
+            "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
+        )
+        embodiment_defaults = _config_args(
+            "embodiment", embodiment_name, defaults.embodiment_args_owner, defaults.embodiment_args
+        )
+    policy_config_args = _config_args(
+        "policy", policy_name, defaults.policy_args_owner, defaults.policy_args
+    )
+    policy_kvs = {**policy_config_args, **_parse_kvs(args.policy_args)}
+    embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
+
+    tasks = [_resolve_or_exit("task", name) for name in task_names]
+    if args.epochs is not None:
+        tasks = [replace(t, epochs=args.epochs) for t in tasks]
+
+    policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
+    if args.sim:
+        embodiment = _resolve_or_exit(
+            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+        )
+    else:
+        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+
+    try:
+        print(f"policy: {policy_name} ({policy_source})")
+        print(f"embodiment: {embodiment_name} ({embodiment_source})")
+        print(f"tasks: {', '.join(task_names)}")
+
+        approver: Approver | None = None
+        if args.disable_guardrails:
+            print(
+                "WARNING: guardrails disabled (--disable-guardrails); actions "
+                "reach the embodiment unchecked.",
+                file=sys.stderr,
+            )
+            print("guardrails: disabled (--disable-guardrails)")
+        else:
+            approver, active, guard_warnings = _build_guardrails(
+                embodiment.info.action_space, args.max_action_delta
+            )
+            for warning in guard_warnings:
+                print(f"guardrails warning: {warning}", file=sys.stderr)
+            print(f"guardrails: {' + '.join(active) if active else 'none active'}")
+
+        success, logs = eval_set(
+            tasks,
+            policy,
+            embodiment,
+            log_dir=args.log_dir,
+            seed=args.seed,
+            fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
+            approver=approver,
+            store_frames=(
+                args.store_frames if args.store_frames is not None else defaults.store_frames
+            ),
+            retry_attempts=args.retry_attempts,
+        )
+    finally:
+        # Same "close what we open" contract as _cmd_run: the CLI resolved the
+        # embodiment itself, so it — not eval_set() — is responsible for
+        # releasing it, exactly once, after every task has run.
+        embodiment.close()
+    _print_eval_set_summary(success, logs, args.log_dir)
+    return 0 if success else 1
+
+
 def _cmd_inspect(path: str) -> int:
     from inspect_robots import read_eval_log
 
@@ -678,6 +895,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_list(args.what)
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "eval-set":
+        return _cmd_eval_set(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log)
     if args.command == "config":

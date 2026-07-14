@@ -190,6 +190,40 @@ run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise.
 
+## `inspect-robots eval-set`
+
+Run several registered tasks against one resolved policy/embodiment pair in a
+single invocation — the CLI counterpart of
+[`eval_set`][inspect_robots.eval.eval_set]. Task names are matched exactly, or
+by shell-quoted `fnmatch` glob (entry-point discovery namespaces tasks as
+`<benchmark>/<key>`, so a benchmark name is a ready-made prefix):
+
+```bash
+inspect-robots eval-set 'kitchenbench/*' --policy xpolicylab -P url=ws://host:19000 \
+             --embodiment yam_arms
+inspect-robots eval-set cubepick-reach my-other-task --policy scripted --embodiment cubepick
+```
+
+Multiple patterns may match the same task; it still runs once. A pattern that
+matches nothing is an error listing every registered task. `--policy` and
+`--embodiment` (and `-P`/`-E`, `--sim`, `--epochs`, `--fail-on-error`,
+`--store-frames`, `--disable-guardrails`, `--max-action-delta`) apply exactly
+as they do for `run`, to every matched task — there is no per-task `-T` in
+this release. The embodiment is resolved once for the whole set, not once per
+task, so a real robot is not reconnected between tasks.
+
+Rather than one full summary per task, the CLI prints the resolved
+policy/embodiment, one status line for the whole set, a compact `[status]
+task_name  metrics-or-error` row per task, and the shared log directory once
+(`eval_set` still writes one `EvalLog` per task inside it). The exit code is
+`0` iff every task's log has `status == "success"`.
+
+`--retry-attempts` is accepted and threaded through to `eval_set()`, whose
+resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
+today does not yet skip already-finished scenes. `--rerun`'s live viewer
+is not offered for `eval-set`: streaming several back-to-back tasks into one
+viewer window is a separate design question from running the set at all.
+
 ## `inspect-robots doctor`
 
 `doctor` reports a registered embodiment's missing declared runtime modules
