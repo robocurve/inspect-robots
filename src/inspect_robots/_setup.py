@@ -1077,6 +1077,6 @@ def run_setup(
             [f"setup complete, but {count} runtime {dependency} missing:", *runtime_lines]
         )
         print(_paint(block, _YELLOW, out), file=out)
-    next_cmd = 'uv run inspect-robots "place the fork on the plate"'
+    next_cmd = 'inspect-robots "place the fork on the plate"'
     print(f"Next: {_paint(next_cmd, _CYAN, out)}", file=out)
     return 0

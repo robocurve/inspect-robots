@@ -22,6 +22,7 @@ EXPECTED = {
     "TrialRecord",
     # tasks, scenes, scoring
     "Task",
+    "TaskEnvelope",
     "Epochs",
     "Scene",
     "Target",
