@@ -251,7 +251,9 @@ def _prompt_camera_role(
                 continue
         elif not entered and current is not None:
             selected = current
-        elif entered.startswith("/"):
+        elif entered.startswith("/") or Path(entered).is_absolute():
+            # startswith("/") keeps POSIX rig paths accepted on Windows
+            # workstations, where "/dev/v4l/..." is not drive-absolute.
             if not Path(entered).exists():
                 print(
                     f"warning: {entered} does not exist here "
