@@ -28,6 +28,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
 | `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
+| `_dotenv.py` | dependency-free `.env` parsing and working-directory auto-loading with real environment variables taking precedence |
 | `_setup.py` | the `inspect-robots setup` wizard (plans 0009 and 0011): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with unplug-to-identify and CAN udev guidance, fallback camera discovery, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
@@ -43,7 +44,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
   inside a trial carries the partial `TrialRecord` on `exc.record`.
 - `eval()` must always return/persist an `EvalLog` once rollouts have started —
   scorer/reducer failures degrade to an error log, never a crash. Errored
-  trials are recorded (and delivered to sinks) but **never scored**.
+  trials are recorded (and delivered to sinks) but **never scored**. A run in
+  which every trial errored ends with `status == "error"` even under the
+  default `fail_on_error=False`.
 - `eval()` closes embodiments it resolved from registry names ("close what we
   open"); caller-constructed objects are caller-owned.
 - `mock/` and core must never import `rerun`/`torch` at module top.

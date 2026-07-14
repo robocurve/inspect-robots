@@ -41,6 +41,7 @@ from inspect_robots._defaults import (
     parse_value,
     set_default,
 )
+from inspect_robots._dotenv import init_dotenv
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
@@ -67,6 +68,7 @@ _DIM = "2"
 _CYAN = "36"
 _GREEN = "32"
 _RED = "31"
+_YELLOW = "33"
 
 
 _KIND_BY_PLURAL = {
@@ -380,6 +382,8 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
         )
         print(f"operator verdict adopted from embodiment: {record.termination_reason}")
         return
+    if record.truncated and record.termination_reason == "max_steps":
+        print("note: this trial hit the step limit before terminating")
     while True:
         try:
             answer = input(_PROMPT).strip().lower()
@@ -394,26 +398,61 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     record.events.append(operator_event(t=len(record.steps), verdict=answer))
 
 
-def _print_run_summary(log: EvalLog, log_path: str) -> None:
+def _step_limit_count(log: EvalLog) -> int:
+    """Count recorded trials whose termination reason is the step horizon."""
+    return sum(
+        reason == "max_steps" for scene in log.samples for reason in scene.termination_reasons
+    )
+
+
+def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
+    """Print the shared timeout note and the horizon-ownership hint when needed."""
+    count = _step_limit_count(log)
+    if count == 0:
+        return
+
+    note = f"note: {count}/{log.results.total_trials} trials hit the step limit before terminating"
+    max_steps = log.eval.max_steps
+    # Guards below reject bool/str values a hand-edited log can smuggle past
+    # from_dict (bool is an int subclass, so isinstance alone lets True in).
+    if isinstance(max_steps, int) and not isinstance(max_steps, bool):
+        parenthetical = f"max_steps={max_steps}"
+        rate = log.eval.embodiment_info.get("control_hz")
+        if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+            parenthetical += f", ~{max_steps / rate:g}s at {rate:g} Hz"
+        note += f" ({parenthetical})"
+    print(_styled(note, _YELLOW))
+    if is_adhoc:
+        hint = "hint: raise it with --max-steps N or: inspect-robots config set max_steps N"
+    else:
+        hint = f"hint: task {log.eval.task!r} defines its own max_steps"
+    print(_styled(hint, _DIM))
+
+
+def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
+    errored_count = log.results.errored_trials
     status_color = _RED if failed else _GREEN
     print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
     if failed and log.error is not None:
         print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
-    if failed:
+    if failed or errored_count:
+        # Errored scenes are failure context even when the run as a whole
+        # succeeded (issue #73): a partially-errored "success" must be legible.
         for scene in log.samples:
             if scene.status == "error":
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
                 print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
-    print(
-        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
-        f"trials: {log.results.total_trials}"
-    )
+    _print_step_limit_notice(log, is_adhoc)
+    trials = f"trials: {log.results.total_trials}"
+    if errored_count:
+        trials += f" ({errored_count} errored)"
+    print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
-    if failed:
+    if failed or errored_count:
         print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
 
 
@@ -574,7 +613,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
-    _print_run_summary(log, str(sink.path))
+    _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
 
 
@@ -582,20 +621,28 @@ def _cmd_inspect(path: str) -> int:
     from inspect_robots import read_eval_log
 
     log = read_eval_log(path)
+    _print_step_limit_notice(log, log.eval.task == "adhoc")
     print(f"task:        {log.eval.task}")
     print(f"policy:      {log.eval.policy}")
     print(f"embodiment:  {log.eval.embodiment}")
     print(f"status:      {log.status}")
     print(f"created:     {log.eval.created}")
     print(f"git:         {log.eval.git_commit}")
-    print(f"scenes:      {log.results.total_scenes}   trials: {log.results.total_trials}")
+    trials = f"trials: {log.results.total_trials}"
+    if log.results.errored_trials:
+        trials += f" ({log.results.errored_trials} errored)"
+    print(f"scenes:      {log.results.total_scenes}   {trials}")
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {value:.4g}")
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(f"{k}={v:.4g}" for k, v in sorted(scene.reduced.items()))
-        print(f"  [{scene.status}] {scene.scene_id}: {reduced}")
+        step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
+        details = [reduced] if reduced else []
+        if step_limit_count:
+            details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit max_steps)")
+        print(f"  [{scene.status}] {scene.scene_id}: {'  '.join(details)}")
     if log.error:
         print(f"error: {log.error}")
     return 0 if log.status == "success" else 1
@@ -684,6 +731,7 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, dispatch one subcommand, and return its process exit code."""
+    init_dotenv(os.environ)
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))

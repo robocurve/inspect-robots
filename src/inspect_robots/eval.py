@@ -138,6 +138,9 @@ def eval(
     as data in the metrics; it stays visible via ``SceneResult.status`` and an
     empty entry in ``SceneResult.epochs``.
 
+    A run in which **every** trial errored (nothing was scored) always ends
+    with ``status == "error"``, regardless of ``fail_on_error``.
+
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
@@ -255,6 +258,7 @@ def _run_eval(
             "capabilities": sorted(embodiment.info.capabilities),
         },
         seed=seed,
+        max_steps=task.max_steps,
     )
     bus.on_eval_start(spec)
 
@@ -268,6 +272,7 @@ def _run_eval(
     status = "success"
     error: str | None = None
     error_count = 0
+    errored_trials = 0
 
     halted = False
     stopped = False
@@ -275,6 +280,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        termination_reasons: list[str | None] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -326,7 +332,9 @@ def _run_eval(
                     # masquerade as data (e.g. an inf min-distance poisoning
                     # the metric mean). It stays visible via scene status.
                     epoch_dicts.append({})
+                    errored_trials += 1
                     judgements.append(None)
+                    termination_reasons.append(record.termination_reason)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -340,6 +348,7 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
+                    termination_reasons.append(record.termination_reason)
                 bus.on_trial_end(record)
 
             if halted:
@@ -381,10 +390,18 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                termination_reasons=tuple(termination_reasons),
             )
         )
         if stopped:
             break
+
+    if status == "success" and total_trials > 0 and errored_trials == total_trials:
+        # Every trial errored: there is no surviving data for fail_on_error's
+        # flaky-trial tolerance to protect, and a "success" log would hide a
+        # total failure (issue #73).
+        status = "error"
+        error = f"all {total_trials} trial(s) errored; nothing was scored"
 
     metrics: dict[str, float] = {}
     for scorer in scorers:
@@ -408,6 +425,7 @@ def _run_eval(
             total_scenes=len(scene_results),
             total_trials=total_trials,
             metrics=metrics,
+            errored_trials=errored_trials,
         ),
         stats=stats,
         samples=tuple(scene_results),

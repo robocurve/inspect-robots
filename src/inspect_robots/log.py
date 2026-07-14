@@ -24,7 +24,7 @@ SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class EvalSpec:
-    """Top-level identity of an eval: what was run, with what, when."""
+    """Top-level identity and configured horizon of a reproducible eval."""
 
     task: str
     policy: str
@@ -35,6 +35,7 @@ class EvalSpec:
     policy_config: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
+    max_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,9 @@ class SceneResult:
     # trial, ``None`` when the trial errored or no judgement was captured.
     # Defaults keep logs written before these fields existed readable.
     operator_judgements: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: why each recorded trial ended, or
+    # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
+    termination_reasons: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,10 @@ class EvalResults:
     total_scenes: int
     total_trials: int
     metrics: dict[str, float] = field(default_factory=dict)
+    # Trials recorded but never scored (visible per-scene as empty entries in
+    # ``SceneResult.epochs``). The default keeps logs written before this
+    # field existed readable.
+    errored_trials: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,7 @@ class EvalLog:
             # written before ``operator_judgements`` existed (newer reads older).
             sample["epochs"] = tuple(sample.get("epochs", ()))
             sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
+            sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],

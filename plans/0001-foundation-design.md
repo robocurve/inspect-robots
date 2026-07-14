@@ -591,7 +591,10 @@ RoboInspect mirrors these so Inspect users feel at home:
   of trials error, `x>1`=fail if that *count* error. RoboInspect adopts this verbatim
   for `PolicyError`-class failures. **Robotics addition:** `EmbodimentFault` /
   `SafetyAbort` always halt regardless of `fail_on_error` (hardware safety is not
-  negotiable) — this is the one place RoboInspect deliberately extends Inspect.
+  negotiable). **Second addition (issue #73):** a finished run in which *every*
+  trial errored degrades to `status: "error"` even under `fail_on_error=False` —
+  error tolerance protects surviving data, and a run that scored nothing has
+  none. These are the two places RoboInspect deliberately extends Inspect.
 - **`EvalLog` structure** mirrored: `version` (int), `status`
   (`"started"|"success"|"error"`), `eval` (an `EvalSpec`: task/policy/embodiment/
   created/git/versions), `plan` (resolved config incl. `PolicyConfig`,
