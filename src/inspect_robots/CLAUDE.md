@@ -20,7 +20,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
-| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` — declarative guardrail/agent readiness; backs `inspect-robots doctor` and adapter-repo CI tests |
+| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight for setup and doctor |
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |

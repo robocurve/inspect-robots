@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -1421,6 +1422,113 @@ def test_run_setup_repeats_plugin_reminder_after_writing(tmp_path: Path) -> None
     )
     assert reminder in text
     assert text.index("Wrote ") < text.index("reminder: ")
+    assert "runtime dependenc" not in text
+
+
+def test_run_setup_reports_one_missing_runtime_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _PolicyFactory:
+        pass
+
+    class _EmbodimentFactory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz": "pip install thing"
+        }
+
+    def fake_registered(kind: str) -> dict[str, object]:
+        if kind == "policy":
+            return {"runtime-policy": _PolicyFactory}
+        return {"runtime-body": _EmbodimentFactory}
+
+    monkeypatch.setattr("inspect_robots.registry.registered", fake_registered)
+    input_fn, _ = _scripted_input(["runtime-policy", "runtime-body", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    assert "setup complete, but 1 runtime dependency is missing:" in text
+    assert "  ✗ definitely_missing_xyz (runtime-body) → pip install thing" in text
+    assert text.index("Wrote ") < text.index("1 runtime dependency is missing:")
+    assert text.index("1 runtime dependency is missing:") < text.index("Next: ")
+
+
+def test_run_setup_reports_multiple_missing_runtime_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _PolicyFactory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz_policy": "install policy dependency"
+        }
+
+    class _EmbodimentFactory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz_body": "install embodiment dependency"
+        }
+
+    def fake_registered(kind: str) -> dict[str, object]:
+        if kind == "policy":
+            return {"runtime-policy": _PolicyFactory}
+        return {"runtime-body": _EmbodimentFactory}
+
+    monkeypatch.setattr("inspect_robots.registry.registered", fake_registered)
+    input_fn, _ = _scripted_input(["runtime-policy", "runtime-body", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    assert "setup complete, but 2 runtime dependencies are missing:" in text
+    assert "definitely_missing_xyz_policy (runtime-policy)" in text
+    assert "definitely_missing_xyz_body (runtime-body)" in text
+
+
+def test_run_setup_omits_runtime_checklist_when_requirements_are_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _PolicyFactory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install os"}
+
+    class _EmbodimentFactory:
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install os"}
+
+    def fake_registered(kind: str) -> dict[str, object]:
+        if kind == "policy":
+            return {"runtime-policy": _PolicyFactory}
+        return {"runtime-body": _EmbodimentFactory}
+
+    monkeypatch.setattr("inspect_robots.registry.registered", fake_registered)
+    input_fn, _ = _scripted_input(["runtime-policy", "runtime-body", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "runtime dependenc" not in out.getvalue()
 
 
 def test_run_setup_no_reminder_when_components_registered(
@@ -1428,7 +1536,7 @@ def test_run_setup_no_reminder_when_components_registered(
 ) -> None:
     monkeypatch.setattr(
         "inspect_robots.registry.registered",
-        lambda kind: {"molmoact2", "yam_arms"},
+        lambda kind: {"molmoact2": object(), "yam_arms": object()},
     )
     input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
     out = io.StringIO()
@@ -1451,7 +1559,10 @@ def test_run_setup_reminder_names_only_the_missing_component(tmp_path: Path) -> 
     out = io.StringIO()
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("inspect_robots.registry.registered", lambda kind: {"molmoact2"})
+        mp.setattr(
+            "inspect_robots.registry.registered",
+            lambda kind: {"molmoact2": object()},
+        )
         result = run_setup(
             {"XDG_CONFIG_HOME": str(tmp_path)},
             input_fn=input_fn,
