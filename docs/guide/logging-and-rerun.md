@@ -62,9 +62,21 @@ Rerun.
 
 ```python
 RerunSink("run.rrd")                   # record to a file, view later
-RerunSink(spawn=True)                  # live viewer (what the CLI wires up)
+RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
+RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
 RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
 ```
+
+The three modes are mutually exclusive: rerun's `save`/`spawn`/`connect_grpc`
+calls each replace the SDK's global sink, so combining them raises `ValueError`
+rather than silently dropping a stream.
+
+On a headless robot box, `spawn=True` has nowhere to open a window. Run the
+viewer on your own machine instead and stream to it: `rerun` on your laptop,
+`ssh -R 9876:localhost:9876 <robot>` for the tunnel, then
+`inspect-robots run ... --rerun-connect` (a bare `--rerun-connect` targets the
+tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
+and SDK versions must match for live connections.
 
 ## Frame side-cars
 
