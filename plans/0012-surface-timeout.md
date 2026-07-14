@@ -8,9 +8,10 @@ notice, is_adhoc plumbing, denominator and rate-approximation notes)
 ## Problem
 
 A real-robot run that hits the rollout step limit currently looks identical to a
-clean finish. Observed on a yam ad-hoc run (`logs/adhoc_7425493a.json`,
-`total_steps: 1200` at 10 Hz): the episode was cut off by `max_steps`, yet the
-CLI printed `status: success` and the eval log recorded nothing about the
+clean finish. Observed on a yam ad-hoc run (`adhoc_7425493a.json` in the
+operator's `inspect-robots-yam` checkout, `total_steps: 1200` at
+`control_hz: 10.0`): the episode was cut off by `max_steps`, yet the CLI
+printed `status: success` and the eval log recorded nothing about the
 truncation.
 
 The information exists and then gets dropped:
@@ -84,9 +85,12 @@ The information exists and then gets dropped:
     part unless both are present, numeric (`isinstance(x, (int, float))` —
     `None > 0` raises), and positive. The embodiment rate is an
     approximation: R1's precedence lets a chunk or registered task override
-    the effective rate, which the `~` hedge covers; ad-hoc tasks (the
-    motivating case) never set `control_hz`, so there it is exact. Do not add
-    more `EvalSpec` fields for this.
+    the effective rate, and the loop does no pacing yet (wall-clock seconds
+    are only real for `SELF_PACED` embodiments like yam) — the `~` hedge
+    covers both. Do not add more `EvalSpec` fields for this.
+  - When `log.eval.max_steps` is `None` (only reachable via a hand-edited or
+    foreign log read by `inspect`), print the note without the parenthetical
+    entirely — never `max_steps=None`.
   - `log.status` semantics are unchanged: a truncated run is still
     `success` (no errors); the note is advisory.
   - The `config set` hint applies to ad-hoc runs; registered tasks own their
