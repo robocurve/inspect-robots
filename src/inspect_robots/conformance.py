@@ -19,7 +19,7 @@ guide covers the human half.
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -27,6 +27,47 @@ import numpy as np
 from inspect_robots.embodiment import EmbodimentInfo
 
 _ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
+DEVICE_KINDS = ("v4l2", "can", "serial")
+
+
+@dataclass(frozen=True)
+class DeviceSlot:
+    """One device-shaped constructor argument the setup wizard interviews.
+
+    ``arg`` is the ``[embodiment.args]`` key to write; ``kind`` selects the
+    probe (``"v4l2"``: /dev/v4l listings with unplug-identify; ``"can"``:
+    SocketCAN netdevs from sysfs with unplug-identify; ``"serial"``:
+    /dev/serial/by-id listing). ``label`` is the human prompt ("left arm CAN
+    channel"). Slots sharing a non-None ``group`` are all-or-none: the
+    wizard refuses to write a partial subset of the group.
+    """
+
+    arg: str
+    kind: str
+    label: str
+    group: str | None = None
+
+
+def device_slots(factory: object) -> tuple[DeviceSlot, ...]:
+    """The declared device slots, defensively read.
+
+    Reads ``DEVICE_SLOTS`` off ``factory``; anything that is not an iterable
+    of ``DeviceSlot`` instances (or contains a slot whose ``kind`` is not
+    recognized) has the offending entries ignored, never crashes the wizard.
+    Returns a tuple in declaration order.
+    """
+    try:
+        slots = getattr(factory, "DEVICE_SLOTS", None)
+    except Exception:
+        return ()
+    if not isinstance(slots, Iterable):
+        return ()
+    try:
+        return tuple(
+            slot for slot in slots if isinstance(slot, DeviceSlot) and slot.kind in DEVICE_KINDS
+        )
+    except Exception:
+        return ()
 
 
 def missing_runtime_requirements(factory: object) -> dict[str, str]:
