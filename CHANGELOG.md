@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Public-docstring coverage gate via Ruff's D1 rules, with a full backfill of
+  missing public docstrings.
+
 ### Fixed
 
 - **Config `[*.args]` sections no longer follow a differently-selected

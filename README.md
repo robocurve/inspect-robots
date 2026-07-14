@@ -17,6 +17,7 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
+[![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
 [**Documentation**](https://inspectrobots.org/) ·
 [Quickstart](https://inspectrobots.org/guide/quickstart.html) ·

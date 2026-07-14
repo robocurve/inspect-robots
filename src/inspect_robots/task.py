@@ -55,6 +55,7 @@ class Task:
 
     @property
     def scorers(self) -> list[Scorer]:
+        """Resolve registry names while preserving the declared scorer order."""
         # A str IS a Sequence: treat it as a single registry name, never as a
         # sequence of one-character "scorers".
         if isinstance(self.scorer, str) or not isinstance(self.scorer, Sequence):
@@ -73,4 +74,5 @@ class Task:
 
     @property
     def epoch_spec(self) -> Epochs:
+        """Normalize an integer epoch count to an ``Epochs`` specification."""
         return self.epochs if isinstance(self.epochs, Epochs) else Epochs(count=self.epochs)

@@ -63,20 +63,25 @@ class JsonLogSink:
         self.path: Path | None = None
 
     def on_eval_start(self, spec: EvalSpec) -> None:
+        """Defer output until the final immutable log is available."""
         return None
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
+        """Ignore trial starts because the final log carries scene and epoch results."""
         return None
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
+        """Ignore live transitions because the final log is the canonical payload."""
         return None
 
     def on_trial_end(self, record: TrialRecord) -> None:
+        """Ignore individual trajectories because their results arrive in the final log."""
         return None
 
     def on_eval_end(self, log: EvalLog) -> None:
+        """Atomically serialize the final log and expose its path."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
         self.path = self.log_dir / filename

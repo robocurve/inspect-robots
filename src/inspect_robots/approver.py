@@ -28,13 +28,16 @@ class Approver(Protocol):
     raise [`SafetyAbort`][inspect_robots.errors.SafetyAbort] to halt the eval.
     """
 
-    def review(self, action: Action, store: dict[str, Any]) -> Action: ...
+    def review(self, action: Action, store: dict[str, Any]) -> Action:
+        """Return the action to execute, or raise ``SafetyAbort`` to halt the evaluation."""
+        ...
 
 
 class AutoApprover:
     """Approve every action unchanged (the permissive default)."""
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
+        """Pass the action through without modifying its identity."""
         return action
 
 
@@ -59,6 +62,7 @@ class ClampApprover:
         self._space = action_space
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
+        """Reject NaNs and clamp bounded dimensions, preserving identity when unchanged."""
         data = np.asarray(action.data, dtype=np.float64)
         if bool(np.isnan(data).any()):
             raise SafetyAbort("ClampApprover: action contains NaN; refusing to pass it on")
@@ -145,6 +149,7 @@ class DeltaLimitApprover:
             self._high = high if explicit is None else _intersect(high, explicit, np.minimum)
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
+        """Limit per-step change, retaining absolute-mode history in trial state."""
         data = np.asarray(action.data, dtype=np.float64)
         if bool(np.isnan(data).any()):
             raise SafetyAbort("DeltaLimitApprover: action contains NaN; refusing to pass it on")
@@ -198,6 +203,7 @@ class ChainApprover:
         self._approvers = approvers
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
+        """Apply each configured gate in order to the preceding gate's output."""
         for approver in self._approvers:
             action = approver.review(action, store)
         return action

@@ -25,7 +25,6 @@ from inspect_robots import (
 from inspect_robots.compat import check_compatibility
 from inspect_robots.errors import CompatibilityError
 from inspect_robots.types import ActionChunk, Observation
-
 from inspect_robots_isaacsim import IsaacSimEmbodiment, isaacsim_embodiment
 
 _FRANKA_SEM = ActionSemantics(

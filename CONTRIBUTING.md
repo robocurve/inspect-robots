@@ -34,6 +34,9 @@ uv run mypy
 uv run pytest --cov            # must report 100% coverage
 ```
 
+Ruff's D1 rules require a docstring on every public module, class, and function.
+State the contract or invariant the caller needs; do not restate the symbol name.
+
 ## Git hooks (pre-commit)
 
 This repo ships a [pre-commit](https://pre-commit.com/) configuration

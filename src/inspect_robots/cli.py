@@ -93,6 +93,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog="inspect-robots",
         description="Inspect Robots — the Inspect AI for robotics.",
@@ -614,6 +615,7 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse arguments, dispatch one subcommand, and return its process exit code."""
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
