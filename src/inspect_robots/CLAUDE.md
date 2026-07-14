@@ -24,7 +24,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
-| `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
+| `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` (non-blocking worker thread; drops frames, never delays control) |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
 | `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
