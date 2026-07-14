@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import MutableMapping
 from pathlib import Path
 
@@ -9,8 +10,8 @@ from pathlib import Path
 def read_dotenv(path: Path) -> dict[str, str]:
     """Return supported key-value pairs, or an empty mapping when the file is unreadable."""
     try:
-        contents = path.read_text(encoding="utf-8")
-    except OSError:
+        contents = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
         return {}
 
     parsed: dict[str, str] = {}
@@ -29,6 +30,10 @@ def read_dotenv(path: Path) -> dict[str, str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
+        else:
+            # python-dotenv semantics: an unquoted value ends at the first
+            # whitespace-preceded "#"; quoted values keep "#" literally.
+            value = re.split(r"\s#", value, maxsplit=1)[0].rstrip()
         parsed[key] = value
     return parsed
 

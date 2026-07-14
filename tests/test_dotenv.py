@@ -44,12 +44,41 @@ def test_read_dotenv_parses_supported_syntax(tmp_path: Path) -> None:
     }
 
 
+def test_read_dotenv_strips_unquoted_inline_comments(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        'KEY=sk-123 # prod key\nQUOTED="value # kept"\nHASH_VALUE=#not-a-comment\nANCHOR=a#b\n',
+        encoding="utf-8",
+    )
+
+    assert read_dotenv(path) == {
+        "KEY": "sk-123",
+        "QUOTED": "value # kept",
+        "HASH_VALUE": "#not-a-comment",
+        "ANCHOR": "a#b",
+    }
+
+
+def test_read_dotenv_strips_utf8_bom(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_bytes(b"\xef\xbb\xbfANTHROPIC_API_KEY=abc\n")
+
+    assert read_dotenv(path) == {"ANTHROPIC_API_KEY": "abc"}
+
+
 def test_read_dotenv_returns_empty_for_missing_file(tmp_path: Path) -> None:
     assert read_dotenv(tmp_path / "missing.env") == {}
 
 
 def test_read_dotenv_returns_empty_for_os_error(tmp_path: Path) -> None:
     assert read_dotenv(tmp_path) == {}
+
+
+def test_read_dotenv_returns_empty_for_undecodable_file(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_bytes(b"KEY=\xff\xfe\n")
+
+    assert read_dotenv(path) == {}
 
 
 def test_init_dotenv_sets_absent_keys_without_overriding_present(tmp_path: Path) -> None:
@@ -80,9 +109,15 @@ def test_cli_main_loads_working_directory_dotenv(
     sentinel = "INSPECT_ROBOTS_TEST_DOTENV_SENTINEL"
     (tmp_path / ".env").write_text(f"{sentinel}=loaded\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv(sentinel, raising=False)
+    # setenv-then-delenv records both operations, so teardown restores absence
+    # (delenv on a missing key records nothing and the value set by main()
+    # would leak into the rest of the session).
+    monkeypatch.setenv(sentinel, "preexisting")
+    monkeypatch.delenv(sentinel)
 
-    from inspect_robots.cli import main
+    import inspect_robots.cli
 
-    assert main(["list"]) == 0
+    monkeypatch.setattr(inspect_robots.cli, "init_dotenv", init_dotenv)
+
+    assert inspect_robots.cli.main(["list"]) == 0
     assert os.environ[sentinel] == "loaded"
