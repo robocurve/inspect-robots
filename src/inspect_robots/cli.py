@@ -413,10 +413,12 @@ def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
 
     note = f"note: {count}/{log.results.total_trials} trials hit the step limit before terminating"
     max_steps = log.eval.max_steps
-    if max_steps is not None:
+    # Guards below reject bool/str values a hand-edited log can smuggle past
+    # from_dict (bool is an int subclass, so isinstance alone lets True in).
+    if isinstance(max_steps, int) and not isinstance(max_steps, bool):
         parenthetical = f"max_steps={max_steps}"
         rate = log.eval.embodiment_info.get("control_hz")
-        if isinstance(rate, (int, float)) and rate > 0:
+        if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
             parenthetical += f", ~{max_steps / rate:g}s at {rate:g} Hz"
         note += f" ({parenthetical})"
     print(_styled(note, _YELLOW))

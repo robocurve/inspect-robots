@@ -106,6 +106,10 @@ def test_halted_eval_with_pass_at_k_reducer_still_writes_log(tmp_path: Path) -> 
     assert log.status == "error"
     assert log.error is not None and "motor stalled" in log.error
     assert log.samples[0].error is not None and "reducer" in log.samples[0].error
+    # The halt path keeps the parallel tuples aligned: the faulted trial gets
+    # a None reason next to its empty epoch entry.
+    assert log.samples[0].termination_reasons == ("success", "success", None)
+    assert len(log.samples[0].termination_reasons) == len(log.samples[0].epochs)
     assert list(tmp_path.glob("*.json"))  # the log reached disk
 
 

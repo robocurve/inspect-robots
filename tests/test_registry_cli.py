@@ -411,6 +411,8 @@ def _step_limit_log(
         (10.0, " (max_steps=1200, ~120s at 10 Hz)"),
         (None, " (max_steps=1200)"),
         (0, " (max_steps=1200)"),
+        # bool is an int subclass; a hand-edited log must not print "at 1 Hz".
+        (True, " (max_steps=1200)"),
     ],
 )
 def test_run_summary_surfaces_step_limit_for_adhoc_runs(
@@ -466,6 +468,23 @@ def test_inspect_surfaces_step_limit_note_hint_and_scene_marker(
     )
     assert "hint: raise it with --max-steps N" in out
     assert "[success] s0: (1/2 trials hit max_steps)" in out
+
+
+def test_inspect_tolerates_non_numeric_max_steps_in_hand_edited_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # from_dict does no field validation, so a hand-edited log can carry a
+    # string horizon; the note must degrade to no parenthetical, not crash.
+    data = _step_limit_log().to_dict()
+    data["eval"]["max_steps"] = "1200"
+    path = tmp_path / "edited.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "note: 1/1 trials hit the step limit before terminating\n" in out
+    assert "max_steps=1200" not in out
 
 
 def test_bare_instruction_runs_adhoc_task_from_env_defaults(
