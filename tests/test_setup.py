@@ -1397,3 +1397,70 @@ def test_run_setup_honors_no_color_on_a_tty(
     assert result == 0
     assert "\x1b[" not in out.getvalue()
     assert all("\x1b[" not in prompt for prompt in prompts)
+
+
+def test_run_setup_repeats_plugin_reminder_after_writing(tmp_path: Path) -> None:
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = out.getvalue()
+    assert result == 0
+    reminder = (
+        "reminder: policy 'molmoact2' and embodiment 'yam_arms' not registered "
+        "here; run `uv pip install inspect-robots-yam` before your first run"
+    )
+    assert reminder in text
+    assert text.index("Wrote ") < text.index("reminder: ")
+
+
+def test_run_setup_no_reminder_when_components_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"molmoact2", "yam_arms"},
+    )
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert "reminder:" not in out.getvalue()
+
+
+def test_run_setup_reminder_names_only_the_missing_component(tmp_path: Path) -> None:
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("inspect_robots.registry.registered", lambda kind: {"molmoact2"})
+        result = run_setup(
+            {"XDG_CONFIG_HOME": str(tmp_path)},
+            input_fn=input_fn,
+            out=out,
+            interactive=True,
+            by_id_dir=tmp_path / "none-id",
+            by_path_dir=tmp_path / "none-path",
+        )
+
+    text = out.getvalue()
+    assert result == 0
+    assert "reminder: embodiment 'yam_arms' not registered here" in text
+    assert "policy 'molmoact2'" not in text.split("Wrote ")[1]

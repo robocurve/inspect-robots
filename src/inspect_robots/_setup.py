@@ -100,7 +100,7 @@ def _ask_yes_no(
     out: IO[str],
 ) -> bool:
     """Ask a conventional yes/no question, re-prompting unclear answers."""
-    suffix = "[Y/n]" if default else "[y/N]"
+    suffix = _paint("[Y/n]" if default else "[y/N]", _CYAN, out)
     while True:
         entered = input_fn(f"{prompt} {suffix} ").strip().lower()
         if not entered:
@@ -112,11 +112,16 @@ def _ask_yes_no(
         print(_paint("please answer yes or no", _YELLOW, out), file=out)
 
 
-def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
-    """Warn about unavailable plugins without importing the registry eagerly."""
+def _is_registered(kind: str, name: str) -> bool:
+    """Resolve ``name`` against the registry without importing it eagerly."""
     from inspect_robots.registry import registered
 
-    if name not in registered(kind):
+    return name in registered(kind)
+
+
+def _warn_unregistered(kind: str, name: str, out: IO[str]) -> None:
+    """Warn about unavailable plugins the moment a name is accepted."""
+    if not _is_registered(kind, name):
         print(
             _paint(
                 f"'{name}' is not registered here — install its plugin, e.g. "
@@ -239,8 +244,10 @@ def _camera_role_prompt(
     devices: list[str],
     current: str | None,
     advertise_path_toggle: bool,
+    *,
     out: IO[str],
 ) -> str:
+    """Prompt text for one camera role, with the Enter-accept current value."""
     choices = f"{role} camera — number, 'u' to identify by unplugging"
     if advertise_path_toggle:
         choices += ", 'p' to switch listing"
@@ -269,7 +276,7 @@ def _prompt_camera_role(
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
         device_dir = by_id_dir if active_is_by_id else by_path_dir
-        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle, out)
+        prompt = _camera_role_prompt(role, devices, current, advertise_path_toggle, out=out)
         entered = input_fn(prompt).strip()
         selected: str | None = None
         if entered.lower() == "s":
@@ -581,6 +588,23 @@ def run_setup(
         path.replace(path.with_name(path.name + ".bak"))
     tmp.replace(path)
     print(_paint(f"Wrote {path}", _GREEN, out), file=out)
+    # Repeat the plugin reminder where it cannot scroll away: the per-prompt
+    # warning is easy to miss while Enter-accepting the suggestions.
+    missing = [
+        f"{kind} '{defaults[kind]}'"
+        for kind in ("policy", "embodiment")
+        if not _is_registered(kind, defaults[kind])
+    ]
+    if missing:
+        print(
+            _paint(
+                f"reminder: {' and '.join(missing)} not registered here; run "
+                "`uv pip install inspect-robots-yam` before your first run",
+                _YELLOW,
+                out,
+            ),
+            file=out,
+        )
     next_cmd = 'uv run inspect-robots "place the fork on the plate"'
     print(f"Next: {_paint(next_cmd, _CYAN, out)}", file=out)
     return 0
