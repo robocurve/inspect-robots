@@ -10,9 +10,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `types.py` | `Observation`, `Action`, `ActionChunk`, `StepResult` (frozen, NumPy-native) |
 | `spaces.py` | `Box`, `ObservationSpace`, `ActionSemantics`, `StateSpec` + canonical state vocab |
 | `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig`; optional duck-typed `bind(embodiment_info)` hook for embodiment-adaptive policies (called by `eval()` before compat) |
-| `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags |
+| `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags; optional duck-typed `bind_task(envelope)` hook for horizon-aware adapters (called by `eval()` before compat; optional input — never fires on direct `rollout()`, keep a fallback) |
 | `scene.py` | `Scene` (the Inspect `Sample` analog), `Target`, `ListSceneDataset` |
-| `task.py` | `Task` (scenes + scorer + horizon), `Epochs` |
+| `task.py` | `Task` (scenes + scorer + horizon), `Epochs`, `TaskEnvelope` (`Task.envelope` — the adapter-safe identity+limits view passed to `bind_task` hooks) |
 | `scorer.py` | `Score`/`Scorer`, epoch reducers, builtin scorers (incl. operator/VLM) |
 | `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
 | `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |
@@ -24,7 +24,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log` |
-| `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` |
+| `logging/` | `LogSink` protocol, `JsonLogSink` (atomic), optional `RerunSink` (non-blocking worker thread; drops frames, never delays control) |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect` / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
 | `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |

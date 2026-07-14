@@ -20,7 +20,7 @@ from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import min_distance_to_goal, operator_scorer, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
-from inspect_robots.task import Epochs, Task
+from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))
@@ -284,6 +284,110 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     logs = eval(_task(max_steps=60), adaptive, CubePickEmbodiment(), log_dir=str(tmp_path))
     assert adaptive.bound_names == ["cubepick"]
     assert logs[0].status == "success"
+
+
+def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:
+    """bind_task fires once per eval with the task's envelope, before any reset."""
+
+    class _HorizonAware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[object] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.calls.append(envelope)
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.calls.append("reset")
+            return super().reset(scene, seed=seed)
+
+    two_scenes = Task(
+        name="t",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=7,
+        epochs=2,
+    )
+    aware = _HorizonAware()
+    (log,) = eval(two_scenes, ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert aware.calls[0] == TaskEnvelope(name="t", max_steps=7)
+    # Exactly one bind per eval — not per scene or per epoch; resets follow it.
+    assert aware.calls.count("reset") == 4
+    assert [c for c in aware.calls if c != "reset"] == [TaskEnvelope(name="t", max_steps=7)]
+
+
+def test_bind_task_rebinds_per_eval_latest_wins(tmp_path: Path) -> None:
+    class _HorizonAware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.envelopes: list[TaskEnvelope] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.envelopes.append(envelope)
+
+    aware = _HorizonAware()
+    eval(_task(max_steps=5), ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    eval(_task(max_steps=9), ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    assert [e.max_steps for e in aware.envelopes] == [5, 9]
+
+
+def test_eval_ignores_non_callable_bind_task(tmp_path: Path) -> None:
+    class _OddAttr(CubePickEmbodiment):
+        bind_task = "not a hook"
+
+    (log,) = eval(_task(max_steps=5), ScriptedPolicy(), _OddAttr(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert _OddAttr.bind_task == "not a hook"
+
+
+class _BindRaisesEmbodiment(_ClosableEmbodiment):
+    def bind_task(self, envelope: TaskEnvelope) -> None:
+        raise RuntimeError("refusing this task")
+
+
+embodiment_decorator("bind-raises-cubepick")(_BindRaisesEmbodiment)
+
+
+def test_raising_bind_task_aborts_before_any_rollout(tmp_path: Path) -> None:
+    _CLOSED.clear()
+    with pytest.raises(RuntimeError, match="refusing this task"):
+        eval(_task(max_steps=5), ScriptedPolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
+    assert not list(tmp_path.glob("*.json"))  # no rollout started, no log written
+    assert _CLOSED == ["closed"]  # registry-owned embodiment still released
+
+
+def test_bind_task_runs_before_the_compatibility_check(tmp_path: Path) -> None:
+    """The hook fires pre-compat: a raising bind_task wins over an incompatible pairing."""
+
+    class _WidePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = PolicyInfo(
+                name="wide",
+                action_space=Box(shape=(9,), semantics=ActionSemantics("joint_pos")),
+            )
+
+    with pytest.raises(RuntimeError, match="refusing this task"):
+        eval(_task(max_steps=5), _WidePolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
+
+
+def test_embodiment_base_bind_task_is_a_noop() -> None:
+    from inspect_robots.embodiment import EmbodimentBase
+
+    class _Minimal(EmbodimentBase):
+        info = CubePickEmbodiment().info
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return CubePickEmbodiment().reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            raise NotImplementedError
+
+    _Minimal().bind_task(TaskEnvelope(name="t", max_steps=1))  # must exist and do nothing
 
 
 def test_policy_base_bind_is_a_noop() -> None:

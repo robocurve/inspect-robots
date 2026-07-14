@@ -213,6 +213,14 @@ def _run_eval(
     if callable(bind):
         bind(embodiment.info)
 
+    # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs
+    # here too, so the adapter can learn the rollout envelope (e.g. for an
+    # operator countdown) before any hardware is touched. Duck-typed —
+    # bind_task is not part of the Embodiment Protocol.
+    bind_task = getattr(embodiment, "bind_task", None)
+    if callable(bind_task):
+        bind_task(task.envelope)
+
     # Fail fast on incompatible pairings before touching any hardware/sim.
     assert_compatible(policy, embodiment, task, remap=remap)
 

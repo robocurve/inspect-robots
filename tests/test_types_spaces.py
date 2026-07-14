@@ -97,6 +97,17 @@ def test_observation_space_rejects_inconsistent_state_keys() -> None:
         ObservationSpace(state_keys=frozenset({"eef_pos"}), state=spec)
 
 
+def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task, TaskEnvelope
+
+    scene = Scene(id="s", instruction="x")
+    task = Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=80)
+    assert task.envelope == TaskEnvelope(name="t", max_steps=80)
+    with pytest.raises(AttributeError):
+        task.envelope.max_steps = 81  # type: ignore[misc]
+
+
 def test_task_validation_and_scorer_names() -> None:
     from inspect_robots.errors import ConfigError
     from inspect_robots.scene import Scene

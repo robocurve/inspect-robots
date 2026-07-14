@@ -550,7 +550,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     assert f"Found 3 camera device(s) under {by_id}:" in output
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
-    assert 'Next: uv run inspect-robots "place the fork on the plate"' in output
+    assert 'Next: inspect-robots "place the fork on the plate"' in output
 
 
 def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:

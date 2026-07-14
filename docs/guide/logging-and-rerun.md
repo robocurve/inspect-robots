@@ -43,6 +43,29 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
+Logging is non-blocking. `log_step` snapshots each transition and a background
+worker hands it to the SDK, so a slow or stalled viewer connection never delays
+the control loop (on real hardware, a blocked viewer used to stall the robot
+mid-episode). Under sustained backpressure the sink degrades visualization
+instead of control: camera frames are dropped first, so scalar plots stay
+complete, then whole steps, and the totals are reported as a `RuntimeWarning`
+when the eval ends. The queue is drained at every trial boundary (bounded by
+`flush_timeout`), so an eval that aborts mid-run loses at most the current
+trial's queued tail; the JSON eval log is synchronous and never affected.
+
+Camera frames are JPEG-compressed by default (`jpeg_quality=75`), which cuts
+viewer bandwidth by an order of magnitude. Pass `jpeg_quality=None` for
+pixel-exact frames. Compression needs pillow (the `rerun` extra includes it);
+without it the sink warns once and logs raw frames. Frames of record are never
+at stake either way: scoring reads from the `FrameStore` side-car, not from
+Rerun.
+
+```python
+RerunSink("run.rrd")                   # record to a file, view later
+RerunSink(spawn=True)                  # live viewer (what the CLI wires up)
+RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
+```
+
 ## Frame side-cars
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
