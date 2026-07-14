@@ -8,6 +8,7 @@ from typing import ClassVar
 
 import pytest
 
+import inspect_robots.cli as cli
 import inspect_robots.registry as reg
 from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
@@ -137,6 +138,37 @@ def test_cli_run_epochs_fail_on_error_store_frames(
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     assert "Inspect Robots" in capsys.readouterr().out
+
+
+def test_cli_help_lists_setup(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    assert "setup" in capsys.readouterr().out
+
+
+def test_setup_is_protected_by_instruction_sugar_guard() -> None:
+    assert "setup" in cli._SUBCOMMANDS
+
+
+def test_cli_setup_requires_an_interactive_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match="setup is interactive"):
+        main(["setup"])
+
+
+def test_cli_setup_dispatches_to_wizard(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    def fake_run_setup(_env: object, *, input_fn: object, out: object, interactive: bool) -> int:
+        del input_fn, out
+        calls.append(interactive)
+        return 7
+
+    monkeypatch.setattr("inspect_robots._setup.run_setup", fake_run_setup)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert main(["setup"]) == 7
+    assert calls == [True]
 
 
 # --------------------------------------------------------------------------- #
@@ -1004,8 +1036,9 @@ def test_cli_degraded_guardrails_warn_but_run(
 
 
 def test_guided_error_mentions_config_set() -> None:
-    with pytest.raises(SystemExit, match="inspect-robots config set policy"):
+    with pytest.raises(SystemExit, match="inspect-robots config set policy") as excinfo:
         main(["run", "--instruction", "reach the cube"])
+    assert "inspect-robots setup" in str(excinfo.value)
 
 
 # --- config set / show (plan 0008 §3e) ----------------------------------------
