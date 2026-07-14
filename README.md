@@ -105,6 +105,9 @@ motion chunk per call:
 uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
 ```
 
+Keys can live in a `.env` file in the working directory: the CLI loads it
+automatically, and real environment variables take precedence over its values.
+
 ### Run in simulation
 
 The same instruction runs on your configured simulator instead of the

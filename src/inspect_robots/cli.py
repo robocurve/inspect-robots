@@ -41,6 +41,7 @@ from inspect_robots._defaults import (
     parse_value,
     set_default,
 )
+from inspect_robots._dotenv import init_dotenv
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
@@ -690,6 +691,7 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, dispatch one subcommand, and return its process exit code."""
+    init_dotenv(os.environ)
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
