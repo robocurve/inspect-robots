@@ -389,3 +389,97 @@ def test_to_image_logic() -> None:
     np.testing.assert_array_equal(res_255, [0, 128, 255])
 
 
+# --------------------------------------------------------------------------- #
+# _ensure_env: the cfg-wiring contract, exercised without Isaac (#25).
+#
+# CI injects a fake env directly (_inject_fake) for step()/reset() translation
+# tests, so _ensure_env's own body — parse_env_cfg args, gym.make(cfg=...),
+# the headless->_disable_debug_vis gate, and the named-obs-terms request —
+# never actually ran in CI. A regression here (e.g. dropping cfg=, as #15
+# fixed) would only have failed live. Stub gymnasium/isaaclab_tasks via
+# sys.modules and assert the exact contract issue #25 specifies.
+# --------------------------------------------------------------------------- #
+class _FakeGroupCfg:
+    def __init__(self) -> None:
+        self.concatenate_terms = True
+
+
+class _FakeObservationsCfg:
+    def __init__(self) -> None:
+        self.policy = _FakeGroupCfg()
+
+
+class _FakeEnvCfg:
+    def __init__(self) -> None:
+        self.debug_vis = True
+        self.observations = _FakeObservationsCfg()
+
+
+def _install_fake_isaac_lab_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, Any], _FakeEnvCfg]:
+    """Register fake gymnasium/isaaclab_tasks(.utils) modules that record calls."""
+    import sys
+    import types
+
+    calls: dict[str, Any] = {}
+    fake_cfg = _FakeEnvCfg()
+
+    def fake_parse_env_cfg(task_id: str, *, device: str, num_envs: int) -> _FakeEnvCfg:
+        calls["parse_env_cfg"] = (task_id, device, num_envs)
+        return fake_cfg
+
+    def fake_make(task_id: str, *, cfg: Any, render_mode: str) -> object:
+        calls["gym_make"] = (task_id, cfg, render_mode)
+        calls["gym_make_count"] = calls.get("gym_make_count", 0) + 1
+        # Snapshot cfg state at make-time: Isaac consumes the cfg during
+        # gym.make, so wiring applied after make would be a silent live no-op.
+        calls["debug_vis_at_make"] = cfg.debug_vis
+        calls["concatenate_terms_at_make"] = cfg.observations.policy.concatenate_terms
+        env = object()  # fresh per call: identity distinguishes a re-make from the cache
+        calls["env"] = env
+        return env
+
+    fake_gym = types.ModuleType("gymnasium")
+    fake_gym.make = fake_make  # type: ignore[attr-defined]
+
+    fake_utils = types.ModuleType("isaaclab_tasks.utils")
+    fake_utils.parse_env_cfg = fake_parse_env_cfg  # type: ignore[attr-defined]
+    fake_tasks = types.ModuleType("isaaclab_tasks")
+    fake_tasks.utils = fake_utils  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "gymnasium", fake_gym)
+    monkeypatch.setitem(sys.modules, "isaaclab_tasks", fake_tasks)
+    monkeypatch.setitem(sys.modules, "isaaclab_tasks.utils", fake_utils)
+    return calls, fake_cfg
+
+
+def test_ensure_env_wires_cfg_correctly_when_headless(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls, fake_cfg = _install_fake_isaac_lab_modules(monkeypatch)
+    emb = IsaacSimEmbodiment(
+        task_id="Isaac-Lift-Cube-Franka-v0", device="cuda:0", headless=True, obs_group="policy"
+    )
+    monkeypatch.setattr(emb, "_ensure_app", lambda: None)
+
+    env = emb._ensure_env()
+
+    assert env is calls["env"]
+    assert calls["parse_env_cfg"] == ("Isaac-Lift-Cube-Franka-v0", "cuda:0", 1)
+    assert calls["gym_make"] == ("Isaac-Lift-Cube-Franka-v0", fake_cfg, "rgb_array")
+    assert calls["debug_vis_at_make"] is False  # headless=True -> _disable_debug_vis ran
+    assert calls["concatenate_terms_at_make"] is False  # named terms requested before make
+    assert emb._ensure_env() is env  # cached: second call doesn't re-wire
+    assert calls["gym_make_count"] == 1
+
+
+def test_ensure_env_skips_debug_vis_disable_when_not_headless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls, _fake_cfg = _install_fake_isaac_lab_modules(monkeypatch)
+    emb = IsaacSimEmbodiment(headless=False)
+    monkeypatch.setattr(emb, "_ensure_app", lambda: None)
+
+    emb._ensure_env()
+
+    assert calls["debug_vis_at_make"] is True  # untouched: headless=False skips the disable
+    assert calls["concatenate_terms_at_make"] is False  # still requested either way
