@@ -26,8 +26,8 @@ RUNTIME_REQUIREMENTS = {
 }
 ```
 
-The setup wizard checks registered policies and embodiments, while `doctor`
-checks its selected embodiment before construction. Both use
+The setup wizard checks the configured policy and embodiment when they are
+registered, while `doctor` checks its selected embodiment before construction. Both use
 `importlib.util.find_spec` without importing the declared top-level modules and
 print each remediation command verbatim when a module is missing.
 
