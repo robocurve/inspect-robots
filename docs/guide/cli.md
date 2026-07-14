@@ -6,8 +6,9 @@ for the common typo; both run the same CLI.
 
 ## Zero-config: `inspect-robots "<instruction>"`
 
-Once you have configured a default policy and embodiment (below), giving the
-robot a command is a one-liner:
+Once you have configured a default policy and embodiment (run
+`inspect-robots setup`, or see below), giving the robot a command is a
+one-liner:
 
 ```bash
 inspect-robots "place the spoon on the plate"
@@ -55,7 +56,11 @@ headless = true
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
 `[*.args]` values, and an explicit `-P/-E key=value` flag overrides the
-same-named config key. There is deliberately no project-local config file:
+same-named config key. An `[*.args]` section belongs to the component named
+in `[defaults]`: it applies whenever that same component is the one selected
+(by default, by flag, or by env var), and is ignored with a stderr note when
+a *different* component is selected. Your YAM rig's `rest_pose` never reaches
+`--embodiment kitchen`. There is deliberately no project-local config file:
 a checked-in file choosing which policy drives your hardware would be a trust
 footgun.
 
@@ -94,6 +99,60 @@ stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
 runs stay non-blocking, and an unjudged trial honestly scores as failure with
 "no operator judgement recorded".
 
+## `inspect-robots setup`
+
+The interactive first-run wizard: it prompts for each `[defaults]` key with
+a suggested value (Enter accepts, typing overrides), warns when a chosen
+policy or embodiment is not registered in the current environment, and then
+helps assign camera devices by listing `/dev/v4l/by-id`. If you do not know
+which physical camera a device path belongs to, answer `u` and unplug that
+camera when asked: the wizard rescans and identifies it from the entry that
+disappeared. When identical cameras without serial numbers collide in the
+by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
+per physical USB port.
+
+When the selected registered embodiment declares device slots, those slots
+drive one device interview for cameras, CAN interfaces, and serial devices.
+CAN slots list SocketCAN interfaces and support unplug-to-identify; rigs with
+multiple USB adapters named `can0`, `can1`, and so on also receive a udev
+pinning suggestion so replug order cannot swap physical devices.
+
+```bash
+inspect-robots setup
+```
+
+The result is written to `~/.config/inspect-robots/config.ini`
+(`$XDG_CONFIG_HOME` honored); an existing file is backed up to
+`config.ini.bak` first, and settings the wizard does not manage (such as
+`[policy.args]` or `sim_embodiment`) are carried through unchanged. Note
+that later `inspect-robots config set` edits drop comments from the file.
+The setup command requires an interactive terminal; for scripted
+configuration use `inspect-robots config set`.
+After writing the config, setup lists missing runtime requirements declared by
+the selected registered policy and embodiment, together with their remediation
+commands.
+
+Prefer to write the file yourself? This is the wizard's output for a YAM
+rig; replace the three camera paths with your rig's V4L2 color nodes
+(stable `/dev/v4l/by-id/...` or udev-symlink paths):
+
+```bash
+mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
+[defaults]
+policy = molmoact2        # from the inspect-robots-yam plugin
+embodiment = yam_arms     # same plugin; cameras configured below
+scorer = success_at_end
+max_steps = 1200          # 120 s at 10 Hz
+rerun = true              # live viewer of cameras/state/actions each run
+store_frames = true       # save each run's camera frames under logs/frames/
+
+[embodiment.args]
+top_cam_device = /dev/v4l/by-id/YOUR-TOP-CAM
+left_cam_device = /dev/v4l/by-id/YOUR-LEFT-CAM
+right_cam_device = /dev/v4l/by-id/YOUR-RIGHT-CAM
+EOF
+```
+
 ## `inspect-robots list`
 
 Show registered components (builtins + installed plugins):
@@ -130,6 +189,15 @@ the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise.
+
+## `inspect-robots doctor`
+
+`doctor` reports a registered embodiment's missing declared runtime modules
+before constructing it, then checks its spaces for adapter conformance.
+
+```bash
+inspect-robots doctor --embodiment my_arms
+```
 
 ## `inspect-robots inspect`
 

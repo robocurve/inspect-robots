@@ -65,9 +65,13 @@ class Policy(Protocol):
     info: PolicyInfo
     config: PolicyConfig
 
-    def reset(self, scene: Scene) -> None: ...
+    def reset(self, scene: Scene) -> None:
+        """Begin a scene with any policy-local state cleared or initialized."""
+        ...
 
-    def act(self, observation: Observation) -> ActionChunk: ...
+    def act(self, observation: Observation) -> ActionChunk:
+        """Infer a non-empty open-loop action chunk from the latest observation."""
+        ...
 
 
 class PolicyBase(ABC):
@@ -86,4 +90,6 @@ class PolicyBase(ABC):
         """Default: stateless policies need no per-scene reset."""
 
     @abstractmethod
-    def act(self, observation: Observation) -> ActionChunk: ...
+    def act(self, observation: Observation) -> ActionChunk:
+        """Infer a non-empty open-loop action chunk from the latest observation."""
+        ...

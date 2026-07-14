@@ -42,6 +42,7 @@ class FrameRef:
     path: str
 
     def load(self) -> npt.NDArray[np.uint8]:
+        """Load the referenced array from disk as ``uint8``."""
         return np.asarray(np.load(self.path), dtype=np.uint8)
 
 
@@ -54,6 +55,7 @@ class FrameStore:
         self.count = 0
 
     def put(self, trial_id: str, t: int, camera: str, image: npt.NDArray[np.uint8]) -> FrameRef:
+        """Persist one camera frame and return its lightweight reference."""
         path = self.root / f"{_safe(trial_id)}_{_safe(camera)}_{t:06d}.npy"
         np.save(path, image)
         self.count += 1

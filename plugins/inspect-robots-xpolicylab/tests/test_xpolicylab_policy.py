@@ -12,6 +12,7 @@ import msgpack
 import msgpack_numpy
 import numpy as np
 import pytest
+from _stub_server import StubPolicyServer
 
 from inspect_robots import (
     ActionSemantics,
@@ -27,7 +28,6 @@ from inspect_robots.compat import check_compatibility
 from inspect_robots.errors import CompatibilityError
 from inspect_robots.registry import registered, resolve
 from inspect_robots.types import Observation
-
 from inspect_robots_xpolicylab import XPolicyLabPolicy, xpolicylab_policy
 from inspect_robots_xpolicylab._client import PolicyClient
 from inspect_robots_xpolicylab._protocol import (
@@ -38,7 +38,6 @@ from inspect_robots_xpolicylab._protocol import (
     decode_wire,
     encode_frame,
 )
-from _stub_server import StubPolicyServer
 
 _SCENE = Scene(id="s0", instruction="stack the bowls")
 
@@ -229,9 +228,8 @@ def test_trial_lifecycle_and_step_counter(stub_server: StubPolicyServer) -> None
 
 
 def test_act_before_reset_raises(stub_server: StubPolicyServer) -> None:
-    with _policy(stub_server) as policy:
-        with pytest.raises(RuntimeError, match="reset"):
-            policy.act(_observation())
+    with _policy(stub_server) as policy, pytest.raises(RuntimeError, match="reset"):
+        policy.act(_observation())
 
 
 def test_missing_camera_raises(stub_server: StubPolicyServer) -> None:
@@ -285,11 +283,13 @@ def test_request_timeout(stub_server: StubPolicyServer) -> None:
 
 
 def test_unreachable_server_actionable_error() -> None:
-    with XPolicyLabPolicy(
-        url="ws://127.0.0.1:9", connect_attempts=2, connect_retry_delay_s=0.01
-    ) as policy:
-        with pytest.raises(ConnectionError, match="setup_eval_policy_server.sh"):
-            policy.reset(_SCENE)
+    with (
+        XPolicyLabPolicy(
+            url="ws://127.0.0.1:9", connect_attempts=2, connect_retry_delay_s=0.01
+        ) as policy,
+        pytest.raises(ConnectionError, match=r"setup_eval_policy_server\.sh"),
+    ):
+        policy.reset(_SCENE)
 
 
 def test_reconnect_after_drop(stub_server: StubPolicyServer) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,14 @@ class Defaults:
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
+    # The [<kind>.args] sections are written alongside the config file's
+    # [defaults] component names; each args dict is only valid for that
+    # component (its "owner", issue #44). Env vars override the names above
+    # but never the owners: the file's args must not follow an env-selected
+    # component of a different name.
+    policy_args_owner: str | None = None
+    embodiment_args_owner: str | None = None
+    sim_embodiment_args_owner: str | None = None
 
 
 def _config_path(env: Mapping[str, str]) -> Path | None:
@@ -98,7 +107,7 @@ def _parse_args_section(parser: configparser.ConfigParser, section: str) -> dict
 
 
 def _read_config(path: Path) -> Defaults:
-    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     try:
         with path.open(encoding="utf-8") as fh:
             parser.read_file(fh)
@@ -144,6 +153,9 @@ def _read_config(path: Path) -> Defaults:
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
+        policy_args_owner=policy,
+        embodiment_args_owner=embodiment,
+        sim_embodiment_args_owner=sim_embodiment,
     )
 
 
@@ -179,7 +191,7 @@ def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
     path = _config_path(env)
     if path is None:
         raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
-    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
     if path.is_file():
         try:
             with path.open(encoding="utf-8") as fh:
@@ -188,6 +200,21 @@ def set_default(env: Mapping[str, str], key: str, value: str) -> Path:
             raise _die(path, f"malformed config: {exc}") from exc
     if not parser.has_section("defaults"):
         parser.add_section("defaults")
+    if key in ("policy", "embodiment", "sim_embodiment"):
+        old_value = parser.get("defaults", key, fallback=None)
+        args_section = f"{key}.args"
+        if (
+            old_value is not None
+            and old_value != value
+            and parser.has_section(args_section)
+            and parser.items(args_section)
+        ):
+            print(
+                f"warning: [{args_section}] was configured for {old_value!r}; "
+                f"it will be ignored for {value!r}: update or remove it "
+                f"in {path}",
+                file=sys.stderr,
+            )
     parser.set("defaults", key, value)
 
     path.parent.mkdir(parents=True, exist_ok=True)

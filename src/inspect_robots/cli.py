@@ -9,6 +9,7 @@ Subcommands:
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
 - ``inspect-robots inspect LOG.json`` — print a saved eval log.
+- ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -43,6 +44,7 @@ from inspect_robots._defaults import (
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
@@ -77,7 +79,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config", "doctor")
+_SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -93,6 +95,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
         prog="inspect-robots",
         description="Inspect Robots — the Inspect AI for robotics.",
@@ -195,6 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
 
+    sub.add_parser(
+        "setup",
+        help="interactive first-run wizard: pick defaults and discover camera devices, "
+        "then write config.ini",
+    )
+
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
@@ -233,9 +242,29 @@ def _pick_component(
     raise SystemExit(
         f"no {kind} given and no default configured.\n"
         f"registered {_PLURAL_BY_KIND[kind]}: {names}\n"
-        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, or run "
+        f"fix: pass --{kind} NAME, set ${_ENV_BY_KIND[kind]}, "
+        "run 'inspect-robots setup', or "
         f"'inspect-robots config set {kind} NAME'"
     )
+
+
+def _config_args(
+    kind: str, name: str, owner: str | None, config_args: dict[str, Any]
+) -> dict[str, Any]:
+    """Config-file ``[<kind>.args]``, gated to the component they were written for.
+
+    An args section is only valid for the ``[defaults]`` component it was
+    configured alongside (its owner); handing it to a differently-selected
+    component injects kwargs that constructor never asked for (issue #44).
+    Dropping is loud on stderr: persisted rig calibration vanishing silently
+    would be a worse failure than the crash this replaces.
+    """
+    if name == owner:
+        return config_args
+    if config_args:
+        reason = f"they apply to {owner!r}" if owner else f"no default {kind} is configured"
+        print(f"note: ignoring [{kind}.args] for {name!r}: {reason}", file=sys.stderr)
+    return {}
 
 
 def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
@@ -258,12 +287,16 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     )
 
 
-def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
+def _resolve_or_exit(
+    kind: str, name: str, args_section: str | None = None, /, **kwargs: Any
+) -> Any:
     """Registry resolution with a clean error instead of a traceback.
 
     Unknown names raise ``KeyError``; a factory that cannot construct itself
     (e.g. the agent policy with no model/key configured) raises a guided
-    ``ConfigError``. Both are user-facing messages, not bugs.
+    ``ConfigError``. Invalid constructor arguments raise ``TypeError``. All
+    three become user-facing messages rather than tracebacks. ``args_section``
+    can identify a config section whose name differs from the registry kind.
     """
     from inspect_robots.errors import ConfigError
     from inspect_robots.registry import resolve
@@ -274,6 +307,13 @@ def _resolve_or_exit(kind: str, name: str, /, **kwargs: Any) -> Any:
         raise SystemExit(str(exc.args[0])) from exc
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
+    except TypeError as exc:
+        if args_section is None:
+            args_section = f"{kind}.args"
+        flag = {"task": "-T", "policy": "-P", "embodiment": "-E"}.get(kind, "the CLI args flag")
+        raise SystemExit(
+            f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
+        ) from exc
 
 
 def _build_guardrails(
@@ -341,6 +381,29 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     record.events.append(operator_event(t=len(record.steps), verdict=answer))
 
 
+def _print_run_summary(log: EvalLog, log_path: str) -> None:
+    """Print the compact post-run summary and failure diagnostics."""
+    failed = log.status != "success"
+    status_color = _RED if failed else _GREEN
+    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
+    if failed and log.error is not None:
+        print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
+    if failed:
+        for scene in log.samples:
+            if scene.status == "error":
+                detail = "" if scene.error in (None, log.error) else f": {scene.error}"
+                print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
+    print(
+        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
+        f"trials: {log.results.total_trials}"
+    )
+    for name, value in sorted(log.results.metrics.items()):
+        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+    print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
+    if failed:
+        print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
@@ -383,15 +446,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if args.sim:
         embodiment_name, embodiment_source = _pick_sim_embodiment(defaults)
-        embodiment_defaults = defaults.sim_embodiment_args
+        embodiment_defaults = _config_args(
+            "sim_embodiment",
+            embodiment_name,
+            defaults.sim_embodiment_args_owner,
+            defaults.sim_embodiment_args,
+        )
     else:
         embodiment_name, embodiment_source = _pick_component(
             "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
         )
-        embodiment_defaults = defaults.embodiment_args
-    # Config-file args apply to whichever component is selected; explicit
-    # -P/-E flags override same-named keys.
-    policy_kvs = {**defaults.policy_args, **_parse_kvs(args.policy_args)}
+        embodiment_defaults = _config_args(
+            "embodiment", embodiment_name, defaults.embodiment_args_owner, defaults.embodiment_args
+        )
+    # Config-file args apply only to the component they were configured
+    # alongside (issue #44); explicit -P/-E flags override same-named keys.
+    policy_config_args = _config_args(
+        "policy", policy_name, defaults.policy_args_owner, defaults.policy_args
+    )
+    policy_kvs = {**policy_config_args, **_parse_kvs(args.policy_args)}
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     if is_adhoc:
@@ -412,7 +485,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         task = _resolve_or_exit("task", args.task, **_parse_kvs(args.task_args))
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
-    embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    if args.sim:
+        embodiment = _resolve_or_exit(
+            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+        )
+    else:
+        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
     try:
         if args.epochs is not None:
             task = replace(task, epochs=args.epochs)
@@ -483,15 +561,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # here and eval() can raise, and that must not leak the embodiment.
         embodiment.close()
     log = logs[0]
-    status_color = _GREEN if log.status == "success" else _RED
-    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
-    print(
-        f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  "
-        f"trials: {log.results.total_trials}"
-    )
-    for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
-    print(f"{_styled('log:', _CYAN)} {_styled(str(sink.path), _DIM)}")
+    _print_run_summary(log, str(sink.path))
     return 0 if log.status == "success" else 1
 
 
@@ -519,28 +589,46 @@ def _cmd_inspect(path: str) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Run the declarative conformance checks against an installed adapter.
+    """Preflight runtime requirements and conformance for an installed adapter.
 
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment
+    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
     name, source = _pick_component(
         "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
     )
-    kvs = {**defaults.embodiment_args, **_parse_kvs(args.embodiment_args)}
+    config_kvs = _config_args(
+        "embodiment", name, defaults.embodiment_args_owner, defaults.embodiment_args
+    )
+    kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
+    print(f"embodiment: {name} ({source})")
+    missing = missing_runtime_requirements(registered("embodiment").get(name))
+    for module, remedy in missing.items():
+        print(f"  [error] runtime-requirement: {module} missing → {remedy}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
     finally:
         embodiment.close()
-    print(f"embodiment: {name} ({source})")
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 0 if report.ok else 1
+    return 1 if not report.ok or missing else 0
+
+
+def _cmd_setup() -> int:
+    from inspect_robots._setup import run_setup
+
+    return run_setup(
+        os.environ,
+        input_fn=input,
+        out=sys.stdout,
+        interactive=sys.stdin.isatty(),
+    )
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
@@ -582,6 +670,7 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse arguments, dispatch one subcommand, and return its process exit code."""
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
@@ -593,6 +682,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_inspect(args.log)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command == "setup":
+        return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
     parser.print_help()

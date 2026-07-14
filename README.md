@@ -17,10 +17,11 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
+[![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
 [**Documentation**](https://inspectrobots.org/) ·
-[Quickstart](https://inspectrobots.org/guide/quickstart.html) ·
-[Concepts](https://inspectrobots.org/guide/concepts.html) ·
+[Quickstart](https://inspectrobots.org/guide/quickstart/) ·
+[Concepts](https://inspectrobots.org/guide/concepts/) ·
 [For LLMs](https://inspectrobots.org/llms.txt)
 
 </div>
@@ -67,26 +68,19 @@ below and no activation is needed.
 
 ## Quickstart
 
-Set your defaults once. The policy and embodiment come from installed plugins
-([inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) shown
-here); replace the three camera paths with your rig's V4L2 color nodes:
+Install the plugin for your rig (the wizard suggests this one's components)
+and set your defaults once:
 
 ```bash
-mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
-[defaults]
-policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = yam_arms     # same plugin; cameras configured below
-scorer = success_at_end
-max_steps = 1200          # 120 s at 10 Hz
-rerun = true              # live viewer of cameras/state/actions each run
-store_frames = true       # save each run's camera frames under logs/frames/
-
-[embodiment.args]
-top_cam_device = /dev/v4l/by-id/YOUR-TOP-CAM
-left_cam_device = /dev/v4l/by-id/YOUR-LEFT-CAM
-right_cam_device = /dev/v4l/by-id/YOUR-RIGHT-CAM
-EOF
+uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms rig
+uv run inspect-robots setup
 ```
+
+The wizard picks your defaults and finds your cameras (unplug one when asked
+and it identifies which is which), then writes
+`~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
+instead and type its component names at the prompts; to write the config file
+by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
 
 Then tell the robot what to do:
 
@@ -97,12 +91,30 @@ uv run inspect-robots "place the fork on the plate"
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
 policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...), and the same
-instruction runs on your configured simulator instead of the real robot:
+(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+
+### Drive the robot with an LLM
+
+The policy slot is not limited to VLAs. With the
+[inspect-robots-agent](plugins/inspect-robots-agent/) plugin installed
+(`uv pip install inspect-robots-agent`) and `$ANTHROPIC_API_KEY` set, a
+frontier LLM drives the same rig through tool calls, one approver-checked
+motion chunk per call:
+
+```bash
+uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
+```
+
+### Run in simulation
+
+The same instruction runs on your configured simulator instead of the
+real robot:
 
 ```bash
 uv run inspect-robots "place the fork on the plate" --sim
 ```
+
+### More CLI commands
 
 The full command line resolves any registered task/policy/embodiment
 (builtins + installed plugins). List what is registered:
@@ -123,7 +135,9 @@ Pretty-print a saved eval log:
 uv run inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
-And everything is a Python API. No hardware or simulator needed: the
+### Python API
+
+Everything is a Python API. No hardware or simulator needed: the
 dependency-free `CubePick` mock world exercises the whole stack:
 
 ```python

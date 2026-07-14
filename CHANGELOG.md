@@ -5,6 +5,55 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
+## [Unreleased]
+
+### Added
+
+- Plugin-declared embodiment device slots for V4L2 cameras, SocketCAN
+  interfaces, and serial devices. `inspect-robots setup` probes and interviews
+  declared slots, enforces grouped all-or-none assignments, and suggests udev
+  serial pinning for order-dependent USB-CAN names (#61).
+- Runtime-requirement declarations for registered component factories, with
+  missing-import preflight checklists in `inspect-robots setup` and
+  `inspect-robots doctor` (#59).
+- isaacsim plugin: `_ensure_env`'s cfg-wiring contract (`parse_env_cfg`'s
+  args, `gym.make(cfg=...)`, the `headless` → `_disable_debug_vis` gate, and
+  the named-obs-terms request) is now exercised in CI via stubbed
+  `gymnasium`/`isaaclab_tasks` modules. Previously only the fake-env-injected
+  `step()`/`reset()` translation was covered, so a regression in `_ensure_env`
+  itself (e.g. #15's missing `cfg=`) would only have failed live (#25).
+- **`inspect-robots setup`**: an interactive first-run wizard that prompts
+  for the `[defaults]` keys with suggested values, discovers camera devices
+  under `/dev/v4l/by-id` (with unplug-to-identify and a `/dev/v4l/by-path`
+  fallback for serial-less cameras that collide in by-id), and writes
+  `~/.config/inspect-robots/config.ini`. An existing file is backed up to
+  `config.ini.bak` and unmanaged sections/keys are carried through
+  unchanged. Warns before writing `rerun = true` in a headless session
+  (part of #50).
+- Public-docstring coverage gate via Ruff's D1 rules, with a full backfill of
+  missing public docstrings.
+
+### Fixed
+
+- **Literal percent signs in config values now round-trip unchanged** (#54).
+  Config reads no longer treat `%` as interpolation syntax, so values such as
+  `policy = 50%off` work with `config set`, `config show`, and normal runs.
+- **Component argument mistakes now fail cleanly and stale args are flagged**
+  (#47). Changing a configured component warns when its non-empty args section
+  still belongs to the old name, and invalid constructor kwargs exit with
+  guidance to check the config section or CLI args flag instead of a traceback.
+- **`inspect-robots run` now surfaces evaluation failures in its summary**:
+  top-level errors, per-scene failure context, and a ready-to-run postmortem
+  `inspect` command are printed after unsuccessful runs (#57).
+- **Config `[*.args]` sections no longer follow a differently-selected
+  component** (#44). `[policy.args]` / `[embodiment.args]` /
+  `[sim_embodiment.args]` now apply only when the selected component matches
+  the `[defaults]` name they were configured alongside; selecting another
+  component (by flag or env var) ignores them with a stderr note instead of
+  crashing its constructor with foreign kwargs. Selecting the configured
+  default explicitly (e.g. `--embodiment` naming the config default) still
+  applies its args.
+
 ## [0.6.0] - 2026-07-10
 
 ### Added

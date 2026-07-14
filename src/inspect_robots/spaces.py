@@ -85,6 +85,7 @@ class Box:
 
     @property
     def dim(self) -> int:
+        """Return the flattened element count implied by ``shape``."""
         out = 1
         for n in self.shape:
             out *= n
@@ -133,6 +134,7 @@ class StateSpec:
 
     @property
     def keys(self) -> frozenset[str]:
+        """Names used to align rich and compatibility-level state declarations."""
         return frozenset(f.key for f in self.fields)
 
 
@@ -163,4 +165,5 @@ class ObservationSpace:
 
     @property
     def camera_names(self) -> frozenset[str]:
+        """Camera name set used during compatibility checks."""
         return frozenset(c.name for c in self.cameras)

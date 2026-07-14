@@ -36,8 +36,8 @@ from inspect_robots import (
     Box,
     CameraSpec,
     EmbodimentInfo,
-    ObservationSpace,
     Observation,
+    ObservationSpace,
     Scene,
     StateField,
     StateSpec,
@@ -100,7 +100,7 @@ def _disable_debug_vis(cfg: Any) -> None:
             continue
         for key, value in obj_vars.items():
             if key == "debug_vis" and value is True:
-                setattr(obj, "debug_vis", False)
+                obj.debug_vis = False
             elif isinstance(value, (dict, list, tuple, set)) or hasattr(value, "__dict__"):
                 stack.append(value)
 
@@ -285,11 +285,13 @@ class IsaacSimEmbodiment:
     # Embodiment protocol
     # ------------------------------------------------------------------ #
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        """Start Isaac Lab lazily, apply the seed, and preserve the scene instruction."""
         env = self._ensure_env()
         obs, _info = env.reset(seed=seed)
         return self._to_observation(obs, scene.instruction)
 
     def step(self, action: Action) -> StepResult:
+        """Translate one action and its resulting Isaac Lab transition."""
         env = self._ensure_env()
         torch = self._torch
         assert torch is not None  # set alongside _env

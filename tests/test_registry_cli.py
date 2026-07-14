@@ -8,6 +8,7 @@ from typing import ClassVar
 
 import pytest
 
+import inspect_robots.cli as cli
 import inspect_robots.registry as reg
 from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
@@ -103,6 +104,98 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "success_at_end" in out
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
+    assert "error:" not in out
+    assert "hint:" not in out
+
+
+def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Observation
+
+    class _FaultOnSecondScene(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("reset exploded")
+            return super().reset(scene, seed=seed)
+
+    name = "fault-on-second-scene-for-cli-test"
+    embodiment_decorator(name)(_FaultOnSecondScene)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=2",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "error: EmbodimentFault: reset exploded" in out
+    assert "  [error] scene-1\n" in out
+    assert "scene-0" not in out  # successful scenes are not failure context
+    assert out.count("EmbodimentFault: reset exploded") == 1
+    (written,) = tmp_path.glob("*.json")
+    assert f"hint: inspect-robots inspect {written}" in out
+
+
+def test_cli_run_prints_distinct_scene_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _ResetFailurePolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("policy reset exploded")
+
+    name = "reset-failure-for-cli-test"
+    policy_decorator(name)(_ResetFailurePolicy)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--fail-on-error",
+                "1",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error: fail_on_error threshold exceeded (1 errors)" in out
+    assert "[error] scene-0: PolicyError: policy reset exploded" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(
@@ -137,6 +230,37 @@ def test_cli_run_epochs_fail_on_error_store_frames(
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     assert "Inspect Robots" in capsys.readouterr().out
+
+
+def test_cli_help_lists_setup(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+    assert excinfo.value.code == 0
+    assert "setup" in capsys.readouterr().out
+
+
+def test_setup_is_protected_by_instruction_sugar_guard() -> None:
+    assert "setup" in cli._SUBCOMMANDS
+
+
+def test_cli_setup_requires_an_interactive_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match="setup is interactive"):
+        main(["setup"])
+
+
+def test_cli_setup_dispatches_to_wizard(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    def fake_run_setup(_env: object, *, input_fn: object, out: object, interactive: bool) -> int:
+        del input_fn, out
+        calls.append(interactive)
+        return 7
+
+    monkeypatch.setattr("inspect_robots._setup.run_setup", fake_run_setup)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert main(["setup"]) == 7
+    assert calls == [True]
 
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +367,94 @@ def test_cli_flags_beat_config_defaults_and_args(
     assert "policy: scripted (--policy)" in capsys.readouterr().out
     # The -P flag's chunk_size=4 overrode the same-named [policy.args] key.
     assert _read_only_log(log_dir).eval.policy_config["action_horizon"] == 4
+
+
+def test_config_args_do_not_leak_to_explicitly_selected_components(
+    _hermetic_defaults: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Issue #44: the [*.args] sections belong to the configured defaults; before
+    # the fix they followed *whatever* was selected, so a persisted rig arg
+    # (rest_pose here) TypeErrored an unrelated --embodiment. Now the run is
+    # green and each dropped section is noted on stderr.
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = noop\n"
+        "embodiment = yam-arms\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "bogus_policy_knob = 1\n"
+        "[embodiment.args]\n"
+        "rest_pose = 0.5\n",
+    )
+    log_dir = tmp_path / "logs"
+    rc = main(
+        [
+            "run",
+            "--instruction",
+            "reach the cube",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "note: ignoring [policy.args] for 'scripted': they apply to 'noop'" in err
+    assert "note: ignoring [embodiment.args] for 'cubepick': they apply to 'yam-arms'" in err
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 1.0
+
+
+def test_config_args_apply_when_flag_names_the_configured_default(
+    _hermetic_defaults: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Selecting the configured default *explicitly* must keep its args: a lab
+    # operator typing --policy for the component the file already names cannot
+    # silently lose the configured calibration (gate on name, not provenance).
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "chunk_size = 6\n",
+    )
+    log_dir = tmp_path / "logs"
+    args = ["run", "--instruction", "reach the cube", "--policy", "scripted"]
+    rc = main([*args, "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert "note: ignoring" not in capsys.readouterr().err
+    assert _read_only_log(log_dir).eval.policy_config["action_horizon"] == 6
+
+
+def test_env_selected_component_does_not_inherit_config_args(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # An env var swaps the component name but the file's args stay owned by the
+    # file's name — they must not follow the env-selected component.
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = noop\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "bogus_policy_knob = 1\n",
+    )
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    log_dir = tmp_path / "logs"
+    rc = main(["run", "--instruction", "reach the cube", "--log-dir", str(log_dir)])
+    assert rc == 0
+    assert "note: ignoring [policy.args] for 'scripted': they apply to 'noop'" in (
+        capsys.readouterr().err
+    )
 
 
 def test_mistyped_subcommand_never_starts_a_rollout(
@@ -510,6 +722,31 @@ def test_sim_embodiment_args_reach_constructor_and_e_flag_overrides(
     assert main(["reach the cube", "--sim", "-E", "max_step=0.1", "--log-dir", str(log_dir_b)]) == 0
     assert _read_only_log(log_dir_b).results.metrics["success_at_end"] == 1.0
     capsys.readouterr()
+
+
+def test_env_selected_sim_drops_args_owned_by_configured_sim(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "sim_embodiment = other-sim\n"
+        "scorer = success_at_end\n"
+        "[sim_embodiment.args]\n"
+        "bogus_sim_knob = 1\n",
+    )
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    log_dir = tmp_path / "logs"
+
+    assert main(["reach the cube", "--sim", "--log-dir", str(log_dir)]) == 0
+    assert (
+        "note: ignoring [sim_embodiment.args] for 'cubepick': they apply to 'other-sim'"
+    ) in capsys.readouterr().err
+    assert _read_only_log(log_dir).results.metrics["success_at_end"] == 1.0
 
 
 def test_sim_conflicts_with_explicit_embodiment() -> None:
@@ -916,8 +1153,9 @@ def test_cli_degraded_guardrails_warn_but_run(
 
 
 def test_guided_error_mentions_config_set() -> None:
-    with pytest.raises(SystemExit, match="inspect-robots config set policy"):
+    with pytest.raises(SystemExit, match="inspect-robots config set policy") as excinfo:
         main(["run", "--instruction", "reach the cube"])
+    assert "inspect-robots setup" in str(excinfo.value)
 
 
 # --- config set / show (plan 0008 §3e) ----------------------------------------
@@ -993,12 +1231,135 @@ def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
     assert "Traceback" not in str(excinfo.value)
 
 
+def test_component_type_error_from_config_args_exits_cleanly(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid persisted kwargs must identify their component and both sources."""
+    from inspect_robots.registry import policy as policy_decorator
+
+    name = "strict-args-policy-for-cli-test"
+
+    @policy_decorator(name)
+    def _factory() -> ScriptedPolicy:
+        return ScriptedPolicy()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        f"policy = {name}\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "[policy.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["policy"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for policy {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "[policy.args]" in message and "-P k=v" in message
+    assert "Traceback" not in message
+
+
+def test_sim_embodiment_type_error_names_sim_args_section(
+    _hermetic_defaults: Path, tmp_path: Path
+) -> None:
+    """Invalid sim kwargs must identify the sim-specific config section."""
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "strict-args-sim-embodiment-for-cli-test"
+
+    @embodiment_decorator(name)
+    def _factory() -> CubePickEmbodiment:
+        return CubePickEmbodiment()
+
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "scorer = success_at_end\n"
+        f"sim_embodiment = {name}\n"
+        "[sim_embodiment.args]\n"
+        "typoed_option = 1\n",
+    )
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["reach it", "--sim", "--log-dir", str(tmp_path)])
+    finally:
+        reg._FACTORIES["embodiment"].pop(name)
+
+    message = str(excinfo.value)
+    assert f"invalid arguments for embodiment {name!r}" in message
+    assert "unexpected keyword argument 'typoed_option'" in message
+    assert "check [sim_embodiment.args]" in message
+    assert "-E k=v" in message
+    assert "check [embodiment.args]" not in message
+    assert "Traceback" not in message
+
+
 # --- doctor (adapter conformance) ---------------------------------------------
 
 
 def test_doctor_passes_on_conformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["doctor", "--embodiment", "cubepick"]) == 0
     assert "conformant" in capsys.readouterr().out
+
+
+def test_doctor_reports_missing_runtime_requirement_before_conformance(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "missing-runtime-doctor-cubepick"
+
+    class _MissingRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_xyz": "uv pip install thing"
+        }
+
+    embodiment_decorator(name)(_MissingRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 1
+    out = capsys.readouterr().out
+    error = "[error] runtime-requirement: definitely_missing_xyz missing → uv pip install thing"
+    assert error in out
+    assert out.index(error) < out.index("conformant")
+
+
+def test_doctor_accepts_present_runtime_requirements(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    name = "present-runtime-doctor-cubepick"
+
+    class _PresentRuntimeCubePick(CubePickEmbodiment):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {"os": "install os"}
+
+    embodiment_decorator(name)(_PresentRuntimeCubePick)
+    assert main(["doctor", "--embodiment", name]) == 0
+    assert "runtime-requirement" not in capsys.readouterr().out
+
+
+def test_doctor_unknown_embodiment_keeps_guided_exit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "definitely-missing-doctor-embodiment"
+
+    with pytest.raises(SystemExit, match=f"no embodiment named '{name}'") as excinfo:
+        main(["doctor", "--embodiment", name])
+
+    message = str(excinfo.value)
+    assert "available:" in message
+    assert "cubepick" in message
+    assert "Traceback" not in message
+    assert f"embodiment: {name} (--embodiment)" in capsys.readouterr().out
 
 
 def test_doctor_fails_on_nonconformant_embodiment(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1027,6 +1388,34 @@ def test_doctor_uses_default_embodiment_and_guides_when_unset(
     monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
     assert main(["doctor"]) == 0
     assert "cubepick" in capsys.readouterr().out
+
+
+def test_doctor_ignores_config_args_for_a_different_embodiment(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The issue-#44 repro: a lab machine's persisted rig args must not crash a
+    # conformance check of an unrelated, explicitly-selected embodiment.
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\nembodiment = yam-arms\n[embodiment.args]\nrest_pose = 0.5\n",
+    )
+    assert main(["doctor", "--embodiment", "cubepick"]) == 0
+    captured = capsys.readouterr()
+    assert "conformant" in captured.out
+    assert "note: ignoring [embodiment.args] for 'cubepick': they apply to 'yam-arms'" in (
+        captured.err
+    )
+
+
+def test_doctor_config_args_without_a_default_owner_never_apply(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An [embodiment.args] section with no [defaults] embodiment has no owner,
+    # so it applies to nothing (and says so).
+    _write_config(_hermetic_defaults, "[embodiment.args]\nrest_pose = 0.5\n")
+    assert main(["doctor", "--embodiment", "cubepick"]) == 0
+    err = capsys.readouterr().err
+    assert "no default embodiment is configured" in err
 
 
 def test_doctor_closes_the_embodiment_it_constructs() -> None:

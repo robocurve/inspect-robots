@@ -56,11 +56,17 @@ class Embodiment(Protocol):
 
     info: EmbodimentInfo
 
-    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation: ...
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        """Prepare a scene and return its initial observation, using ``seed`` if supported."""
+        ...
 
-    def step(self, action: Action) -> StepResult: ...
+    def step(self, action: Action) -> StepResult:
+        """Issue one action without waiting for the control period unless ``self_paced``."""
+        ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release hardware, simulator, or transport resources held by the adapter."""
+        ...
 
 
 class EmbodimentBase(ABC):
@@ -69,10 +75,14 @@ class EmbodimentBase(ABC):
     info: EmbodimentInfo
 
     @abstractmethod
-    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation: ...
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        """Prepare a scene and return its initial observation, using ``seed`` if supported."""
+        ...
 
     @abstractmethod
-    def step(self, action: Action) -> StepResult: ...
+    def step(self, action: Action) -> StepResult:
+        """Issue one action without waiting for the control period unless ``self_paced``."""
+        ...
 
     def close(self) -> None:  # noqa: B027 - intentional no-op default
         """Default: nothing to release."""

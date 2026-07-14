@@ -51,7 +51,13 @@ packages = ["src/inspect_robots_isaacsim"]
 include = ["src/inspect_robots_isaacsim", "tests", "README.md"]
 
 [tool.ruff]
-line-length = 100
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_isaacsim"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
 
 [tool.mypy]
 strict = true

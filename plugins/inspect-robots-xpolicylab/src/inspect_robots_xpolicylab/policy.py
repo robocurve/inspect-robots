@@ -30,6 +30,7 @@ from __future__ import annotations
 import atexit
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from typing import Any
 from uuid import uuid4
 
@@ -47,7 +48,6 @@ from inspect_robots import (
     PolicyInfo,
     Scene,
 )
-
 from inspect_robots_xpolicylab._client import PolicyClient
 from inspect_robots_xpolicylab._protocol import WsError
 
@@ -260,10 +260,8 @@ class XPolicyLabPolicy:
         self._closed = True
         atexit.unregister(self._atexit_close)
         if self._client.connected and self._open_trial_id is not None:
-            try:
+            with suppress(Exception):
                 self._client.trial_end(self._open_trial_id)
-            except Exception:  # noqa: BLE001 - close must never raise
-                pass
         self._open_trial_id = None
         self._client.close()
 
@@ -278,10 +276,8 @@ class XPolicyLabPolicy:
     # ------------------------------------------------------------------ #
 
     def _atexit_close(self) -> None:
-        try:
+        with suppress(Exception):
             self.close()
-        except Exception:  # noqa: BLE001 - never raise at interpreter exit
-            pass
 
     def _ensure_connected(self) -> PolicyClient:
         """Connect lazily; after a socket drop, reconnect (replaying ``hello``)."""

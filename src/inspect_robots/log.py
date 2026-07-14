@@ -93,10 +93,12 @@ class EvalLog:
     SCHEMA_VERSION: ClassVar[int] = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the complete log to nested dictionaries and sequences."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalLog:
+        """Reconstruct an immutable log, rejecting unsupported schema versions."""
         if data.get("version") != SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported eval-log schema version {data.get('version')!r}; "

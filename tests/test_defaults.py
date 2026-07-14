@@ -14,6 +14,7 @@ from inspect_robots._defaults import (
     Defaults,
     load_defaults,
     parse_value,
+    set_default,
 )
 
 
@@ -60,6 +61,21 @@ def test_full_config_parses_with_inline_comments_and_expansion(tmp_path: Path) -
     assert d.embodiment_args == {"cameras": "wrist,front", "port": None}
 
 
+def test_config_value_with_literal_percent_loads_unchanged(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, "[defaults]\npolicy = 50%off\n")
+    defaults = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    assert defaults.policy == "50%off"
+    assert defaults.policy_source == str(path)
+
+
+def test_set_default_round_trips_literal_percent(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    path = set_default(env, "policy", "50%off")
+    assert set_default(env, "policy", "50%off") == path
+    assert load_defaults(env).policy == "50%off"
+    assert "policy = 50%off" in path.read_text(encoding="utf-8")
+
+
 def test_env_vars_override_config_names_but_not_args(tmp_path: Path) -> None:
     _write_config(tmp_path, _FULL_CONFIG)
     d = load_defaults(
@@ -73,8 +89,12 @@ def test_env_vars_override_config_names_but_not_args(tmp_path: Path) -> None:
     assert d.policy_source == f"${ENV_POLICY}"
     assert d.embodiment == "other-arm"
     assert d.embodiment_source == f"${ENV_EMBODIMENT}"
-    # Config-file args still apply to whatever component ends up selected.
+    # Config-file args stay loaded, but their owner stays the *file's* name:
+    # the CLI applies them only when the selected component matches it, so an
+    # env-selected "other-policy" never inherits molmoact2-yam's args (#44).
     assert d.policy_args["temperature"] == 0.5
+    assert d.policy_args_owner == "molmoact2-yam"
+    assert d.embodiment_args_owner == "yam-bimanual"
 
 
 def test_env_vars_work_without_any_config_file(tmp_path: Path) -> None:
@@ -106,7 +126,7 @@ def test_unknown_sections_and_keys_are_ignored(tmp_path: Path) -> None:
     )
     d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
     # Full equality: the unknown key and section contributed nothing at all.
-    assert d == Defaults(policy="p", policy_source=str(path))
+    assert d == Defaults(policy="p", policy_source=str(path), policy_args_owner="p")
 
 
 def test_malformed_ini_raises_system_exit_naming_file(tmp_path: Path) -> None:
@@ -159,6 +179,8 @@ def test_sim_embodiment_config_is_independent_of_real(tmp_path: Path) -> None:
         sim_embodiment_source=str(path),
         embodiment_args={"port": "/dev/ttyUSB0"},
         sim_embodiment_args={"headless": True, "scene_file": scene_file},
+        embodiment_args_owner="yam-bimanual",
+        sim_embodiment_args_owner="yam-bimanual-isaac",
     )
 
 
@@ -215,17 +237,51 @@ def test_config_rerun_rejects_non_bool(tmp_path: Path) -> None:
 
 
 def test_set_default_requires_config_home() -> None:
-    from inspect_robots._defaults import set_default
-
     with pytest.raises(SystemExit, match="config home"):
         set_default({}, "policy", "scripted")
 
 
 def test_set_default_rejects_malformed_existing_config(tmp_path: Path) -> None:
-    from inspect_robots._defaults import set_default
-
     path = tmp_path / "inspect-robots" / "config.ini"
     path.parent.mkdir(parents=True)
     path.write_text("policy = dangling, no section header\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="malformed config"):
         set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "policy", "scripted")
+
+
+@pytest.mark.parametrize("key", ["policy", "embodiment", "sim_embodiment"])
+def test_set_default_warns_when_component_change_leaves_owned_args(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], key: str
+) -> None:
+    path = tmp_path / "inspect-robots" / "config.ini"
+    _write_config(
+        tmp_path,
+        f"[defaults]\n{key} = old-component\n[{key}.args]\nport = can0\n",
+    )
+    set_default({"XDG_CONFIG_HOME": str(tmp_path)}, key, "new-component")
+    assert capsys.readouterr().err == (
+        f"warning: [{key}.args] was configured for 'old-component'; "
+        f"it will be ignored for 'new-component': update or remove it in {path}\n"
+    )
+
+    set_default({"XDG_CONFIG_HOME": str(tmp_path)}, key, "new-component")
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("args_section", ["", "[embodiment.args]\n"])
+def test_set_default_does_not_warn_without_nonempty_args_section(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args_section: str,
+) -> None:
+    _write_config(tmp_path, f"[defaults]\nembodiment = old-arm\n{args_section}")
+    set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "embodiment", "new-arm")
+    assert capsys.readouterr().err == ""
+
+
+def test_set_default_does_not_warn_when_args_have_no_prior_owner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(tmp_path, "[embodiment.args]\nport = can0\n")
+    set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "embodiment", "new-arm")
+    assert capsys.readouterr().err == ""
