@@ -31,7 +31,7 @@ registered, while `doctor` checks its selected embodiment before construction. B
 `importlib.util.find_spec` without importing the declared top-level modules and
 print each remediation command verbatim when a module is missing.
 
-## Declare device slots:
+## Declare device slots
 
 Declare device-shaped constructor arguments on the registered embodiment
 factory. Import `DeviceSlot` from the `inspect_robots.conformance` submodule:

@@ -719,9 +719,14 @@ def _suggest_can_pinning(
         assignments.get(slot.arg) in order_dependent for slot in slots if slot.kind == "can"
     ):
         return
-    if not any(
-        "usb" in (sysfs_net / ifname / "device").resolve().parts for ifname in order_dependent
-    ):
+
+    def _is_usb(ifname: str) -> bool:
+        # Real sysfs buses are numbered (usb1, usb2, ...); a bare "usb"
+        # segment never occurs on hardware.
+        parts = (sysfs_net / ifname / "device").resolve().parts
+        return any(re.fullmatch(r"usb\d*", part) for part in parts)
+
+    if not any(_is_usb(ifname) for ifname in order_dependent):
         return
 
     warning = "these CAN interfaces have order-dependent names; a replug can swap them."

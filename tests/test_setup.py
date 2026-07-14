@@ -70,7 +70,8 @@ def _attach_can_adapter(
     *,
     usb: bool = True,
 ) -> None:
-    root = tmp_path / ("usb" if usb else "platform") / ifname / "adapter"
+    # "usb1" matches the numbered bus segments real sysfs uses (never bare "usb").
+    root = tmp_path / ("usb1" if usb else "platform") / ifname / "adapter"
     root.mkdir(parents=True)
     if serial is not None:
         (root / "serial").write_text(serial + "\n", encoding="utf-8")
@@ -185,7 +186,7 @@ def test_can_serial_reads_through_device_symlink(tmp_path: Path) -> None:
     sysfs_net = tmp_path / "net"
     interface = sysfs_net / "can0"
     interface.mkdir(parents=True)
-    adapter = tmp_path / "usb" / "adapter"
+    adapter = tmp_path / "usb3" / "adapter"
     adapter.mkdir(parents=True)
     (adapter / "serial").write_text(" 3B004B\n", encoding="utf-8")
     device = adapter / "net-device"
