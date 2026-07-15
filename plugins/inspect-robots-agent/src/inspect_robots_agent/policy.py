@@ -31,7 +31,7 @@ _MAX_CONSECUTIVE_FAILURES = 3
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
-_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \

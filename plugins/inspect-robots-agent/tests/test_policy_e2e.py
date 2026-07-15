@@ -320,6 +320,13 @@ def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script, effort=None), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert "reasoning_effort" not in script.requests[0]
 
+    # "none" is a wire value, distinct from None (omit the field): GPT-5.x
+    # rejects function tools on chat completions unless reasoning_effort is
+    # explicitly "none", and omitting the field 400s the same way.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == "none"
+
     with pytest.raises(ValueError, match="effort"):
         _policy(_Script([]), effort="turbo")
 
