@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -506,6 +507,45 @@ def test_run_summary_adds_agent_conversation_hint_when_recorded(
     out = capsys.readouterr().out
     assert "hint: view it with: inspect-robots inspect run.json" in out
     assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
+
+
+def test_transcript_rendering_degrades_lone_surrogates_instead_of_crashing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A hostile/buggy model server can emit lone UTF-16 surrogates; they
+    # survive the log's JSON round-trip (ensure_ascii escapes them on disk)
+    # and must degrade at print time, not crash the forensic reader.
+    log = _transcript_log()
+    hostile = dataclasses.replace(
+        log.samples[0],
+        policy_transcripts=([{"role": "assistant", "content": "bad \ud800 data"}],),
+        epochs=({},),
+    )
+    path = tmp_path / "hostile.json"
+    path.write_text(
+        json.dumps(dataclasses.replace(log, samples=(hostile,)).to_dict()), encoding="utf-8"
+    )
+
+    assert main(["inspect", str(path), "--transcript"]) == 0
+
+    out = capsys.readouterr().out
+    assert "\ud800" not in out
+    assert "bad � data" in out or "bad ? data" in out
+
+
+def test_transcript_empty_list_falls_back_to_json_rendering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # all() is vacuously true on [], which must not classify as a chat
+    # transcript: the JSON fallback at least prints the empty list.
+    log = _transcript_log()
+    empty = dataclasses.replace(log.samples[0], policy_transcripts=([],), epochs=({},))
+    path = tmp_path / "empty.json"
+    path.write_text(
+        json.dumps(dataclasses.replace(log, samples=(empty,)).to_dict()), encoding="utf-8"
+    )
+    assert main(["inspect", str(path), "--transcript"]) == 0
+    assert "    []" in capsys.readouterr().out
 
 
 def test_chat_renderer_tolerates_malformed_tool_call_entries(

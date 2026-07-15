@@ -455,6 +455,17 @@ def _has_policy_transcripts(log: EvalLog) -> bool:
     )
 
 
+def _print_degraded(line: str) -> None:
+    """Print transcript-derived text, replacing unencodable code points.
+
+    Transcripts are foreign data: a hostile or buggy model server can put lone
+    UTF-16 surrogates in message content, and they survive the log's JSON
+    round-trip but crash ``print`` on a strict-UTF-8 stdout. The forensic
+    reader must degrade, never crash, on the episodes it exists to explain.
+    """
+    print(line.encode("utf-8", errors="replace").decode("utf-8"))
+
+
 def _chat_content(content: object) -> str | None:
     """Render text from an OpenAI-style content value, collapsing media parts."""
     if isinstance(content, str):
@@ -471,9 +482,11 @@ def _chat_content(content: object) -> str | None:
 
 
 def _is_chat_transcript(transcript: object) -> bool:
-    """Recognize a list of role-bearing message dictionaries."""
-    return isinstance(transcript, list) and all(
-        isinstance(message, dict) and "role" in message for message in transcript
+    """Recognize a non-empty list of role-bearing message dictionaries."""
+    return (
+        isinstance(transcript, list)
+        and bool(transcript)
+        and all(isinstance(message, dict) and "role" in message for message in transcript)
     )
 
 
@@ -486,10 +499,10 @@ def _render_chat_transcript(transcript: list[object]) -> None:
         content = _chat_content(raw_message.get("content"))
         if role == "tool":
             suffix = "" if content is None else f" {content}"
-            print(f"        tool:{suffix}")
+            _print_degraded(f"        tool:{suffix}")
             continue
         suffix = "" if content is None else f" {content}"
-        print(f"    {role}:{suffix}")
+        _print_degraded(f"    {role}:{suffix}")
         tool_calls = raw_message.get("tool_calls")
         if not isinstance(tool_calls, list):
             continue
@@ -503,7 +516,7 @@ def _render_chat_transcript(transcript: list[object]) -> None:
             arguments = function.get("arguments", "")
             if not isinstance(arguments, str):
                 arguments = json.dumps(arguments)
-            print(f"      -> {name}({arguments})")
+            _print_degraded(f"      -> {name}({arguments})")
 
 
 def _print_policy_transcripts(log: EvalLog) -> None:
@@ -516,12 +529,12 @@ def _print_policy_transcripts(log: EvalLog) -> None:
         for trial, transcript in enumerate(scene.policy_transcripts):
             if transcript is None:
                 continue
-            print(f"scene {scene.scene_id}, trial {trial}:")
+            _print_degraded(f"scene {scene.scene_id}, trial {trial}:")
             if _is_chat_transcript(transcript):
                 _render_chat_transcript(transcript)
                 continue
             for line in json.dumps(transcript, indent=2).splitlines():
-                print(f"    {line}")
+                _print_degraded(f"    {line}")
 
 
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:

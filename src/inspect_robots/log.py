@@ -7,10 +7,11 @@ guarantee enforced by golden tests in a later step).
 
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
-dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts and
-``policy_transcripts``, ``EvalResults.metrics``, ``EvalSpec.policy_config`` /
-``embodiment_info``) remain plain mutable dicts. Treat a log as read-only;
-nothing deep-freezes it.
+dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``)
+remain plain mutable dicts, and ``SceneResult.policy_transcripts`` entries are
+arbitrary mutable JSON values. Treat a log as read-only; nothing deep-freezes
+it.
 """
 
 from __future__ import annotations

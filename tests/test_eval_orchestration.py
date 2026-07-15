@@ -604,6 +604,25 @@ def test_policy_transcripts_parallel_scored_and_errored_epochs(tmp_path: Path) -
     assert len(scene.policy_transcripts) == len(scene.epochs)
 
 
+def test_halted_trial_transcript_reaches_the_persisted_log(tmp_path: Path) -> None:
+    class _TranscriptScripted(ScriptedPolicy):
+        def transcript(self) -> object:
+            return [{"role": "assistant", "content": "walking to the cube"}]
+
+    (log,) = eval(
+        _task(epochs=2),
+        _TranscriptScripted(),
+        _FaultAfterEpochsEmbodiment(good_epochs=1),
+        log_dir=str(tmp_path),
+    )
+    scene = log.samples[0]
+    assert log.status == "error"
+    assert len(scene.policy_transcripts) == len(scene.epochs) == 2
+    # The faulted second trial keeps its transcript: forensics matter most
+    # exactly when the trial died.
+    assert scene.policy_transcripts[1] == [{"role": "assistant", "content": "walking to the cube"}]
+
+
 def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
     class _HooklessPolicy:
         def __init__(self) -> None:
