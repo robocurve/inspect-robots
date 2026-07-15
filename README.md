@@ -234,7 +234,7 @@ adapter shipped from this repo as separate packages:
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
   next to fine-tuned VLAs.
 
-### Real robots via ROS:
+### Real robots via ROS
 
 The ROS embodiment connects to any ROS 1 or ROS 2 arm that exposes standard
 joint, compressed-image, and optional pose topics through `rosbridge_server`.
