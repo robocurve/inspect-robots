@@ -101,7 +101,9 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. CLI flags override any default
+policy sees while the robot moves. The viewer starts with a 2 GiB memory cap
+so long sessions stay responsive; after upgrading, kill any already-running
+Rerun viewer once so the cap applies. CLI flags override any default
 (`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
