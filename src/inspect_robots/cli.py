@@ -745,11 +745,12 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
     _print_step_limit_notice(log, log.eval.task == "adhoc")
     print(f"task:        {log.eval.task}")
     # One shared instruction (the adhoc case) reads as run-level identity;
-    # differing instructions print per scene below instead.
+    # differing instructions print per scene below instead. Instructions are
+    # foreign text (dataset/operator-supplied), so printing degrades.
     instructions = {scene.instruction for scene in log.samples}
     shared = next(iter(instructions)) if len(instructions) == 1 else None
-    if shared is not None:
-        print(f"instruction: {shared}")
+    if shared:
+        _print_degraded(f"instruction: {shared}")
     print(f"policy:      {log.eval.policy}")
     print(f"embodiment:  {log.eval.embodiment}")
     print(f"status:      {log.status}")
@@ -770,8 +771,8 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
         if step_limit_count:
             details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit max_steps)")
         print(f"  [{scene.status}] {scene.scene_id}: {'  '.join(details)}")
-        if shared is None and scene.instruction is not None:
-            print(f"      instruction: {scene.instruction}")
+        if not shared and scene.instruction:
+            _print_degraded(f"      instruction: {scene.instruction}")
     if log.error:
         print(f"error: {log.error}")
     if transcript:
