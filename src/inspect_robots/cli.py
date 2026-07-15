@@ -768,6 +768,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
                 _print_degraded(f"cancelled: partial log written to {sink.path}")
+                print(_styled(f"hint: view it with: inspect-robots inspect {sink.path}", _DIM))
             else:
                 _print_degraded("cancelled: no log written")
             return 130

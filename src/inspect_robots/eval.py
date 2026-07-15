@@ -148,8 +148,9 @@ def eval(
     with ``status == "error"``, regardless of ``fail_on_error``.
 
     Ctrl-C during a rollout records the partial trial and writes a log with
-    ``status == "cancelled"``, then re-raises the same ``KeyboardInterrupt``
-    instance after ``on_eval_end`` completes. An interrupt outside the rollout
+    ``status == "cancelled"``, then re-raises the interrupt (as a
+    ``KeyboardInterrupt`` subclass chaining the original) after
+    ``on_eval_end`` completes. An interrupt outside the rollout
     call (during scoring, reducers, or log assembly), or a second interrupt
     during the cancellation handlers, may still prevent the log from being
     written.
