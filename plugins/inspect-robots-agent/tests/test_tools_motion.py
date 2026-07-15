@@ -701,3 +701,18 @@ def test_joint_mode_tool_name_and_description_unchanged() -> None:
     assert move["name"] == "move_joints"
     assert "end-effector" not in move["description"]
     assert "start orientation" not in move["description"]
+
+
+def test_displacement_pose_mode_keeps_move_by() -> None:
+    space = Box(
+        shape=(3,),
+        low=np.array([-0.05, -0.05, -0.1]),
+        high=np.array([0.05, 0.05, 0.1]),
+        semantics=ActionSemantics(
+            "eef_delta_pose", rotation_repr="none", dim_labels=("dx", "dy", "dyaw")
+        ),
+    )
+    toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
+    move = toolset.schemas()[0]["function"]
+    assert move["name"] == "move_by"
+    assert move["description"].startswith("Move BY")
