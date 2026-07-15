@@ -8,7 +8,10 @@ core is untouched.
 The agent toolset (plan 0008 §4c) makes the LLM pick `duration_s` for every
 motion. Speed is not a quantity the LLM should reason about: the loop is
 open-loop per turn (the model re-observes after the chunk plays out) and the
-trial budget is per LLM call, not per second. Worse, a too-short duration does
+budget it manages is per LLM call, not per second. (Trials also carry a
+control-step horizon — `Task.max_steps` — and speed-limited playout consumes
+more of it per motion than a short-duration call did; that is the accepted
+cost of never truncating, and the step-cap error in §3c bounds it per call.) Worse, a too-short duration does
 not fail — the core guardrails clamp the chunk per step (`DeltaLimitApprover`
 in absolute modes; `ClampApprover`'s box clamp in displacement modes, where
 the delta limiter adds nothing by default), so the arm moves at the limit and
@@ -53,10 +56,12 @@ Resolved knobs (user decisions, 2026-07-14):
   (float64 vector). Zero-width dimensions (`high == low`, common padding in
   VLA action spaces) have `speed == 0` and are legal at bind time.
 - Per call, for each *named* dimension: if `speed_i == 0` and
-  `target_i != current_i`, return a structured error
-  (`"dimension {label} is fixed at {value}"`). Dimensions with zero distance
-  (including zero-width ones re-sent at their fixed value) contribute
-  nothing to the step count.
+  `target_i != low_i`, return a structured error
+  (`"dimension {label} is fixed at {value}"`). The comparison is against the
+  *bound*, not the observed state — on hardware the observation carries
+  noise, and re-sending the documented fixed value must always succeed.
+  Zero-width dimensions contribute nothing to the step count; dimensions
+  with zero distance to the observed state likewise contribute nothing.
 - Steps: `steps = max(1, ceil(max_i(|target_i - current_i| / speed_i) * hz
   / (1 - 1e-6)))`, the max taken over named dimensions with positive
   distance and positive speed; an empty max (all named targets equal the
@@ -86,13 +91,14 @@ Resolved knobs (user decisions, 2026-07-14):
 - Per call, for each named dimension with a nonzero value: if the limit on
   the requested side is zero, return a structured error
   (`"dimension {label} cannot move in that direction"`).
-- Steps: `steps = max(1, ceil(max_i(|delta_i| / limit_i)))` over named
-  dimensions with nonzero values; all-zero deltas (legal today, a hold) get
-  `steps = 1`, emitting a single zero action. Each action is
-  `vector / steps` (unchanged emission shape). No float headroom is needed:
-  each emitted action is exactly `vector / steps`, whose magnitude is
-  `<= limit` by construction of `ceil`, and no cumulative interpolation is
-  involved.
+- Steps: `steps = max(1, ceil(max_i(|delta_i| / limit_i) / (1 - 1e-6)))`
+  over named dimensions with nonzero values; all-zero deltas (legal today, a
+  hold) get `steps = 1`, emitting a single zero action. Each action is
+  `vector / steps` (unchanged emission shape). The same `1e-6` headroom as
+  §3a applies: `ceil` alone does not bound the per-step magnitude in float
+  arithmetic — for some `(delta, limit)` pairs `delta / limit` rounds down
+  to an exact integer `n` while `delta / n` rounds 1 ulp *above* the limit,
+  and `ClampApprover` would clamp and log a spurious approval event.
 
 ### 3c. Chunk cap
 
@@ -112,11 +118,20 @@ with actionable messages (same stance as `DeltaLimitApprover`):
 
 - Absolute modes: every dimension needs finite `low` and `high` (speed is
   derived from the range). `high == low` is allowed (handled per call, §3a).
-  The existing "no bounds; move conservatively" fallback text disappears for
-  absolute modes since unbounded absolute spaces are now rejected.
-- Displacement modes: every dimension needs finite `low` and `high`. A zero
-  bound on one side is allowed (that direction simply cannot move; handled
-  per call, §3b).
+- Displacement modes: every dimension needs finite `low` and `high` with
+  `low <= 0 <= high` (core's `Box` only validates `low <= high`, so a
+  displacement box not containing zero would make the §3b side-limits
+  negative and the split nonsensical; such spaces also cannot hold still and
+  are rejected). A zero bound on one side is allowed (that direction simply
+  cannot move; handled per call, §3b).
+- Both modes: a declared `control_hz` that is non-finite or `<= 0` is
+  rejected at bind time (`None` stays allowed and falls back to
+  `_FALLBACK_HZ` for step computation). Core never validates `control_hz`,
+  and `hz = 0` would make §3a floor every motion to a single step while §3c
+  errors every call — contradictory outcomes this check makes unreachable.
+- The "no bounds; move conservatively" `bounds_text` fallback becomes dead
+  in both modes (finite bounds are now required everywhere) and is removed
+  outright.
 
 Previously such spaces "worked" only because the LLM supplied a duration;
 motions in them were never actually speed-safe.
@@ -184,10 +199,15 @@ cap" claim.
   `0.05 * (high - low)` — the spurious-clamp regression test.
 - Small move → `steps == 1` floor; all named targets equal to current →
   `steps == 1`.
-- Zero-width dimension: re-sending the fixed value succeeds and contributes
-  no steps; targeting a different value returns the "fixed at" error.
-- `move_by` splits by box side: `high = 0.05`, delta `+0.2` → 4 steps of
-  0.05; asymmetric `low = -0.1` with delta `-0.2` → 2 steps.
+- Zero-width dimension: targeting the bound value succeeds and contributes
+  no steps *even when the observed state differs from the bound* (sensor
+  noise); targeting any other value returns the "fixed at" error.
+- `move_by` splits by box side: `high = 0.05`, delta `+0.2` → 5 steps of
+  0.04 (the §3b headroom pushes the float-exact 4-step split to 5);
+  asymmetric `low = -0.1` with delta `-0.2` → 3 steps.
+- `move_by` ulp regression: every emitted per-step magnitude is `<=` the box
+  side for a non-float-clean pair (e.g. delta `0.29`, limit `0.11287...`-
+  style values from a property-style spot check).
 - `move_by` with all-zero deltas → 1 zero-action step (hold).
 - `move_by` into a zero-bound direction → the "cannot move in that
   direction" error.
@@ -200,13 +220,27 @@ cap" claim.
   with `control_hz=None`, note contains no seconds figure (replaces the
   existing `test_control_hz_none_falls_back_to_default`, which passes
   `duration_s` and dies with it).
+- Declared-rate note: with `control_hz=20`, the note's seconds figure is
+  `steps / 20` (pins the units; a `steps * hz` bug must fail).
 - Bind-time `ToolsetError` for missing/non-finite bounds per §3d (absolute
-  and displacement variants); zero-width and zero-sided bounds bind fine.
+  and displacement variants); zero-width and zero-sided bounds bind fine;
+  displacement boxes not containing zero are rejected; declared
+  `control_hz` of `0`, negative, or non-finite is rejected while `None`
+  binds.
 - `max_speed_frac` validation errors (0, negative, non-finite).
 - Speed derivation honors non-default frac (absolute modes).
 
 `tests/test_policy_e2e.py`: existing flows updated (tool calls no longer
-send `duration_s`); config snapshot includes `max_speed_frac`.
+send `duration_s`); config snapshot includes `max_speed_frac`. One test is
+redesigned, not updated: `test_wild_swing_is_clamped_by_guardrails_but_not_without`
+provokes a clamp by sending `move_by` `dx=5.0`, but under the new surface
+the toolset splits that into in-box steps — no default guardrail can bite,
+by design, and the split would blow the task's 40-step horizon anyway. It
+becomes a test of the §4 caveat instead: build the guardrail chain with an
+explicit `max_delta` *tighter than the box*, request a `move_by` sized so
+its computed steps fit the horizon, and assert `delta_clamped` approval
+events occur with guardrails and the emitted per-step values pass through
+untouched without them.
 
 `tests/test_llm.py`, `tests/test_package.py`: untouched unless imports move.
 
