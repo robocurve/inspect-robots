@@ -655,3 +655,49 @@ def test_declared_rate_note_divides_steps_by_hz() -> None:
     assert result.chunk is not None
     assert len(result.chunk.actions) == 51
     assert result.note == "executing move_joints over 51 steps (2.5s)"
+
+
+def _pose_space() -> Box:
+    return Box(
+        shape=(4,),
+        low=np.array([0.1, -0.3, 0.03, -np.pi]),
+        high=np.array([0.5, 0.3, 0.4, np.pi]),
+        semantics=ActionSemantics(
+            "eef_abs_pose",
+            rotation_repr="none",
+            frame="base",
+            dim_labels=("x", "y", "z", "yaw"),
+        ),
+    )
+
+
+def test_pose_mode_tool_is_move_to_with_cartesian_contracts() -> None:
+    obs_space = ObservationSpace(state=StateSpec(fields=(StateField(key="eef", shape=(4,)),)))
+    toolset = build_toolset(_pose_space(), obs_space, control_hz=10.0)
+    move = toolset.schemas()[0]["function"]
+    assert move["name"] == "move_to"
+    description = move["description"]
+    assert "end-effector" in description
+    assert "its own base frame" in description
+    assert "relative to the trial's start orientation" in description
+    assert "without wrapping" in description
+    assert "Per-dimension bounds" in description
+    # The executor accepts the renamed tool and still rejects the old name.
+    result = toolset.execute(
+        _call("move_to", targets={"x": 0.3}),
+        Observation(state={"eef": np.array([0.2, 0.0, 0.1, 0.0])}),
+    )
+    assert result.error is None and result.chunk is not None
+    stale = toolset.execute(
+        _call("move_joints", targets={"x": 0.3}),
+        Observation(state={"eef": np.array([0.2, 0.0, 0.1, 0.0])}),
+    )
+    assert stale.error is not None and "move_to" in stale.error
+
+
+def test_joint_mode_tool_name_and_description_unchanged() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    move = toolset.schemas()[0]["function"]
+    assert move["name"] == "move_joints"
+    assert "end-effector" not in move["description"]
+    assert "start orientation" not in move["description"]

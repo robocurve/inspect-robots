@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-agent"
-version = "0.3.0"
+version = "0.4.0"
 description = "LLM agent policy for Inspect Robots: frontier LLMs (Claude, GPT, anything OpenAI-compatible) drive any registered embodiment through tool calls."
 dynamic = ["readme"]
 requires-python = ">=3.10"

@@ -66,15 +66,22 @@ class Toolset:
         low: npt.NDArray[np.float64],
         high: npt.NDArray[np.float64],
         step_limits: npt.NDArray[np.float64],
+        pose: bool = False,
     ):
         self._absolute = absolute
+        self._pose = pose
         self._labels = labels
         self._index_by_label = {label: i for i, label in enumerate(labels)}
         self._state_key = state_key
         self._hz = control_hz
         self._resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
         self._max_steps = math.ceil(_MAX_DURATION_S * self._resolved_hz)
-        self._move_tool = "move_joints" if absolute else "move_by"
+        if pose:
+            # Cartesian surfaces get a Cartesian name; the LLM should think in
+            # workspace terms, not joints.
+            self._move_tool = "move_to" if absolute else "move_by"
+        else:
+            self._move_tool = "move_joints" if absolute else "move_by"
         self._bounds_text = bounds_text
         self._low = low
         self._high = high
@@ -88,7 +95,23 @@ class Toolset:
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for this embodiment."""
-        if self._absolute:
+        if self._absolute and self._pose:
+            move_description = (
+                "Move to absolute Cartesian end-effector targets (meters for "
+                "positions, radians for rotations, per the dimension labels). "
+                "The motion is a straight line interpolated at a fixed safe "
+                "speed and the result reports its step count. Unnamed "
+                "dimensions hold their current value. Coordinates are absolute "
+                "in the embodiment's declared frame; on multi-arm embodiments "
+                "each arm uses its own base frame and axes may differ between "
+                "arms depending on mounting. Rotation dimensions are absolute "
+                "targets measured relative to the trial's start orientation "
+                "(0 means the start orientation) and interpolate linearly "
+                "without wrapping, so prefer intermediate values for large "
+                "rotations. " + self._bounds_text
+            )
+            values_key = "targets"
+        elif self._absolute:
             move_description = (
                 "Move to absolute joint/dimension targets. The motion is smoothly "
                 "interpolated at a fixed safe speed and the result reports its step "
@@ -447,4 +470,5 @@ def build_toolset(
         low=low64,
         high=high64,
         step_limits=step_limits,
+        pose=mode in _POSE_MODES,
     )
