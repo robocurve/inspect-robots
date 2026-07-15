@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import socket
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 import types
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -55,31 +59,75 @@ def test_recording_and_connect_are_mutually_exclusive() -> None:
         RerunSink("run.rrd", connect_url="rerun+http://127.0.0.1:9876/proxy")
 
 
-def test_connect_grpc_is_called_only_when_configured() -> None:
-    """Startup connects to the configured URL and skips gRPC when it is unset."""
+class _StartupRR:
+    """Capture startup calls made through the fake Rerun SDK surface."""
 
-    class _FakeRR:
-        def __init__(self) -> None:
-            self.init_count = 0
-            self.connect_urls: list[str] = []
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
 
-        def init(self, *args: object, **kwargs: object) -> None:
-            self.init_count += 1
+    def init(self, application_id: str, **kwargs: object) -> None:
+        """Capture initialization arguments."""
+        self.calls.append(("init", (application_id, kwargs)))
 
-        def connect_grpc(self, url: str) -> None:
-            self.connect_urls.append(url)
+    def spawn(self, **kwargs: object) -> None:
+        """Capture viewer-spawn arguments."""
+        self.calls.append(("spawn", kwargs))
+
+    def connect_grpc(self, url: str) -> None:
+        """Capture the remote viewer URL."""
+        self.calls.append(("connect_grpc", url))
+
+
+def test_spawn_uses_bounded_memory_limit_after_plain_init() -> None:
+    """Local startup initializes without spawn= and applies the 2 GiB viewer cap."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True)
+    sink._rr = fake
+
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB"}),
+    ]
+
+
+def test_custom_spawn_memory_limit_is_forwarded_verbatim() -> None:
+    """A caller-provided viewer memory limit reaches rr.spawn unchanged."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True, spawn_memory_limit="4GiB")
+    sink._rr = fake
+
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls[-1] == ("spawn", {"memory_limit": "4GiB"})
+
+
+def test_default_startup_never_spawns_a_viewer() -> None:
+    """The default non-spawn mode only initializes the recording."""
+    fake = _StartupRR()
+    sink = RerunSink()
+    sink._rr = fake
+
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls == [("init", ("inspect_robots", {}))]
+
+
+def test_connect_grpc_follows_init_without_spawning() -> None:
+    """Remote startup initializes, connects to the URL, and never spawns locally."""
 
     url = "rerun+http://127.0.0.1:9876/proxy"
-    fake = _FakeRR()
-    connected = RerunSink(connect_url=url)
-    connected._rr = fake
-    connected.on_eval_start(None)  # type: ignore[arg-type]
-    unconnected = RerunSink()
-    unconnected._rr = fake
-    unconnected.on_eval_start(None)  # type: ignore[arg-type]
+    fake = _StartupRR()
+    sink = RerunSink(connect_url=url)
+    sink._rr = fake
 
-    assert fake.init_count == 2
-    assert fake.connect_urls == [url]
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("connect_grpc", url),
+    ]
 
 
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
@@ -110,8 +158,8 @@ def test_rerun_sink_writes_recording(tmp_path: Path) -> None:
     assert rrd.exists()
 
 
-def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
-    """A missing viewer binary (rr.init raising) must not kill the eval."""
+def test_init_failure_disables_sink_instead_of_crashing() -> None:
+    """A recording initialization failure must warn instead of killing the eval."""
     from inspect_robots.log import EvalSpec
 
     class _FakeRR:
@@ -128,6 +176,23 @@ def test_viewer_failure_disables_sink_instead_of_crashing() -> None:
         )
     assert sink.available is False  # dormant from here on
     sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
+
+
+def test_spawn_failure_disables_sink_instead_of_crashing() -> None:
+    """A missing viewer binary reported by rr.spawn must leave the sink dormant."""
+
+    class _FakeRR:
+        def init(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def spawn(self, **kwargs: object) -> None:
+            raise RuntimeError("Failed to find Rerun Viewer executable in PATH.")
+
+    sink = RerunSink(spawn=True)
+    sink._rr = _FakeRR()
+    with pytest.warns(RuntimeWarning, match="RerunSink disabled"):
+        sink.on_eval_start(None)  # type: ignore[arg-type]
+    assert sink.available is False
 
 
 def test_connection_failure_disables_sink_instead_of_crashing() -> None:
@@ -197,6 +262,59 @@ def _install_fake_rerun(
     fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "rerun", fake)
     return logged
+
+
+class _BlockingRecording:
+    """Fake recording whose flush remains blocked until the test releases it."""
+
+    def __init__(self, gate: threading.Event, finished: threading.Event) -> None:
+        self._gate = gate
+        self._finished = finished
+
+    def flush(self) -> None:
+        """Wait long enough to exceed the sink's bounded probe timeout."""
+        self._gate.wait(timeout=30.0)
+        self._finished.set()
+
+
+class _HealthyRecording:
+    """Fake recording with an immediately completed flush."""
+
+    def flush(self) -> None:
+        """Return immediately to represent a healthy SDK connection."""
+
+
+class _ExplodingRecording:
+    """Fake recording whose available flush surface raises an exception."""
+
+    def flush(self) -> None:
+        """Raise so the probe can treat the completed call as healthy."""
+        raise RuntimeError("flush failed")
+
+
+class _RecordingWithoutFlush:
+    """Represent the rerun-sdk 0.20/0.21 recording surface."""
+
+
+def _probe_fake(
+    recording: object | None,
+    *,
+    unregister_calls: list[None] | None = None,
+    unregister_error: Exception | None = None,
+) -> types.ModuleType:
+    """Build a fake SDK exposing the recording probe and optional atexit shim."""
+    fake = types.ModuleType("rerun")
+    fake.init = lambda *a, **k: None  # type: ignore[attr-defined]
+    fake.get_global_data_recording = lambda: recording  # type: ignore[attr-defined]
+    if unregister_calls is not None:
+
+        def _unregister_shutdown() -> None:
+            unregister_calls.append(None)
+            if unregister_error is not None:
+                raise unregister_error
+
+        fake.unregister_shutdown = _unregister_shutdown  # type: ignore[attr-defined]
+    return fake
 
 
 def _obs(*, with_image: bool = True) -> Observation:
@@ -377,6 +495,7 @@ def test_wedged_worker_is_disowned_and_backlog_dropped(
     """A worker stuck in the SDK is abandoned; a restarted worker owns the queue alone."""
     gate = threading.Event()
     logged = _install_fake_rerun(monkeypatch, gate=gate)
+    assert not hasattr(sys.modules["rerun"], "get_global_data_recording")
     sink = RerunSink(flush_timeout=0.05)
     try:
         _log_one(sink, 0)
@@ -400,6 +519,133 @@ def test_wedged_worker_is_disowned_and_backlog_dropped(
     camera = [p for p, _ in logged if p == "trial/camera/cam"]
     assert len(camera) == 2  # A's in-flight payload 0, B's payload 2; payload 1 dropped
     sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_wedged_recording_flush_unregisters_atexit_and_disables_sink() -> None:
+    """A timed-out SDK flush abandons queued data and prevents unsafe re-init."""
+    gate = threading.Event()
+    finished = threading.Event()
+    unregister_calls: list[None] = []
+    fake = _probe_fake(_BlockingRecording(gate, finished), unregister_calls=unregister_calls)
+    init_calls: list[None] = []
+
+    def _init(*args: object, **kwargs: object) -> None:
+        init_calls.append(None)
+
+    fake.init = _init  # type: ignore[attr-defined]
+    sink = RerunSink(flush_timeout=0.05)
+    sink._rr = fake
+    try:
+        with pytest.warns(RuntimeWarning, match="viewer connection is stalled"):
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+        assert sink._disabled
+        sink.on_eval_start(None)  # type: ignore[arg-type]
+        assert sink._rr is fake
+        assert init_calls == []
+    finally:
+        gate.set()
+    assert finished.wait(timeout=5.0)
+
+
+def test_disabled_sink_skips_probe_on_later_shutdowns() -> None:
+    """A wedge-disabled sink stays dormant: no repeated stall, warning, or unregister."""
+    gate = threading.Event()
+    finished = threading.Event()
+    unregister_calls: list[None] = []
+    sink = RerunSink(flush_timeout=0.05)
+    sink._rr = _probe_fake(_BlockingRecording(gate, finished), unregister_calls=unregister_calls)
+    try:
+        with pytest.warns(RuntimeWarning, match="viewer connection is stalled"):
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+    finally:
+        gate.set()
+    assert finished.wait(timeout=5.0)
+
+
+def test_healthy_recording_flush_keeps_atexit_and_sink_enabled() -> None:
+    """A completed SDK flush leaves the normal Rerun atexit cleanup registered."""
+    unregister_calls: list[None] = []
+    sink = RerunSink()
+    sink._rr = _probe_fake(_HealthyRecording(), unregister_calls=unregister_calls)
+
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+    assert unregister_calls == []
+    assert not sink._disabled
+
+
+def test_shutdown_probe_shims_leave_inconclusive_sinks_enabled() -> None:
+    """Missing recording APIs keep the older SDK's existing atexit posture unchanged."""
+    uninitialized = RerunSink()
+    uninitialized.on_eval_end(None)  # type: ignore[arg-type]
+    assert not uninitialized._disabled
+
+    no_get_recording = types.ModuleType("rerun")
+    no_recording = _probe_fake(None)
+    unregister_calls: list[None] = []
+    no_flush = _probe_fake(_RecordingWithoutFlush(), unregister_calls=unregister_calls)
+
+    for fake in (no_get_recording, no_recording, no_flush):
+        sink = RerunSink()
+        sink._rr = fake
+        sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert not sink._disabled
+
+    assert unregister_calls == []
+
+
+def test_wedged_recording_without_unregister_shutdown_still_disables() -> None:
+    """A missing unregister shim cannot prevent the wedged sink from going dormant."""
+    gate = threading.Event()
+    finished = threading.Event()
+    sink = RerunSink(flush_timeout=0.05)
+    sink._rr = _probe_fake(_BlockingRecording(gate, finished))
+    try:
+        with pytest.warns(RuntimeWarning, match="viewer connection is stalled"):
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert sink._disabled
+    finally:
+        gate.set()
+    assert finished.wait(timeout=5.0)
+
+
+def test_unregister_shutdown_failure_is_swallowed() -> None:
+    """A failing atexit-unregister shim does not escape the shutdown path."""
+    gate = threading.Event()
+    finished = threading.Event()
+    unregister_calls: list[None] = []
+    sink = RerunSink(flush_timeout=0.05)
+    sink._rr = _probe_fake(
+        _BlockingRecording(gate, finished),
+        unregister_calls=unregister_calls,
+        unregister_error=RuntimeError("cannot unregister"),
+    )
+    try:
+        with pytest.warns(RuntimeWarning, match="viewer connection is stalled"):
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+        assert sink._disabled
+    finally:
+        gate.set()
+    assert finished.wait(timeout=5.0)
+
+
+def test_recording_flush_exception_counts_as_completed_probe() -> None:
+    """An exception from an available flush is swallowed and treated as non-wedged."""
+    unregister_calls: list[None] = []
+    sink = RerunSink()
+    sink._rr = _probe_fake(_ExplodingRecording(), unregister_calls=unregister_calls)
+
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+    assert unregister_calls == []
+    assert not sink._disabled
 
 
 def test_eval_end_reports_dropped_data(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,3 +688,76 @@ def test_trial_end_skips_flush_once_stalled(monkeypatch: pytest.MonkeyPatch) -> 
         gate.set()
     assert sink.flush(timeout=5.0)
     sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
+    """The real SDK atexit path is bounded after a connected peer stops reading."""
+    rr = pytest.importorskip("rerun")
+    if not hasattr(rr, "connect_grpc"):
+        pytest.skip("pre-gRPC rerun-sdk cannot run the connect-mode wedge scenario")
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port = server.getsockname()[1]
+    accepted = threading.Event()
+    release_listener = threading.Event()
+
+    def _accept_without_reading() -> None:
+        try:
+            connection, _ = server.accept()
+        except OSError:
+            return
+        with connection:
+            accepted.set()
+            release_listener.wait(timeout=45.0)
+
+    listener = threading.Thread(target=_accept_without_reading, daemon=True)
+    listener.start()
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import numpy as np
+
+        from inspect_robots.logging import RerunSink
+        from inspect_robots.types import Action, Observation, StepResult
+
+        sink = RerunSink(
+            connect_url=sys.argv[1],
+            jpeg_quality=None,
+            flush_timeout=0.2,
+        )
+        sink.on_eval_start(None)
+        image = np.random.default_rng(0).integers(
+            0, 256, size=(4096, 4096, 3), dtype=np.uint8
+        )
+        observation = Observation(images={"camera": image})
+        result = StepResult(observation=Observation(), reward=1.0)
+        sink.log_step(0, observation, Action(data=np.array([0.5])), result)
+        assert sink.flush(timeout=10.0)
+        sink.on_eval_end(None)
+        """
+    )
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                f"rerun+http://127.0.0.1:{port}/proxy",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    finally:
+        release_listener.set()
+        server.close()
+        listener.join(timeout=5.0)
+
+    assert accepted.is_set(), completed.stderr
+    assert completed.returncode == 0, completed.stderr
+    # Guard against the trivial pass: the wedge branch must actually fire.
+    assert "viewer connection is stalled" in completed.stderr, completed.stderr
