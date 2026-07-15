@@ -69,10 +69,14 @@ object. No new hook is needed.
 
 Ripple effects inside core:
 
-- `__all__` / `tests/test_api_snapshot.py`: `EmbodimentInfo` is already
-  exported; the snapshot records field names, so it must be regenerated or
-  updated to include `docs`.
+- `tests/test_api_snapshot.py` needs **no change**: it fences the symbol
+  names in `inspect_robots.__all__`, not dataclass fields, and
+  `EmbodimentInfo` is already exported. Do not add `"docs"` to `EXPECTED`.
 - `conformance.py` does not gate on the new field (advisory).
+- `EvalSpec.embodiment_info` (the hand-picked dict projection in `eval.py`)
+  deliberately does **not** gain `docs`: the rendered system prompt is
+  already captured verbatim in the per-trial policy transcript, which is the
+  audit surface that matters. Leave the projection unchanged.
 - Mock embodiments: `CubePick` gains a one-paragraph docs string, which
   doubles as the in-tree usage example and exercises the field end to end in
   the existing agent-plugin-against-mock tests (if any) and core tests.
@@ -82,34 +86,56 @@ Ripple effects inside core:
 
 `plugins/inspect-robots-agent`:
 
-- `LLMAgentPolicy.bind()` captures `getattr(embodiment_info, "docs", None)`
-  (getattr so the plugin keeps working against older cores; the pyproject
-  lower bound is still raised — see §5 — but the plugin should not crash if
-  someone pins an old core with a new plugin).
+- `LLMAgentPolicy.bind()` captures `getattr(embodiment_info, "docs", None)`.
+  The getattr fallback means the plugin degrades gracefully against older
+  cores (docs simply absent), so the `inspect-robots>=0.4` lower bound in
+  the plugin's pyproject stays as-is — no bump.
+- The docs attribute is initialized to `None` in `__init__` (not only in
+  `bind()`): `reset()` must keep working on an unbound policy.
 - `reset()` appends a section to the system prompt when docs are non-empty
-  after `str.strip()`:
+  after `str.strip()`. Order of operations is normative: run
+  `_SYSTEM_TEMPLATE.format(...)` **first**, then concatenate the docs text
+  verbatim (`formatted + "\n\nEmbodiment notes:\n" + docs`). Embodiment
+  markdown may legally contain `{`/`}` (JSON snippets, code examples);
+  passing it through `str.format` would let third-party content crash every
+  trial at reset.
 
-  ```text
-  {existing _SYSTEM_TEMPLATE text}
-
-  Embodiment notes:
-  {docs}
-  ```
-
-  No truncation, no reformatting. Whitespace-only docs are treated as absent.
+  No truncation, no reformatting. Whitespace-only docs are treated as absent
+  (no dangling header).
 - Tool descriptions are unchanged: bounds and labels already live there, and
   duplicating prose into every tool schema wastes tokens on every call.
 
 ### 3.3 Agent plugin: labeled proprio state in observations
 
-In `_observation_content` (policy.py), when rendering the state field that
-the toolset selected as the proprio reference (`state_key`) *and* its length
-equals the number of action dims, render label/value pairs instead of a bare
+Goal: render the proprio state field as label/value pairs instead of a bare
 list:
 
 ```text
 state[joint_pos]: left_j0=0.01 left_j1=-0.02 … right_gripper=0.98
 ```
+
+Which field gets labeled — normative selection rule, applying in **all**
+modes (absolute and displacement; today's `state_key` is only computed for
+absolute modes, which would silently skip YAM `joint_delta` runs):
+
+1. If the toolset's existing `state_key` is set (absolute modes), label that
+   field.
+2. Otherwise (displacement modes), label the state field whose shape equals
+   `(action_dim,)` **iff exactly one field matches**; ambiguity (e.g.
+   CubePick's two 2-D fields `eef_pos`/`cube_pos` against a 2-D action)
+   means no labeling — a mislabeled line is worse than an unlabeled one.
+3. Labeling additionally requires real `dim_labels` on the action semantics.
+   When `build_toolset` synthesized fallback labels (`"0"`, `"1"`, …),
+   render the old unlabeled list — `0=0.01 1=-0.02` is pure noise.
+4. At render time, if the runtime vector's length mismatches the labels,
+   fall back to the unlabeled rendering (sanity check, never crash).
+
+Plumbing — normative, because `_observation_content` is a module-level
+function with no toolset access: `Toolset` gains one public method,
+`state_labels() -> tuple[str, tuple[str, ...]] | None`, returning
+`(state_key_to_label, labels)` per rules 1–3 or `None`. The policy calls it
+once after bind and passes the result into `_observation_content` as an
+optional parameter (default `None` keeps the current rendering).
 
 All other state fields keep the existing unlabeled rendering. Rounding stays
 as-is. This is a pure prompt-format change; update the plugin tests that
@@ -125,9 +151,12 @@ assert on observation text.
   identical sign conventions, so the notes are written once and prefixed
   "each arm".
 - `eef_pos` mode: frame identity (+X forward out of the arm base, +Y left,
-  +Z up, per-arm base frame), yaw-relative-to-start restated briefly, and
-  the validated workspace box from plan 0006 (yam repo) as a reachability
-  hint.
+  +Z up, per-arm base frame), yaw-relative-to-start restated briefly, arm
+  geometry (link lengths, reach), and gripper polarity. **No numeric
+  workspace bounds**: in eef mode the action box *is* the workspace box and
+  `build_toolset` already renders those numbers into the move tool's
+  bounds text; restating them here would violate the no-restated-bounds
+  rule and drift whenever an operator overrides `eef_low`/`eef_high`.
 - New optional config key `docs_extra: str = ""` (embodiment arg, so
   `-E docs_extra="…"` and config.ini both work): operator-supplied
   rig-specific notes (e.g. how the two arms are mounted relative to the
@@ -156,35 +185,47 @@ Two identical 6-DoF arms ("left_", "right_") with parallel-jaw grippers …
 Core (100% gate):
 
 - `EmbodimentInfo` default `docs is None`; frozen dataclass still hashes/eqs.
-- API snapshot updated.
+- No API-snapshot change (see §3.1).
 - CubePick publishes non-empty docs.
 
 Agent plugin:
 
-- bind→reset with docs set: system prompt contains the section verbatim.
+- bind→reset with docs set: system prompt contains the section verbatim,
+  **including docs containing `{`/`}` characters** (the format-first rule).
 - docs None / empty / whitespace-only: prompt identical to today's (no
   dangling header).
-- getattr fallback: bind against a stub info object without a `docs`
-  attribute does not raise.
-- labeled proprio line: exact-format test for label=value rendering; a state
-  field whose length mismatches action dims keeps the old rendering.
+- reset before bind still works (docs attr initialized in `__init__`).
+- getattr fallback: bind against a stub info object lacking a `docs`
+  attribute does not raise (test will need a `cast`, since `bind()` is
+  typed against `EmbodimentInfo`).
+- `state_labels()`: absolute mode returns the proprio field labels;
+  displacement mode with a unique shape match returns it; ambiguous shapes
+  (CubePick-style) return None; synthesized fallback labels return None;
+  runtime length mismatch falls back to unlabeled rendering.
+- labeled proprio line: exact-format test for label=value rendering.
 
 YAM plugin (companion PR):
 
 - joints-mode docs mention every label `left_j0`…`right_gripper` exactly
-  once in the bullet list; gripper polarity string matches the normalization
-  in `packing.py` (test derives expected polarity from the code, not a
-  literal).
-- eef-mode docs mention every eef label and the workspace box bounds equal
-  to the constants in `config.py`.
-- `docs_extra` appended verbatim; empty default adds nothing.
+  once in the bullet list; the gripper polarity sentence is asserted as a
+  literal matching the wire convention hardcoded in the yam
+  `embodiment.py` gripper normalization (cmd 1 → open). The convention is
+  structural there, not a derivable constant — a literal is the honest test.
+- eef-mode docs mention every eef label; assert **no** numeric workspace
+  bounds appear (guards the no-restated-bounds rule).
+- `docs_extra` appended verbatim (including braces); empty default adds
+  nothing.
 
 ## 5. Rollout
 
 1. Core PR (this plan): core field + agent plugin consumption. Agent plugin
-   version → 0.5.0 (feature); core minor release after merge.
-2. Yam PR: raise `inspect-robots` lower bound to the new core version, add
-   the cheat-sheet + `docs_extra`. Yam minor release after merge.
+   version → 0.5.0 (feature); its `inspect-robots>=0.4` bound is unchanged
+   (getattr fallback, §3.2). Core minor release after merge.
+2. Yam PR: raise the yam plugin's `inspect-robots` lower bound to the new
+   core minor (it constructs `EmbodimentInfo(docs=…)`, which raises
+   TypeError on older cores — unlike the agent plugin, yam genuinely needs
+   the new field), add the cheat-sheet + `docs_extra`. Yam minor release
+   after merge.
 3. No config migration: absent field defaults preserve today's behavior
    everywhere.
 
@@ -210,10 +251,15 @@ all-zero joints), +Y left, +Z up.
 
 Geometry: upper arm 0.264 m, forearm 0.252 m, wrist-to-grasp-point 0.247 m
 when straight; max reach shoulder→grasp ≈ 0.76 m. At all-zero joints the arm
-rests folded with the gripper pointing forward (+X). Runtime software widens
-the XML ranges by ±0.15 rad; the plugin's declared bounds already reflect
-what the embodiment accepts, so the notes must not restate numeric ranges
-(the tool description owns bounds).
+rests folded with the gripper pointing forward (+X).
+
+The notes must not restate numeric ranges: the tool description owns bounds.
+This matters doubly because the yam plugin's default joint bounds are
+conservative ±π placeholders that do not match the XML ranges above (e.g.
+j1 XML [0, 3.65] vs declared [-π, π]) — restated numbers would contradict
+the tool text on a default rig. The XML ranges in the table exist to inform
+the *prose* (e.g. "j1 and j2 only move one way from zero"), never to be
+copied into the docs string.
 
 Caution for the author of the prose: with the arm folded (near zero), the
 *end-effector* motion produced by a joint can be counterintuitive (e.g. +j1
