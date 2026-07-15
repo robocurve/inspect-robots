@@ -105,8 +105,15 @@ Resolved knobs (user decisions, 2026-07-14):
   range 2.0, distance 1.5, 15 steps, limit 0.1) emits consecutive deltas of
   `0.1 + 1 ulp` and the backstop clamps spuriously at the default boundary.
   `hz` falls back to `_FALLBACK_HZ = 10.0` as today.
-- Interpolation is unchanged (`linspace` fractions from current observed
-  state).
+- Interpolation: `linspace` fractions from the current observed state as
+  today, with two float repairs. The final action is *snapped* to the exact
+  target (`current + (target - current) * 1.0` is not `target` in float
+  arithmetic — e.g. `-0.1 + 0.4 = 0.30000000000000004`), and every emitted
+  action is then clipped into the box: interpolants can overshoot a bound
+  by 1–2 ulp from fully in-box inputs, and `ClampApprover` would flag a
+  spurious approval event. Clipping is a per-dimension projection of a
+  monotone sequence, so it cannot enlarge consecutive step deltas — the
+  §3a headroom guarantee survives it.
 
 ### 3b. `move_by` (displacement modes: `eef_delta_pos`, `eef_delta_pose`, `joint_delta`)
 
@@ -147,8 +154,11 @@ like `1e308` overflows the division to `inf`, never raising) and the cap
 comparison runs *before* `ceil` — `math.ceil(inf)` raises `OverflowError`,
 which would escape as a trial-killing `PolicyError` for what is an
 LLM-correctable mistake, violating the module's errors-not-exceptions
-contract. (`move_joints` cannot reach this: targets are bounds-checked
-first, so its ratio is capped at `1 / step_frac`.) At the default speed a
+contract. The pre-ceil cap check applies to *both* tools: `move_joints`'
+ratio numerator is `|target - current|` with `current` from the
+*observation*, which is only checked for finiteness — a grossly-off finite
+reading can push the ratio past the cap or to `inf`, and must land in the
+structured over-cap error, not an exception. At the default speed a
 full-range `move_joints` needs 21 steps (2.1 s at 10 Hz — the §3a headroom
 bumps the exact 20-split), so in practice only large `move_by`
 totals hit this.
@@ -171,7 +181,10 @@ with actionable messages (same stance as `DeltaLimitApprover`):
   `_FALLBACK_HZ` for step computation). Core never validates `control_hz`,
   and `hz = 0` would make §3c's `max_steps = 0`, turning every call into an
   error — a nonsense configuration this check rejects with a clear message
-  instead.
+  instead. A positive-but-tiny declared rate (e.g. 0.1 Hz → `max_steps = 1`)
+  binds fine and makes most motions hit the §3c error; that is a truthful
+  reflection of an embodiment that genuinely cannot move far in 10 s, not a
+  configuration the plugin second-guesses.
 - The "no bounds; move conservatively" `bounds_text` fallback becomes dead
   in both modes (finite bounds are now required everywhere) and is removed
   outright.
@@ -242,7 +255,13 @@ cap" claim.
 
 - `move_joints` computes steps from distance and range (range 2.0, frac 0.5
   → speed 1.0/s; distance 1.5 at 10 Hz → 16 steps with the §3a headroom)
-  and reaches the exact target in the final action.
+  and reaches the *bit-exact* target in the final action (valid to assert
+  with `==` only because §3a snaps it; plain linspace arithmetic lands
+  1 ulp off).
+- Interpolation clipping regression: a move from in-box state to a target
+  exactly at a bound emits no action outside the box (checks every
+  interpolant, not just the final action — e.g. `current=-0.1, high=0.3`,
+  which overshoots by 1 ulp without the §3a clip).
 - The headroom guarantee itself: for the boundary case above, every
   consecutive per-step delta of the emitted chunk is `<=` the backstop's
   `0.05 * (high - low)` — the spurious-clamp regression test.
@@ -276,6 +295,15 @@ cap" claim.
   a full-range move needs 1001 steps, 100.1 s).
 - Huge finite `move_by` delta (`1e308`) returns the split-the-move error —
   never raises (the §3c inf-tolerant cap check).
+- `move_joints` with an absurd finite observed state (e.g. `1e308`) likewise
+  returns the over-cap error, never an exception (§3c applies to both
+  tools).
+- Default-chain integration: a plugin-emitted absolute-mode chunk run
+  through `ChainApprover(ClampApprover, DeltaLimitApprover)` with default
+  settings — including a target exactly at a bound and a second chunk
+  reusing the store — produces zero modified actions (the §2 promise,
+  exercised against the real approvers and the store-held reference; unit
+  level, since the CubePick e2e world is displacement-mode).
 - Schemas no longer advertise `duration_s`; a call carrying a stray
   `duration_s` key still succeeds (extra keys were and remain ignored).
 - `control_hz=None`: steps computed at the 10 Hz fallback, chunk emitted
