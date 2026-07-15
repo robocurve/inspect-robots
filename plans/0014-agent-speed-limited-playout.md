@@ -59,8 +59,11 @@ Resolved knobs (user decisions, 2026-07-14):
   motion is interpolated at a fixed safe speed and reports its step count.
 - Per-dimension *per-step* limit:
   `step_frac = min(max_speed_frac / hz, _BACKSTOP_STEP_FRAC)` with
-  `_BACKSTOP_STEP_FRAC = 0.05`, so the per-step change is
-  `step_frac * (high - low)`. The wall-clock speed is
+  `_BACKSTOP_STEP_FRAC = 0.05`, giving `step_frac * (high - low)` — then
+  elementwise-min'd with `0.05 * (high - low)` computed in the box's
+  *native dtype*: `DeltaLimitApprover` derives its default without
+  promoting, so a low-precision box (e.g. float16 bounds) rounds the
+  backstop *below* the float64 value and the plugin must not outrun it. The wall-clock speed is
   `max_speed_frac * range` per second whenever `hz >= max_speed_frac / 0.05`
   (i.e. ≥ 10 Hz at the default frac); on slower embodiments the per-step cap
   wins and the motion plays proportionally slower rather than provoking the
@@ -92,7 +95,9 @@ Resolved knobs (user decisions, 2026-07-14):
     with zero distance to the observed state likewise contribute nothing.
 - Non-finite observed state: if the proprioceptive reference vector contains
   a non-finite value, `execute` raises `ValueError` (the rollout wraps it as
-  `PolicyError` and the trial errors). A broken sensor is not an
+  `PolicyError` and the trial errors). This check runs *before* the
+  per-dimension target validation: a broken sensor must end the trial even
+  when the tool call happens to contain its own correctable mistake. A broken sensor is not an
   LLM-correctable condition, so it does not use the structured-error
   channel; without this guard the steps formula would poison `ceil`/`max`
   with NaN and crash uncontrolled.
@@ -185,6 +190,17 @@ with actionable messages (same stance as `DeltaLimitApprover`):
   binds fine and makes most motions hit the §3c error; that is a truthful
   reflection of an embodiment that genuinely cannot move far in 10 s, not a
   configuration the plugin second-guesses.
+- Derived-quantity guards, all `ToolsetError` at bind time: a declared
+  `control_hz` whose `10 * hz` playout cap overflows to `inf`; a
+  `max_speed_frac` whose `frac / hz` underflows to exactly zero (it would
+  misreport every dimension as fixed); a `high - low` range that overflows
+  to `inf` despite finite endpoints (e.g. `[-1e308, 1e308]`); and non-1-D
+  action-space shapes (the toolset's indexing and bounds text are
+  vector-only).
+- Tool-call values: a JSON number is coerced with `float()` before the
+  finiteness check — arbitrary-precision integers (`10**400`) overflow
+  `float()` and crash `np.isfinite` outright, and both must return the
+  standard "must be a finite number" structured error.
 - The "no bounds; move conservatively" `bounds_text` fallback becomes dead
   in both modes (finite bounds are now required everywhere) and is removed
   outright.

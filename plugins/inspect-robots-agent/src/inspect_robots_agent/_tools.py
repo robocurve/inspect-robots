@@ -65,6 +65,7 @@ class Toolset:
         bounds_text: str,
         low: npt.NDArray[np.float64],
         high: npt.NDArray[np.float64],
+        native_backstop: npt.NDArray[np.float64],
         max_speed_frac: float = 0.5,
     ):
         self._absolute = absolute
@@ -80,7 +81,10 @@ class Toolset:
         self._high = high
         if absolute:
             step_frac = min(max_speed_frac / self._resolved_hz, _BACKSTOP_STEP_FRAC)
-            self._step_limits = step_frac * (high - low)
+            # The elementwise min with the backstop derived in the box's native
+            # dtype: DeltaLimitApprover computes 0.05 * (high - low) without
+            # promoting, so low-precision boxes round it below our float64 value.
+            self._step_limits = np.minimum(step_frac * (high - low), native_backstop)
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
         else:
@@ -199,9 +203,17 @@ class Toolset:
                 return ToolResult(
                     error=f"unknown dimension {label!r}; valid names: {', '.join(self._labels)}"
                 )
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not np.isfinite(raw):
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
                 return ToolResult(error=f"value for {label!r} must be a finite number, got {raw!r}")
-            vector[index] = float(raw)
+            try:
+                # Arbitrary-precision JSON integers overflow float() (and crash
+                # np.isfinite outright); both must stay structured errors.
+                coerced = float(raw)
+            except OverflowError:
+                return ToolResult(error=f"value for {label!r} must be a finite number, got {raw!r}")
+            if not np.isfinite(coerced):
+                return ToolResult(error=f"value for {label!r} must be a finite number, got {raw!r}")
+            vector[index] = coerced
             named_indices.append(index)
 
         if self._absolute:
@@ -330,6 +342,18 @@ def build_toolset(
         raise ToolsetError("control_hz must be finite and > 0 when declared")
     if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
         raise ToolsetError("max_speed_frac must be finite and > 0")
+    resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
+    if not math.isfinite(_MAX_DURATION_S * resolved_hz):
+        raise ToolsetError(f"control_hz {control_hz!r} is too large to derive a playout cap")
+    if max_speed_frac / resolved_hz == 0.0:
+        raise ToolsetError(
+            f"max_speed_frac {max_speed_frac!r} underflows to a zero per-step "
+            f"limit at control_hz {resolved_hz!r}"
+        )
+    if len(action_space.shape) != 1:
+        raise ToolsetError(
+            f"only 1-D (vector) action spaces are supported, got shape {action_space.shape}"
+        )
 
     absolute = mode in _ABSOLUTE_MODES
     dim = action_space.dim
@@ -359,8 +383,13 @@ def build_toolset(
         raise ToolsetError(f"{mode_name} control needs finite low and high bounds")
     low64 = np.asarray(low, dtype=np.float64)
     high64 = np.asarray(high, dtype=np.float64)
+    if not bool(np.all(np.isfinite(high64 - low64))):
+        raise ToolsetError("action-space range (high - low) overflows; bounds are too large")
     if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
         raise ToolsetError("displacement control bounds must contain zero in every dimension")
+    # DeltaLimitApprover derives its default limit in the box's native dtype;
+    # reproduce that arithmetic exactly so our ceiling can never exceed it.
+    native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
 
     labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
     pairs = ", ".join(
@@ -377,5 +406,6 @@ def build_toolset(
         bounds_text=bounds_text,
         low=low64,
         high=high64,
+        native_backstop=native_backstop,
         max_speed_frac=max_speed_frac,
     )

@@ -202,6 +202,54 @@ def test_control_hz_none_binds() -> None:
     build_toolset(_delta_space(), ObservationSpace(), control_hz=None)
 
 
+def test_build_rejects_degenerate_derivations() -> None:
+    with pytest.raises(ToolsetError, match="too large to derive a playout cap"):
+        build_toolset(_delta_space(), ObservationSpace(), control_hz=1e308)
+
+    with pytest.raises(ToolsetError, match="underflows to a zero per-step limit"):
+        build_toolset(
+            _absolute_space(),
+            _absolute_obs_space(),
+            control_hz=10.0,
+            max_speed_frac=5e-324,
+        )
+
+    huge = _absolute_space(low=np.array([-1e308]), high=np.array([1e308]))
+    with pytest.raises(ToolsetError, match=r"range .* overflows"):
+        build_toolset(huge, _absolute_obs_space(), control_hz=10.0)
+
+    matrix = Box(
+        shape=(2, 2),
+        low=np.zeros((2, 2)),
+        high=np.ones((2, 2)),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    with pytest.raises(ToolsetError, match="only 1-D"):
+        build_toolset(matrix, _absolute_obs_space(dim=4), control_hz=10.0)
+
+
+def test_low_precision_bounds_never_outrun_native_backstop() -> None:
+    # DeltaLimitApprover derives 0.05 * (high - low) in the box's dtype;
+    # float16 rounds that to 0.0999755859375, below the float64 0.1. Every
+    # emitted step must respect the *native* value or the backstop clamps.
+    space = Box(
+        shape=(1,),
+        low=np.array([-1.0], dtype=np.float16),
+        high=np.array([1.0], dtype=np.float16),
+        semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
+    )
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+    result = toolset.execute(
+        _call("move_joints", targets={"joint": 0.9999}),
+        _obs({"q": np.array([0.0])}),
+    )
+    assert result.chunk is not None
+    chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
+    store: dict[str, Any] = {}
+    for action in result.chunk.actions:
+        assert chain.review(action, store) is action
+
+
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
 def test_build_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
     with pytest.raises(ToolsetError, match="max_speed_frac must be finite and > 0"):
@@ -240,6 +288,12 @@ def test_move_joints_derives_steps_and_snaps_bit_exact_target() -> None:
     assert len(result.chunk.actions) == 16
     assert result.chunk.actions[-1].data[0] == 1.0
     assert result.note == "executing move_joints over 16 steps (1.6s)"
+
+    # Pins the snap itself: 0.3 is interior (clip cannot repair it) and plain
+    # linspace arithmetic lands on 0.30000000000000004 instead.
+    snapped = _execute_absolute(0.3, current=-0.1)
+    assert snapped.chunk is not None
+    assert snapped.chunk.actions[-1].data[0] == 0.3
 
 
 def test_move_joints_clips_every_interpolant_into_box() -> None:
@@ -466,6 +520,19 @@ def test_huge_finite_move_by_returns_cap_error() -> None:
     result = toolset.execute(_call("move_by", deltas={"0": 1e308}), _obs({}))
     assert result.chunk is None
     assert result.error is not None and "split the move into smaller motions" in result.error
+
+
+def test_arbitrary_precision_json_integer_is_a_structured_error() -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    # 10**400 overflows float() and crashes np.isfinite; both int sizes must
+    # come back as errors the LLM can correct, never exceptions.
+    overflowing = toolset.execute(_call("move_by", deltas={"0": 10**400}), _obs({}))
+    assert overflowing.chunk is None
+    assert overflowing.error is not None and "must be a finite number" in overflowing.error
+
+    representable = toolset.execute(_call("move_by", deltas={"0": 10**100}), _obs({}))
+    assert representable.chunk is None
+    assert representable.error is not None and "split the move" in representable.error
 
 
 # --- done, notes, and structured errors ---------------------------------------
