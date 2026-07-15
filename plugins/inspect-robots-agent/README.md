@@ -25,9 +25,25 @@ Model strings are OpenRouter-style `provider/model`, resolved from
 `-P model=...` or `$INSPECT_ROBOTS_MODEL`. API keys come from the environment:
 
 1. `-P base_url=...` (with `-P api_key_env=NAME`): any OpenAI-compatible endpoint
-2. `anthropic/*` model with `ANTHROPIC_API_KEY`: the Anthropic compat endpoint
-3. `openai/*` model with `OPENAI_API_KEY`: OpenAI
-4. `OPENROUTER_API_KEY`: OpenRouter, any model string
+2. A known provider prefix with that provider's key set: the provider's own
+   endpoint, prefix stripped from the model id
+3. `OPENROUTER_API_KEY`: OpenRouter, any model string. Ids ending in a known
+   OpenRouter variant suffix (`:free`, `:nitro`, `:floor`, `:extended`,
+   `:online`, `:thinking`) always route here, since the variant means nothing
+   to a provider's own API; other colons (fine-tune ids like `openai/ft:...`)
+   still resolve directly.
+
+Providers resolved directly by prefix:
+
+| Prefix | Key | Endpoint |
+|---|---|---|
+| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat) |
+| `openai/*` | `OPENAI_API_KEY` | OpenAI |
+| `google/*` | `GEMINI_API_KEY` | Google Gemini (OpenAI-compat) |
+| `x-ai/*` or `xai/*` | `XAI_API_KEY` | xAI |
+| `groq/*` | `GROQ_API_KEY` | Groq (rest of the id passed through, slashes and all) |
+| `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
+| `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
 ## How it works
 
