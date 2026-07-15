@@ -886,6 +886,7 @@ def test_scalar_coerced_one_dof_bounds_are_accepted() -> None:
         ({"gripper_closed_at": "left"}, "gripper_closed_at"),
         ({"fresh_obs_timeout_s": 0.0}, "fresh_obs_timeout_s must be positive and finite"),
         ({"camera_throttle_ms": -1}, "camera_throttle_ms must be >= 0"),
+        ({"camera_throttle_ms": 50.5}, "camera_throttle_ms must be integer milliseconds"),
         ({"obs_timeout_s": 0.0}, "obs_timeout_s must be positive and finite"),
         ({"connect_timeout_s": math.inf}, "connect_timeout_s must be positive and finite"),
         ({"request_timeout_s": 0.0}, "request_timeout_s must be positive and finite"),
