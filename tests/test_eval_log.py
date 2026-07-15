@@ -53,6 +53,12 @@ def _golden_log() -> EvalLog:
                 instruction="reach the cube",
                 operator_judgements=("yes",),
                 termination_reasons=("success",),
+                policy_transcripts=(
+                    [
+                        {"role": "user", "content": "reach the cube"},
+                        {"role": "assistant", "content": "moving"},
+                    ],
+                ),
             ),
         ),
     )
@@ -84,6 +90,12 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].instruction == "reach the cube"
     assert restored.samples[0].operator_judgements == ("yes",)
     assert restored.samples[0].termination_reasons == ("success",)
+    assert restored.samples[0].policy_transcripts == (
+        [
+            {"role": "user", "content": "reach the cube"},
+            {"role": "assistant", "content": "moving"},
+        ],
+    )
     assert restored.eval.max_steps == 1200
 
 
@@ -95,6 +107,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
         del sample["instruction"]
         del sample["operator_judgements"]
         del sample["termination_reasons"]
+        del sample["policy_transcripts"]
     path = tmp_path / "old.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     restored = read_eval_log(str(path))
@@ -102,6 +115,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
     assert restored.samples[0].termination_reasons == ()
+    assert restored.samples[0].policy_transcripts == ()
     assert restored.eval.max_steps is None
 
 

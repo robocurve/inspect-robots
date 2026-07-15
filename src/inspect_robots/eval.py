@@ -18,7 +18,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from inspect_robots import __version__
 from inspect_robots.approver import Approver, AutoApprover
@@ -289,6 +289,7 @@ def _run_eval(
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
         termination_reasons: list[str | None] = []
+        policy_transcripts: list[Any] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -343,6 +344,7 @@ def _run_eval(
                     errored_trials += 1
                     judgements.append(None)
                     termination_reasons.append(record.termination_reason)
+                    policy_transcripts.append(record.policy_transcript)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -357,6 +359,7 @@ def _run_eval(
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
                     termination_reasons.append(record.termination_reason)
+                    policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
             if halted:
@@ -399,6 +402,7 @@ def _run_eval(
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
                 termination_reasons=tuple(termination_reasons),
+                policy_transcripts=tuple(policy_transcripts),
             )
         )
         if stopped:

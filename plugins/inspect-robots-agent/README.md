@@ -69,6 +69,8 @@ Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `max_llm_calls` (default `100`), `temperature`, `effort`, `max_speed_frac`.
 The speed fraction defaults to `0.1` and applies only to absolute modes.
 
+`LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
+
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the
 model either way, and frontier models at low effort remain strong at this

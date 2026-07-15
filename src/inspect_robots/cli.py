@@ -8,7 +8,8 @@ Subcommands:
   components from the registry. Pass constructor args with ``-T/-P/-E k=v``;
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
   written log's path is printed at the end.
-- ``inspect-robots inspect LOG.json`` — print a saved eval log.
+- ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
+  optionally append recorded policy conversations.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
@@ -23,6 +24,7 @@ single-word instructions use the explicit ``run --instruction`` form.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -204,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
     p_inspect.add_argument("log", help="path to an EvalLog JSON file")
+    p_inspect.add_argument(
+        "--transcript",
+        action="store_true",
+        help="append recorded policy transcripts",
+    )
 
     p_doctor = sub.add_parser(
         "doctor",
@@ -441,6 +448,82 @@ def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
     print(_styled(hint, _DIM))
 
 
+def _has_policy_transcripts(log: EvalLog) -> bool:
+    """Whether any recorded trial carries a policy audit record."""
+    return any(
+        transcript is not None for scene in log.samples for transcript in scene.policy_transcripts
+    )
+
+
+def _chat_content(content: object) -> str | None:
+    """Render text from an OpenAI-style content value, collapsing media parts."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            parts.append(str(part.get("text", "")))
+        else:
+            parts.append("[image]")
+    return "\n".join(parts)
+
+
+def _is_chat_transcript(transcript: object) -> bool:
+    """Recognize a list of role-bearing message dictionaries."""
+    return isinstance(transcript, list) and all(
+        isinstance(message, dict) and "role" in message for message in transcript
+    )
+
+
+def _render_chat_transcript(transcript: list[object]) -> None:
+    """Print roles, text, tool calls, and their indented results."""
+    for raw_message in transcript:
+        if not isinstance(raw_message, dict):
+            continue
+        role = str(raw_message["role"])
+        content = _chat_content(raw_message.get("content"))
+        if role == "tool":
+            suffix = "" if content is None else f" {content}"
+            print(f"        tool:{suffix}")
+            continue
+        suffix = "" if content is None else f" {content}"
+        print(f"    {role}:{suffix}")
+        tool_calls = raw_message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for raw_call in tool_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name", "unknown"))
+            arguments = function.get("arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments)
+            print(f"      -> {name}({arguments})")
+
+
+def _print_policy_transcripts(log: EvalLog) -> None:
+    """Append each available policy audit record in a tolerant human-readable form."""
+    if not _has_policy_transcripts(log):
+        print("no policy transcripts recorded")
+        return
+    print("policy transcripts:")
+    for scene in log.samples:
+        for trial, transcript in enumerate(scene.policy_transcripts):
+            if transcript is None:
+                continue
+            print(f"scene {scene.scene_id}, trial {trial}:")
+            if _is_chat_transcript(transcript):
+                _render_chat_transcript(transcript)
+                continue
+            for line in json.dumps(transcript, indent=2).splitlines():
+                print(f"    {line}")
+
+
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     """Print the compact post-run summary and failure diagnostics."""
     failed = log.status != "success"
@@ -467,6 +550,13 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
     print(_styled(f"hint: view it with: inspect-robots inspect {log_path}", _DIM))
+    if _has_policy_transcripts(log):
+        print(
+            _styled(
+                f"hint: agent conversation: inspect-robots inspect {log_path} --transcript",
+                _DIM,
+            )
+        )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -635,7 +725,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0 if log.status == "success" else 1
 
 
-def _cmd_inspect(path: str) -> int:
+def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
     from inspect_robots import read_eval_log
 
     log = read_eval_log(path)
@@ -663,6 +753,10 @@ def _cmd_inspect(path: str) -> int:
         print(f"  [{scene.status}] {scene.scene_id}: {'  '.join(details)}")
     if log.error:
         print(f"error: {log.error}")
+    if transcript:
+        _print_policy_transcripts(log)
+    elif _has_policy_transcripts(log):
+        print("policy transcripts: recorded (--transcript to print)")
     return 0 if log.status == "success" else 1
 
 
@@ -758,7 +852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "inspect":
-        return _cmd_inspect(args.log)
+        return _cmd_inspect(args.log, transcript=args.transcript)
     if args.command == "config":
         return _cmd_config(args)
     if args.command == "setup":

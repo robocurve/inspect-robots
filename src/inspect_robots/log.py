@@ -7,9 +7,10 @@ guarantee enforced by golden tests in a later step).
 
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
-dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
-``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``)
-remain plain mutable dicts. Treat a log as read-only; nothing deep-freezes it.
+dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts and
+``policy_transcripts``, ``EvalResults.metrics``, ``EvalSpec.policy_config`` /
+``embodiment_info``) remain plain mutable dicts. Treat a log as read-only;
+nothing deep-freezes it.
 """
 
 from __future__ import annotations
@@ -69,6 +70,9 @@ class SceneResult:
     # Strictly parallel to ``epochs``: why each recorded trial ended, or
     # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
     termination_reasons: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: the policy's audit record per trial,
+    # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
+    policy_transcripts: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,7 @@ class EvalLog:
             sample["epochs"] = tuple(sample.get("epochs", ()))
             sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
+            sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],

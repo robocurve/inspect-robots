@@ -407,6 +407,126 @@ def _step_limit_log(
     )
 
 
+def _transcript_log(*, status: str = "success") -> EvalLog:
+    chat = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look at the workspace"},
+                {"type": "image_url", "image_url": {"url": "omitted"}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_move",
+                    "type": "function",
+                    "function": {"name": "move_by", "arguments": '{"dx": 0.1}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_move", "content": "moved 2 steps"},
+    ]
+    return EvalLog(
+        version=1,
+        status=status,
+        eval=EvalSpec(
+            task="agent-task",
+            policy="agent",
+            embodiment="e",
+            created="x",
+            inspect_robots_version="0",
+        ),
+        results=EvalResults(total_scenes=1, total_trials=3, metrics={}),
+        stats=EvalStats(started_at="a", completed_at="b", duration_s=0.0, total_steps=1),
+        samples=(
+            SceneResult(
+                scene_id="s0",
+                status=status,
+                epochs=({}, {}, {}),
+                policy_transcripts=(chat, None, {"custom": [1, 2]}),
+            ),
+        ),
+        error="trial failed" if status == "error" else None,
+    )
+
+
+def test_inspect_transcript_renders_chat_and_unknown_shapes_after_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "transcripts.json"
+    path.write_text(json.dumps(_transcript_log().to_dict()), encoding="utf-8")
+
+    assert main(["inspect", str(path), "--transcript"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.index("policy transcripts:") > out.index("[success] s0")
+    assert "scene s0, trial 0:" in out
+    assert "user: look at the workspace\n[image]" in out
+    assert '-> move_by({"dx": 0.1})' in out
+    assert "moved 2 steps" in out
+    assert '  "custom": [' in out
+
+
+def test_inspect_transcript_keeps_error_status_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "error.json"
+    path.write_text(json.dumps(_transcript_log(status="error").to_dict()), encoding="utf-8")
+    assert main(["inspect", str(path), "--transcript"]) == 1
+    assert "policy transcripts:" in capsys.readouterr().out
+
+
+def test_inspect_transcript_reports_when_none_recorded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "none.json"
+    path.write_text(json.dumps(_step_limit_log(reasons=("success",)).to_dict()), encoding="utf-8")
+    assert main(["inspect", str(path), "--transcript"]) == 0
+    assert "no policy transcripts recorded" in capsys.readouterr().out
+
+
+def test_plain_inspect_mentions_recorded_policy_transcripts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "transcripts.json"
+    path.write_text(json.dumps(_transcript_log().to_dict()), encoding="utf-8")
+    assert main(["inspect", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "policy transcripts: recorded (--transcript to print)" in out
+    assert "scene s0, trial 0:" not in out
+
+
+def test_run_summary_adds_agent_conversation_hint_when_recorded(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._print_run_summary(_transcript_log(), "run.json", is_adhoc=False)
+    out = capsys.readouterr().out
+    assert "hint: view it with: inspect-robots inspect run.json" in out
+    assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
+
+
+def test_chat_renderer_tolerates_malformed_tool_call_entries(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli._render_chat_transcript(
+        [
+            "not a message",
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    "not a call",
+                    {"function": "not a function"},
+                    {"function": {"name": "move", "arguments": {"dx": 1}}},
+                ],
+            },
+        ]
+    )
+    assert '-> move({"dx": 1})' in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("control_hz", "parenthetical"),
     [
