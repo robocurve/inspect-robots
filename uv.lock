@@ -519,7 +519,7 @@ provides-extras = ["all", "dev", "docs", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-agent"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "plugins/inspect-robots-agent" }
 dependencies = [
     { name = "httpx" },
