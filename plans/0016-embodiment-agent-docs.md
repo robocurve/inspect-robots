@@ -15,9 +15,10 @@ a 100-call budget.
 
 Root cause (verified against source): there is no free-text field anywhere in
 the embodiment → policy chain. `EmbodimentInfo` carries `name`, spaces,
-`control_hz`, `is_simulated`, capability flags, and nothing else;
-`ActionSemantics` carries `dim_labels` only; `StateField` carries a short
-`unit` string. The agent plugin's `bind()` consumes `action_space`,
+`control_hz`, `is_simulated`, capability/setup metadata (`capabilities`,
+`supported_setups`, `supported_target_kinds`) — none of it free text;
+`dim_labels` is `ActionSemantics`' only textual member; `StateField` carries
+a short `unit` string. The agent plugin's `bind()` consumes `action_space`,
 `observation_space`, `control_hz`, `name` — there is nothing else to consume.
 
 A second, smaller gap: the per-step observation text renders the proprio
@@ -94,14 +95,15 @@ Ripple effects inside core:
   `bind()`): `reset()` must keep working on an unbound policy.
 - `reset()` appends a section to the system prompt when docs are non-empty
   after `str.strip()`. Order of operations is normative: run
-  `_SYSTEM_TEMPLATE.format(...)` **first**, then concatenate the docs text
-  verbatim (`formatted + "\n\nEmbodiment notes:\n" + docs`). Embodiment
+  `_SYSTEM_TEMPLATE.format(...)` **first**, then concatenate the
+  **stripped** docs text with no further transformation
+  (`formatted + "\n\nEmbodiment notes:\n" + docs.strip()`). Embodiment
   markdown may legally contain `{`/`}` (JSON snippets, code examples);
   passing it through `str.format` would let third-party content crash every
   trial at reset.
 
-  No truncation, no reformatting. Whitespace-only docs are treated as absent
-  (no dangling header).
+  No truncation, no reformatting beyond the outer strip. Whitespace-only
+  docs are treated as absent (no dangling header).
 - Tool descriptions are unchanged: bounds and labels already live there, and
   duplicating prose into every tool schema wastes tokens on every call.
 
@@ -120,10 +122,18 @@ absolute modes, which would silently skip YAM `joint_delta` runs):
 
 1. If the toolset's existing `state_key` is set (absolute modes), label that
    field.
-2. Otherwise (displacement modes), label the state field whose shape equals
-   `(action_dim,)` **iff exactly one field matches**; ambiguity (e.g.
-   CubePick's two 2-D fields `eef_pos`/`cube_pos` against a 2-D action)
-   means no labeling — a mislabeled line is worse than an unlabeled one.
+2. Otherwise (displacement modes): if the observation space declares no
+   `StateSpec` at all (e.g. CubePick, which lists `state_keys` but no
+   spec'd fields), **no labeling**. If a spec exists, the candidates are
+   the declared fields whose shape equals `(action_dim,)` **and** whose key
+   appears in the canonical state vocabulary (`CANONICAL_STATE_UNITS` in
+   `spaces.py` — proprio keys, which is what action labels can honestly
+   describe; an object-pose field that happens to match the shape must not
+   get joint labels painted on it). Label iff exactly one candidate
+   remains; ambiguity means no labeling — a mislabeled line is worse than
+   an unlabeled one. Residual hazard accepted: a canonical-keyed,
+   shape-matching field could still in principle be mislabeled, but every
+   in-tree and yam case is correct under this rule.
 3. Labeling additionally requires real `dim_labels` on the action semantics.
    When `build_toolset` synthesized fallback labels (`"0"`, `"1"`, …),
    render the old unlabeled list — `0=0.01 1=-0.02` is pure noise.
@@ -131,11 +141,18 @@ absolute modes, which would silently skip YAM `joint_delta` runs):
    fall back to the unlabeled rendering (sanity check, never crash).
 
 Plumbing — normative, because `_observation_content` is a module-level
-function with no toolset access: `Toolset` gains one public method,
-`state_labels() -> tuple[str, tuple[str, ...]] | None`, returning
-`(state_key_to_label, labels)` per rules 1–3 or `None`. The policy calls it
-once after bind and passes the result into `_observation_content` as an
-optional parameter (default `None` keeps the current rendering).
+function with no toolset access and today's `Toolset` constructor receives
+neither the observation space nor the synthesized-labels fact: the rule 1–3
+decision is computed **inside `build_toolset`** (which has all three
+inputs: the semantics' real-or-absent `dim_labels`, the observation space,
+and the mode) and passed to the `Toolset` constructor as a precomputed
+`tuple[str, tuple[str, ...]] | None`; a public `Toolset.state_labels()`
+simply returns it. Do **not** detect synthesized labels by comparing the
+resolved labels against `("0", "1", …)` — an embodiment may legitimately
+name its dims that way; use the presence of `semantics.dim_labels` at the
+point of synthesis. The policy calls `state_labels()` once and passes the
+result into `_observation_content` as an optional parameter (default `None`
+keeps the current rendering).
 
 All other state fields keep the existing unlabeled rendering. Rounding stays
 as-is. This is a pure prompt-format change; update the plugin tests that
@@ -146,10 +163,12 @@ assert on observation text.
 `inspect_robots_yam` sets `EmbodimentInfo.docs` according to
 `control_interface`:
 
-- `joints` mode: the joint cheat-sheet in Appendix A, with labels rewritten
-  to the plugin's `{side}_j{i}` naming. Both arms are identical hardware with
-  identical sign conventions, so the notes are written once and prefixed
-  "each arm".
+- `joints` mode: the joint cheat-sheet in Appendix A. Both arms are
+  identical hardware with identical sign conventions, so the joint
+  descriptions are written once, but each bullet names both side labels
+  explicitly so the model can copy them into tool calls verbatim:
+  `- left_j0 / right_j0: base yaw, positive swings the arm …`. Every one of
+  the 14 action labels appears exactly once in the bullet list this way.
 - `eef_pos` mode: frame identity (+X forward out of the arm base, +Y left,
   +Z up, per-arm base frame), yaw-relative-to-start restated briefly, arm
   geometry (link lengths, reach), and gripper polarity. **No numeric
@@ -163,9 +182,11 @@ assert on observation text.
   table) appended after the built-in text with a blank line. The built-in
   text must stay rig-agnostic because mounting varies.
 
-Implementation must verify against `packing.py`/`config.py` (yam repo), not
-this plan, for: label order, gripper normalization direction, and eef dim
-labels. Appendix A values were verified numerically against the combined
+Implementation must verify against the yam repo code, not this plan, for:
+label order and eef dim labels (`packing.py`/`config.py`) and the gripper
+wire convention (`embodiment.py` `_denorm_grippers`/`_norm_grippers` —
+command 1 → open; that function is the single source of truth for
+polarity). Appendix A values were verified numerically against the combined
 i2rt MuJoCo model (FK sign probes) on 2026-07-15 and are normative for the
 *content*; the label mapping is normative from the code.
 
@@ -175,8 +196,8 @@ i2rt MuJoCo model (FK sign probes) on 2026-07-15 and are normative for the
 You are controlling a real robot embodiment named 'yam_arms' … budget of 100 LLM calls …
 
 Embodiment notes:
-Two identical 6-DoF arms ("left_", "right_") with parallel-jaw grippers …
-- j0: base yaw, positive swings the arm counterclockwise seen from above …
+Two identical 6-DoF arms with parallel-jaw grippers …
+- left_j0 / right_j0: base yaw, positive swings the arm counterclockwise seen from above …
 …
 ```
 
@@ -198,10 +219,14 @@ Agent plugin:
 - getattr fallback: bind against a stub info object lacking a `docs`
   attribute does not raise (test will need a `cast`, since `bind()` is
   typed against `EmbodimentInfo`).
-- `state_labels()`: absolute mode returns the proprio field labels;
-  displacement mode with a unique shape match returns it; ambiguous shapes
-  (CubePick-style) return None; synthesized fallback labels return None;
-  runtime length mismatch falls back to unlabeled rendering.
+- `state_labels()`, one test per branch: absolute mode returns the proprio
+  field labels; displacement mode with a unique canonical-keyed shape match
+  returns it; **no StateSpec at all** returns None (use real
+  `CubePickEmbodiment().info` — CubePick declares `state_keys` but no
+  spec); **two canonical shape-matching fields** returns None (needs a
+  synthetic spec — no in-tree embodiment has this); non-canonical key
+  excluded from candidacy (synthetic); synthesized fallback labels return
+  None; runtime length mismatch falls back to unlabeled rendering.
 - labeled proprio line: exact-format test for label=value rendering.
 
 YAM plugin (companion PR):
@@ -211,8 +236,11 @@ YAM plugin (companion PR):
   literal matching the wire convention hardcoded in the yam
   `embodiment.py` gripper normalization (cmd 1 → open). The convention is
   structural there, not a derivable constant — a literal is the honest test.
-- eef-mode docs mention every eef label; assert **no** numeric workspace
-  bounds appear (guards the no-restated-bounds rule).
+- eef-mode docs mention every eef label; the no-restated-bounds rule is
+  guarded concretely: assert that none of the formatted default
+  `eef_low`/`eef_high` component values from `config.py` appear as
+  substrings of the docs (the docs legitimately contain other numbers —
+  link lengths, reach — so "no numbers" is not the test).
 - `docs_extra` appended verbatim (including braces); empty default adds
   nothing.
 
