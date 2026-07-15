@@ -24,10 +24,11 @@ observation.
 Drop `duration_s` from both motion tools. The toolset computes the playout
 time from a speed cap, so the full requested displacement is emitted;
 large motions simply play out over more steps. Guardrails below the plugin
-are unchanged (the plugin still contains no safety-critical code path); at the
-default speed every emitted per-step change stays strictly within the core
-backstop's 5%-of-range default, so at default settings the backstop does not
-clamp what the plugin emits.
+are unchanged (the plugin still contains no safety-critical code path); the
+§3a per-step ceiling keeps every emitted per-step change strictly within the
+core backstop's 5%-of-range default — at any `max_speed_frac` and any
+declared control rate — so the default backstop never clamps what the plugin
+emits.
 
 Honest scoping of that guarantee: `DeltaLimitApprover` measures against the
 last *approved command* held in the trial store, while `move_joints`
@@ -43,8 +44,9 @@ Resolved knobs (user decisions, 2026-07-14):
 - `duration_s` is removed, not made optional.
 - Default speed: `max_speed_frac = 0.5` — half the joint's range per second
   for absolute modes, which matches the core backstop's implied speed (5% of
-  range per step at 10 Hz). `max_speed_frac` applies to absolute modes only;
-  see §3b for why `move_by` has no frac.
+  range per step at 10 Hz); on slower embodiments the §3a per-step ceiling
+  wins and the motion is proportionally slower. `max_speed_frac` applies to
+  absolute modes only; see §3b for why `move_by` has no frac.
 
 ## 3. Toolset changes (`_tools.py`)
 
@@ -52,20 +54,46 @@ Resolved knobs (user decisions, 2026-07-14):
 
 - Schema: `targets` only; `required: ["targets"]`. Description explains the
   motion is interpolated at a fixed safe speed and reports its step count.
-- Per-dimension speed: `speed = max_speed_frac * (high - low)` per second
-  (float64 vector). Zero-width dimensions (`high == low`, common padding in
-  VLA action spaces) have `speed == 0` and are legal at bind time.
-- Per call, for each *named* dimension: if `speed_i == 0` and
-  `target_i != low_i`, return a structured error
-  (`"dimension {label} is fixed at {value}"`). The comparison is against the
-  *bound*, not the observed state — on hardware the observation carries
-  noise, and re-sending the documented fixed value must always succeed.
-  Zero-width dimensions contribute nothing to the step count; dimensions
-  with zero distance to the observed state likewise contribute nothing.
-- Steps: `steps = max(1, ceil(max_i(|target_i - current_i| / speed_i) * hz
-  / (1 - 1e-6)))`, the max taken over named dimensions with positive
-  distance and positive speed; an empty max (all named targets equal the
-  current state) yields `steps = 1`. The `1e-6` relative headroom exists
+- Per-dimension *per-step* limit:
+  `step_frac = min(max_speed_frac / hz, _BACKSTOP_STEP_FRAC)` with
+  `_BACKSTOP_STEP_FRAC = 0.05`, so the per-step change is
+  `step_frac * (high - low)`. The wall-clock speed is
+  `max_speed_frac * range` per second whenever `hz >= max_speed_frac / 0.05`
+  (i.e. ≥ 10 Hz at the default frac); on slower embodiments the per-step cap
+  wins and the motion plays proportionally slower rather than provoking the
+  backstop. `_BACKSTOP_STEP_FRAC` deliberately mirrors
+  `DeltaLimitApprover`'s derived default (5% of range per step) — that is
+  the constant being matched, and the guarantee in §2 is per-step, because
+  the backstop is per-step. Zero-width dimensions (`high == low`, common
+  padding in VLA action spaces) have a zero limit and are legal at bind
+  time.
+- Per call, for each *named* dimension, validated in this order:
+  - `target_i` outside `[low_i, high_i]` returns a structured error
+    (`"target for {label} is outside [{low}, {high}]"`). Letting it through
+    would recreate §1's silent divergence: the sizing satisfies the delta
+    limiter while `ClampApprover` pins every step at the bound and the note
+    claims the full motion executed. Bounds are guaranteed finite by §3d,
+    so the check is always meaningful.
+  - Zero-width dimensions (`limit == 0`): `target_i != low_i` returns
+    `"dimension {label} is fixed at {value}"`. The comparison is against
+    the *bound*, not the observed state — on hardware the observation
+    carries noise, and re-sending the documented fixed value must always
+    succeed. `{value}` is rendered with `repr()` (JSON round-trip exact),
+    because the schema's `bounds_text` renders at 4 significant figures
+    (`.4g`) and may not match on the first attempt; the error then teaches
+    the exact value.
+  - Zero-width dimensions contribute nothing to the step count; dimensions
+    with zero distance to the observed state likewise contribute nothing.
+- Non-finite observed state: if the proprioceptive reference vector contains
+  a non-finite value, `execute` raises `ValueError` (the rollout wraps it as
+  `PolicyError` and the trial errors). A broken sensor is not an
+  LLM-correctable condition, so it does not use the structured-error
+  channel; without this guard the steps formula would poison `ceil`/`max`
+  with NaN and crash uncontrolled.
+- Steps: `steps = max(1, ceil(max_i(|target_i - current_i| /
+  (step_frac * range_i)) / (1 - 1e-6)))`, the max taken over named
+  dimensions with positive distance and positive range; an empty max (all
+  named targets equal the current state) yields `steps = 1`. The `1e-6` relative headroom exists
   because `linspace` interpolation accumulates ~1 ulp of float error per
   step: without it, a step count that divides the distance exactly (e.g.
   range 2.0, distance 1.5, 15 steps, limit 0.1) emits consecutive deltas of
@@ -106,8 +134,8 @@ Resolved knobs (user decisions, 2026-07-14):
 (with `hz` the same fallback-resolved rate used for step computation). A
 computed `steps > max_steps` returns a structured `ToolResult(error=...)`
 telling the LLM the request exceeds the playout cap and to split the move
-into smaller motions — advice that always works, because a smaller distance
-or delta strictly reduces the computed steps. At the default speed a
+into smaller motions — advice that always works, because the computed steps
+shrink toward 1 as the motion shrinks. At the default speed a
 full-range `move_joints` needs 2 s, so in practice only large `move_by`
 totals hit this.
 
@@ -159,8 +187,11 @@ the LLM.
 Truncation caveats, documented in the README rather than prevented (the
 plugin cannot know the CLI's `--max-action-delta`):
 
-- Absolute modes: `max_speed_frac / hz > 0.05` (e.g. frac above 0.5 at
-  10 Hz) means the default backstop clamps again and motions truncate.
+- Absolute modes: the §3a per-step ceiling means no `max_speed_frac` value
+  can provoke the *default* backstop (frac above `0.05 * hz` is simply
+  capped — the knob slows motion, never outruns the guardrail). The
+  remaining truncation risk is an explicit `--max-action-delta` tighter
+  than 5% of range.
 - Displacement modes: an explicit `--max-action-delta` tighter than the box
   reintroduces truncation for `move_by` (the delta limiter intersects the
   box with `±max_delta`).
@@ -199,9 +230,18 @@ cap" claim.
   `0.05 * (high - low)` — the spurious-clamp regression test.
 - Small move → `steps == 1` floor; all named targets equal to current →
   `steps == 1`.
+- Out-of-bounds target returns the "outside [low, high]" error; a target
+  exactly at a bound succeeds.
 - Zero-width dimension: targeting the bound value succeeds and contributes
   no steps *even when the observed state differs from the bound* (sensor
-  noise); targeting any other value returns the "fixed at" error.
+  noise); targeting any other value returns the "fixed at" error, and the
+  error's value renders `repr()`-exact for a non-`.4g`-clean bound (e.g.
+  `0.30000000000000004`).
+- Per-step ceiling: declared `control_hz=5` at default frac emits 5%-of-range
+  steps (not 10%); `max_speed_frac=1.0` at 10 Hz likewise stays at 5%/step
+  (the knob cannot outrun the default backstop).
+- Non-finite observed state (NaN in the proprioceptive reference) raises
+  `ValueError` from `execute` rather than returning a structured error.
 - `move_by` splits by box side: `high = 0.05`, delta `+0.2` → 5 steps of
   0.04 (the §3b headroom pushes the float-exact 4-step split to 5);
   asymmetric `low = -0.1` with delta `-0.2` → 3 steps.
@@ -213,7 +253,9 @@ cap" claim.
   direction" error.
 - `move_by` ignores `max_speed_frac` (same split at frac 0.5 and 0.1).
 - Over-cap request errors with the split-the-move message; boundary exactly
-  at `max_steps` succeeds.
+  at `max_steps` succeeds. Covered for both tools: `move_by` with a large
+  total, and `move_joints` with a tiny frac (e.g. `max_speed_frac=0.01` →
+  a full-range move needs 100 s).
 - Schemas no longer advertise `duration_s`; a call carrying a stray
   `duration_s` key still succeeds (extra keys were and remain ignored).
 - `control_hz=None`: steps computed at the 10 Hz fallback, chunk emitted
@@ -231,7 +273,10 @@ cap" claim.
 - Speed derivation honors non-default frac (absolute modes).
 
 `tests/test_policy_e2e.py`: existing flows updated (tool calls no longer
-send `duration_s`); config snapshot includes `max_speed_frac`. One test is
+send `duration_s`); config snapshot includes `max_speed_frac`; one e2e run
+uses a non-default frac and asserts the resulting step count, pinning that
+`bind()` actually forwards the knob to `build_toolset` (the toolset-level
+frac tests cannot catch a forgotten forward). One test is
 redesigned, not updated: `test_wild_swing_is_clamped_by_guardrails_but_not_without`
 provokes a clamp by sending `move_by` `dx=5.0`, but under the new surface
 the toolset splits that into in-box steps — no default guardrail can bite,
