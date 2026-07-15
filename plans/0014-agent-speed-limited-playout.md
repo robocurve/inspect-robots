@@ -95,9 +95,10 @@ Resolved knobs (user decisions, 2026-07-14):
     with zero distance to the observed state likewise contribute nothing.
 - Non-finite observed state: if the proprioceptive reference vector contains
   a non-finite value, `execute` raises `ValueError` (the rollout wraps it as
-  `PolicyError` and the trial errors). This check runs *before* the
-  per-dimension target validation: a broken sensor must end the trial even
-  when the tool call happens to contain its own correctable mistake. A broken sensor is not an
+  `PolicyError` and the trial errors). This check runs before *any* tool
+  argument validation (labels, value types, per-dimension checks): a broken
+  sensor must end the trial even when the tool call happens to contain its
+  own correctable mistake. A broken sensor is not an
   LLM-correctable condition, so it does not use the structured-error
   channel; without this guard the steps formula would poison `ceil`/`max`
   with NaN and crash uncontrolled.
@@ -192,8 +193,9 @@ with actionable messages (same stance as `DeltaLimitApprover`):
   configuration the plugin second-guesses.
 - Derived-quantity guards, all `ToolsetError` at bind time: a declared
   `control_hz` whose `10 * hz` playout cap overflows to `inf`; a
-  `max_speed_frac` whose `frac / hz` underflows to exactly zero (it would
-  misreport every dimension as fixed); a `high - low` range that overflows
+  `max_speed_frac` whose `frac / hz` underflows to exactly zero, or whose
+  product with any movable dimension's range underflows the derived
+  per-step limit to zero (either would misreport dimensions as fixed); a `high - low` range that overflows
   to `inf` despite finite endpoints — checked in *both* float64 and the
   box's native dtype, since `DeltaLimitApprover` subtracts without
   promoting (float32 `[-3e38, 3e38]` overflows only natively); non-1-D

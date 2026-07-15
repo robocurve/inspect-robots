@@ -65,8 +65,7 @@ class Toolset:
         bounds_text: str,
         low: npt.NDArray[np.float64],
         high: npt.NDArray[np.float64],
-        native_backstop: npt.NDArray[np.float64],
-        max_speed_frac: float = 0.5,
+        step_limits: npt.NDArray[np.float64],
     ):
         self._absolute = absolute
         self._labels = labels
@@ -79,16 +78,11 @@ class Toolset:
         self._bounds_text = bounds_text
         self._low = low
         self._high = high
+        self._step_limits = step_limits
         if absolute:
-            step_frac = min(max_speed_frac / self._resolved_hz, _BACKSTOP_STEP_FRAC)
-            # The elementwise min with the backstop derived in the box's native
-            # dtype: DeltaLimitApprover computes 0.05 * (high - low) without
-            # promoting, so low-precision boxes round it below our float64 value.
-            self._step_limits = np.minimum(step_frac * (high - low), native_backstop)
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
         else:
-            self._step_limits = np.zeros_like(high)
             self._positive_limits = high
             self._negative_limits = np.abs(low)
 
@@ -190,6 +184,15 @@ class Toolset:
         )
 
     def _move(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        current: npt.NDArray[np.float64] | None = None
+        if self._absolute:
+            # A broken sensor must end the trial before any argument
+            # validation: a malformed tool call must not mask it behind a
+            # correctable structured error.
+            current = self._current_state(observation)
+            if not bool(np.all(np.isfinite(current))):
+                raise ValueError("proprioceptive reference contains a non-finite value")
+
         values_key = "targets" if self._absolute else "deltas"
         values = arguments.get(values_key)
         if not isinstance(values, dict) or not values:
@@ -217,7 +220,8 @@ class Toolset:
             named_indices.append(index)
 
         if self._absolute:
-            return self._move_absolute(values, vector, named_indices, observation)
+            assert current is not None
+            return self._move_absolute(values, vector, named_indices, current)
         return self._move_displacement(vector, named_indices)
 
     def _move_absolute(
@@ -225,12 +229,8 @@ class Toolset:
         values: dict[Any, Any],
         vector: npt.NDArray[np.float64],
         named_indices: list[int],
-        observation: Observation,
+        current: npt.NDArray[np.float64],
     ) -> ToolResult:
-        current = self._current_state(observation)
-        if not bool(np.all(np.isfinite(current))):
-            raise ValueError("proprioceptive reference contains a non-finite value")
-
         target = current.copy()
         for label, index in zip(values, named_indices, strict=True):
             value = vector[index]
@@ -405,6 +405,7 @@ def build_toolset(
     # DeltaLimitApprover derives its default limit in the box's native dtype;
     # reproduce that arithmetic exactly so our ceiling can never exceed it.
     native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
+    step_limits = np.zeros_like(high64)
     if absolute:
         # Interpolants snap to the float grid at the bounds' magnitude. If that
         # grid is coarse relative to the backstop (offset boxes like
@@ -417,6 +418,17 @@ def build_toolset(
             raise ToolsetError(
                 "bounds are too coarse at this magnitude for speed-limited "
                 "interpolation (float spacing exceeds the per-step budget)"
+            )
+        resolved = control_hz if control_hz is not None else _FALLBACK_HZ
+        step_frac = min(max_speed_frac / resolved, _BACKSTOP_STEP_FRAC)
+        step_limits = np.minimum(step_frac * (high64 - low64), native_backstop)
+        # The frac/hz quotient can be nonzero yet still underflow to a zero
+        # limit once multiplied by a small range; a movable dimension with a
+        # zero limit would be misreported as fixed.
+        if bool(np.any(movable & (step_limits == 0))):
+            raise ToolsetError(
+                f"max_speed_frac {max_speed_frac!r} underflows the derived "
+                "per-step limit for a movable dimension; increase it"
             )
 
     labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
@@ -434,6 +446,5 @@ def build_toolset(
         bounds_text=bounds_text,
         low=low64,
         high=high64,
-        native_backstop=native_backstop,
-        max_speed_frac=max_speed_frac,
+        step_limits=step_limits,
     )

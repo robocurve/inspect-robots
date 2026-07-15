@@ -234,6 +234,16 @@ def test_build_rejects_degenerate_derivations() -> None:
     with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
         build_toolset(subnormal_range, _absolute_obs_space(), control_hz=10.0)
 
+    # frac/hz is nonzero but multiplying by a small range underflows the
+    # derived limit to zero; the dimension must not be misreported as fixed.
+    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
+        build_toolset(
+            _absolute_space(low=np.array([0.0]), high=np.array([0.1])),
+            _absolute_obs_space(),
+            control_hz=1.0,
+            max_speed_frac=5e-324,
+        )
+
     matrix = Box(
         shape=(2, 2),
         low=np.zeros((2, 2)),
@@ -418,6 +428,17 @@ def test_move_joints_honors_non_default_speed_fraction() -> None:
 def test_move_joints_rejects_non_finite_observed_state(bad_state: float) -> None:
     with pytest.raises(ValueError, match="non-finite"):
         _execute_absolute(0.5, current=bad_state)
+
+
+def test_broken_sensor_raises_even_with_malformed_arguments() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    # A malformed tool call must not mask a broken sensor behind a
+    # correctable structured error.
+    with pytest.raises(ValueError, match="non-finite"):
+        toolset.execute(
+            _call("move_joints", targets={"unknown_dim": 0.1}),
+            _obs({"q": np.array([float("nan")])}),
+        )
 
 
 def test_move_joints_absurd_finite_state_returns_cap_error() -> None:
