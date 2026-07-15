@@ -112,6 +112,58 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert out.count("hint:") == 1
 
 
+@pytest.mark.parametrize(
+    ("path_state", "expected"),
+    [
+        ("existing", "partial log written"),
+        ("none", "no log written"),
+        ("missing", "no log written"),
+    ],
+)
+def test_cli_cancelled_run_reports_partial_log_state(
+    path_state: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    import inspect_robots.logging
+
+    path = tmp_path / f"{path_state}.json"
+    if path_state == "existing":
+        path.write_text("{}", encoding="utf-8")
+
+    class _CancelSink:
+        def __init__(self, log_dir: str) -> None:
+            del log_dir
+            self.path: Path | None = None if path_state == "none" else path
+
+    def interrupted_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(inspect_robots.logging, "JsonLogSink", _CancelSink)
+    monkeypatch.setattr(inspect_robots, "eval", interrupted_eval)
+
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 130
+    assert f"cancelled: {expected}" in capsys.readouterr().out
+
+
 def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -507,6 +559,20 @@ def test_run_summary_adds_agent_conversation_hint_when_recorded(
     out = capsys.readouterr().out
     assert "hint: view it with: inspect-robots inspect run.json" in out
     assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
+
+
+def test_run_summary_shows_cancelled_scene_detail(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _transcript_log(status="cancelled")
+    cancelled_scene = dataclasses.replace(
+        log.samples[0], status="cancelled", error="cancelled by user"
+    )
+    log = dataclasses.replace(log, samples=(cancelled_scene,))
+
+    cli._print_run_summary(log, "run.json", is_adhoc=False)
+
+    assert "[cancelled] s0: cancelled by user" in capsys.readouterr().out
 
 
 def test_transcript_rendering_degrades_lone_surrogates_instead_of_crashing(

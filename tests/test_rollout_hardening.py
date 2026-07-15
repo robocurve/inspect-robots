@@ -11,7 +11,7 @@ import pytest
 from inspect_robots import eval
 from inspect_robots.approver import Approver, AutoApprover, ClampApprover
 from inspect_robots.controller import DefaultController
-from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort, _CancelledTrial
 from inspect_robots.frames import FrameStore
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -78,6 +78,36 @@ def test_policy_exception_wrapped_as_policy_error() -> None:
 def test_embodiment_exception_wrapped_as_fault() -> None:
     with pytest.raises(EmbodimentFault, match="motor stalled"):
         _run(ScriptedPolicy(), _FaultyEmbodiment())
+
+
+def test_keyboard_interrupt_from_step_carries_partial_record_and_transcript() -> None:
+    original = KeyboardInterrupt("stop now")
+
+    class _InterruptingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def step(self, action: Action):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 2:
+                raise original
+            return super().step(action)
+
+    class _AuditedPolicy(ScriptedPolicy):
+        def transcript(self) -> object:
+            return {"inferences": self.num_inferences}
+
+    with pytest.raises(_CancelledTrial) as excinfo:
+        _run(_AuditedPolicy(chunk_size=1), _InterruptingEmbodiment())
+
+    record = excinfo.value.record
+    assert record.status == "cancelled"
+    assert len(record.steps) == 1
+    assert record.policy_transcript == {"inferences": 2}
+    assert record.events[-1].kind == "error"
+    assert record.events[-1].t == 1
+    assert excinfo.value.__cause__ is original
 
 
 def test_safety_abort_propagates() -> None:

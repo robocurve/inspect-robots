@@ -429,13 +429,13 @@ class RerunSink:
         """Drain queued events between trials, bounding loss if the eval aborts mid-run.
 
         ``eval()`` does not guarantee ``on_eval_end`` on every failure path
-        (scorer/hook exceptions, Ctrl-C), so trial boundaries are the flush
-        points that cap tail loss at one trial. Blocking here is bounded by
-        ``flush_timeout`` and happens between trials, never inside the
-        control-rate loop. Once a flush times out, the connection is treated
-        as stalled for the rest of this worker generation and later trial
-        boundaries return immediately instead of re-paying the timeout; the
-        eval-end drop report still accounts for whatever never drained.
+        (scorer/hook exceptions, or Ctrl-C outside the rollout window), so
+        trial boundaries are the flush points that cap tail loss at one trial.
+        Blocking here is bounded by ``flush_timeout`` and happens between trials,
+        never inside the control-rate loop. Once a flush times out, the connection
+        is treated as stalled for the rest of this worker generation and later
+        trial boundaries return immediately instead of re-paying the timeout;
+        the eval-end drop report still accounts for whatever never drained.
         """
         state = self._state
         if state is not None and state.stalled:

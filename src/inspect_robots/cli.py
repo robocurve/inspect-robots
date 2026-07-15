@@ -575,12 +575,12 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     if failed and log.error is not None:
         print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
     if failed or errored_count:
-        # Errored scenes are failure context even when the run as a whole
-        # succeeded (issue #73): a partially-errored "success" must be legible.
+        # Non-successful scenes are failure context. Errored scenes stay visible
+        # even when the run succeeded (issue #73).
         for scene in log.samples:
-            if scene.status == "error":
+            if scene.status != "success":
                 detail = "" if scene.error in (None, log.error) else f": {scene.error}"
-                print(f"  [{_styled('error', _RED)}] {scene.scene_id}{detail}")
+                print(f"  [{_styled(scene.status, _RED)}] {scene.scene_id}{detail}")
     _print_step_limit_notice(log, is_adhoc)
     trials = f"trials: {log.results.total_trials}"
     if errored_count:
@@ -750,20 +750,28 @@ def _cmd_run(args: argparse.Namespace) -> int:
             # warn-once no-op when rerun-sdk is not installed.
             sinks.append(RerunSink(spawn=True))
             print(f"{_styled('rerun:', _CYAN)} live viewer")
-        logs = eval(
-            task,
-            policy,
-            embodiment,
-            log_dir=args.log_dir,
-            seed=args.seed,
-            sinks=sinks,
-            fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-            approver=approver,
-            store_frames=(
-                args.store_frames if args.store_frames is not None else defaults.store_frames
-            ),
-            before_scoring=before_scoring,
-        )
+        try:
+            logs = eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=args.log_dir,
+                seed=args.seed,
+                sinks=sinks,
+                fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
+                approver=approver,
+                store_frames=(
+                    args.store_frames if args.store_frames is not None else defaults.store_frames
+                ),
+                before_scoring=before_scoring,
+            )
+        except KeyboardInterrupt:
+            if sink.path is not None and sink.path.exists():
+                _print_degraded(f"cancelled: partial log written to {sink.path}")
+                print(_styled(f"hint: view it with: inspect-robots inspect {sink.path}", _DIM))
+            else:
+                _print_degraded("cancelled: no log written")
+            return 130
     finally:
         # The CLI resolved the embodiment itself, so eval() does not own it
         # ("close what we open"). Real-hardware embodiments release motor

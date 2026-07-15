@@ -18,6 +18,9 @@ again = read_eval_log("logs/cubepick-reach_xxxx.json")   # always re-readable
 Logs are written atomically (temp file + rename), schema-versioned, and carry
 a read-back guarantee: a newer Inspect Robots always reads an older log.
 
+Pressing Ctrl-C during a rollout writes a log with `status: "cancelled"` and
+everything gathered so far, including the partial trial record and transcript.
+
 ## Sinks
 
 A [`LogSink`][inspect_robots.logging.LogSink] observes the run lifecycle

@@ -58,7 +58,7 @@ class SceneResult:
     """Per-scene result: the reduced score(s) plus the raw per-epoch scores."""
 
     scene_id: str
-    status: str  # "success" | "error"
+    status: str  # "success" | "error" | "cancelled"
     reduced: dict[str, float] = field(default_factory=dict)
     epochs: tuple[dict[str, float], ...] = ()
     error: str | None = None
@@ -83,9 +83,9 @@ class EvalResults:
     total_scenes: int
     total_trials: int
     metrics: dict[str, float] = field(default_factory=dict)
-    # Trials recorded but never scored (visible per-scene as empty entries in
-    # ``SceneResult.epochs``). The default keeps logs written before this
-    # field existed readable.
+    # Errored trials, which are recorded but never scored (visible per-scene
+    # as empty entries in ``SceneResult.epochs``). The default keeps logs
+    # written before this field existed readable.
     errored_trials: int = 0
 
 
@@ -94,7 +94,7 @@ class EvalLog:
     """The full record returned by [`eval`][inspect_robots.eval.eval] and persisted to disk."""
 
     version: int
-    status: str  # "started" | "success" | "error"
+    status: str  # "started" | "success" | "error" | "cancelled"
     eval: EvalSpec
     results: EvalResults
     stats: EvalStats
