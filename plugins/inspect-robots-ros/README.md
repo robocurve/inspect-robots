@@ -64,6 +64,25 @@ inspect-robots run --task my-task --policy agent --embodiment ros \
     -E action_high=3.1,2.2,2.9,3.1,2.9,3.1
 ```
 
+The embodiment composes with any compatible policy. The same robot
+configuration evaluates an XPolicyLab-served VLA (any of the 40+ policies
+behind [inspect-robots-xpolicylab](../inspect-robots-xpolicylab/)) instead of
+an LLM:
+
+```bash
+inspect-robots run --task my-task --embodiment ros \
+    --policy xpolicylab -P url=ws://gpu-box:19000 -P cameras=cam_head:wrist \
+    -E url=ws://robot:9090 \
+    -E joints=joint1,joint2,joint3,joint4,joint5,joint6 \
+    -E command_topic=/joint_trajectory_controller/joint_trajectory \
+    -E cameras=wrist:/camera/wrist/image_raw/compressed:640x480 \
+    -E action_low=-3.1,-2.2,-2.9,-3.1,-2.9,-3.1 \
+    -E action_high=3.1,2.2,2.9,3.1,2.9,3.1
+```
+
+`-P` arguments go to the policy and `-E` arguments go to the embodiment, so
+the robot half of the command never changes when you swap policies.
+
 Construction and `.info` are network-free. The websocket connects on the first
 `reset()`, after compatibility and guardrail checks have inspected the declared
 spaces.
