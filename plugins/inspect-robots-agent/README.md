@@ -27,8 +27,11 @@ Model strings are OpenRouter-style `provider/model`, resolved from
 1. `-P base_url=...` (with `-P api_key_env=NAME`): any OpenAI-compatible endpoint
 2. A known provider prefix with that provider's key set: the provider's own
    endpoint, prefix stripped from the model id
-3. `OPENROUTER_API_KEY`: OpenRouter, any model string (including `:free` /
-   `:nitro` variant suffixes, which always route here)
+3. `OPENROUTER_API_KEY`: OpenRouter, any model string. Ids ending in a known
+   OpenRouter variant suffix (`:free`, `:nitro`, `:floor`, `:extended`,
+   `:online`, `:thinking`) always route here, since the variant means nothing
+   to a provider's own API; other colons (fine-tune ids like `openai/ft:...`)
+   still resolve directly.
 
 Providers resolved directly by prefix:
 

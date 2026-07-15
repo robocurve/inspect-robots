@@ -47,6 +47,19 @@ _DIRECT_PROVIDERS: dict[str, _DirectProvider] = {
 }
 
 
+# OpenRouter routing-variant suffixes. The variant only means something to
+# OpenRouter, so ids carrying one are never claimed by a direct provider. A
+# closed set, not "any colon": OpenAI/Mistral fine-tune ids legitimately
+# contain colons (ft:gpt-4o-mini:org:suffix:id) and must keep routing direct.
+_OPENROUTER_VARIANTS = frozenset({"free", "nitro", "floor", "extended", "online", "thinking"})
+
+
+def _has_openrouter_variant(model_id: str) -> bool:
+    """True when the id ends in a known OpenRouter ``:variant`` suffix."""
+    _, sep, suffix = model_id.rpartition(":")
+    return bool(sep) and suffix in _OPENROUTER_VARIANTS
+
+
 def _provider_key_hints() -> str:
     """One ``$KEY for prefix/*`` hint per distinct key, for the guided error."""
     seen: dict[str, str] = {}
@@ -76,10 +89,11 @@ def resolve_provider(
        from ``api_key_env`` (default ``OPENROUTER_API_KEY``), and a missing
        key is allowed (local vLLM/Ollama endpoints are typically keyless).
     2. A known ``prefix/*`` model + that provider's key (``_DIRECT_PROVIDERS``:
-       anthropic, openai, google, x-ai, groq, mistralai, deepseek) — the
-       provider's own endpoint, prefix stripped from the model id. Ids with an
-       OpenRouter variant suffix (``:free``, ``:nitro``) are never claimed
-       here — the variant only means something to OpenRouter.
+       anthropic, openai, google, x-ai/xai, groq, mistralai, deepseek) — the
+       provider's own endpoint, prefix stripped from the model id. Ids ending
+       in a known OpenRouter variant suffix (``_OPENROUTER_VARIANTS``, e.g.
+       ``:free``, ``:nitro``) are never claimed here — the variant only means
+       something to OpenRouter. Other colons (fine-tune ids) pass through.
     3. ``OPENROUTER_API_KEY`` — OpenRouter, which takes the full
        ``provider/model`` string.
 
@@ -100,7 +114,7 @@ def resolve_provider(
     if (
         direct is not None
         and bare_model  # a bare "anthropic" must not resolve to an empty model id
-        and ":" not in bare_model  # OpenRouter variant syntax; not a direct-API id
+        and not _has_openrouter_variant(bare_model)
         and (key := env.get(direct.key_env))
     ):
         return Provider(base_url=direct.base_url, api_key=key, model=bare_model)

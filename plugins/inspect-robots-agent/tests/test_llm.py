@@ -120,6 +120,30 @@ def test_openrouter_variant_suffix_is_never_claimed_directly() -> None:
     assert p.model == "google/gemini-3.5-flash:nitro"
 
 
+def test_fine_tune_colons_still_resolve_directly() -> None:
+    # Only the closed variant set defers to OpenRouter; fine-tune ids carry
+    # colons that the provider's own API understands.
+    p = resolve_provider(
+        model="openai/ft:gpt-4o-mini-2024-07-18:org:suffix:id",
+        base_url=None,
+        api_key_env=None,
+        env={"OPENAI_API_KEY": "oai", "OPENROUTER_API_KEY": "or-key"},
+    )
+    assert "api.openai.com" in p.base_url
+    assert p.model == "ft:gpt-4o-mini-2024-07-18:org:suffix:id"
+
+
+def test_table_provider_without_its_key_falls_back_to_openrouter() -> None:
+    p = resolve_provider(
+        model="google/gemini-3.5-flash",
+        base_url=None,
+        api_key_env=None,
+        env={"OPENROUTER_API_KEY": "or-key"},  # no GEMINI_API_KEY
+    )
+    assert "openrouter.ai" in p.base_url
+    assert p.model == "google/gemini-3.5-flash"
+
+
 def test_variant_suffix_without_openrouter_key_is_a_guided_error() -> None:
     with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
         resolve_provider(
@@ -140,6 +164,17 @@ def test_bare_prefix_without_model_id_is_not_claimed() -> None:
         env={"ANTHROPIC_API_KEY": "ant-key", "OPENROUTER_API_KEY": "or-key"},
     )
     assert "openrouter.ai" in p.base_url
+    assert p.model == "anthropic"  # the full unmodified string reaches OpenRouter
+
+
+def test_bare_prefix_without_openrouter_key_is_a_guided_error() -> None:
+    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
+        resolve_provider(
+            model="anthropic",
+            base_url=None,
+            api_key_env=None,
+            env={"ANTHROPIC_API_KEY": "ant-key"},  # provider key alone can't route it
+        )
 
 
 def test_guided_error_names_the_new_provider_keys() -> None:
