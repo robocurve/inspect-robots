@@ -57,6 +57,7 @@ class AgentPolicyConfig(PolicyConfig):
     api_key_env: str | None = None
     max_llm_calls: int = 50
     effort: str | None = "low"
+    max_speed_frac: float = 0.5
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -75,9 +76,12 @@ class LLMAgentPolicy(PolicyBase):
         max_llm_calls: int = 50,
         temperature: float | None = None,
         effort: str | None = "low",
+        max_speed_frac: float = 0.5,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
+        if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
+            raise ValueError("max_speed_frac must be finite and > 0")
         environ = dict(os.environ) if env is None else env
         provider = resolve_provider(
             model=model or environ.get(ENV_MODEL),
@@ -98,6 +102,7 @@ class LLMAgentPolicy(PolicyBase):
         # (the arm stands still while the model thinks; safety guardrails sit
         # below the model, so effort trades thinking time, not safety).
         self._effort = effort
+        self._max_speed_frac = max_speed_frac
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -105,6 +110,7 @@ class LLMAgentPolicy(PolicyBase):
             api_key_env=api_key_env,
             max_llm_calls=max_llm_calls,
             effort=effort,
+            max_speed_frac=max_speed_frac,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -121,6 +127,7 @@ class LLMAgentPolicy(PolicyBase):
             embodiment_info.action_space,
             embodiment_info.observation_space,
             embodiment_info.control_hz,
+            self._max_speed_frac,
         )
         self._embodiment_name = embodiment_info.name
         self.info = PolicyInfo(

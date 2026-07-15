@@ -1,24 +1,20 @@
-"""The agent's tool surface over a bound action space (plan 0008 §4b/§4c).
+"""The agent's speed-limited tool surface over a bound action space.
 
-Tools are generated from the embodiment's spaces — the plugin never knows
-what a "YAM" or an "arm" is. The control mode picks the motion tool:
+Tools are generated from the embodiment's spaces, so the plugin never needs
+embodiment-specific motion knowledge. Absolute targets are interpolated with a
+per-step limit of ``min(max_speed_frac / hz, 0.05)`` times each dimension's
+range. Displacements are split by the available box side, which the plugin
+treats as the embodiment author's per-action limit.
 
-- Absolute-target modes (``joint_pos``, ``eef_abs_pose``): ``move_joints``
-  with named partial targets, linearly interpolated from the current
-  observed state; hold-still repeats the current state.
-- Displacement modes (``eef_delta_pos``, ``eef_delta_pose``,
-  ``joint_delta``): ``move_by`` splits the requested displacement evenly
-  across the chunk's steps; hold-still is all zeros.
-
-Tool mistakes (unknown label, non-finite value, bad duration, malformed
-JSON) come back as structured error strings the LLM sees and can correct —
-never exceptions. Unsupported configurations fail at build (= ``bind``)
-time with a clear message.
+Tool mistakes come back as structured error strings the LLM can correct.
+Broken observations still raise, and unsupported configurations fail at build
+(bind) time with a clear message.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +31,8 @@ _SAFE_ROT = frozenset({"none", "rot6d"})
 
 _FALLBACK_HZ = 10.0
 _MAX_DURATION_S = 10.0
+_BACKSTOP_STEP_FRAC = 0.05
+_RELATIVE_HEADROOM = 1e-6
 
 
 class ToolsetError(Exception):
@@ -55,7 +53,7 @@ class ToolResult:
 
 
 class Toolset:
-    """Schemas + execution for one bound embodiment. Built via ``build_toolset``."""
+    """Schemas and execution for one embodiment, built via ``build_toolset``."""
 
     def __init__(
         self,
@@ -65,30 +63,45 @@ class Toolset:
         state_key: str | None,
         control_hz: float | None,
         bounds_text: str,
+        low: npt.NDArray[np.float64],
+        high: npt.NDArray[np.float64],
+        max_speed_frac: float = 0.5,
     ):
         self._absolute = absolute
         self._labels = labels
         self._index_by_label = {label: i for i, label in enumerate(labels)}
         self._state_key = state_key
         self._hz = control_hz
+        self._resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
+        self._max_steps = math.ceil(_MAX_DURATION_S * self._resolved_hz)
         self._move_tool = "move_joints" if absolute else "move_by"
         self._bounds_text = bounds_text
-
-    # -- schemas ---------------------------------------------------------------
+        self._low = low
+        self._high = high
+        if absolute:
+            step_frac = min(max_speed_frac / self._resolved_hz, _BACKSTOP_STEP_FRAC)
+            self._step_limits = step_frac * (high - low)
+            self._positive_limits = np.zeros_like(high)
+            self._negative_limits = np.zeros_like(low)
+        else:
+            self._step_limits = np.zeros_like(high)
+            self._positive_limits = high
+            self._negative_limits = np.abs(low)
 
     def schemas(self) -> list[dict[str, Any]]:
-        """OpenAI-format tool definitions for this embodiment."""
+        """Return OpenAI-format tool definitions for this embodiment."""
         if self._absolute:
             move_description = (
-                "Move to absolute joint/dimension targets, smoothly interpolated "
-                "from the current pose over duration_s. Unnamed dimensions hold "
-                "their current value. " + self._bounds_text
+                "Move to absolute joint/dimension targets. The motion is smoothly "
+                "interpolated at a fixed safe speed and the result reports its step "
+                "count. Unnamed dimensions hold their current value. " + self._bounds_text
             )
             values_key = "targets"
         else:
             move_description = (
-                "Move BY the given displacement per dimension, split evenly over "
-                "duration_s. Unnamed dimensions do not move. " + self._bounds_text
+                "Move BY the given displacement per dimension. The motion is split "
+                "into steps that fit the per-action bounds and the result reports its "
+                "step count. Unnamed dimensions do not move. " + self._bounds_text
             )
             values_key = "deltas"
         move = {
@@ -106,14 +119,8 @@ class Toolset:
                                 + ", ".join(self._labels)
                             ),
                         },
-                        "duration_s": {
-                            "type": "number",
-                            "description": (
-                                f"Motion duration in seconds (0 < d <= {_MAX_DURATION_S})"
-                            ),
-                        },
                     },
-                    "required": [values_key, "duration_s"],
+                    "required": [values_key],
                 },
             },
         }
@@ -145,10 +152,8 @@ class Toolset:
         }
         return [move, done, give_up]
 
-    # -- execution ---------------------------------------------------------------
-
     def execute(self, call: Any, observation: Observation) -> ToolResult:
-        """Turn one tool call into an ActionChunk, or an error string for the LLM."""
+        """Turn one tool call into an action chunk or an error string for the LLM."""
         try:
             arguments = json.loads(call.arguments)
         except (TypeError, ValueError):
@@ -169,9 +174,7 @@ class Toolset:
         return np.asarray(observation.state[self._state_key], dtype=np.float64)
 
     def _stop(self, name: str, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        # Hold still per control mode: repeat the pose (absolute) or move by
-        # nothing (displacement), flagged for rollout's policy-stop channel.
-        data = self._current_state(observation) if self._absolute else np.zeros(len(self._labels))
+        data = self._current_state(observation)
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
         action = Action(
             data=data,
@@ -185,17 +188,11 @@ class Toolset:
     def _move(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         values_key = "targets" if self._absolute else "deltas"
         values = arguments.get(values_key)
-        duration = arguments.get("duration_s")
         if not isinstance(values, dict) or not values:
             return ToolResult(error=f"{values_key} must be a non-empty object of name: value")
-        if not isinstance(duration, (int, float)) or isinstance(duration, bool):
-            return ToolResult(error="duration_s must be a number")
-        if not 0 < float(duration) <= _MAX_DURATION_S:
-            return ToolResult(
-                error=f"duration_s must be in (0, {_MAX_DURATION_S}] seconds, got {duration}"
-            )
 
         vector = np.zeros(len(self._labels))
+        named_indices: list[int] = []
         for label, raw in values.items():
             index = self._index_by_label.get(str(label))
             if index is None:
@@ -205,33 +202,115 @@ class Toolset:
             if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not np.isfinite(raw):
                 return ToolResult(error=f"value for {label!r} must be a finite number, got {raw!r}")
             vector[index] = float(raw)
+            named_indices.append(index)
 
-        hz = self._hz if self._hz is not None else _FALLBACK_HZ
-        steps = max(1, round(float(duration) * hz))
         if self._absolute:
-            current = self._current_state(observation)
-            target = current.copy()
-            for label in values:
-                target[self._index_by_label[str(label)]] = vector[self._index_by_label[str(label)]]
-            fractions = np.linspace(1.0 / steps, 1.0, steps)
-            actions = [Action(data=current + (target - current) * f) for f in fractions]
-        else:
-            per_step = vector / steps
-            actions = [Action(data=per_step.copy()) for _ in range(steps)]
+            return self._move_absolute(values, vector, named_indices, observation)
+        return self._move_displacement(vector, named_indices)
+
+    def _move_absolute(
+        self,
+        values: dict[Any, Any],
+        vector: npt.NDArray[np.float64],
+        named_indices: list[int],
+        observation: Observation,
+    ) -> ToolResult:
+        current = self._current_state(observation)
+        if not bool(np.all(np.isfinite(current))):
+            raise ValueError("proprioceptive reference contains a non-finite value")
+
+        target = current.copy()
+        for label, index in zip(values, named_indices, strict=True):
+            value = vector[index]
+            if self._step_limits[index] == 0:
+                if value != self._low[index]:
+                    return ToolResult(
+                        error=f"dimension {label} is fixed at {float(self._low[index])!r}"
+                    )
+            elif value < self._low[index] or value > self._high[index]:
+                return ToolResult(
+                    error=(
+                        f"target for {label} is outside "
+                        f"[{float(self._low[index])!r}, {float(self._high[index])!r}]"
+                    )
+                )
+            target[index] = value
+
+        ratios: list[np.float64] = []
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            for index in named_indices:
+                distance = np.abs(np.subtract(target[index], current[index]))
+                limit = self._step_limits[index]
+                if distance > 0 and limit > 0:
+                    ratios.append(np.divide(distance, limit))
+            ratio = max(ratios, default=np.float64(0.0))
+            headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
+        if headed_ratio > self._max_steps:
+            return self._cap_error()
+        steps = max(1, math.ceil(float(headed_ratio)))
+
+        fractions = np.linspace(1.0 / steps, 1.0, steps)
+        actions = [
+            Action(data=np.clip(current + (target - current) * fraction, self._low, self._high))
+            for fraction in fractions
+        ]
+        actions[-1] = Action(data=np.clip(target.copy(), self._low, self._high))
+        return self._success(actions, steps)
+
+    def _move_displacement(
+        self,
+        vector: npt.NDArray[np.float64],
+        named_indices: list[int],
+    ) -> ToolResult:
+        ratios: list[np.float64] = []
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            for index in named_indices:
+                value = vector[index]
+                if value == 0:
+                    continue
+                limit = self._positive_limits[index] if value > 0 else self._negative_limits[index]
+                if limit == 0:
+                    return ToolResult(
+                        error=f"dimension {self._labels[index]} cannot move in that direction"
+                    )
+                ratios.append(np.divide(np.abs(value), limit))
+            ratio = max(ratios, default=np.float64(0.0))
+            headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
+        if headed_ratio > self._max_steps:
+            return self._cap_error()
+        steps = max(1, math.ceil(float(headed_ratio)))
+        per_step = vector / steps
+        actions = [Action(data=per_step.copy()) for _ in range(steps)]
+        return self._success(actions, steps)
+
+    def _cap_error(self) -> ToolResult:
+        return ToolResult(
+            error=(
+                f"requested motion exceeds the {_MAX_DURATION_S:g}s playout cap; "
+                "split the move into smaller motions"
+            )
+        )
+
+    def _success(self, actions: list[Action], steps: int) -> ToolResult:
+        note = f"executing {self._move_tool} over {steps} steps"
+        if self._hz is not None:
+            note += f" ({steps / self._hz:.1f}s)"
         return ToolResult(
             chunk=ActionChunk(actions=actions, control_hz=self._hz),
-            note=f"executing {self._move_tool} over {steps} steps ({duration}s)",
+            note=note,
         )
 
 
 def build_toolset(
-    action_space: Box, observation_space: ObservationSpace, control_hz: float | None
+    action_space: Box,
+    observation_space: ObservationSpace,
+    control_hz: float | None,
+    max_speed_frac: float = 0.5,
 ) -> Toolset:
-    """Validate a (action space, observation space) pairing and build its tools.
+    """Validate an embodiment's spaces and build its agent-facing tools.
 
-    Raises [`ToolsetError`][inspect_robots_agent._tools.ToolsetError] with a
-    clear message for configurations the motion layer cannot drive — at bind
-    time, never mid-trial.
+    Raises [`ToolsetError`][inspect_robots_agent._tools.ToolsetError] for
+    configurations the motion layer cannot drive, before a trial begins.
     """
     semantics = action_space.semantics
     if semantics is None:
@@ -247,6 +326,10 @@ def build_toolset(
         )
     if mode not in _ABSOLUTE_MODES | _DISPLACEMENT_MODES:
         raise ToolsetError(f"control_mode {mode!r} is not supported by the agent policy yet")
+    if control_hz is not None and (not np.isfinite(control_hz) or control_hz <= 0):
+        raise ToolsetError("control_hz must be finite and > 0 when declared")
+    if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
+        raise ToolsetError("max_speed_frac must be finite and > 0")
 
     absolute = mode in _ABSOLUTE_MODES
     dim = action_space.dim
@@ -258,7 +341,7 @@ def build_toolset(
                 "absolute-target control needs a StateSpec on the embodiment's "
                 "observation space to locate the proprioceptive reference"
             )
-        matching = [f.key for f in spec.fields if f.shape == (dim,)]
+        matching = [field.key for field in spec.fields if field.shape == (dim,)]
         if len(matching) != 1:
             raise ToolsetError(
                 f"absolute-target control needs exactly one state field with shape "
@@ -266,16 +349,25 @@ def build_toolset(
             )
         state_key = matching[0]
 
-    labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
     low, high = action_space.low, action_space.high
-    if low is not None and high is not None:
-        pairs = ", ".join(
-            f"{label}: [{lo:.4g}, {hi:.4g}]"
-            for label, lo, hi in zip(labels, low.tolist(), high.tolist(), strict=False)
-        )
-        bounds_text = f"Per-dimension bounds: {pairs}."
-    else:
-        bounds_text = "The action space declares no bounds; move conservatively."
+    if (
+        low is None
+        or high is None
+        or not bool(np.all(np.isfinite(low)) and np.all(np.isfinite(high)))
+    ):
+        mode_name = "absolute-target" if absolute else "displacement"
+        raise ToolsetError(f"{mode_name} control needs finite low and high bounds")
+    low64 = np.asarray(low, dtype=np.float64)
+    high64 = np.asarray(high, dtype=np.float64)
+    if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
+        raise ToolsetError("displacement control bounds must contain zero in every dimension")
+
+    labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
+    pairs = ", ".join(
+        f"{label}: [{lo:.4g}, {hi:.4g}]"
+        for label, lo, hi in zip(labels, low64.tolist(), high64.tolist(), strict=False)
+    )
+    bounds_text = f"Per-dimension bounds: {pairs}."
 
     return Toolset(
         absolute=absolute,
@@ -283,4 +375,7 @@ def build_toolset(
         state_key=state_key,
         control_hz=control_hz,
         bounds_text=bounds_text,
+        low=low64,
+        high=high64,
+        max_speed_frac=max_speed_frac,
     )

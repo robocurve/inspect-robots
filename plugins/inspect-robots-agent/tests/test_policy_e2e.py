@@ -17,13 +17,18 @@ import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
 from inspect_robots.task import Task
+from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_agent._llm import ChatClient, resolve_provider
+from inspect_robots_agent._png import encode_png
 
 # --- scripted-conversation harness ---------------------------------------------
 
@@ -50,6 +55,27 @@ def _tool_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _text_response(text: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+def _multi_tool_response(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                        for index, (name, arguments) in enumerate(calls)
+                    ],
+                }
+            }
+        ]
+    }
 
 
 class _Script:
@@ -92,13 +118,43 @@ class _RecordingSink(NullSink):
         self.records.append(record)
 
 
+class _AbsoluteEmbodiment:
+    def __init__(self) -> None:
+        self._q = np.array([0.0])
+        self.info = EmbodimentInfo(
+            name="absolute-test",
+            action_space=Box(
+                shape=(1,),
+                low=np.array([-1.0]),
+                high=np.array([1.0]),
+                semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
+            ),
+            observation_space=ObservationSpace(
+                state=StateSpec(fields=(StateField(key="q", shape=(1,)),))
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+        )
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        self._q = np.array([0.0])
+        return Observation(state={"q": self._q.copy()}, instruction=scene.instruction)
+
+    def step(self, action: Action) -> StepResult:
+        self._q = np.asarray(action.data, dtype=np.float64).copy()
+        return StepResult(observation=Observation(state={"q": self._q.copy()}))
+
+    def close(self) -> None:
+        return None
+
+
 # --- tests -----------------------------------------------------------------------
 
 
 def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}}),
             _tool_response("done", {"summary": "close enough"}),
         ]
     )
@@ -110,10 +166,11 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     (record,) = sink.records
     assert record.truncated is True
     assert record.termination_reason == "done"
-    # 5 interpolated steps + 1 hold-still stop action.
-    assert len(record.steps) == 6
+    # Headroom splits a box-sized move into two steps, then done holds once.
+    assert len(record.steps) == 3
     assert logs[0].eval.policy_config["model"] == "test/model"
     assert logs[0].eval.policy_config["max_llm_calls"] == 50
+    assert logs[0].eval.policy_config["max_speed_frac"] == 0.5
 
 
 def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
@@ -135,7 +192,7 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
     def run(approver: Any) -> TrialRecord:
         script = _Script(
             [
-                _tool_response("move_by", {"deltas": {"dx": 5.0}, "duration_s": 0.5}),
+                _tool_response("move_by", {"deltas": {"dx": 0.08}}),
                 _tool_response("done", {"summary": "stop"}),
             ]
         )
@@ -151,18 +208,19 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
         return sink.records[0]
 
     space = CubePickEmbodiment().info.action_space
-    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space)))
+    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.02)))
     approvals = [e for e in guarded.events if e.kind == "approval"]
-    assert approvals, "the 1.0-per-step swing must be clamped to the 0.1 bound"
-    assert all(abs(float(np.asarray(s.action.data)[0])) <= 0.1 for s in guarded.steps)
+    assert approvals
+    assert any(e.data.get("detail") == "delta_clamped" for e in approvals)
+    assert float(np.asarray(guarded.steps[0].action.data)[0]) == 0.02
 
     unguarded = run(None)  # eval()'s Python-API default is the permissive AutoApprover
     assert not [e for e in unguarded.events if e.kind == "approval"]
-    assert any(abs(float(np.asarray(s.action.data)[0])) > 0.1 for s in unguarded.steps)
+    assert float(np.asarray(unguarded.steps[0].action.data)[0]) == 0.08
 
 
 def test_llm_call_budget_forces_give_up(tmp_path: Path) -> None:
-    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.05}, "duration_s": 0.5})])
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.05}})])
     sink = _RecordingSink()
     logs = ir_eval(
         _task(),
@@ -194,8 +252,8 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
 def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"dz": 0.1}, "duration_s": 0.5}),  # bad dim
-            _tool_response("move_by", {"deltas": {"dx": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dz": 0.1}}),  # bad dim
+            _tool_response("move_by", {"deltas": {"dx": 0.1}}),
             _tool_response("done", {"summary": "recovered"}),
         ]
     )
@@ -210,6 +268,40 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
         m for request in script.requests for m in request["messages"] if m.get("role") == "tool"
     ]
     assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
+
+
+def test_persistent_tool_errors_become_policy_error(tmp_path: Path) -> None:
+    script = _Script([_tool_response("move_by", {"deltas": {"dz": 0.1}})])
+    sink = _RecordingSink()
+    logs = ir_eval(
+        _task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
+    )
+    assert logs[0].status == "error"
+    assert sink.records[0].error is not None
+    assert "tool calls kept failing" in sink.records[0].error
+
+
+def test_extra_tool_calls_are_answered_but_not_executed(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_by", {"deltas": {"dx": 0.05}}),
+                    ("give_up", {"reason": "extra"}),
+                ]
+            ),
+            _tool_response("done", {"summary": "only the first call ran"}),
+        ]
+    )
+    sink = _RecordingSink()
+    ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+    assert sink.records[0].termination_reason == "done"
+    ignored = [
+        message
+        for message in script.requests[1]["messages"]
+        if message.get("content") == "ignored: one tool call per turn"
+    ]
+    assert len(ignored) == 1
 
 
 def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
@@ -237,6 +329,75 @@ def test_registry_resolves_agent_policy() -> None:
 
     policy = resolve("policy", "agent", model="m", base_url="http://x/v1")
     assert isinstance(policy, LLMAgentPolicy)
+
+
+def test_non_default_speed_fraction_is_forwarded_through_bind(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("done", {"summary": "moved"}),
+        ]
+    )
+    sink = _RecordingSink()
+    ir_eval(
+        _task(max_steps=20),
+        _policy(script, max_speed_frac=0.25),
+        _AbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+    # Distance 0.5 / (0.25 / 10 * range 2) plus relative headroom.
+    assert len(sink.records[0].steps) == 12  # 11 motion steps + done
+
+
+@pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
+def test_policy_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
+    with pytest.raises(ValueError, match="max_speed_frac must be finite and > 0"):
+        _policy(_Script([]), max_speed_frac=max_speed_frac)
+
+
+def test_policy_rejects_empty_call_budget_and_reads_process_environment() -> None:
+    with pytest.raises(ValueError, match="max_llm_calls must be >= 1"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            max_llm_calls=0,
+            env={},
+        )
+
+    policy = LLMAgentPolicy(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    )
+    assert policy.info.name == "agent"
+
+
+def test_chat_transport_failure_and_close_are_well_defined() -> None:
+    provider = resolve_provider(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        api_key_env=None,
+        env={},
+    )
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    client = ChatClient(
+        provider,
+        transport=httpx.MockTransport(fail),
+        max_retries=1,
+        backoff_s=0.0,
+    )
+    with pytest.raises(RuntimeError, match="offline"):
+        client.complete(messages=[], tools=[])
+    client.close()
+
+
+def test_png_encoder_accepts_float_grayscale_frames() -> None:
+    encoded = encode_png(np.array([[0.5]], dtype=np.float64))
+    assert encoded.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_unbound_act_raises_clear_error() -> None:
