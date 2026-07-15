@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
+import threading
+import time
+from typing import Any
 
+import pytest
+from _stub_server import StubRosbridgeServer
+
+from inspect_robots_ros._client import RosbridgeClient
 from inspect_robots_ros._protocol import (
     PublishedMessage,
     RosbridgeError,
@@ -131,3 +137,200 @@ def test_protocol_rejects_non_json_values_on_encode() -> None:
 
 def test_non_error_status_does_not_create_an_error() -> None:
     assert StatusMessage("warning", "slow publisher").as_error() is None
+
+
+def _client(server: StubRosbridgeServer, **kwargs: Any) -> RosbridgeClient:
+    return RosbridgeClient(
+        server.url,
+        connect_timeout_s=2.0,
+        request_timeout_s=1.0,
+        **kwargs,
+    )
+
+
+def _wait_for_latched_error(client: RosbridgeClient) -> Exception:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        error = client.latched_error
+        if error is not None:
+            return error
+        time.sleep(0.005)
+    raise TimeoutError("client did not latch an error")
+
+
+def test_client_sends_while_receive_thread_updates_topic_cache(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server)
+    client.connect()
+    client.subscribe(
+        "/joint_states",
+        subscription_id="joints",
+        message_type="sensor_msgs/msg/JointState",
+        throttle_rate=50,
+    )
+    stub_server.wait_for(lambda ops: any(op.get("op") == "subscribe" for op in ops))
+
+    def stream() -> None:
+        for index in range(20):
+            stub_server.publish("/joint_states", {"position": [float(index)]})
+            time.sleep(0.002)
+
+    publisher = threading.Thread(target=stream)
+    publisher.start()
+    for index in range(20):
+        client.publish("/arm/command", {"data": [float(index)]})
+    publisher.join(timeout=2)
+
+    sample = client.wait_for_sample("/joint_states", timeout_s=1.0)
+    stub_server.wait_for(lambda ops: len([op for op in ops if op.get("op") == "publish"]) == 20)
+    assert sample.seq >= 1
+    assert sample.msg["position"][0] >= 0.0
+    assert len(stub_server.ops_of("publish")) == 20
+    client.close()
+
+
+def test_client_topic_sequence_increments_even_when_receive_stamps_tie(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server, clock=lambda: 7.0)
+    client.connect()
+    client.subscribe(
+        "/joint_states",
+        subscription_id="joints",
+        message_type="sensor_msgs/msg/JointState",
+        throttle_rate=50,
+    )
+    stub_server.wait_for(lambda ops: any(op.get("op") == "subscribe" for op in ops))
+    stub_server.publish("/joint_states", {"position": [1.0]})
+    first = client.wait_for_sample("/joint_states", timeout_s=1.0)
+    stub_server.publish("/joint_states", {"position": [2.0]})
+    second = client.wait_for_sample("/joint_states", after_seq=first.seq, timeout_s=1.0)
+    assert first.stamp == second.stamp == 7.0
+    assert second.seq == first.seq + 1
+    client.close()
+
+
+def test_client_status_error_latches_and_surfaces_on_every_later_call(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server)
+    client.connect()
+    stub_server.send_status("error", "message type mismatch")
+    error = _wait_for_latched_error(client)
+    assert isinstance(error, RosbridgeError)
+    assert "message type mismatch" in str(error)
+    with pytest.raises(RosbridgeError, match="message type mismatch"):
+        client.publish("/arm/command", {"data": []})
+    with pytest.raises(RosbridgeError, match="message type mismatch"):
+        client.latest("/joint_states")
+    with pytest.raises(RosbridgeError, match="message type mismatch"):
+        client.call_service("/home")
+    client.close()
+
+
+def test_client_socket_death_latches_connection_error(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server)
+    client.connect()
+    stub_server.drop_connections()
+    error = _wait_for_latched_error(client)
+    assert isinstance(error, ConnectionError)
+    assert stub_server.url in str(error)
+    with pytest.raises(ConnectionError, match="lost"):
+        client.sequence("/joint_states")
+    client.close()
+
+
+def test_client_service_response_is_correlated_by_id(stub_server: StubRosbridgeServer) -> None:
+    stub_server.deferred_services.add("/home")
+    client = _client(stub_server)
+    client.connect()
+    replies: list[ServiceResponse] = []
+    failures: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            replies.append(client.call_service("/home"))
+        except BaseException as exc:  # pragma: no cover - assertion reports unexpected failure
+            failures.append(exc)
+
+    caller = threading.Thread(target=call)
+    caller.start()
+    stub_server.wait_for(lambda ops: any(op.get("op") == "call_service" for op in ops))
+    request_id = stub_server.ops_of("call_service")[0]["id"]
+    stub_server.send_service_response("wrong-id", values={"wrong": True})
+    time.sleep(0.02)
+    assert caller.is_alive()
+    stub_server.send_service_response(request_id, values={"homed": True})
+    caller.join(timeout=2)
+    assert not failures
+    assert replies == [ServiceResponse(request_id, {"homed": True}, True)]
+    client.close()
+
+
+def test_client_failed_service_result_raises_protocol_error(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    stub_server.service_results["/home"] = (False, {"reason": "blocked"})
+    client = _client(stub_server)
+    client.connect()
+    with pytest.raises(RosbridgeError, match=r"/home.*result=false.*blocked"):
+        client.call_service("/home")
+    client.close()
+
+
+def test_client_service_timeout_names_service_and_url(stub_server: StubRosbridgeServer) -> None:
+    stub_server.deferred_services.add("/home")
+    client = RosbridgeClient(
+        stub_server.url,
+        connect_timeout_s=2.0,
+        request_timeout_s=0.03,
+    )
+    client.connect()
+    with pytest.raises(RosbridgeError, match=rf"/home.*{stub_server.url}"):
+        client.call_service("/home")
+    client.close()
+
+
+def test_client_close_cleans_resources_joins_thread_and_is_idempotent(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server)
+    client.connect()
+    client.advertise("/arm/command", message_type="std_msgs/msg/Float64MultiArray")
+    client.subscribe(
+        "/joint_states",
+        subscription_id="joints",
+        message_type="sensor_msgs/msg/JointState",
+        throttle_rate=50,
+    )
+    stub_server.wait_for(lambda ops: len(ops) >= 2)
+    client.close()
+    client.close()
+    stub_server.wait_for(
+        lambda ops: (
+            any(op.get("op") == "unsubscribe" for op in ops)
+            and any(op.get("op") == "unadvertise" for op in ops)
+        )
+    )
+    assert not client.connected
+    assert not client.receiver_alive
+    assert set(stub_server.subscriptions) == set()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.publish("/arm/command", {"data": []})
+
+
+def test_client_requires_connect_and_connect_failure_names_url(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    client = _client(stub_server)
+    with pytest.raises(ConnectionError, match="call connect"):
+        client.latest("/joint_states")
+    client.close()
+
+    unreachable = RosbridgeClient("ws://127.0.0.1:9", connect_timeout_s=0.05)
+    with pytest.raises(ConnectionError, match=r"ws://127\.0\.0\.1:9"):
+        unreachable.connect()
+    unreachable.close()
