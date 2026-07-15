@@ -331,7 +331,7 @@ class RerunSink:
 
     def _probe_recording_flush(self) -> None:
         rr = self._rr
-        if rr is None:
+        if rr is None or self._disabled:
             return
         get_rec = getattr(rr, "get_global_data_recording", None)
         rec = get_rec() if get_rec is not None else None
@@ -368,7 +368,7 @@ class RerunSink:
             "RerunSink viewer connection is stalled; visualization is disabled "
             "for this sink and queued SDK-side data was abandoned",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
 
     def on_eval_start(self, spec: EvalSpec) -> None:

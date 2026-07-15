@@ -10,6 +10,7 @@ import textwrap
 import threading
 import time
 import types
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -547,6 +548,26 @@ def test_wedged_recording_flush_unregisters_atexit_and_disables_sink() -> None:
     assert finished.wait(timeout=5.0)
 
 
+def test_disabled_sink_skips_probe_on_later_shutdowns() -> None:
+    """A wedge-disabled sink stays dormant: no repeated stall, warning, or unregister."""
+    gate = threading.Event()
+    finished = threading.Event()
+    unregister_calls: list[None] = []
+    sink = RerunSink(flush_timeout=0.05)
+    sink._rr = _probe_fake(_BlockingRecording(gate, finished), unregister_calls=unregister_calls)
+    try:
+        with pytest.warns(RuntimeWarning, match="viewer connection is stalled"):
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        assert unregister_calls == [None]
+    finally:
+        gate.set()
+    assert finished.wait(timeout=5.0)
+
+
 def test_healthy_recording_flush_keeps_atexit_and_sink_enabled() -> None:
     """A completed SDK flush leaves the normal Rerun atexit cleanup registered."""
     unregister_calls: list[None] = []
@@ -671,7 +692,9 @@ def test_trial_end_skips_flush_once_stalled(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     """The real SDK atexit path is bounded after a connected peer stops reading."""
-    pytest.importorskip("rerun")
+    rr = pytest.importorskip("rerun")
+    if not hasattr(rr, "connect_grpc"):
+        pytest.skip("pre-gRPC rerun-sdk cannot run the connect-mode wedge scenario")
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
@@ -736,3 +759,5 @@ def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
 
     assert accepted.is_set(), completed.stderr
     assert completed.returncode == 0, completed.stderr
+    # Guard against the trivial pass: the wedge branch must actually fire.
+    assert "viewer connection is stalled" in completed.stderr, completed.stderr
