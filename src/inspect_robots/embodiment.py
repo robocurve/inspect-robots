@@ -39,7 +39,15 @@ SELF_PACED: Capability = "self_paced"
 
 @dataclass(frozen=True)
 class EmbodimentInfo:
-    """Static description of an embodiment for compatibility checking + logging."""
+    """Static description of an embodiment for compatibility checking + logging.
+
+    ``docs`` contains free-form markdown operating notes for policies that can
+    read text, such as joint layout and positive directions, zero-pose
+    geometry, gripper polarity, frame conventions, and workspace hints. Keep
+    it concise because consumers inject it into system prompts verbatim.
+    ``None`` means no notes are offered; consumers must treat empty and
+    whitespace-only strings the same as absence.
+    """
 
     name: str
     action_space: Box
@@ -51,6 +59,7 @@ class EmbodimentInfo:
     # scene-realizability checks). Empty means "unconstrained" for the tracer.
     supported_setups: frozenset[str] = field(default_factory=frozenset)
     supported_target_kinds: frozenset[str] = field(default_factory=frozenset)
+    docs: str | None = None
 
 
 @runtime_checkable

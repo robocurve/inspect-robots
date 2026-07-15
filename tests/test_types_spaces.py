@@ -7,6 +7,8 @@ import dataclasses
 import numpy as np
 import pytest
 
+from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import (
     ActionSemantics,
     Box,
@@ -16,6 +18,33 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
+
+
+def test_embodiment_info_docs_preserve_frozen_value_semantics() -> None:
+    action_space = Box(shape=(1,))
+    observation_space = ObservationSpace()
+    info = EmbodimentInfo(
+        name="test",
+        action_space=action_space,
+        observation_space=observation_space,
+    )
+    same = EmbodimentInfo(
+        name="test",
+        action_space=action_space,
+        observation_space=observation_space,
+    )
+
+    assert info.docs is None
+    assert info == same
+    assert hash(info) == hash(same)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.docs = "changed"  # type: ignore[misc]
+
+
+def test_cubepick_publishes_operating_notes() -> None:
+    docs = CubePickEmbodiment().info.docs
+    assert docs is not None
+    assert docs.strip()
 
 
 def test_core_types_are_frozen() -> None:
