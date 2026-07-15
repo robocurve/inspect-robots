@@ -1,6 +1,6 @@
 # 0016 — Embodiment-authored docs for LLM agent policies
 
-Status: draft
+Status: approved (4 critique rounds, 2026-07-15)
 Issue: robocurve/inspect-robots#109
 Companion: inspect-robots-yam (cheat-sheet content, separate PR after core release)
 
@@ -153,8 +153,9 @@ neither the observation space nor the synthesized-labels fact: the rule 1–3
 decision is computed **inside `build_toolset`** (which has all three
 inputs: the semantics' real-or-absent `dim_labels`, the observation space,
 and the mode) and passed to the `Toolset` constructor as a precomputed
-`tuple[str, tuple[str, ...]] | None`; a public `Toolset.state_labels()`
-simply returns it. Do **not** detect synthesized labels by comparing the
+`tuple[str, tuple[str, ...]] | None` (the `str` is the state field key to
+label; the inner tuple is the per-element labels); a public
+`Toolset.state_labels()` simply returns it. Do **not** detect synthesized labels by comparing the
 resolved labels against `("0", "1", …)` — an embodiment may legitimately
 name its dims that way; use the presence of `semantics.dim_labels` at the
 point of synthesis. The policy calls `state_labels()` once per `bind()`,
@@ -162,8 +163,10 @@ caches the result on itself, and passes it into `_observation_content` as
 an optional parameter (default `None` keeps the current rendering).
 
 All other state fields keep the existing unlabeled rendering. Rounding stays
-as-is. This is a pure prompt-format change; update the plugin tests that
-assert on observation text.
+as-is. This is a pure prompt-format change. Existing observation-text
+assertions survive as-is (the only one, `"state[eef_pos]" in …` in
+`test_policy_e2e.py`, hits CubePick's no-StateSpec branch → unlabeled); do
+not hunt for others.
 
 ### 3.4 YAM plugin: authored cheat-sheet (companion PR, separate repo)
 
@@ -251,8 +254,8 @@ YAM plugin (companion PR):
   guarded concretely but collision-safely: assert with word-boundary
   regexes that none of the tokens `0.48`, `0.15`, `0.03` (the default x
   bounds and z low, formatted `.4g`) appear in the docs. Deliberately
-  excluded from the check: `0.25` (y bound — substring-collides with the
-  required forearm length "0.252"), `0.4` (z high — too generic), the yaw
+  excluded from the check: `0.25` (y bound — the prose may legitimately
+  round the 0.252 m forearm to 0.25), `0.4` (z high — too generic), the yaw
   bounds (π), and the gripper 0/1 endpoints (the polarity sentence must
   state them). This is a drift tripwire, not an exhaustive guard.
 - `docs_extra` appended verbatim (including braces); empty default adds
