@@ -60,16 +60,24 @@ no change. Not a `Policy` protocol change; no API-snapshot impact
 ```python
 step = observation.extra.get("env_step")
 suffix = f" (step {step})" if isinstance(step, int) else ""
-...
+# suffix is computed ONCE, before the camera loop (env_step is
+# per-observation, not per-camera), then reused for every label:
 parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
 ```
 
 - `isinstance(step, int)` guards the fallback: under an older core (no
   injection) or a non-int value, the label is exactly today's, so the plugin
-  keeps its "no minimum core version bump" property. `bool` is an `int`
-  subclass but the rollout only ever injects real ints; guarding `bool` out
-  adds an untestable branch for a value that cannot occur — keep plain
-  `isinstance(step, int)`.
+  keeps its "no minimum core version bump" property. `bool` passes this guard
+  (`bool` subclasses `int`): on a new core the rollout's overwrite makes that
+  unreachable, and under an older core an embodiment that sets
+  `env_step=True` produces a cosmetic `(step True)` label — no worse than an
+  embodiment injecting a wrong-but-real int, which no guard can detect. Keep
+  plain `isinstance(step, int)` and pin the `True` behavior with a plugin
+  unit test so the choice is deliberate, not accidental. Same deliberateness
+  for numpy ints: an older-core embodiment emitting `env_step` as `np.int64`
+  fails `isinstance(step, int)` (numpy scalars don't subclass `int`) and
+  silently gets no label — consistent with the fallback framing, unreachable
+  on a new core (rollout injects a Python `int`), pinned in test 5.
 - The elision placeholder in `transcript()` stays
   `[image omitted: streamed camera frame]` — the join key lives in the
   adjacent label part, which the persisted transcript keeps verbatim.
@@ -77,37 +85,63 @@ parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
 
 ### Versioning
 
-The agent plugin's static version is already `0.6.0`, unreleased (bumped by
-PR #115 which is not yet on PyPI). This feature rides `0.6.0`; no further
-bump. Core needs no version action (hatch-vcs, next tag).
+The agent plugin's `0.6.0` is already on PyPI (released as part of v0.13.1,
+2026-07-15). Because `skip-existing` makes an unchanged plugin version a
+silent no-op at release time, this PR MUST bump the plugin's static version —
+to `0.7.0` (new feature) — or the feature never publishes. Core needs no
+version action (hatch-vcs, next tag).
 
 ### Docs
 
-- `Observation.extra` docstring in `types.py`: document the `env_step`
-  reservation ("the rollout injects the current step for the policy-facing
-  observation; embodiments should not set this key").
-- Agent plugin README: one line in the observation-format section showing the
-  labeled form `camera 'top_cam' (step 480):` and the join to
-  `{trial}_{camera}_{t:06d}.npy`.
-- `docs/guide/logging-and-rerun.md`: extend the transcript paragraph — the
-  step label is the join key from transcript observations to stored frames.
+- `Observation` class docstring in `types.py` (there is no per-field
+  docstring for `extra` today, and the class docstring does not mention it):
+  add the `env_step` reservation ("the rollout injects the current step into
+  the policy-facing observation's `extra`; embodiments should not set this
+  key").
+- Agent plugin README: the README has no observation-format heading (its
+  headings are Install / Quickstart / How it works); anchor the new line to
+  the existing `transcript()` sentence (~line 95, inside "How it works"),
+  showing the labeled form `camera 'top_cam' (step 480):` as the join key to
+  stored frames.
+- `docs/guide/logging-and-rerun.md`: write a short "Policy transcripts"
+  paragraph from scratch — plan 0015's transcript persistence was never
+  documented here (the file currently has no mention of transcripts). Cover:
+  what is persisted, image elision, and the step label as the join key from
+  transcript observations to stored frames. Precision caveat to include:
+  FrameStore sanitizes trial and camera names (`_safe()` in frames.py) before
+  building `{trial}_{camera}_{t:06d}.npy`, so for camera names containing
+  characters the sanitizer rewrites, the authoritative mapping is
+  `StepRecord.image_refs` / `FrameRef.path`, not string assembly.
 
 ## Testing (100% branch coverage for core; agent plugin's own suite)
 
 Core (`tests/`):
-1. Rollout injection: a probe policy records the observations it receives;
-   assert `extra["env_step"] == t` for each call and that the observations in
+1. Rollout injection: a probe policy that emits single-action chunks (so
+   `act()` fires at every step and each call maps to a known `t`) records the
+   observations it receives; assert the recorded `extra["env_step"]` sequence
+   equals `[0, 1, ..., n-1]` exactly, and that the observations in
    `record.steps` / `sink.log_step` do NOT contain `env_step` (original obs).
-2. Collision: a mock embodiment that sets `extra={"env_step": "theirs"}`;
-   the policy sees the rollout's int.
+2. Merge, not replace: a mock embodiment that sets
+   `extra={"env_step": "theirs", "unrelated": 1}` on EVERY observation it
+   returns (`reset()`'s and each `StepResult.observation` — `obs` is
+   reassigned per iteration, so reset-only extras would vacuously pass past
+   t=0); the policy-facing observation has `env_step == t` (rollout's int
+   wins) AND `extra["unrelated"] == 1` (embodiment extras survive the merge —
+   kills the `replace(obs, extra={"env_step": t})` mutant that drops
+   `**obs.extra`).
 3. Sharing, not copying: the policy-facing observation's `images` mapping is
    the same object as the embodiment's (identity assert), pinning the
    shallow-copy claim.
 
 Agent plugin (`plugins/inspect-robots-agent/tests/`):
-4. `_observation_content` with `extra={"env_step": 480}` → label text
-   `camera 'top_cam' (step 480):` precedes the image part.
-5. Without `env_step` (and with a non-int value) → today's unlabeled text.
+4. `_observation_content` with `extra={"env_step": 480}` and TWO OR MORE
+   cameras → every camera label carries the suffix (`camera 'top_cam'
+   (step 480):`, `camera 'left_cam' (step 480):`), each preceding its image
+   part — a single-camera test would pass a "label only the first camera"
+   mutant.
+5. Without `env_step` (and with a non-int value, e.g. a string) → today's
+   unlabeled text; with `env_step=True` → `(step True)` (pins the deliberate
+   bool behavior from the design section).
 6. Transcript round-trip: build a conversation via the policy, call
    `transcript()`, assert the label text survives elision next to the
    `[image omitted: ...]` placeholder.
