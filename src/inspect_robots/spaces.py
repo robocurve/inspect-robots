@@ -111,7 +111,7 @@ CANONICAL_STATE_UNITS: dict[str, str] = {
     "eef_pos": "m",
     "eef_pose": "m+quat",
     "eef_quat": "unit_quat",
-    "gripper": "normalized",  # 0 (open) .. 1 (closed)
+    "gripper": "normalized",  # 0 (closed) .. 1 (open)
     "gripper_width": "m",
 }
 
