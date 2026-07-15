@@ -55,6 +55,12 @@ The embodiment then plays the chunk at its native rate. In this case the speed
 and playout caps are step-count constructs, not wall-clock guarantees, and the
 tool result does not report seconds.
 
+When the embodiment publishes operating notes via `EmbodimentInfo.docs`
+(joint layout, sign conventions, gripper polarity), the policy appends them
+to the system prompt as an `Embodiment notes:` section. The per-step
+observation also labels the proprioceptive state vector with the action
+dimension names (`left_j0=0.01 ...`) whenever the mapping is unambiguous.
+
 Every action still passes the CLI's default safety approvers (bounds clamp plus
 per-step delta limit); the plugin contains no safety-critical code path of its
 own. An explicit `--max-action-delta` tighter than 5% of range can truncate
