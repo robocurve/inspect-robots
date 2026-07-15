@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
 from inspect_robots.types import Observation
 from inspect_robots_agent._llm import ToolCall
@@ -132,6 +133,85 @@ def test_absolute_mode_requires_exactly_one_aligned_state_field() -> None:
     )
     with pytest.raises(ToolsetError, match="exactly one"):
         build_toolset(space, two_match, control_hz=10.0)
+
+
+def test_absolute_mode_labels_its_reference_even_when_the_key_is_noncanonical() -> None:
+    canonical = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
+    assert canonical.state_labels() == ("joint_pos", _ARM_LABELS)
+
+    labels = ("x", "y", "z", "yaw")
+    space = Box(
+        shape=(4,),
+        low=-np.ones(4),
+        high=np.ones(4),
+        semantics=ActionSemantics("eef_abs_pose", dim_labels=labels),
+    )
+    observation_space = ObservationSpace(
+        state=StateSpec(fields=(StateField(key="eef_state", shape=(4,)),))
+    )
+    noncanonical = build_toolset(space, observation_space, control_hz=10.0)
+    assert noncanonical.state_labels() == ("eef_state", labels)
+
+
+def test_displacement_mode_labels_one_canonical_shape_match() -> None:
+    labels = ("dx", "dy")
+    space = Box(
+        shape=(2,),
+        low=-np.ones(2),
+        high=np.ones(2),
+        semantics=ActionSemantics("eef_delta_pos", dim_labels=labels),
+    )
+    observation_space = ObservationSpace(
+        state=StateSpec(fields=(StateField(key="eef_pos", shape=(2,)),))
+    )
+    assert build_toolset(space, observation_space, 10.0).state_labels() == ("eef_pos", labels)
+
+
+def test_displacement_mode_without_state_spec_has_no_state_labels() -> None:
+    info = CubePickEmbodiment().info
+    assert (
+        build_toolset(info.action_space, info.observation_space, info.control_hz).state_labels()
+        is None
+    )
+
+
+def test_displacement_mode_rejects_ambiguous_canonical_shape_matches() -> None:
+    labels = ("a", "b")
+    space = Box(
+        shape=(2,),
+        low=-np.ones(2),
+        high=np.ones(2),
+        semantics=ActionSemantics("joint_delta", dim_labels=labels),
+    )
+    observation_space = ObservationSpace(
+        state=StateSpec(
+            fields=(
+                StateField(key="joint_pos", shape=(2,)),
+                StateField(key="eef_pos", shape=(2,)),
+            )
+        )
+    )
+    assert build_toolset(space, observation_space, 10.0).state_labels() is None
+
+
+def test_displacement_mode_excludes_noncanonical_shape_matches() -> None:
+    space = Box(
+        shape=(2,),
+        low=-np.ones(2),
+        high=np.ones(2),
+        semantics=ActionSemantics("joint_delta", dim_labels=("a", "b")),
+    )
+    observation_space = ObservationSpace(
+        state=StateSpec(fields=(StateField(key="object_pose", shape=(2,)),))
+    )
+    assert build_toolset(space, observation_space, 10.0).state_labels() is None
+
+
+def test_synthesized_action_labels_do_not_label_state() -> None:
+    observation_space = ObservationSpace(
+        state=StateSpec(fields=(StateField(key="eef_pos", shape=(2,)),))
+    )
+    assert build_toolset(_delta_space(), observation_space, 10.0).state_labels() is None
 
 
 @pytest.mark.parametrize(

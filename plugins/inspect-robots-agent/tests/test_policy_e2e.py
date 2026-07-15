@@ -8,8 +8,9 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -29,6 +30,7 @@ from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
+from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, _observation_content
 
 # --- scripted-conversation harness ---------------------------------------------
 
@@ -183,6 +185,91 @@ def test_transcript_is_none_before_first_reset() -> None:
     assert policy.transcript() is None
 
 
+def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="(unbound)", budget=100)
+
+
+def test_embodiment_docs_are_appended_verbatim_after_formatting() -> None:
+    docs = '  Keep {x/y} literal.\n```json\n{"open": 1}\n```  '
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == (
+        _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+        + "\n\nEmbodiment notes:\n"
+        + docs.strip()
+    )
+
+
+@pytest.mark.parametrize("docs", [None, "", " \n\t "])
+def test_absent_embodiment_docs_leave_the_prompt_unchanged(docs: str | None) -> None:
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+
+
+def test_bind_accepts_legacy_embodiment_info_without_docs() -> None:
+    current = CubePickEmbodiment().info
+
+    class _LegacyInfo:
+        name = current.name
+        action_space = current.action_space
+        observation_space = current.observation_space
+        control_hz = current.control_hz
+
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(cast(EmbodimentInfo, _LegacyInfo()))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert "Embodiment notes:" not in transcript[0]["content"]
+
+
+def test_observation_content_labels_the_selected_state_field_exactly() -> None:
+    content = _observation_content(
+        Observation(state={"joint_pos": np.array([0.01, -0.02, 0.98])}),
+        ("joint_pos", ("left_j0", "left_j1", "right_gripper")),
+    )
+
+    assert content == [
+        {
+            "type": "text",
+            "text": (
+                "Current observation.\n"
+                "state[joint_pos]: left_j0=0.01 left_j1=-0.02 right_gripper=0.98"
+            ),
+        }
+    ]
+
+
+def test_observation_content_uses_unlabeled_fallback_for_length_mismatch() -> None:
+    content = _observation_content(
+        Observation(state={"joint_pos": np.array([0.01, -0.02])}),
+        ("joint_pos", ("left_j0", "left_j1", "right_gripper")),
+    )
+
+    assert content[0]["text"] == "Current observation.\nstate[joint_pos]: [0.01, -0.02]"
+
+
 def test_transcript_strips_images_and_preserves_text_and_tools() -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="reach"))
@@ -244,6 +331,9 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
     assert [t["function"]["name"] for t in first["tools"]] == ["move_by", "done", "give_up"]
     system, goal, observation = first["messages"]
     assert "cubepick" in system["content"]
+    assert "Embodiment notes:\n" in system["content"]
+    docs = CubePickEmbodiment().info.docs
+    assert docs is not None and docs in system["content"]
     assert goal["content"] == "Goal: reach the cube"
     text_parts = [p["text"] for p in observation["content"] if p["type"] == "text"]
     assert any("state[eef_pos]" in t for t in text_parts)
