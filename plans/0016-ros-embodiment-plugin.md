@@ -59,7 +59,8 @@ ROS-MCP?" (issue #104 has the long form):
   get/set — `step()` publishes to a topic; actions' goal/feedback/result
   lifecycle doesn't fit a control-rate loop.
 - **No TF** — `eef_pose` comes from a pose topic if the user has one
-  (ros2_control publishes one for most arms; otherwise omit it).
+  (some drivers/broadcasters publish one, e.g. UR's `tcp_pose_broadcaster`
+  or ros2_control's recent `pose_broadcaster`; otherwise omit it).
 - **No URDF introspection** — action bounds are explicit config (see §5;
   guardrails need honest bounds, and a wrong guess is worse than a required
   arg).
@@ -78,9 +79,10 @@ ROS-MCP?" (issue #104 has the long form):
   client dead; the next client call raises, the rollout wraps it into
   `EmbodimentFault`, and `EmbodimentFault` halts the eval (`errors.py`) —
   which is the right outcome when the link to a moving robot drops. (A
-  reset-time reconnect path would be nearly unreachable in CLI runs since
-  `eval()` closes registry-resolved embodiments on halt; not worth the
-  code.)
+  reset-time reconnect path would be nearly unreachable: a halt ends the
+  eval and the embodiment is closed — by the CLI's own `finally` for
+  `inspect-robots run`, or by `eval()` for registry-name-resolved
+  embodiments; not worth the code.)
 
 ## 2. Grounding: the rosbridge v2 protocol (verified against spec)
 
@@ -179,8 +181,13 @@ exactly the degenerate loop R1's escape hatch exists for. So:
 - Freshness is a **separate** guarantee, not a side effect of the sleep
   (at a chunk boundary there is no sleep, and a state stream throttled at
   exactly the control rate would only race the deadline): after
-  publishing, `step()` waits for a joint-states message whose receive
-  stamp postdates this step's publish, bounded by `fresh_obs_timeout_s`
+  publishing, `step()` waits for a joint-states message *newer than the
+  cache entry at publish time* — implemented as a per-topic monotonic
+  **sequence number** (the receive thread increments it per message;
+  `step()` captures it just before publishing and waits for `seq >
+  seq_at_publish`), which is immune to equal-timestamp ties that a
+  stamp comparison would race on (and that an injected fake clock would
+  hit deterministically in tests). Bounded by `fresh_obs_timeout_s`
   (default `2/control_hz`; timeout ⇒ staleness fault naming both
   `fresh_obs_timeout_s` and `control_hz` as the knobs). To keep that wait
   short, state topics subscribe at **2× the control rate**
@@ -191,11 +198,17 @@ exactly the degenerate loop R1's escape hatch exists for. So:
   documented rather than hidden.
 - The design assumes the robot's native `joint_states` rate is at least
   ~2× `control_hz` (real arms publish at 25-500 Hz; `throttle_rate` can
-  only thin a stream, never speed one up). `reset()` measures the
-  inter-arrival rate during its first-message wait and warns when the
-  native rate is below 2× `control_hz` ("lower `control_hz` or raise
-  `fresh_obs_timeout_s`"), so a slow publisher is diagnosed up front
-  instead of as a mid-rollout staleness fault on a healthy robot.
+  only thin a stream, never speed one up). The first `reset()` runs a
+  **preflight rate measurement**: it subscribes to `joint_states`
+  *unthrottled*, collects messages for a short window (until 5 messages
+  or 1 s, whichever first), computes the native rate from receive-stamp
+  deltas, warns when it is below 2× `control_hz` ("lower `control_hz` or
+  raise `fresh_obs_timeout_s`"), then resubscribes throttled at 2× for
+  the rollout. Measuring *before* throttling is the point: a throttled
+  stream observes `ceil(throttle/p)·p` intervals and is mathematically
+  capped at 2× `control_hz`, so measuring through it would warn on every
+  healthy robot. Tests must cover both directions — a slow publisher
+  warns *and a fast one does not*.
 - Core stays untouched; if/when core pacing lands, `self_paced` remains
   correct (the framework defers to it).
 
@@ -242,7 +255,8 @@ string→string maps.
 | `command_topic` | **required** | where arm actions go |
 | `command_type` | `"joint_trajectory"` | `"joint_trajectory"` (`trajectory_msgs/JointTrajectory`, one point, `time_from_start` = 1/`control_hz`) or `"float64_multi_array"` (`std_msgs/Float64MultiArray`) |
 | `action_low` / `action_high` | **required** | per-arm-joint bounds, `len(joints)` floats each |
-| `gripper_topic` | `None` | optional command topic for a 1-DoF gripper (`std_msgs/Float64` position); when set, action dim grows by 1 |
+| `gripper_topic` | `None` | optional command topic for a 1-DoF gripper; when set, action dim grows by 1 |
+| `gripper_command_type` | version-dependent | `"float64_multi_array"` (default when `ros_version=2`: the one-joint `forward_command_controller` interface — stock ROS 2 controllers do not consume a bare `Float64`) or `"float64"` (default when `ros_version=1`: the classic `ros_control` `<controller>/command` interface). README maps both to controller families |
 | `gripper_joint` | `None` | joint-states name holding the gripper position (required iff `gripper_topic`) |
 | `gripper_low` / `gripper_high` | `None` | **required iff `gripper_topic`**: the gripper's native command range (rad or m — robot-specific; no default, same honesty rule as arm bounds). Appended to the action `Box` bounds and used to normalize the canonical `gripper` observation to 0..1 |
 | `gripper_closed_at` | `"low"` | `"low"` or `"high"`: which end of the command range is *closed*. The canonical `gripper` observation pins 0 = closed, 1 = open, and `Box` requires low < high, so polarity must be a flag, not a bound swap |
@@ -252,7 +266,7 @@ string→string maps.
 | `fresh_obs_timeout_s` | `2/control_hz` | max wait for a post-publish joint-states message in `step()` (§3); timeout ⇒ staleness fault |
 | `camera_throttle_ms` | `1000/control_hz` | camera subscribe `throttle_rate`; `0` = unthrottled. Default ties camera bandwidth to the control rate — base64 JSON frames on a thin link otherwise queue in the socket and trip the staleness fault |
 | `reset_service` | `None` | optional service called on `reset()` (e.g. a bringup-provided home routine); empty args, must return `result: true` |
-| `operator_reset_confirm` | `False` | when true, `reset()` prints the scene instruction and blocks on Enter (TTY prompt via `input()`) — the "human arranges the scene" path |
+| `operator_reset_confirm` | `False` | when true, `reset()` prints the scene instruction and blocks on Enter (TTY prompt via `input()`) — the "human arranges the scene" path. On a non-TTY stdin `input()` raises `EOFError` → `EmbodimentFault` → halt, which is the *intended* outcome for a confirm-required run with no operator (unlike the CLI's own operator-scorer prompt, which degrades to skip); pinned by a test |
 | `obs_timeout_s` | `5.0` | max wait for the first message on every subscribed topic (reset-time) |
 | `staleness_s` | `2.0` | max age of cached state messages when an observation is assembled; older ⇒ raise (the robot stopped publishing; wrapped into `EmbodimentFault` by the rollout). This is also the **cross-modal skew bound**: a fresh `joint_pos` may pair with an `eef_pose`/camera frame up to `staleness_s` old (up to 20 control periods at the defaults) — `state_time`/`image_times` expose the actual ages, and the README states the bound |
 | `simulated` | `False` | sets `EmbodimentInfo.is_simulated` (Gazebo-behind-rosbridge runs) |
@@ -276,11 +290,15 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
   value; the field is irrelevant to `joint_pos` mode). `dim_labels` are
   mandatory in practice: conformance errors without them and the agent
   policy's tool surface is built from them; they also pin the gripper to
-  the last dim. Factory validations: an arm joint literally named
-  `"gripper"` alongside `gripper_topic` would duplicate `dim_labels`
-  (conformance error) ⇒ rejected at construction; `gripper_low >=
-  gripper_high` is rejected too (conformance only warns on zero width,
-  but the 0..1 normalization divides by the range).
+  the last dim. Factory validations: duplicate names within `joints`
+  and an arm joint literally named `"gripper"` alongside
+  `gripper_topic` are rejected at construction (either would duplicate
+  `dim_labels` — a conformance error `eval()` never runs, so left
+  unchecked the reorder-by-name would silently duplicate one position
+  across dims and publish repeated `joint_names`); `gripper_low >=
+  gripper_high` is rejected too (`Box` itself allows `low <= high` with
+  equality only drawing a conformance `zero_width` warning, but the
+  0..1 normalization divides by the range).
 - `observation_space.state` (`StateSpec`):
   - `joint_pos`, shape `(d,)` — arm joints in `joints` order, plus the raw
     `gripper_joint` position as the last element when a gripper is
@@ -399,7 +417,8 @@ axis.
   (missing joint ⇒ error listing available names), CompressedImage
   base64→Pillow→RGB (module-top `PIL` import — it's a declared dep),
   PoseStamped xyzw→wxyz reorder, JointTrajectory (per-`ros_version`
-  duration fields) / Float64MultiArray / Float64 builders.
+  duration fields) / Float64MultiArray builders, and the gripper command
+  builders (`float64` and one-element `float64_multi_array`).
 
 ## 7. Tests (no ROS, no hardware, no external processes)
 
@@ -416,8 +435,8 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   correctly; scalar-coerced 1-DoF bounds (float, not str) normalize too;
   required-arg omissions (incl. `gripper_low/high` when `gripper_topic`)
   raise actionable errors; factory rejections: `d == 7` +
-  `eef_pose_topic`, arm joint named `"gripper"` with a gripper, and
-  `gripper_low >= gripper_high`.
+  `eef_pose_topic`, duplicate names in `joints`, arm joint named
+  `"gripper"` with a gripper, and `gripper_low >= gripper_high`.
 - `.info`: correct spaces/semantics/`dim_labels`/capabilities for all config
   shapes (gripper folds into `joint_pos (d,)` and bounds; normalized
   `gripper` field declared; `self_paced` always on); no network before
@@ -434,7 +453,10 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
 - step: JointTrajectory golden shapes for **both** `ros_version`s
   (`{secs,nsecs}` vs `{sec,nanosec}`, type strings) and Float64MultiArray;
   joint order = config order; `time_from_start` = period; gripper split
-  publishes two messages with the raw (un-normalized) command; pacing:
+  publishes two messages with the raw (un-normalized) command in the
+  version-appropriate default `gripper_command_type` (and the explicit
+  override); the fresh-obs wait keys on the per-topic sequence number
+  (equal-stamp tie test); pacing:
   **every inter-publish interval ≥ the control period under fast
   back-to-back steps** (the assertion that catches a publish-then-sleep
   implementation, which passes weaker "slept once" checks while
@@ -445,11 +467,14 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   False; observation `gripper` normalized 0..1 and flipped under
   `gripper_closed_at="high"`; `instruction` threaded onto every
   observation; `state_time`/`image_times` follow the §5 convention.
-- reset warnings: slow native `joint_states` rate (< 2× `control_hz`)
-  warns at first reset; the second reset with neither `reset_service`
+- reset warnings: the unthrottled preflight window flags a slow native
+  `joint_states` rate (< 2× `control_hz`) **and stays silent for a fast
+  publisher** (the no-warn direction is the test that catches measuring
+  through the throttle); the second reset with neither `reset_service`
   nor `operator_reset_confirm` warns once about physical-reset absence;
   post-confirm fresh wait is bounded by `obs_timeout_s`, not
-  `fresh_obs_timeout_s`.
+  `fresh_obs_timeout_s`; `operator_reset_confirm` on non-TTY stdin
+  raises (`EOFError` path pinned).
 - messages: JointState reorder (shuffled names), missing-joint error,
   CompressedImage jpeg + png decode to `(H, W, 3)` uint8 RGB, exotic ROS 1
   `format` strings, PoseStamped xyzw→wxyz reorder.
