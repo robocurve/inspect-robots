@@ -292,6 +292,16 @@ class Toolset:
             return self._cap_error()
         steps = max(1, math.ceil(float(headed_ratio)))
         per_step = vector / steps
+        for index in named_indices:
+            # Subnormal deltas can underflow the split to exactly zero; a
+            # success note over a zero-motion chunk would be a silent lie.
+            if vector[index] != 0 and per_step[index] == 0:
+                return ToolResult(
+                    error=(
+                        f"delta for {self._labels[index]} is too small to split "
+                        "into executable steps"
+                    )
+                )
         actions = [Action(data=per_step.copy()) for _ in range(steps)]
         return self._success(actions, steps)
 
@@ -383,13 +393,31 @@ def build_toolset(
         raise ToolsetError(f"{mode_name} control needs finite low and high bounds")
     low64 = np.asarray(low, dtype=np.float64)
     high64 = np.asarray(high, dtype=np.float64)
-    if not bool(np.all(np.isfinite(high64 - low64))):
+    # The range must be finite in the box's native dtype, not just in float64:
+    # DeltaLimitApprover subtracts without promoting, so float32 bounds like
+    # [-3e38, 3e38] overflow for it even though the float64 difference is fine.
+    with np.errstate(over="ignore"):
+        native_range = np.asarray(high - low, dtype=np.float64)
+    if not bool(np.all(np.isfinite(native_range)) and np.all(np.isfinite(high64 - low64))):
         raise ToolsetError("action-space range (high - low) overflows; bounds are too large")
     if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
         raise ToolsetError("displacement control bounds must contain zero in every dimension")
     # DeltaLimitApprover derives its default limit in the box's native dtype;
     # reproduce that arithmetic exactly so our ceiling can never exceed it.
     native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
+    if absolute:
+        # Interpolants snap to the float grid at the bounds' magnitude. If that
+        # grid is coarse relative to the backstop (offset boxes like
+        # [1e16, 1e16 + 2], or ranges whose 5% underflows to zero), emitted
+        # steps jump by more than the backstop allows and motions silently
+        # truncate — the exact failure this plugin exists to remove.
+        spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
+        movable = high64 > low64
+        if bool(np.any(movable & (spacing > 5e-7 * native_backstop))):
+            raise ToolsetError(
+                "bounds are too coarse at this magnitude for speed-limited "
+                "interpolation (float spacing exceeds the per-step budget)"
+            )
 
     labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
     pairs = ", ".join(

@@ -218,6 +218,22 @@ def test_build_rejects_degenerate_derivations() -> None:
     with pytest.raises(ToolsetError, match=r"range .* overflows"):
         build_toolset(huge, _absolute_obs_space(), control_hz=10.0)
 
+    # float32 bounds whose difference overflows only in the native dtype:
+    # DeltaLimitApprover subtracts without promoting, so this must reject too.
+    huge32 = _absolute_space(
+        low=np.array([-3e38], dtype=np.float32), high=np.array([3e38], dtype=np.float32)
+    )
+    with pytest.raises(ToolsetError, match=r"range .* overflows"):
+        build_toolset(huge32, _absolute_obs_space(), control_hz=10.0)
+
+    offset = _absolute_space(low=np.array([1e16]), high=np.array([1e16 + 2.0]))
+    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+        build_toolset(offset, _absolute_obs_space(), control_hz=10.0)
+
+    subnormal_range = _absolute_space(low=np.array([0.0]), high=np.array([5e-324]))
+    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+        build_toolset(subnormal_range, _absolute_obs_space(), control_hz=10.0)
+
     matrix = Box(
         shape=(2, 2),
         low=np.zeros((2, 2)),
@@ -520,6 +536,14 @@ def test_huge_finite_move_by_returns_cap_error() -> None:
     result = toolset.execute(_call("move_by", deltas={"0": 1e308}), _obs({}))
     assert result.chunk is None
     assert result.error is not None and "split the move into smaller motions" in result.error
+
+
+def test_subnormal_delta_underflow_is_a_structured_error() -> None:
+    space = _delta_space(low=np.array([-5e-324, -0.1]), high=np.array([5e-324, 0.1]))
+    toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
+    result = toolset.execute(_call("move_by", deltas={"0": 5e-324}), _obs({}))
+    assert result.chunk is None
+    assert result.error is not None and "too small to split" in result.error
 
 
 def test_arbitrary_precision_json_integer_is_a_structured_error() -> None:

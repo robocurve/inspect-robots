@@ -194,9 +194,18 @@ with actionable messages (same stance as `DeltaLimitApprover`):
   `control_hz` whose `10 * hz` playout cap overflows to `inf`; a
   `max_speed_frac` whose `frac / hz` underflows to exactly zero (it would
   misreport every dimension as fixed); a `high - low` range that overflows
-  to `inf` despite finite endpoints (e.g. `[-1e308, 1e308]`); and non-1-D
+  to `inf` despite finite endpoints — checked in *both* float64 and the
+  box's native dtype, since `DeltaLimitApprover` subtracts without
+  promoting (float32 `[-3e38, 3e38]` overflows only natively); non-1-D
   action-space shapes (the toolset's indexing and bounds text are
-  vector-only).
+  vector-only); and, in absolute modes, bounds whose float spacing at
+  their magnitude exceeds `5e-7 *` the native backstop (offset boxes like
+  `[1e16, 1e16 + 2]` or ranges whose 5% underflows to zero) — interpolants
+  snap to the float grid there, emitted steps jump past the backstop, and
+  motions would silently truncate.
+- `move_by` per-step underflow: a subnormal requested delta can make
+  `vector / steps` exactly zero; a success note over a zero-motion chunk
+  would lie, so this returns a structured "too small to split" error.
 - Tool-call values: a JSON number is coerced with `float()` before the
   finiteness check — arbitrary-precision integers (`10**400`) overflow
   `float()` and crash `np.isfinite` outright, and both must return the
