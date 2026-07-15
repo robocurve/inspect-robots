@@ -93,7 +93,8 @@ class LLMAgentPolicy(PolicyBase):
             raise ValueError("max_llm_calls must be >= 1")
         if effort is not None and effort not in _EFFORT_LEVELS:
             raise ValueError(
-                f"effort must be one of {sorted(_EFFORT_LEVELS)} or none, got {effort!r}"
+                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
+                f"the field, got {effort!r}"
             )
         self._client = ChatClient(provider, transport=transport)
         self._max_llm_calls = max_llm_calls

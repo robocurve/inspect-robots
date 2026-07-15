@@ -327,7 +327,7 @@ def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert script.requests[0]["reasoning_effort"] == "none"
 
-    with pytest.raises(ValueError, match="effort"):
+    with pytest.raises(ValueError, match=r"or None to omit the field, got 'turbo'"):
         _policy(_Script([]), effort="turbo")
 
 
