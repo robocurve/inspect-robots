@@ -18,7 +18,7 @@ pip install inspect-robots inspect-robots-agent
 export ANTHROPIC_API_KEY=sk-ant-...
 
 inspect-robots "pick up the cube" --policy agent \
-    -P model=anthropic/claude-fable-5 --embodiment cubepick
+    -P model=anthropic/claude-fable-5 -P effort=low --embodiment cubepick
 ```
 
 Model strings are OpenRouter-style `provider/model`, resolved from
