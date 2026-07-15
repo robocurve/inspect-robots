@@ -91,3 +91,13 @@ each eval gets its own directory; read the exact path from the log's
 ```python
 eval(task, policy, embodiment, log_dir="logs", store_frames=True)
 ```
+
+Stored frames are raw `.npy` arrays, not a video. To watch an episode after
+the fact, render them with the [`video` subcommand](cli.md#inspect-robots-video):
+
+```bash
+inspect-robots video logs/adhoc_xxxx.json
+```
+
+`inspect-robots inspect` prints the frames directory and this command as a
+hint whenever a log has stored frames.

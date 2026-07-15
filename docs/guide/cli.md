@@ -226,6 +226,30 @@ scenes:
   ...
 ```
 
+## `inspect-robots video`
+
+Render a `--store-frames` run's stored camera frames into one MP4 per
+(trial, camera) stream:
+
+```bash
+inspect-robots video logs/adhoc_xxxx.json
+```
+
+```text
+fps: 10 (control_hz from log)
+wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote 2/2 streams
+```
+
+Encoding is done by the `ffmpeg` binary (no Python dependencies are added);
+install it from your package manager, or point at a specific build with
+`--ffmpeg PATH`. Videos land in the frames directory by default (`--out DIR`
+overrides). The playback rate defaults to the log's `control_hz` and can be
+overridden with `--fps N`. A stream that fails to encode is reported on
+stderr and the remaining streams still encode; the exit code is 1 if any
+stream failed.
+
 ## `inspect-robots --version`
 
 ```bash
