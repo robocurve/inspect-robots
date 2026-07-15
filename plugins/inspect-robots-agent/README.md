@@ -33,11 +33,14 @@ Model strings are OpenRouter-style `provider/model`, resolved from
 
 Motion tool calls state where to go, not how long to move. For absolute modes,
 `move_joints` interpolates named partial targets from the observed state at a
-fixed safe speed. The default `max_speed_frac=0.5` allows half of each
+fixed safe speed. The default `max_speed_frac=0.1` allows a tenth of each
 dimension's range per second, subject to a 5%-of-range per-step ceiling that
-matches the core's default delta backstop. The tool result reports the computed
-step count and, when the embodiment declares `control_hz`, the corresponding
-playout time. `duration_s` is not part of either motion tool.
+matches the core's default delta backstop. At that default a near-full-range
+move exceeds the 10 s per-call playout cap, so the agent receives a
+split-the-move error and issues it as two smaller motions; raise the fraction
+(up to `0.5` before the ceiling binds at 10 Hz) for faster arms. The tool
+result reports the computed step count and, when the embodiment declares
+`control_hz`, the corresponding playout time. `duration_s` is not part of either motion tool.
 
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
@@ -63,8 +66,8 @@ motion fall short of the tool's requested total.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`max_llm_calls`, `temperature`, `effort`, `max_speed_frac`. The speed fraction
-defaults to `0.5` and applies only to absolute modes.
+`max_llm_calls` (default `100`), `temperature`, `effort`, `max_speed_frac`.
+The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the

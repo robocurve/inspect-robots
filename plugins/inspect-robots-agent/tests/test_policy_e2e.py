@@ -169,8 +169,8 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     # Headroom splits a box-sized move into two steps, then done holds once.
     assert len(record.steps) == 3
     assert logs[0].eval.policy_config["model"] == "test/model"
-    assert logs[0].eval.policy_config["max_llm_calls"] == 50
-    assert logs[0].eval.policy_config["max_speed_frac"] == 0.5
+    assert logs[0].eval.policy_config["max_llm_calls"] == 100
+    assert logs[0].eval.policy_config["max_speed_frac"] == 0.1
 
 
 def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:

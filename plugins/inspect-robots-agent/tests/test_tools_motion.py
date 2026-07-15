@@ -77,7 +77,7 @@ def _execute_absolute(
     current: float = 0.0,
     *,
     control_hz: float | None = 10.0,
-    max_speed_frac: float = 0.5,
+    max_speed_frac: float = 0.1,
 ) -> ToolResult:
     toolset = build_toolset(
         _absolute_space(),
@@ -264,7 +264,10 @@ def test_low_precision_bounds_never_outrun_native_backstop() -> None:
         high=np.array([1.0], dtype=np.float16),
         semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
     )
-    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+    # frac 0.5 puts the frac-derived limit (0.1) above the float16-native
+    # backstop, so the elementwise min actually binds; the 0.1 default would
+    # pass this test without the native-dtype fix at all.
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0, max_speed_frac=0.5)
     result = toolset.execute(
         _call("move_joints", targets={"joint": 0.9999}),
         _obs({"q": np.array([0.0])}),
@@ -309,11 +312,13 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
 
 
 def test_move_joints_derives_steps_and_snaps_bit_exact_target() -> None:
+    # Factory default frac 0.1 at 10 Hz: 1% of range per step, distance 1.5
+    # over range 2.0 with headroom -> 76 steps.
     result = _execute_absolute(1.0, current=-0.5)
     assert result.error is None and result.chunk is not None
-    assert len(result.chunk.actions) == 16
+    assert len(result.chunk.actions) == 76
     assert result.chunk.actions[-1].data[0] == 1.0
-    assert result.note == "executing move_joints over 16 steps (1.6s)"
+    assert result.note == "executing move_joints over 76 steps (7.6s)"
 
     # Pins the snap itself: 0.3 is interior (clip cannot repair it) and plain
     # linspace arithmetic lands on 0.30000000000000004 instead.
@@ -380,6 +385,9 @@ def test_move_joints_rejects_out_of_bounds_but_accepts_bound() -> None:
     )
     assert accepted.error is None and accepted.chunk is not None
     assert accepted.chunk.actions[-1].data[0] == -1.0
+    # Also pins build_toolset's factory default (no frac passed): 0.1 at
+    # 10 Hz over range 2.0, distance 1.0 -> 51 steps.
+    assert len(accepted.chunk.actions) == 51
 
 
 def test_zero_width_target_uses_bound_not_noisy_observation_and_no_steps() -> None:
@@ -459,7 +467,10 @@ def test_move_joints_over_cap_returns_structured_error() -> None:
 
 def test_absolute_chunks_pass_default_approvers_across_calls() -> None:
     space = _absolute_space()
-    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+    # frac 0.5 pins the stress case where the per-step size sits exactly at
+    # the backstop boundary (the 0.1 default runs far below it, and its
+    # full-range second move would hit the per-call playout cap).
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0, max_speed_frac=0.5)
     chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
     store: dict[str, Any] = {}
 
@@ -634,13 +645,13 @@ def test_stray_duration_key_is_ignored() -> None:
 def test_control_hz_none_uses_fallback_without_seconds_note() -> None:
     result = _execute_absolute(1.0, control_hz=None)
     assert result.error is None and result.chunk is not None
-    assert len(result.chunk.actions) == 11
+    assert len(result.chunk.actions) == 51
     assert result.chunk.control_hz is None
-    assert result.note == "executing move_joints over 11 steps"
+    assert result.note == "executing move_joints over 51 steps"
 
 
 def test_declared_rate_note_divides_steps_by_hz() -> None:
     result = _execute_absolute(0.5, control_hz=20.0)
     assert result.chunk is not None
-    assert len(result.chunk.actions) == 11
-    assert result.note == "executing move_joints over 11 steps (0.6s)"
+    assert len(result.chunk.actions) == 51
+    assert result.note == "executing move_joints over 51 steps (2.5s)"

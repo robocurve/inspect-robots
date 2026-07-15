@@ -55,9 +55,9 @@ class AgentPolicyConfig(PolicyConfig):
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
-    max_llm_calls: int = 50
+    max_llm_calls: int = 100
     effort: str | None = "low"
-    max_speed_frac: float = 0.5
+    max_speed_frac: float = 0.1
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -73,10 +73,10 @@ class LLMAgentPolicy(PolicyBase):
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str | None = None,
-        max_llm_calls: int = 50,
+        max_llm_calls: int = 100,
         temperature: float | None = None,
         effort: str | None = "low",
-        max_speed_frac: float = 0.5,
+        max_speed_frac: float = 0.1,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
