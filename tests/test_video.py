@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -88,45 +89,67 @@ def _write_log(tmp_path: Path, log: EvalLog, name: str = "run.json") -> Path:
 class _FakeStdin:
     """Pipe stand-in that records bytes and can break on write or close."""
 
-    def __init__(self, fail_on_write_after: int | None, fail_at_close: bool) -> None:
+    def __init__(
+        self,
+        fail_on_write_after: int | None,
+        fail_at_close: bool,
+        write_exception: type[BaseException],
+    ) -> None:
         self.piped = bytearray()
         self.writes = 0
+        self.close_called = False
         self._fail_on_write_after = fail_on_write_after
         self._fail_at_close = fail_at_close
+        self._write_exception = write_exception
 
     def write(self, data: bytes) -> int:
         if self._fail_on_write_after is not None and self.writes >= self._fail_on_write_after:
-            raise BrokenPipeError
+            raise self._write_exception
         self.writes += 1
         self.piped.extend(data)
         return len(data)
 
     def close(self) -> None:
+        self.close_called = True
         if self._fail_at_close:
             raise BrokenPipeError
 
 
 class _FakePopen:
-    """Records argv, consumes stdin, and writes stderr through the real fd."""
+    """Records argv, consumes stdin, writes stderr through the real fd, and
+    snapshots lifecycle state at wait() so tests can pin call ordering."""
 
     calls: ClassVar[list[_FakePopen]] = []
     returncode_next = 0
     stderr_text_next = ""
     fail_on_write_after: ClassVar[int | None] = None
     fail_at_close = False
+    write_exception: ClassVar[type[BaseException]] = BrokenPipeError
 
     def __init__(self, argv: list[str], stdin: Any, stdout: Any, stderr: int) -> None:
         self.argv = argv
         self.stdout = stdout
         self._stderr_fd = stderr
-        self.stdin = _FakeStdin(_FakePopen.fail_on_write_after, _FakePopen.fail_at_close)
+        self.stdin = _FakeStdin(
+            _FakePopen.fail_on_write_after,
+            _FakePopen.fail_at_close,
+            _FakePopen.write_exception,
+        )
         self.killed = False
+        self.stdin_closed_at_wait: bool | None = None
+        self.out_exists_at_wait: bool | None = None
         _FakePopen.calls.append(self)
 
     def kill(self) -> None:
         self.killed = True
 
     def wait(self) -> int:
+        # Snapshot lifecycle state the way a real child would experience it:
+        # was stdin closed (EOF — without it a real ffmpeg never exits and
+        # wait() hangs forever), and does the output still exist (unlinking a
+        # file the child holds open fails on Windows)?
+        self.stdin_closed_at_wait = self.stdin.close_called
+        self.out_exists_at_wait = Path(self.argv[-1]).exists()
         # Like a real child: stderr text lands in the file the parent passed.
         if _FakePopen.stderr_text_next:
             os.write(self._stderr_fd, _FakePopen.stderr_text_next.encode())
@@ -140,6 +163,7 @@ def fake_popen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> type[_FakePop
     _FakePopen.stderr_text_next = ""
     _FakePopen.fail_on_write_after = None
     _FakePopen.fail_at_close = False
+    _FakePopen.write_exception = BrokenPipeError
     monkeypatch.setattr(subprocess, "Popen", _FakePopen)
     # Keep ffmpeg's stderr temp files inside tmp_path so leaks are assertable.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -242,6 +266,10 @@ def test_encode_pins_argv_and_pipes_exact_bytes(
     assert proc.stdout is subprocess.DEVNULL
     expected = np.load(frames[0][1]).tobytes() + np.load(frames[1][1]).tobytes()
     assert bytes(proc.stdin.piped) == expected
+    # Lifecycle ordering: stdin must be closed (EOF) before wait(), or a
+    # real ffmpeg never exits and the untimed wait() hangs forever.
+    assert proc.stdin.close_called
+    assert proc.stdin_closed_at_wait is True
     assert _no_temp_leak(tmp_path)
 
 
@@ -312,6 +340,10 @@ def test_encode_truncated_mid_stream_kills_and_unlinks(
     assert result.error is not None and "s_000001.npy" in result.error
     (proc,) = fake_popen.calls
     assert proc.killed
+    # Cleanup ordering: the partial output must survive until after wait()
+    # (unlinking a file the child holds open fails on Windows) and be gone
+    # afterwards.
+    assert proc.out_exists_at_wait is True
     assert not out.exists()
     assert _no_temp_leak(tmp_path)
 
@@ -395,6 +427,19 @@ def test_encode_broken_pipe_at_close_is_caught(
     assert result.error == "moov atom write failed"
 
 
+def test_encode_interrupt_mid_pipe_propagates_without_temp_leak(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    # Ctrl-C during a multi-thousand-frame encode must not leave the stderr
+    # temp file behind: unlink-on-every-path includes escaping exceptions.
+    fake_popen.fail_on_write_after = 0
+    fake_popen.write_exception = KeyboardInterrupt
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    with pytest.raises(KeyboardInterrupt):
+        encode_stream(frames, tmp_path / "s.mp4", 10.0, "/fake/ffmpeg")
+    assert _no_temp_leak(tmp_path)
+
+
 def test_encode_popen_raising_is_a_hard_exit_without_temp_leak(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,7 +481,7 @@ def test_video_end_to_end_writes_streams_and_summary(
     out = capsys.readouterr().out
     assert "fps: 10 (control_hz from log)" in out
     assert f"wrote {frames_root / 'scene-0-e0_left_cam.mp4'} (2 frames)" in out
-    assert f"wrote {frames_root / 'scene-0-e0_right_cam.mp4'} (1 frames)" in out
+    assert f"wrote {frames_root / 'scene-0-e0_right_cam.mp4'} (1 frame)" in out
     assert "wrote 2/2 streams" in out
     assert len(fake_popen.calls) == 2
 
@@ -460,7 +505,7 @@ def test_video_failure_isolation_and_exit_code(
 
     captured = capsys.readouterr()
     assert "failed: a_cam: unreadable frame" in captured.err
-    assert f"wrote {frames_root / 'b_cam.mp4'} (1 frames)" in captured.out
+    assert f"wrote {frames_root / 'b_cam.mp4'} (1 frame)" in captured.out
     assert "wrote 1/2 streams, 1 failed" in captured.out
 
 
@@ -481,7 +526,7 @@ def test_video_warns_about_stray_npy_and_empty_skips_on_stderr(
 
     err = capsys.readouterr().err
     assert "warning: skipping notes.npy" in err
-    assert "warning: cam: skipped 1 empty frames" in err
+    assert "warning: cam: skipped 1 empty frame" in err
 
 
 def test_video_requires_stored_frames(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -492,7 +537,9 @@ def test_video_requires_stored_frames(tmp_path: Path, capsys: pytest.CaptureFixt
 
 def test_video_unresolvable_frames_dir_lists_both_candidates(tmp_path: Path) -> None:
     log_path = _write_log(tmp_path, _frames_log("gone/frames/stamp"))
-    with pytest.raises(SystemExit, match=r"tried .*gone/frames/stamp.*frames/stamp"):
+    # Escape the expected paths: on Windows they render with backslashes.
+    as_is, fallback = frames_dir_candidates("gone/frames/stamp", log_path)
+    with pytest.raises(SystemExit, match=re.escape(f"tried {as_is} and {fallback}")):
         main(["video", str(log_path)])
 
 
@@ -632,7 +679,7 @@ def test_inspect_frames_line_uses_resolved_fallback_path(
     _write_frames(frames_root, "cam", [_rgb(0)])
     log_path = _write_log(tmp_path, _frames_log("elsewhere/frames/stamp"))
     assert main(["inspect", str(log_path)]) == 0
-    assert f"frames:      {frames_root} (1 frames)" in capsys.readouterr().out
+    assert f"frames:      {frames_root} (1 frame)" in capsys.readouterr().out
 
 
 def test_inspect_frames_dir_unresolvable_notes_and_skips_hint(

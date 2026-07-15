@@ -808,7 +808,8 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
             # The resolved path, not the stored string: after a machine move
             # the stored string is exactly the path that does not work.
             n_frames = count_frames(root)
-            print(f"frames:      {root} ({n_frames} frames)")
+            plural = "frame" if n_frames == 1 else "frames"
+            print(f"frames:      {root} ({n_frames} {plural})")
             if n_frames:
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
@@ -875,7 +876,6 @@ def _cmd_video(args: argparse.Namespace) -> int:
         fps, fps_source = args.fps, "--fps"
     else:
         fps, fps_source = default_fps(log.eval.embodiment_info)
-    print(f"fps: {fps:g} ({fps_source})")
 
     if args.ffmpeg is not None:
         if not (os.path.isfile(args.ffmpeg) and os.access(args.ffmpeg, os.X_OK)):
@@ -895,20 +895,24 @@ def _cmd_video(args: argparse.Namespace) -> int:
         raise SystemExit(f"--out {out_dir} exists and is not a directory")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # All validation is done: only now may result-looking stdout appear.
+    print(f"fps: {fps:g} ({fps_source})")
     failed = 0
     for prefix, frames in streams.items():
         out_path = out_dir / f"{prefix}.mp4"
         result = encode_stream(frames, out_path, fps, ffmpeg)
         if result.skipped_empty:
+            plural = "frame" if result.skipped_empty == 1 else "frames"
             print(
-                f"warning: {prefix}: skipped {result.skipped_empty} empty frames",
+                f"warning: {prefix}: skipped {result.skipped_empty} empty {plural}",
                 file=sys.stderr,
             )
         if result.error is not None:
             failed += 1
             print(f"failed: {prefix}: {result.error}", file=sys.stderr)
         else:
-            print(f"wrote {out_path} ({result.piped} frames)")
+            plural = "frame" if result.piped == 1 else "frames"
+            print(f"wrote {out_path} ({result.piped} {plural})")
     total = len(streams)
     summary = f"wrote {total - failed}/{total} streams"
     if failed:

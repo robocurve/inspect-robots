@@ -263,33 +263,37 @@ def encode_stream(
     broken_pipe = False
     stdin = cast("IO[bytes]", proc.stdin)
     try:
-        stdin.write(first.tobytes())
-        piped += 1
-        for _step, path in frames[index:]:
-            frame = _normalize(path)
-            if frame is None:
-                skipped += 1
-                continue
-            if frame.shape != first.shape:
-                raise _FrameError(
-                    f"frame shape changed from {first.shape} to {frame.shape} at {path.name}"
-                )
-            stdin.write(frame.tobytes())
+        try:
+            stdin.write(first.tobytes())
             piped += 1
-    except _FrameError as exc:
-        error = str(exc)
-        proc.kill()
-    except OSError:
-        # ffmpeg died mid-stream; its stderr tail is the real complaint.
-        broken_pipe = True
-    try:
-        # A buffered tail can surface the broken pipe at close, not write —
-        # including after our own kill() above.
-        stdin.close()
-    except OSError:
-        broken_pipe = True
-    returncode = proc.wait()
-    tail = _stderr_tail(stderr_fd, stderr_name)
+            for _step, path in frames[index:]:
+                frame = _normalize(path)
+                if frame is None:
+                    skipped += 1
+                    continue
+                if frame.shape != first.shape:
+                    raise _FrameError(
+                        f"frame shape changed from {first.shape} to {frame.shape} at {path.name}"
+                    )
+                stdin.write(frame.tobytes())
+                piped += 1
+        except _FrameError as exc:
+            error = str(exc)
+            proc.kill()
+        except OSError:
+            # ffmpeg died mid-stream; its stderr tail is the real complaint.
+            broken_pipe = True
+        try:
+            # A buffered tail can surface the broken pipe at close, not
+            # write — including after our own kill() above.
+            stdin.close()
+        except OSError:
+            broken_pipe = True
+        returncode = proc.wait()
+    finally:
+        # Also reached when an unanticipated exception escapes (Ctrl-C
+        # mid-pipe, MemoryError): the temp file is unlinked on every path.
+        tail = _stderr_tail(stderr_fd, stderr_name)
     if error is None and (broken_pipe or returncode != 0):
         error = tail or f"ffmpeg exited with code {returncode}"
     if error is not None:
