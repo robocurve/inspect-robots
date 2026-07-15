@@ -182,7 +182,7 @@ class RosEmbodiment(EmbodimentBase):
         cameras: CameraMap | str | None = None,
         control_hz: float = 10.0,
         fresh_obs_timeout_s: float | None = None,
-        camera_throttle_ms: int | None = None,
+        camera_throttle_ms: int | float | None = None,
         reset_service: str | None = None,
         operator_reset_confirm: bool = False,
         obs_timeout_s: float = 5.0,
@@ -274,9 +274,14 @@ class RosEmbodiment(EmbodimentBase):
         resolved_fresh_timeout = (
             2.0 / control_hz if fresh_obs_timeout_s is None else float(fresh_obs_timeout_s)
         )
-        resolved_camera_throttle = (
-            max(1, int(1000.0 / control_hz)) if camera_throttle_ms is None else camera_throttle_ms
-        )
+        if camera_throttle_ms is None:
+            resolved_camera_throttle = max(1, round(1000.0 / control_hz))
+        else:
+            if camera_throttle_ms != int(camera_throttle_ms):
+                raise ValueError(
+                    f"camera_throttle_ms must be integer milliseconds, got {camera_throttle_ms!r}"
+                )
+            resolved_camera_throttle = int(camera_throttle_ms)
         if resolved_fresh_timeout <= 0 or not math.isfinite(resolved_fresh_timeout):
             raise ValueError(
                 f"fresh_obs_timeout_s must be positive and finite, got {resolved_fresh_timeout!r}"
@@ -526,7 +531,7 @@ class RosEmbodiment(EmbodimentBase):
 
     @property
     def _state_throttle_ms(self) -> int:
-        return max(1, int(500.0 / self.control_hz))
+        return max(1, round(500.0 / self.control_hz))
 
     def _joint_state_preflight(self) -> None:
         self._client.subscribe(
@@ -575,8 +580,13 @@ class RosEmbodiment(EmbodimentBase):
                 stacklevel=2,
             )
         elif len(samples) >= 2:
+            # Count messages by sequence delta, not by collected samples: the
+            # client's poll loop coalesces fast publishers into its latest-value
+            # slot, so sample count alone caps the measurable rate at the poll
+            # frequency and would falsely warn on healthy high-rate rigs.
             elapsed = samples[-1].stamp - samples[0].stamp
-            native_hz = math.inf if elapsed <= 0 else (len(samples) - 1) / elapsed
+            message_count = samples[-1].seq - samples[0].seq
+            native_hz = math.inf if elapsed <= 0 else message_count / elapsed
             if native_hz < 2.0 * self.control_hz:
                 warnings.warn(
                     f"joint_states native rate is about {native_hz:g} Hz, below 2x "

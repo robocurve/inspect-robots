@@ -1460,6 +1460,33 @@ def test_rosbridge_reset_subscriptions_preflight_handoff_and_fast_rate_no_warnin
     embodiment.close()
 
 
+def test_rosbridge_preflight_high_rate_publisher_above_poll_frequency_no_warning(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    """A 500 Hz publisher at control_hz=60 must not warn.
+
+    The client poll loop coalesces messages faster than its 10 ms poll into the
+    latest-value slot, so a sample-count rate estimate caps at ~100 Hz and
+    falsely flags any rig whose 2x-control_hz threshold exceeds that cap; the
+    sequence-delta estimate sees the coalesced messages.
+    """
+    embodiment = _embodiment(url=stub_server.url, control_hz=60.0)
+    with (
+        _topic_streams(stub_server, {"/joint_states": _joint_message()}, interval_s=0.002),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        observation = embodiment.reset(_SCENE)
+    assert observation.instruction == _SCENE.instruction
+    rate_warnings = [
+        warning
+        for warning in caught
+        if "native rate" in str(warning.message) or "too few" in str(warning.message)
+    ]
+    assert not rate_warnings
+    embodiment.close()
+
+
 def test_rosbridge_preflight_warns_for_slow_native_joint_state_rate(
     stub_server: StubRosbridgeServer,
 ) -> None:

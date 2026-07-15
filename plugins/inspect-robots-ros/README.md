@@ -1,6 +1,6 @@
 # inspect-robots-ros
 
-## Safety:
+## Safety
 
 > [!WARNING]
 > This adapter sends commands to physical hardware. Keep a tested emergency
@@ -20,7 +20,7 @@ The package registers the `ros` Inspect Robots embodiment. It connects directly
 to `rosbridge_server`, so the evaluation machine needs no ROS installation,
 ROS message packages, or robot-vendor SDK.
 
-## Install:
+## Install
 
 ```bash
 pip install inspect-robots-ros
@@ -28,7 +28,7 @@ pip install inspect-robots-ros
 
 The embodiment then appears in `inspect-robots list embodiments`.
 
-## Robot-side bringup:
+## Robot-side bringup
 
 Install `rosbridge_server` in the robot's ROS environment and start its
 websocket endpoint. Port 9090 is the rosbridge default.
@@ -49,7 +49,7 @@ The evaluation host must be able to reach the websocket URL. Restrict network
 access to trusted hosts because rosbridge exposes ROS topics and services.
 The plugin does not launch rosbridge or install anything on the robot.
 
-## Quickstart:
+## Quickstart
 
 This six-joint example publishes `JointTrajectory` commands, reads a wrist
 camera, and uses explicit joint limits:
@@ -68,7 +68,7 @@ Construction and `.info` are network-free. The websocket connects on the first
 `reset()`, after compatibility and guardrail checks have inspected the declared
 spaces.
 
-## Configuration:
+## Configuration
 
 Pass values as `-E key=value` arguments or as keyword arguments to
 `RosEmbodiment`. Compact lists use commas. Camera entries use
@@ -108,7 +108,7 @@ Arm bounds and gripper bounds form the action `Box`, so the default Inspect
 Robots clamp and delta-limit guardrails can reject unsafe policy output before
 it reaches rosbridge.
 
-## Controller mapping:
+## Controller mapping
 
 Choose settings that match the controller's subscribed ROS message type.
 
@@ -125,7 +125,7 @@ The stock ROS 2 `gripper_action_controller` is action-only and is not supported
 by this publish-based adapter. Configure a `forward_command_controller` on the
 gripper joint instead. The plugin does not send ROS action goals.
 
-## Observation and timing contract:
+## Observation and timing contract
 
 - `joint_pos` follows the configured arm joint order. With a gripper, its raw
   measured position is folded into the last element so proprioception matches
@@ -150,7 +150,7 @@ before the arm publish and waits for a greater sequence afterward. A message
 sampled just before the command but received just after it can satisfy this
 check; this is a receive-time approximation intended for low-latency links.
 
-## Reset behavior:
+## Reset behavior
 
 The first reset advertises command topics, performs the native-rate preflight,
 subscribes with queue length 1, and verifies every configured topic and camera
@@ -161,7 +161,7 @@ If neither reset path is configured, the adapter warns once on the second
 reset because it cannot change the physical scene between trials. An operator
 confirmation on non-interactive stdin raises `EOFError` and halts the run.
 
-## Troubleshooting:
+## Troubleshooting
 
 - Connection failures name the URL and both rosbridge launch commands. Confirm
   the server is listening, port 9090 is reachable, and no proxy intercepts the

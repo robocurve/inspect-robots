@@ -1,10 +1,12 @@
 """Threaded synchronous client for the rosbridge v2 websocket protocol.
 
 One receive thread owns ``ClientConnection.recv``. Rollout-facing calls only
-send, which matches websockets 16's documented concurrency contract: concurrent
-send and receive are supported, while concurrent receives raise
-``ConcurrencyError``. Topic traffic is reduced to a latest-value slot carrying
-the monotonic receive stamp and a per-topic sequence number.
+send, which matches the sync client's documented concurrency contract since
+its introduction (verified against the websockets 16.0 docs, the locked
+version; the declared ``>=12`` floor ships the same one-reader/one-writer
+guarantee): concurrent send and receive are supported, while concurrent
+receives raise an error. Topic traffic is reduced to a latest-value slot
+carrying the monotonic receive stamp and a per-topic sequence number.
 """
 
 from __future__ import annotations

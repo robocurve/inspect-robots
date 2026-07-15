@@ -234,6 +234,17 @@ adapter shipped from this repo as separate packages:
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
   next to fine-tuned VLAs.
 
+```bash
+# Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
+inspect-robots run --task my-task --embodiment isaacsim \
+    --policy xpolicylab -P url=ws://gpu-box:19000 -P cameras=cam_head:base_rgb
+
+# Claude driving the mock world, no hardware or GPU required:
+export ANTHROPIC_API_KEY=sk-ant-...
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-fable-5 --embodiment cubepick
+```
+
 ### Real robots via ROS
 
 The ROS embodiment connects to any ROS 1 or ROS 2 arm that exposes standard
@@ -255,17 +266,6 @@ inspect-robots run --task my-task --policy agent --embodiment ros \
 Robot bringup, controller mappings, safety requirements, camera configuration,
 and reset behavior are documented in the
 [ROS plugin README](plugins/inspect-robots-ros/).
-
-```bash
-# Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
-inspect-robots run --task my-task --embodiment isaacsim \
-    --policy xpolicylab -P url=ws://gpu-box:19000 -P cameras=cam_head:base_rgb
-
-# Claude driving the mock world, no hardware or GPU required:
-export ANTHROPIC_API_KEY=sk-ant-...
-inspect-robots "pick up the cube" --policy agent \
-    -P model=anthropic/claude-fable-5 --embodiment cubepick
-```
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
 the embodiment's action space) are wired into every CLI run by default, for
