@@ -270,6 +270,60 @@ def test_observation_content_uses_unlabeled_fallback_for_length_mismatch() -> No
     assert content[0]["text"] == "Current observation.\nstate[joint_pos]: [0.01, -0.02]"
 
 
+def test_observation_content_labels_every_camera_with_the_environment_step() -> None:
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    content = _observation_content(
+        Observation(
+            images={"top_cam": image, "left_cam": image},
+            extra={"env_step": 480},
+        )
+    )
+
+    assert content[1]["text"] == "camera 'top_cam' (step 480):"
+    assert content[2]["type"] == "image_url"
+    assert content[3]["text"] == "camera 'left_cam' (step 480):"
+    assert content[4]["type"] == "image_url"
+
+
+def test_observation_content_step_label_fallbacks() -> None:
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    without_step = _observation_content(Observation(images={"top": image}))
+    string_step = _observation_content(
+        Observation(images={"top": image}, extra={"env_step": "480"})
+    )
+    bool_step = _observation_content(Observation(images={"top": image}, extra={"env_step": True}))
+    numpy_step = _observation_content(
+        Observation(images={"top": image}, extra={"env_step": np.int64(480)})
+    )
+
+    assert without_step[1]["text"] == "camera 'top':"
+    assert string_step[1]["text"] == "camera 'top':"
+    assert bool_step[1]["text"] == "camera 'top' (step True):"
+    assert numpy_step[1]["text"] == "camera 'top':"
+
+
+def test_transcript_preserves_step_label_next_to_elided_image() -> None:
+    policy = _policy(_Script([_tool_response("done", {"summary": "observed"})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(
+        Observation(
+            images={"top_cam": np.zeros((1, 1, 3), dtype=np.uint8)},
+            extra={"env_step": 480},
+        )
+    )
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[-3]["content"][-2:] == [
+        {"type": "text", "text": "camera 'top_cam' (step 480):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+
 def test_transcript_strips_images_and_preserves_text_and_tools() -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="reach"))

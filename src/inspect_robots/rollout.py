@@ -216,7 +216,9 @@ def rollout(
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
             try:
-                action = controller.next_action(policy, obs, t, store)
+                action = controller.next_action(
+                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                )
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise

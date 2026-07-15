@@ -265,8 +265,10 @@ def _observation_content(
                 continue
         lines.append(f"state[{key}]: {rounded}")
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
+    step = observation.extra.get("env_step")
+    suffix = f" (step {step})" if isinstance(step, int) else ""
     for name, image in observation.images.items():
-        parts.append({"type": "text", "text": f"camera {name!r}:"})
+        parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
     return parts
 
