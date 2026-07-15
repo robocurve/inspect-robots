@@ -203,12 +203,22 @@ exactly the degenerate loop R1's escape hatch exists for. So:
   *unthrottled*, collects messages for a short window (until 5 messages
   or 1 s, whichever first), computes the native rate from receive-stamp
   deltas, warns when it is below 2× `control_hz` ("lower `control_hz` or
-  raise `fresh_obs_timeout_s`"), then resubscribes throttled at 2× for
-  the rollout. Measuring *before* throttling is the point: a throttled
+  raise `fresh_obs_timeout_s`"), then swaps to the throttled rollout
+  subscription. Measuring *before* throttling is the point: a throttled
   stream observes `ceil(throttle/p)·p` intervals and is mathematically
   capped at 2× `control_hz`, so measuring through it would warn on every
   healthy robot. Tests must cover both directions — a slow publisher
-  warns *and a fast one does not*.
+  warns *and a fast one does not*. Degenerate windows: 0 messages falls
+  through to the `obs_timeout_s` missing-topic error; exactly 1 message
+  (no delta to measure) warns as too-slow-to-measure. **Subscription
+  handoff semantics**: rosbridge aggregates same-topic subscriptions
+  from one client by least-restrictive parameters, keyed by the optional
+  `id` — a naive throttled re-subscribe would leave the unthrottled
+  preflight subscription live and silently defeat the throttle. The
+  preflight subscribe therefore uses an explicit `id`, the handoff is
+  `unsubscribe(preflight id)` → `subscribe(new id, throttled)`, and the
+  stub server models per-id subscriptions so the tests can catch a
+  wrong handoff.
 - Core stays untouched; if/when core pacing lands, `self_paced` remains
   correct (the framework defers to it).
 
@@ -259,9 +269,9 @@ string→string maps.
 | `gripper_command_type` | version-dependent | `"float64_multi_array"` (default when `ros_version=2`: the one-joint `forward_command_controller` interface — stock ROS 2 controllers do not consume a bare `Float64`) or `"float64"` (default when `ros_version=1`: the classic `ros_control` `<controller>/command` interface). README maps both to controller families |
 | `gripper_joint` | `None` | joint-states name holding the gripper position (required iff `gripper_topic`) |
 | `gripper_low` / `gripper_high` | `None` | **required iff `gripper_topic`**: the gripper's native command range (rad or m — robot-specific; no default, same honesty rule as arm bounds). Appended to the action `Box` bounds and used to normalize the canonical `gripper` observation to 0..1 |
-| `gripper_closed_at` | `"low"` | `"low"` or `"high"`: which end of the command range is *closed*. The canonical `gripper` observation pins 0 = closed, 1 = open, and `Box` requires low < high, so polarity must be a flag, not a bound swap |
+| `gripper_closed_at` | `"low"` | `"low"` or `"high"`: which end of the command range is *closed*. The canonical `gripper` observation pins 0 = closed, 1 = open, and the factory requires `gripper_low < gripper_high` (`Box` itself allows equality), so polarity must be a flag, not a bound swap |
 | `eef_pose_topic` | `None` | optional `geometry_msgs/PoseStamped` → observation `eef_pose` (7-D, wxyz) |
-| `cameras` | `{}` | camera name → `(topic, height, width)`; compact form `name:topic:WxH`. Resolution is required — `CameraSpec.height/width` are mandatory ints, and an embodiment that declares no `CameraSpec` fails compat against every camera-requiring policy (`missing_camera`) |
+| `cameras` | `{}` | camera name → `(topic, height, width)`; compact form `name:topic:WxH` where `640x480` means width 640, height 480 (parser test uses a non-square camera so a swapped parse can't hide). Resolution is required — `CameraSpec.height/width` are mandatory ints, and an embodiment that declares no `CameraSpec` fails compat against every camera-requiring policy (`missing_camera`) |
 | `control_hz` | `10.0` | control rate; `step()` paces to it (§3); state subscriptions throttle at 2× it |
 | `fresh_obs_timeout_s` | `2/control_hz` | max wait for a post-publish joint-states message in `step()` (§3); timeout ⇒ staleness fault |
 | `camera_throttle_ms` | `1000/control_hz` | camera subscribe `throttle_rate`; `0` = unthrottled. Default ties camera bandwidth to the control rate — base64 JSON frames on a thin link otherwise queue in the socket and trip the staleness fault |
@@ -290,15 +300,21 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
   value; the field is irrelevant to `joint_pos` mode). `dim_labels` are
   mandatory in practice: conformance errors without them and the agent
   policy's tool surface is built from them; they also pin the gripper to
-  the last dim. Factory validations: duplicate names within `joints`
-  and an arm joint literally named `"gripper"` alongside
-  `gripper_topic` are rejected at construction (either would duplicate
+  the last dim. Factory validations, all with actionable messages:
+  duplicate names within `joints` and an arm joint literally named
+  `"gripper"` alongside `gripper_topic` (either would duplicate
   `dim_labels` — a conformance error `eval()` never runs, so left
   unchecked the reorder-by-name would silently duplicate one position
   across dims and publish repeated `joint_names`); `gripper_low >=
-  gripper_high` is rejected too (`Box` itself allows `low <= high` with
-  equality only drawing a conformance `zero_width` warning, but the
-  0..1 normalization divides by the range).
+  gripper_high` (`Box` itself allows `low <= high` with equality only
+  drawing a conformance `zero_width` warning, but the 0..1 normalization
+  divides by the range); `control_hz` positive and finite (it divides
+  into every throttle and timeout default); `len(action_low)` /
+  `len(action_high)` vs `len(joints)` checked before `Box` construction
+  ("you gave 5 bounds for 6 joints", not a bare shape mismatch); enum
+  args validated (`ros_version` ∈ {1, 2}, `command_type`,
+  `gripper_command_type`, `gripper_closed_at`); duplicate camera names
+  rejected (the compact-string parser must not silently collapse them).
 - `observation_space.state` (`StateSpec`):
   - `joint_pos`, shape `(d,)` — arm joints in `joints` order, plus the raw
     `gripper_joint` position as the last element when a gripper is
@@ -368,9 +384,11 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
 
 **`step(action)`**: sleep-gate on the previous publish (§3), split the
 vector into arm command (+ gripper command), build the §2 message shapes
-per `ros_version`, `publish` (two publishes when gripper is configured),
-wait for a post-publish joint-states message (§3), assemble the observation
-(staleness-checked), return `StepResult(observation=..., reward=None,
+per `ros_version`, `publish` (two publishes when gripper is configured —
+the **arm** publish is the single pacing/freshness reference: it
+timestamps the sleep-gate and the `seq` capture, so the inter-publish
+invariant stays well-defined), wait for a post-publish joint-states
+message (§3), assemble the observation (staleness-checked), return `StepResult(observation=..., reward=None,
 terminated=False, truncated=False)`. Timing rides on the observation's own
 fields — no duplicate `info` payload — with the convention stated here
 because no core producer has pinned one yet: `state_time` is the monotonic
@@ -470,7 +488,10 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
 - reset warnings: the unthrottled preflight window flags a slow native
   `joint_states` rate (< 2× `control_hz`) **and stays silent for a fast
   publisher** (the no-warn direction is the test that catches measuring
-  through the throttle); the second reset with neither `reset_service`
+  through the throttle); the preflight→throttled handoff
+  unsubscribes the preflight `id` (per-id stub assertion); a
+  single-message window warns as too-slow-to-measure; the second reset
+  with neither `reset_service`
   nor `operator_reset_confirm` warns once about physical-reset absence;
   post-confirm fresh wait is bounded by `obs_timeout_s`, not
   `fresh_obs_timeout_s`; `operator_reset_confirm` on non-TTY stdin
@@ -507,7 +528,12 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   ros = "inspect_robots_ros:ros_embodiment"`.
 - Docs: plugin README (robot-side rosbridge bringup for ROS 1/ROS 2,
   eval-side quickstart, full config table, ros2_control controller notes —
-  which `command_type` pairs with which controller family — plus a leading
+  which `command_type`/`gripper_command_type` pairs with which controller
+  family, including the explicit exclusion that ROS 2's stock
+  `gripper_action_controller` is action-only and needs a
+  `forward_command_controller` on the gripper joint instead, and the
+  `joint_pos` unit caveat that the folded gripper dim is in the gripper's
+  native unit, not rad — plus a leading
   safety section: e-stop, verified bounds from URDF/datasheet, low
   `max_speed_frac`, supervised first runs; troubleshooting: base64 image
   bandwidth, throttle rates, the 6-DoF+gripper+`eef_pose` conformance
