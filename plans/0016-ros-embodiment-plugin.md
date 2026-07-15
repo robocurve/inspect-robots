@@ -165,25 +165,37 @@ unpaced stream of `JointTrajectory` points at LLM/VLA inference cadence is
 exactly the degenerate loop R1's escape hatch exists for. So:
 
 - The embodiment declares the `SELF_PACED` capability.
-- `step()` publishes the command, then sleeps until one control period
-  (`1/control_hz`, monotonic clock, measured from the previous step's
-  publish) has elapsed — this is the pacing half, and it composes with
-  open-loop `ActionChunk` playout (mid-chunk, buffered pops are fast and
-  the sleep absorbs the overhead; at a chunk boundary after slow inference
-  the period has already elapsed and the sleep is ~zero, which is correct:
-  pacing bounds the command rate, it never adds latency on top of
-  inference).
+- **The publish is gated, not followed, by the pacing sleep**: at the top
+  of `step()`, sleep until one control period (`1/control_hz`, monotonic
+  clock) has elapsed since the *previous* publish, **then** publish this
+  step's command. This enforces the real invariant — every inter-publish
+  interval ≥ the period — rather than a constraint on publishes two
+  apart (publish-then-sleep would let steady-state intervals average
+  `T/2`, streaming commands at ~2× the configured rate on real
+  hardware). It composes with open-loop `ActionChunk` playout: mid-chunk,
+  buffered pops are fast and the sleep absorbs the overhead; at a chunk
+  boundary after slow inference the period has already elapsed, the
+  sleep is ~zero, and pacing never adds latency on top of inference.
 - Freshness is a **separate** guarantee, not a side effect of the sleep
   (at a chunk boundary there is no sleep, and a state stream throttled at
-  exactly the control rate would only race the deadline): after the
-  pacing sleep, `step()` waits for a joint-states message whose receive
+  exactly the control rate would only race the deadline): after
+  publishing, `step()` waits for a joint-states message whose receive
   stamp postdates this step's publish, bounded by `fresh_obs_timeout_s`
-  (default `2/control_hz`; timeout ⇒ staleness fault). To keep that wait
+  (default `2/control_hz`; timeout ⇒ staleness fault naming both
+  `fresh_obs_timeout_s` and `control_hz` as the knobs). To keep that wait
   short, state topics subscribe at **2× the control rate**
-  (`throttle_rate = 500/control_hz` ms), so a post-command message
-  arrives within ~half a period. The observation a policy plans from is
-  therefore always post-command, including the one the LLM agent sees
-  after seconds of inference.
+  (`throttle_rate = 500/control_hz` ms, rounded to an integer ≥ 1 — the
+  field is integer milliseconds). Post-command here means *received*
+  after the publish; a message sampled just before but delivered just
+  after passes the check — a milliseconds-scale approximation on a LAN,
+  documented rather than hidden.
+- The design assumes the robot's native `joint_states` rate is at least
+  ~2× `control_hz` (real arms publish at 25-500 Hz; `throttle_rate` can
+  only thin a stream, never speed one up). `reset()` measures the
+  inter-arrival rate during its first-message wait and warns when the
+  native rate is below 2× `control_hz` ("lower `control_hz` or raise
+  `fresh_obs_timeout_s`"), so a slow publisher is diagnosed up front
+  instead of as a mid-rollout staleness fault on a healthy robot.
 - Core stays untouched; if/when core pacing lands, `self_paced` remains
   correct (the framework defers to it).
 
@@ -233,6 +245,7 @@ string→string maps.
 | `gripper_topic` | `None` | optional command topic for a 1-DoF gripper (`std_msgs/Float64` position); when set, action dim grows by 1 |
 | `gripper_joint` | `None` | joint-states name holding the gripper position (required iff `gripper_topic`) |
 | `gripper_low` / `gripper_high` | `None` | **required iff `gripper_topic`**: the gripper's native command range (rad or m — robot-specific; no default, same honesty rule as arm bounds). Appended to the action `Box` bounds and used to normalize the canonical `gripper` observation to 0..1 |
+| `gripper_closed_at` | `"low"` | `"low"` or `"high"`: which end of the command range is *closed*. The canonical `gripper` observation pins 0 = closed, 1 = open, and `Box` requires low < high, so polarity must be a flag, not a bound swap |
 | `eef_pose_topic` | `None` | optional `geometry_msgs/PoseStamped` → observation `eef_pose` (7-D, wxyz) |
 | `cameras` | `{}` | camera name → `(topic, height, width)`; compact form `name:topic:WxH`. Resolution is required — `CameraSpec.height/width` are mandatory ints, and an embodiment that declares no `CameraSpec` fails compat against every camera-requiring policy (`missing_camera`) |
 | `control_hz` | `10.0` | control rate; `step()` paces to it (§3); state subscriptions throttle at 2× it |
@@ -241,7 +254,7 @@ string→string maps.
 | `reset_service` | `None` | optional service called on `reset()` (e.g. a bringup-provided home routine); empty args, must return `result: true` |
 | `operator_reset_confirm` | `False` | when true, `reset()` prints the scene instruction and blocks on Enter (TTY prompt via `input()`) — the "human arranges the scene" path |
 | `obs_timeout_s` | `5.0` | max wait for the first message on every subscribed topic (reset-time) |
-| `staleness_s` | `2.0` | max age of cached state messages when an observation is assembled; older ⇒ raise (the robot stopped publishing; wrapped into `EmbodimentFault` by the rollout) |
+| `staleness_s` | `2.0` | max age of cached state messages when an observation is assembled; older ⇒ raise (the robot stopped publishing; wrapped into `EmbodimentFault` by the rollout). This is also the **cross-modal skew bound**: a fresh `joint_pos` may pair with an `eef_pose`/camera frame up to `staleness_s` old (up to 20 control periods at the defaults) — `state_time`/`image_times` expose the actual ages, and the README states the bound |
 | `simulated` | `False` | sets `EmbodimentInfo.is_simulated` (Gazebo-behind-rosbridge runs) |
 | `name` | `"ros"` | `EmbodimentInfo.name` (users can tag e.g. `"ros:ur5e"`) |
 | `connect_timeout_s` / `request_timeout_s` | `10` / `30` | client timeouts |
@@ -278,8 +291,9 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
     gripper dim is in its native command unit — documented).
   - `gripper`, shape `(1,)` — canonical normalized 0..1 (0 closed, 1 open
     per `CANONICAL_STATE_UNITS`), computed from
-    `(raw - gripper_low) / (gripper_high - gripper_low)`. Declared only
-    when a gripper is configured.
+    `(raw - gripper_low) / (gripper_high - gripper_low)` and flipped to
+    `1 - that` when `gripper_closed_at="high"`. Declared only when a
+    gripper is configured.
   - `eef_pose`, shape `(7,)` — declared only when `eef_pose_topic` set.
     **Hard constraint, enforced in the factory**: when `d == 7` (any
     shape — 6-DoF + gripper *or* a gripperless 7-DoF arm, i.e. Franka /
@@ -320,16 +334,24 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
 3. If `reset_service`: `call_service`, require `result: true`.
 4. If `operator_reset_confirm`: print `scene.instruction` and block on
    Enter.
-5. Assemble and return the initial `Observation` (fresh-message wait, not
-   cache: reset must observe the *post-reset* world). Every observation —
+5. If *neither* `reset_service` nor `operator_reset_confirm` is
+   configured, the second and every later `reset()` warns once on stderr:
+   between-trial resets are then no-ops on the physical world, and trial
+   N+1 silently starting from trial N's end state is an eval-validity
+   trap, not an ops detail.
+6. Assemble and return the initial `Observation` (fresh-message wait
+   bounded by `obs_timeout_s` — the reset-time bound; arbitrary time may
+   have passed during an operator confirm, so the post-confirm wait must
+   not reuse the tight `fresh_obs_timeout_s`). Not cache: reset must
+   observe the *post-reset* world. Every observation —
    here and in `step()` — carries `scene.instruction` on
    `Observation.instruction`, matching the cubepick/isaacsim precedent
    (policies keep a reset-time fallback, but the embodiment threads it).
 
-**`step(action)`**: split the vector into arm command (+ gripper command),
-build the §2 message shapes per `ros_version`, `publish` (two publishes when
-gripper is configured), sleep out the control period, wait for a
-post-publish joint-states message (§3), assemble the observation
+**`step(action)`**: sleep-gate on the previous publish (§3), split the
+vector into arm command (+ gripper command), build the §2 message shapes
+per `ros_version`, `publish` (two publishes when gripper is configured),
+wait for a post-publish joint-states message (§3), assemble the observation
 (staleness-checked), return `StepResult(observation=..., reward=None,
 terminated=False, truncated=False)`. Timing rides on the observation's own
 fields — no duplicate `info` payload — with the convention stated here
@@ -412,13 +434,22 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
 - step: JointTrajectory golden shapes for **both** `ros_version`s
   (`{secs,nsecs}` vs `{sec,nanosec}`, type strings) and Float64MultiArray;
   joint order = config order; `time_from_start` = period; gripper split
-  publishes two messages with the raw (un-normalized) command; pacing
-  sleeps to `control_hz` and is ~zero after slow inference (injected
+  publishes two messages with the raw (un-normalized) command; pacing:
+  **every inter-publish interval ≥ the control period under fast
+  back-to-back steps** (the assertion that catches a publish-then-sleep
+  implementation, which passes weaker "slept once" checks while
+  streaming at 2×), and the gate is ~zero after slow inference (injected
   fake clock, §6); the fresh-obs wait returns only a post-publish
-  joint-states message and faults on `fresh_obs_timeout_s`; staleness
-  beyond `staleness_s` raises; `terminated` always False; observation
-  `gripper` normalized 0..1; `instruction` threaded onto every
+  joint-states message and faults on `fresh_obs_timeout_s` naming both
+  knobs; staleness beyond `staleness_s` raises; `terminated` always
+  False; observation `gripper` normalized 0..1 and flipped under
+  `gripper_closed_at="high"`; `instruction` threaded onto every
   observation; `state_time`/`image_times` follow the §5 convention.
+- reset warnings: slow native `joint_states` rate (< 2× `control_hz`)
+  warns at first reset; the second reset with neither `reset_service`
+  nor `operator_reset_confirm` warns once about physical-reset absence;
+  post-confirm fresh wait is bounded by `obs_timeout_s`, not
+  `fresh_obs_timeout_s`.
 - messages: JointState reorder (shuffled names), missing-joint error,
   CompressedImage jpeg + png decode to `(H, W, 3)` uint8 RGB, exotic ROS 1
   `format` strings, PoseStamped xyzw→wxyz reorder.
