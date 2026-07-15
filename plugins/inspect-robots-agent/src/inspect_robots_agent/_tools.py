@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.spaces import Box, ObservationSpace
+from inspect_robots.spaces import CANONICAL_STATE_UNITS, Box, ObservationSpace
 from inspect_robots.types import Action, ActionChunk, Observation
 
 _ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
@@ -61,6 +61,7 @@ class Toolset:
         absolute: bool,
         labels: tuple[str, ...],
         state_key: str | None,
+        state_labels: tuple[str, tuple[str, ...]] | None,
         control_hz: float | None,
         bounds_text: str,
         low: npt.NDArray[np.float64],
@@ -73,6 +74,7 @@ class Toolset:
         self._labels = labels
         self._index_by_label = {label: i for i, label in enumerate(labels)}
         self._state_key = state_key
+        self._state_labels = state_labels
         self._hz = control_hz
         self._resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
         self._max_steps = math.ceil(_MAX_DURATION_S * self._resolved_hz)
@@ -92,6 +94,10 @@ class Toolset:
         else:
             self._positive_limits = high
             self._negative_limits = np.abs(low)
+
+    def state_labels(self) -> tuple[str, tuple[str, ...]] | None:
+        """Return the state field and per-element labels selected at build time."""
+        return self._state_labels
 
     def schemas(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for this embodiment."""
@@ -391,14 +397,14 @@ def build_toolset(
     absolute = mode in _ABSOLUTE_MODES
     dim = action_space.dim
     state_key: str | None = None
+    state_spec = observation_space.state
     if absolute:
-        spec = observation_space.state
-        if spec is None:
+        if state_spec is None:
             raise ToolsetError(
                 "absolute-target control needs a StateSpec on the embodiment's "
                 "observation space to locate the proprioceptive reference"
             )
-        matching = [field.key for field in spec.fields if field.shape == (dim,)]
+        matching = [field.key for field in state_spec.fields if field.shape == (dim,)]
         if len(matching) != 1:
             raise ToolsetError(
                 f"absolute-target control needs exactly one state field with shape "
@@ -454,7 +460,20 @@ def build_toolset(
                 "per-step limit for a movable dimension; increase it"
             )
 
-    labels = semantics.dim_labels or tuple(str(i) for i in range(dim))
+    authored_labels = semantics.dim_labels
+    labels = authored_labels or tuple(str(i) for i in range(dim))
+    state_labels: tuple[str, tuple[str, ...]] | None = None
+    if authored_labels is not None:
+        if state_key is not None:
+            state_labels = (state_key, authored_labels)
+        elif state_spec is not None:
+            candidates = [
+                field.key
+                for field in state_spec.fields
+                if field.shape == (dim,) and field.key in CANONICAL_STATE_UNITS
+            ]
+            if len(candidates) == 1:
+                state_labels = (candidates[0], authored_labels)
     pairs = ", ".join(
         f"{label}: [{lo:.4g}, {hi:.4g}]"
         for label, lo, hi in zip(labels, low64.tolist(), high64.tolist(), strict=False)
@@ -465,6 +484,7 @@ def build_toolset(
         absolute=absolute,
         labels=labels,
         state_key=state_key,
+        state_labels=state_labels,
         control_hz=control_hz,
         bounds_text=bounds_text,
         low=low64,

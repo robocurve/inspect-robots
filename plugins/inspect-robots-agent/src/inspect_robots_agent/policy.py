@@ -118,6 +118,8 @@ class LLMAgentPolicy(PolicyBase):
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
         self._toolset: Toolset | None = None
         self._embodiment_name = "(unbound)"
+        self._embodiment_docs: str | None = None
+        self._state_labels: tuple[str, tuple[str, ...]] | None = None
         self._messages: list[dict[str, Any]] = []
         self._calls_used = 0
 
@@ -125,13 +127,16 @@ class LLMAgentPolicy(PolicyBase):
 
     def bind(self, embodiment_info: EmbodimentInfo) -> None:
         """Adopt the embodiment's spaces and build the tool surface from them."""
-        self._toolset = build_toolset(
+        toolset = build_toolset(
             embodiment_info.action_space,
             embodiment_info.observation_space,
             embodiment_info.control_hz,
             self._max_speed_frac,
         )
+        self._toolset = toolset
+        self._state_labels = toolset.state_labels()
         self._embodiment_name = embodiment_info.name
+        self._embodiment_docs = getattr(embodiment_info, "docs", None)
         self.info = PolicyInfo(
             name="agent",
             action_space=embodiment_info.action_space,
@@ -141,12 +146,14 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        formatted = _SYSTEM_TEMPLATE.format(name=self._embodiment_name, budget=self._max_llm_calls)
+        docs = self._embodiment_docs
+        if docs is not None and docs.strip():
+            formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
         self._messages = [
             {
                 "role": "system",
-                "content": _SYSTEM_TEMPLATE.format(
-                    name=self._embodiment_name, budget=self._max_llm_calls
-                ),
+                "content": formatted,
             },
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
@@ -179,7 +186,12 @@ class LLMAgentPolicy(PolicyBase):
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
             )
-        self._messages.append({"role": "user", "content": _observation_content(observation)})
+        self._messages.append(
+            {
+                "role": "user",
+                "content": _observation_content(observation, self._state_labels),
+            }
+        )
         failures = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
@@ -232,13 +244,25 @@ class LLMAgentPolicy(PolicyBase):
         return result.chunk
 
 
-def _observation_content(observation: Observation) -> list[dict[str, Any]]:
+def _observation_content(
+    observation: Observation,
+    state_labels: tuple[str, tuple[str, ...]] | None = None,
+) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs."""
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
     for key, value in observation.state.items():
-        rounded = np.round(np.asarray(value, dtype=np.float64), 4).tolist()
+        array = np.asarray(value, dtype=np.float64)
+        rounded = np.round(array, 4).tolist()
+        if state_labels is not None and key == state_labels[0]:
+            labels = state_labels[1]
+            if array.shape == (len(labels),):
+                labeled = " ".join(
+                    f"{label}={item}" for label, item in zip(labels, rounded, strict=True)
+                )
+                lines.append(f"state[{key}]: {labeled}")
+                continue
         lines.append(f"state[{key}]: {rounded}")
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
     for name, image in observation.images.items():

@@ -9,7 +9,9 @@ those declarations load-bearing:
 - The LLM agent policy (`inspect-robots-agent`) builds its whole tool surface
   from the spaces at bind time: tool schemas from the bounds and labels, the
   motion strategy from the control mode, the proprioceptive reference from
-  the `StateSpec`.
+  the `StateSpec`. It also injects `EmbodimentInfo.docs` (free-form operating
+  notes: joint layout, positive directions, gripper polarity) into its system
+  prompt, so an adapter that ships good notes measurably helps LLM policies.
 
 An adapter with missing or dishonest declarations silently degrades both.
 This page is the contract; the conformance kit makes most of it mechanical.
