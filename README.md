@@ -270,8 +270,10 @@ inspect-robots run --task my-task --policy agent --embodiment ros \
     -E action_high=3.1,2.2,2.9,3.1,2.9,3.1
 ```
 
-Robot bringup, controller mappings, safety requirements, camera configuration,
-and reset behavior are documented in the
+Swap `--policy agent` for `--policy xpolicylab -P url=ws://gpu-box:19000` to
+evaluate any XPolicyLab-served VLA on the same arm; the `-E` robot arguments
+stay unchanged. Robot bringup, controller mappings, safety requirements,
+camera configuration, and reset behavior are documented in the
 [ROS plugin README](plugins/inspect-robots-ros/).
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
