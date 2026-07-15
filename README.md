@@ -218,6 +218,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 Both halves of an eval (the "body" and the "brain") have a ready-made
 adapter shipped from this repo as separate packages:
 
+- **[inspect-robots-ros](plugins/inspect-robots-ros/)**: run evals on ROS 1 or
+  ROS 2 arms through rosbridge, with no ROS installation on the eval machine
+  (`--embodiment ros`).
 - **[inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/)**: run evals
   against an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation
   (`--embodiment isaacsim`).
@@ -230,6 +233,28 @@ adapter shipped from this repo as separate packages:
   embodiment through tool calls, as a first-class policy. The same
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
   next to fine-tuned VLAs.
+
+### Real robots via ROS:
+
+The ROS embodiment connects to any ROS 1 or ROS 2 arm that exposes standard
+joint, compressed-image, and optional pose topics through `rosbridge_server`.
+It publishes joint-position commands at a configured control rate and works
+with every compatible policy, including `agent` and XPolicyLab-served VLAs.
+
+```bash
+uv pip install inspect-robots-ros
+
+inspect-robots run --task my-task --policy agent --embodiment ros \
+    -E url=ws://robot:9090 \
+    -E joints=joint1,joint2,joint3,joint4,joint5,joint6 \
+    -E command_topic=/joint_trajectory_controller/joint_trajectory \
+    -E action_low=-3.1,-2.2,-2.9,-3.1,-2.9,-3.1 \
+    -E action_high=3.1,2.2,2.9,3.1,2.9,3.1
+```
+
+Robot bringup, controller mappings, safety requirements, camera configuration,
+and reset behavior are documented in the
+[ROS plugin README](plugins/inspect-robots-ros/).
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
