@@ -20,7 +20,13 @@ import numpy as np
 from inspect_robots.approver import Approver
 from inspect_robots.controller import _INFER_KEY, Controller
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import EmbodimentFault, InspectRobotsError, PolicyError, SafetyAbort
+from inspect_robots.errors import (
+    EmbodimentFault,
+    InspectRobotsError,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.frames import FrameRef, FrameStore
 from inspect_robots.policy import Policy
 from inspect_robots.scene import Scene
@@ -78,7 +84,7 @@ class TrialRecord:
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
-    status: str = "success"  # "success" (ran to completion) | "error"
+    status: str = "success"  # "success" (ran to completion) | "error" | "cancelled"
     error: str | None = None
     inference_latencies: list[float] = field(default_factory=list)
     # Human operator's success verdict, captured once during rollout (R6). Read
@@ -196,6 +202,7 @@ def rollout(
     policy_reset_ok = False
 
     try:
+        t = -1
         try:
             policy.reset(scene)
             policy_reset_ok = True
@@ -301,6 +308,11 @@ def rollout(
         else:
             record.truncated = True
             record.termination_reason = "max_steps"
+    except KeyboardInterrupt as exc:
+        record.status = "cancelled"
+        record.error = "cancelled by user (KeyboardInterrupt)"
+        record.events.append(error_event(t, "KeyboardInterrupt", "cancelled by user"))
+        raise _CancelledTrial(record.error, record) from exc
     finally:
         # Preserve measured latencies even when the trial ends in an error.
         record.inference_latencies = [

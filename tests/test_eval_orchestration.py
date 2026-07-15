@@ -8,17 +8,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from inspect_robots import eval, eval_set
-from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots import eval, eval_set, read_eval_log
+from inspect_robots.errors import (
+    ConfigError,
+    EmbodimentFault,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.eval import _git_commit
 from inspect_robots.log import EvalLog
+from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
-from inspect_robots.scene import Scene
-from inspect_robots.scorer import min_distance_to_goal, operator_scorer, success_at_end
+from inspect_robots.scene import Scene, Target
+from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
@@ -91,6 +98,217 @@ class _BoomPolicy:
 
     def act(self, observation: Observation) -> ActionChunk:
         raise RuntimeError("inference exploded")
+
+
+class _InterruptingPolicy(ScriptedPolicy):
+    """Raise one specific Ctrl-C during inference and expose an audit record."""
+
+    def __init__(self, interrupt: KeyboardInterrupt, *, interrupt_on_call: int = 2) -> None:
+        super().__init__(chunk_size=1)
+        self.interrupt = interrupt
+        self.interrupt_on_call = interrupt_on_call
+        self.act_calls = 0
+
+    def reset(self, scene: Scene) -> None:
+        self.act_calls = 0
+        super().reset(scene)
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self.act_calls += 1
+        if self.act_calls == self.interrupt_on_call:
+            raise self.interrupt
+        return super().act(observation)
+
+    def transcript(self) -> object:
+        return {"act_calls": self.act_calls}
+
+
+class _CountingScorer:
+    """Count every trajectory presented for scoring."""
+
+    name = "counting"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+        del record, target
+        self.calls += 1
+        return Score(value=1.0)
+
+
+# --------------------------------------------------------------------------- #
+# Ctrl-C during rollout writes a partial cancelled log before propagating.
+# --------------------------------------------------------------------------- #
+def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) -> None:
+    policy = _InterruptingPolicy(KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            policy,
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            store_frames=True,
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    scene = log.samples[0]
+    assert log.status == "cancelled"
+    assert scene.status == "cancelled"
+    assert scene.policy_transcripts == ({"act_calls": 2},)
+    assert scene.termination_reasons == (None,)
+    assert scene.epochs == ({},)
+    assert scene.reduced == {}
+    assert log.results.metrics == {}
+    assert log.results.errored_trials == 0
+    assert log.error == "cancelled by user (KeyboardInterrupt)"
+    assert log.stats.frames_dir is not None
+    assert list(Path(log.stats.frames_dir).rglob("*.npy"))
+
+
+def test_cancelled_eval_reraises_typed_exception_with_original_cause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from inspect_robots.rollout import rollout as actual_rollout
+
+    original = KeyboardInterrupt("operator interrupt")
+    raised: list[_CancelledTrial] = []
+
+    def capturing_rollout(*args: object, **kwargs: object) -> TrialRecord:
+        try:
+            return actual_rollout(*args, **kwargs)  # type: ignore[arg-type]
+        except _CancelledTrial as exc:
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "rollout", capturing_rollout)
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        eval(
+            _task(),
+            _InterruptingPolicy(original),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    assert isinstance(excinfo.value, _CancelledTrial)
+    assert excinfo.value is raised[0]
+    assert excinfo.value.__cause__ is original
+
+
+def test_cancelled_policy_reset_records_t_minus_one_and_zero_steps(tmp_path: Path) -> None:
+    class _ResetInterruptPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise KeyboardInterrupt
+
+    records = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _ResetInterruptPolicy(),
+            CubePickEmbodiment(),
+            sinks=[records, json_sink],
+        )
+
+    (record,) = records.records
+    assert record.status == "cancelled"
+    assert record.steps == []
+    assert record.events[-1].kind == "error"
+    assert record.events[-1].t == -1
+    assert json_sink.path is not None and json_sink.path.exists()
+    assert read_eval_log(str(json_sink.path)).status == "cancelled"
+
+
+def test_cancelled_first_scene_halts_before_second_scene(tmp_path: Path) -> None:
+    task = Task(
+        name="two-scenes",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            task,
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    assert log.results.total_scenes == 1
+    assert tuple(scene.scene_id for scene in log.samples) == ("s0",)
+
+
+def test_cancelled_trial_is_never_scored() -> None:
+    scorer = _CountingScorer()
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(scorer=scorer),
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            sinks=[NullSink()],
+        )
+
+    assert scorer.calls == 0
+
+
+def test_all_errored_guard_does_not_rewrite_cancelled_status(tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    assert log.status == "cancelled"
+    assert log.error == "cancelled by user (KeyboardInterrupt)"
+
+
+def test_errored_then_cancelled_epochs_preserve_both_records(tmp_path: Path) -> None:
+    class _ErrorThenCancelPolicy(_InterruptingPolicy):
+        def __init__(self) -> None:
+            super().__init__(KeyboardInterrupt(), interrupt_on_call=1)
+            self.resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self.resets += 1
+            if self.resets == 1:
+                raise RuntimeError("first epoch failed")
+            super().reset(scene)
+
+    records = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(epochs=2),
+            _ErrorThenCancelPolicy(),
+            CubePickEmbodiment(),
+            sinks=[records, json_sink],
+        )
+
+    assert json_sink.path is not None
+    log = read_eval_log(str(json_sink.path))
+    assert log.status == "cancelled"
+    assert log.results.errored_trials == 1
+    assert log.results.total_trials == 2
+    assert log.samples[0].epochs == ({}, {})
+    assert [record.status for record in records.records] == ["error", "cancelled"]
 
 
 # --------------------------------------------------------------------------- #
