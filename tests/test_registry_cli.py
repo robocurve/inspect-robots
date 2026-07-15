@@ -533,6 +533,57 @@ def test_transcript_rendering_degrades_lone_surrogates_instead_of_crashing(
     assert "bad � data" in out or "bad ? data" in out
 
 
+def test_inspect_shows_shared_instruction_in_header(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = _step_limit_log(reasons=("success",))
+    scene = dataclasses.replace(log.samples[0], instruction="wipe the table")
+    path = tmp_path / "shared.json"
+    path.write_text(
+        json.dumps(dataclasses.replace(log, samples=(scene,)).to_dict()), encoding="utf-8"
+    )
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "instruction: wipe the table\n" in out
+    # Run-level identity: directly under the task line, not repeated per scene.
+    assert out.index("task:") < out.index("instruction:") < out.index("policy:")
+    assert "      instruction:" not in out
+
+
+def test_inspect_shows_differing_instructions_per_scene(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = _step_limit_log(reasons=("success",))
+    first = dataclasses.replace(log.samples[0], instruction="fold the towel")
+    second = dataclasses.replace(log.samples[0], scene_id="s1")
+    path = tmp_path / "differing.json"
+    path.write_text(
+        json.dumps(dataclasses.replace(log, samples=(first, second)).to_dict()),
+        encoding="utf-8",
+    )
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "      instruction: fold the towel\n" in out
+    assert out.index("[success] s0") < out.index("      instruction:") < out.index("[success] s1")
+    # No shared header line, and the instruction-less scene prints no sub-line.
+    assert out.index("instruction:") > out.index("scenes:")
+    assert out.count("instruction:") == 1
+
+
+def test_inspect_stays_silent_when_no_scene_has_an_instruction(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Logs written before SceneResult.instruction existed must render as today.
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(_step_limit_log(reasons=("success",)).to_dict()), encoding="utf-8")
+    assert main(["inspect", str(path)]) == 0
+    assert "instruction:" not in capsys.readouterr().out
+
+
 def test_transcript_empty_list_falls_back_to_json_rendering(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
