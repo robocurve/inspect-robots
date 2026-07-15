@@ -327,7 +327,7 @@ def build_toolset(
     action_space: Box,
     observation_space: ObservationSpace,
     control_hz: float | None,
-    max_speed_frac: float = 0.5,
+    max_speed_frac: float = 0.1,
 ) -> Toolset:
     """Validate an embodiment's spaces and build its agent-facing tools.
 

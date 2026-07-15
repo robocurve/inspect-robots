@@ -459,7 +459,10 @@ def test_move_joints_over_cap_returns_structured_error() -> None:
 
 def test_absolute_chunks_pass_default_approvers_across_calls() -> None:
     space = _absolute_space()
-    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+    # frac 0.5 pins the stress case where the per-step size sits exactly at
+    # the backstop boundary (the 0.1 default runs far below it, and its
+    # full-range second move would hit the per-call playout cap).
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0, max_speed_frac=0.5)
     chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
     store: dict[str, Any] = {}
 
