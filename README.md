@@ -131,7 +131,8 @@ uv pip install inspect-robots-agent
 Run the LLM on the robot:
 
 ```bash
-inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
+inspect-robots "place the fork on the plate" --policy agent \
+    -P model=anthropic/claude-fable-5 -P effort=low
 ```
 
 Read the recorded agent conversation with `inspect-robots inspect LOG.json --transcript`.
@@ -249,7 +250,7 @@ inspect-robots run --task my-task --embodiment isaacsim \
 # Claude driving the mock world, no hardware or GPU required:
 export ANTHROPIC_API_KEY=sk-ant-...
 inspect-robots "pick up the cube" --policy agent \
-    -P model=anthropic/claude-fable-5 --embodiment cubepick
+    -P model=anthropic/claude-fable-5 -P effort=low --embodiment cubepick
 ```
 
 ### Real robots via ROS
