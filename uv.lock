@@ -12,6 +12,7 @@ members = [
     "inspect-robots",
     "inspect-robots-agent",
     "inspect-robots-isaacsim",
+    "inspect-robots-ros",
     "inspect-robots-xpolicylab",
 ]
 
@@ -574,6 +575,39 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "inspect-robots-ros"
+version = "0.1.0"
+source = { editable = "plugins/inspect-robots-ros" }
+dependencies = [
+    { name = "inspect-robots" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pillow" },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "inspect-robots", editable = "." },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "websockets", specifier = ">=12" },
 ]
 provides-extras = ["dev"]
 
