@@ -79,6 +79,20 @@ def test_parse_value_variants() -> None:
     assert _parse_value("hello") == "hello"
 
 
+def test_parse_value_quoted_strings_bypass_coercion() -> None:
+    # The escape hatch for strings the heuristics would claim: quoted values
+    # come back as the literal inner string, uncoerced.
+    assert _parse_value("'none'") == "none"
+    assert _parse_value('"none"') == "none"
+    assert _parse_value("'7'") == "7"
+    assert _parse_value("'true'") == "true"
+    assert _parse_value("''") == ""
+    # Mismatched or single quotes are not treated as wrapping.
+    assert _parse_value("'none\"") == "'none\""
+    assert _parse_value("'") == "'"
+    assert _parse_value("don't") == "don't"
+
+
 def test_parse_kvs_rejects_bad_pair() -> None:
     with pytest.raises(SystemExit):
         _parse_kvs(["no-equals-sign"])

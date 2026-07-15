@@ -70,4 +70,9 @@ Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the
 model either way, and frontier models at low effort remain strong at this
 task shape. Raise it for hard manipulation problems (`-P effort=high`) or
-pass `-P effort=none` to omit the parameter for endpoints that reject it.
+pass `-P effort=none` to omit the parameter for endpoints that reject it
+(the CLI reads a bare `none` as null). To send the literal wire value
+`none` and disable reasoning, quote it: `-P effort="'none'"`. GPT-5.x on
+chat completions requires the literal `none` when function tools are in
+play (any other value, or omitting the field, is a 400). In Python,
+`effort=None` omits the field and `effort="none"` sends the wire value.
