@@ -22,6 +22,7 @@ class StubRosbridgeServer:
         self._lock = threading.RLock()
         self._connections: set[ServerConnection] = set()
         self._subscriptions: dict[ServerConnection, dict[str, dict[str, Any]]] = {}
+        self._last_subscription_send: dict[tuple[ServerConnection, str], float] = {}
         self._server: Server = serve(self._handler, "127.0.0.1", 0, max_size=None)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
@@ -63,12 +64,22 @@ class StubRosbridgeServer:
     def publish(self, topic: str, msg: Mapping[str, Any]) -> None:
         """Send a topic message only to connections subscribed to that topic."""
         frame = {"op": "publish", "topic": topic, "msg": dict(msg)}
+        now = time.monotonic()
         with self._lock:
-            targets = [
-                connection
-                for connection, by_id in self._subscriptions.items()
-                if any(operation.get("topic") == topic for operation in by_id.values())
-            ]
+            targets: list[ServerConnection] = []
+            for connection, by_id in self._subscriptions.items():
+                due_ids: list[str] = []
+                for subscription_id, operation in by_id.items():
+                    if operation.get("topic") != topic:
+                        continue
+                    throttle_s = float(operation.get("throttle_rate", 0)) / 1000.0
+                    last = self._last_subscription_send.get((connection, subscription_id))
+                    if last is None or throttle_s == 0 or now - last >= throttle_s:
+                        due_ids.append(subscription_id)
+                if due_ids:
+                    targets.append(connection)
+                    for subscription_id in due_ids:
+                        self._last_subscription_send[(connection, subscription_id)] = now
         self._send(targets, frame)
 
     def send_status(self, level: str, message: str, *, request_id: str | None = None) -> None:
@@ -109,6 +120,8 @@ class StubRosbridgeServer:
                 connection.close()
         self._server.shutdown()
         self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise TimeoutError("stub rosbridge serving thread did not stop")
 
     def _handler(self, ws: ServerConnection) -> None:
         with self._lock:
@@ -129,17 +142,24 @@ class StubRosbridgeServer:
                     if isinstance(subscription_id, str):
                         with self._lock:
                             self._subscriptions[ws][subscription_id] = operation
+                            self._last_subscription_send.pop((ws, subscription_id), None)
                 elif op == "unsubscribe":
                     subscription_id = operation.get("id")
                     if isinstance(subscription_id, str):
                         with self._lock:
                             self._subscriptions[ws].pop(subscription_id, None)
+                            self._last_subscription_send.pop((ws, subscription_id), None)
                 elif op == "call_service":
                     self._handle_service(ws, operation)
         finally:
             with self._lock:
                 self._connections.discard(ws)
                 self._subscriptions.pop(ws, None)
+                self._last_subscription_send = {
+                    key: stamp
+                    for key, stamp in self._last_subscription_send.items()
+                    if key[0] is not ws
+                }
 
     def _handle_service(self, ws: ServerConnection, operation: dict[str, Any]) -> None:
         service = operation.get("service")

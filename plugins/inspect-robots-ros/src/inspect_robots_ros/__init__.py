@@ -1,8 +1,8 @@
-"""Run Inspect Robots evaluations on ROS robots through rosbridge.
+"""Run Inspect Robots evaluations on ROS 1 and ROS 2 robots through rosbridge.
 
 The ``ros`` embodiment is discovered through the
-``inspect_robots.embodiments`` entry-point group. Its implementation is added
-in the subsequent focused commits described by plan 0016.
+``inspect_robots.embodiments`` entry-point group. Construction and ``.info``
+remain network-free; the websocket connects on the first reset.
 """
 
 from __future__ import annotations
