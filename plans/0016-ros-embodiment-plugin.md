@@ -113,8 +113,10 @@ Message-type facts (standard ROS msgs):
   `"rgb8; jpeg compressed bgr8"`) + `data` (base64 in JSON) — decoded via
   Pillow, converted to `(H, W, 3)` RGB uint8.
 - `geometry_msgs/PoseStamped`: `pose.position` xyz + `pose.orientation`
-  **xyzw** quaternion — the adapter reorders to the core's canonical
-  `eef_pose` form `[x, y, z, qw, qx, qy, qz]` (quat wxyz).
+  **xyzw** quaternion — the adapter reorders to `[x, y, z, qw, qx, qy, qz]`
+  (quat wxyz). Core pins no quaternion order for `eef_pose` (the unit is
+  just `"m+quat"`); wxyz is the ecosystem precedent (plan 0007 /
+  xpolicylab's ee-pose convention) and the plugin README documents it.
 - `trajectory_msgs/JointTrajectory`: `joint_names` + `points[]` with
   `positions` and `time_from_start`. **Not identical across ROS versions**:
   the duration is `{secs, nsecs}` in ROS 1 but `{sec, nanosec}` in ROS 2
@@ -165,10 +167,23 @@ exactly the degenerate loop R1's escape hatch exists for. So:
 - The embodiment declares the `SELF_PACED` capability.
 - `step()` publishes the command, then sleeps until one control period
   (`1/control_hz`, monotonic clock, measured from the previous step's
-  publish) has elapsed, then assembles the post-action observation from the
-  topic cache. The sleep doubles as the freshness window: state topics are
-  subscribed at the control rate, so the cache has a post-command message by
-  the time the observation is read.
+  publish) has elapsed — this is the pacing half, and it composes with
+  open-loop `ActionChunk` playout (mid-chunk, buffered pops are fast and
+  the sleep absorbs the overhead; at a chunk boundary after slow inference
+  the period has already elapsed and the sleep is ~zero, which is correct:
+  pacing bounds the command rate, it never adds latency on top of
+  inference).
+- Freshness is a **separate** guarantee, not a side effect of the sleep
+  (at a chunk boundary there is no sleep, and a state stream throttled at
+  exactly the control rate would only race the deadline): after the
+  pacing sleep, `step()` waits for a joint-states message whose receive
+  stamp postdates this step's publish, bounded by `fresh_obs_timeout_s`
+  (default `2/control_hz`; timeout ⇒ staleness fault). To keep that wait
+  short, state topics subscribe at **2× the control rate**
+  (`throttle_rate = 500/control_hz` ms), so a post-command message
+  arrives within ~half a period. The observation a policy plans from is
+  therefore always post-command, including the one the LLM agent sees
+  after seconds of inference.
 - Core stays untouched; if/when core pacing lands, `self_paced` remains
   correct (the framework defers to it).
 
@@ -209,7 +224,7 @@ string→string maps.
 | Arg | Default | Meaning |
 | --- | --- | --- |
 | `url` | `"ws://localhost:9090"` | rosbridge websocket URL (9090 is the rosbridge default) |
-| `ros_version` | `2` | `1` or `2`; selects `JointTrajectory` duration field names and type strings (§2) |
+| `ros_version` | `2` | `1` or `2`; selects `JointTrajectory` duration field names and type strings (§2). ROS 1 is kept despite Noetic's 2025 EOL because industrial fleets still run it and the cost is two builder branches plus golden tests — the protocol layer is identical |
 | `joints` | **required** | ordered arm joint names; defines `joint_pos` order |
 | `joint_states_topic` | `"/joint_states"` | `sensor_msgs/JointState` source |
 | `command_topic` | **required** | where arm actions go |
@@ -220,7 +235,8 @@ string→string maps.
 | `gripper_low` / `gripper_high` | `None` | **required iff `gripper_topic`**: the gripper's native command range (rad or m — robot-specific; no default, same honesty rule as arm bounds). Appended to the action `Box` bounds and used to normalize the canonical `gripper` observation to 0..1 |
 | `eef_pose_topic` | `None` | optional `geometry_msgs/PoseStamped` → observation `eef_pose` (7-D, wxyz) |
 | `cameras` | `{}` | camera name → `(topic, height, width)`; compact form `name:topic:WxH`. Resolution is required — `CameraSpec.height/width` are mandatory ints, and an embodiment that declares no `CameraSpec` fails compat against every camera-requiring policy (`missing_camera`) |
-| `control_hz` | `10.0` | control rate; `step()` paces to it (§3) and state subscriptions throttle to it |
+| `control_hz` | `10.0` | control rate; `step()` paces to it (§3); state subscriptions throttle at 2× it |
+| `fresh_obs_timeout_s` | `2/control_hz` | max wait for a post-publish joint-states message in `step()` (§3); timeout ⇒ staleness fault |
 | `camera_throttle_ms` | `1000/control_hz` | camera subscribe `throttle_rate`; `0` = unthrottled. Default ties camera bandwidth to the control rate — base64 JSON frames on a thin link otherwise queue in the socket and trip the staleness fault |
 | `reset_service` | `None` | optional service called on `reset()` (e.g. a bringup-provided home routine); empty args, must return `result: true` |
 | `operator_reset_confirm` | `False` | when true, `reset()` prints the scene instruction and blocks on Enter (TTY prompt via `input()`) — the "human arranges the scene" path |
@@ -247,7 +263,11 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
   value; the field is irrelevant to `joint_pos` mode). `dim_labels` are
   mandatory in practice: conformance errors without them and the agent
   policy's tool surface is built from them; they also pin the gripper to
-  the last dim.
+  the last dim. Factory validations: an arm joint literally named
+  `"gripper"` alongside `gripper_topic` would duplicate `dim_labels`
+  (conformance error) ⇒ rejected at construction; `gripper_low >=
+  gripper_high` is rejected too (conformance only warns on zero width,
+  but the 0..1 normalization divides by the range).
 - `observation_space.state` (`StateSpec`):
   - `joint_pos`, shape `(d,)` — arm joints in `joints` order, plus the raw
     `gripper_joint` position as the last element when a gripper is
@@ -261,11 +281,19 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
     `(raw - gripper_low) / (gripper_high - gripper_low)`. Declared only
     when a gripper is configured.
   - `eef_pose`, shape `(7,)` — declared only when `eef_pose_topic` set.
-    **Known corner**: a 6-DoF arm + gripper (d = 7) + `eef_pose` gives two
-    `(7,)` fields, which fails the shape-based `state_alignment`
-    conformance check (eval itself is unaffected — compat doesn't use
-    alignment). Documented in the README; follow-up core issue: match the
-    reference field by key priority (`joint_pos` first), not shape alone.
+    **Hard constraint, enforced in the factory**: when `d == 7` (any
+    shape — 6-DoF + gripper *or* a gripperless 7-DoF arm, i.e. Franka /
+    iiwa / Kinova Gen3), setting `eef_pose_topic` creates two `(7,)`
+    state fields. That is not a cosmetic conformance blemish: the agent
+    policy replicates the same shape-match at `bind()` time
+    (`inspect_robots_agent/_tools.py` raises `ToolsetError` on ambiguous
+    reference fields, and `eval()` binds before any rollout), so
+    agent-on-ROS would hard-fail at eval start. The factory therefore
+    raises an actionable `ValueError` at construction ("omit
+    `eef_pose_topic` on a 7-dim action space until core supports
+    key-priority reference matching"). Follow-up core issue: match the
+    proprioceptive reference by key priority (`joint_pos` first), not
+    shape alone; lift the restriction when it lands.
 - `observation_space.cameras`: `CameraSpec(name, height, width)` per
   configured camera; the first received frame is validated against the
   declared resolution at reset (mismatch ⇒ error naming both).
@@ -281,7 +309,8 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
 
 1. First call: connect, `advertise` the command (and gripper) topics,
    `subscribe` (always `queue_length=1` — latest-value semantics) to joint
-   states / eef pose (`throttle_rate` = `1000/control_hz` ms) and cameras
+   states / eef pose (`throttle_rate` = `500/control_hz` ms — 2× the
+   control rate, see §3 freshness) and cameras
    (`camera_throttle_ms`), then wait up to `obs_timeout_s` for one message
    per subscribed topic — a missing topic fails *here*, at reset, with the
    topic name, not mid-rollout. First camera frames validate declared
@@ -292,16 +321,22 @@ the one-line rosbridge launch command for ROS 1 and ROS 2.
 4. If `operator_reset_confirm`: print `scene.instruction` and block on
    Enter.
 5. Assemble and return the initial `Observation` (fresh-message wait, not
-   cache: reset must observe the *post-reset* world).
+   cache: reset must observe the *post-reset* world). Every observation —
+   here and in `step()` — carries `scene.instruction` on
+   `Observation.instruction`, matching the cubepick/isaacsim precedent
+   (policies keep a reset-time fallback, but the embodiment threads it).
 
 **`step(action)`**: split the vector into arm command (+ gripper command),
 build the §2 message shapes per `ros_version`, `publish` (two publishes when
-gripper is configured), sleep out the control period (§3), assemble the
-current observation from the topic cache (staleness-checked), return
-`StepResult(observation=..., reward=None, terminated=False,
-truncated=False)`. Per-topic message ages ride on the observation's own
-`state_time` / `image_times` fields (that is what they exist for — no
-duplicate `info` payload). No success oracle ⇒ `terminated` is always
+gripper is configured), sleep out the control period, wait for a
+post-publish joint-states message (§3), assemble the observation
+(staleness-checked), return `StepResult(observation=..., reward=None,
+terminated=False, truncated=False)`. Timing rides on the observation's own
+fields — no duplicate `info` payload — with the convention stated here
+because no core producer has pinned one yet: `state_time` is the monotonic
+receive stamp of the **oldest** state message contributing to the
+observation (joint states or eef pose), and `image_times[name]` is each
+camera frame's receive stamp. No success oracle ⇒ `terminated` is always
 False; horizons and policy `request_stop` end trials, scorers decide
 success.
 
@@ -326,7 +361,11 @@ axis.
   the stub-server test pattern carries over) and relies on the websockets
   sync client's documented one-thread-receiving / one-thread-sending
   safety — pin the claim to the installed version's docs during
-  implementation and cover it with a threaded test.
+  implementation and cover it with a threaded test. Both the client
+  (cache receive stamps) and the embodiment (pacing sleep, fresh-obs
+  wait, staleness checks) take an injectable monotonic clock + sleep
+  (default `time.monotonic`/`time.sleep`), so timing tests control one
+  clock domain instead of racing real stamps against a fake clock.
 - **Error latching**: the receive thread can't raise into the rollout
   thread, and rosbridge reports publish-side type errors asynchronously as
   `status: error` ops. The thread latches the first error (and any socket
@@ -354,15 +393,18 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   string-form `-E` args (joints, cameras incl. `WxH`, bounds) normalizes
   correctly; scalar-coerced 1-DoF bounds (float, not str) normalize too;
   required-arg omissions (incl. `gripper_low/high` when `gripper_topic`)
-  raise actionable errors.
+  raise actionable errors; factory rejections: `d == 7` +
+  `eef_pose_topic`, arm joint named `"gripper"` with a gripper, and
+  `gripper_low >= gripper_high`.
 - `.info`: correct spaces/semantics/`dim_labels`/capabilities for all config
   shapes (gripper folds into `joint_pos (d,)` and bounds; normalized
   `gripper` field declared; `self_paced` always on); no network before
   first `reset()` (construct with an unroutable URL).
 - conformance: `assert_embodiment_conformant(RosEmbodiment(...).info)`
-  passes for gripperless and gripper configs (no `eef_pose` collision);
-  the documented 6-DoF+gripper+`eef_pose` corner is asserted to fail with
-  `state_alignment` (pinning the known limitation).
+  passes for gripperless and gripper configs both with and without
+  `eef_pose` at `d != 7`; the `d == 7` + `eef_pose_topic` combinations
+  (6-DoF+gripper *and* 7-DoF gripperless) are asserted to raise the
+  factory's actionable error (pinning the enforced limitation).
 - reset: subscribes with `queue_length=1` and the right `throttle_rate`s;
   missing topic ⇒ error naming it within `obs_timeout_s`; camera resolution
   mismatch ⇒ error; `reset_service` called and `result: false` raises;
@@ -371,9 +413,12 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   (`{secs,nsecs}` vs `{sec,nanosec}`, type strings) and Float64MultiArray;
   joint order = config order; `time_from_start` = period; gripper split
   publishes two messages with the raw (un-normalized) command; pacing
-  sleeps to `control_hz` (monotonic-clock based, tested with a fake
-  clock); staleness beyond `staleness_s` raises; `terminated` always
-  False; observation `gripper` normalized 0..1.
+  sleeps to `control_hz` and is ~zero after slow inference (injected
+  fake clock, §6); the fresh-obs wait returns only a post-publish
+  joint-states message and faults on `fresh_obs_timeout_s`; staleness
+  beyond `staleness_s` raises; `terminated` always False; observation
+  `gripper` normalized 0..1; `instruction` threaded onto every
+  observation; `state_time`/`image_times` follow the §5 convention.
 - messages: JointState reorder (shuffled names), missing-joint error,
   CompressedImage jpeg + png decode to `(H, W, 3)` uint8 RGB, exotic ROS 1
   `format` strings, PoseStamped xyzw→wxyz reorder.
@@ -395,7 +440,10 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
   inspect-robots = { workspace = true }`, mypy strict, ruff line-length 100.
   `uv lock` after adding; workspace glob picks it up.
 - CI: `plugin-ros` job cloned from `plugin-xpolicylab` (ruff, mypy strict,
-  pytest, ubuntu) and **added to `ci-ok.needs`**.
+  pytest, ubuntu) and **added to both `ci-ok.needs` and
+  `alert-red-main.needs`** (plugin jobs appear in both lists; omitting the
+  second would exempt `plugin-ros` failures from red-main stop-the-line
+  alerts).
 - Release: `publish-ros` job in `release.yml` (environment `pypi-ros`;
   maintainer must create the PyPI trusted-publisher environment before first
   release — settings action, called out in the PR).
@@ -421,7 +469,7 @@ Coverage targets (plugin CI, full-line aim on `embodiment.py`):
 | Base64 JSON images too slow at control rate | `CompressedImage` (jpeg) keeps frames tens-of-KB; camera subscriptions throttle to the control rate by default (`camera_throttle_ms`); documented follow-up: `cbor` subscription mode |
 | JointState arrives without all configured joints (some drivers split arm/gripper across publishers) | Reorder-by-name errors list missing vs available; v1 requires `gripper_joint` on the same topic and says so; split-topic support is a follow-up |
 | Wrong `command_type` / `ros_version` for the robot's stack | README maps types to controller families; rosbridge `status: error` (type mismatch) latches and surfaces on the next step as `EmbodimentFault` |
-| Stale cache read as live state (robot died, cache survives) | `staleness_s` check on every observation assembly ⇒ fault, not silent stale data; socket death latches the client dead |
+| Stale cache read as live state (robot died, cache survives) | `staleness_s` check on every observation assembly ⇒ fault, not silent stale data; socket death latches the client dead; `step()` additionally requires a post-publish joint-states message (§3), so a pre-command observation can't masquerade as post-command |
 | Guardrail bounds wrong because user guessed | Arm **and gripper** bounds are required, never defaulted; README tells users to copy them from URDF/datasheet and start with low agent speed caps |
 | Unpaced rollout loop on real hardware | `self_paced` + in-`step()` pacing (§3) — the loop cannot outrun `control_hz` regardless of policy inference speed |
 | websockets sync client thread-safety assumptions | One-reader (receive thread) / one-writer (rollout thread) split; claim pinned to installed-version docs; threaded test in CI |
