@@ -207,6 +207,9 @@ def test_client_sends_while_receive_thread_updates_topic_cache(
 ) -> None:
     client = _client(stub_server)
     client.connect()
+    client.connect()
+    client.advertise("/temporary", message_type="std_msgs/msg/Float64MultiArray")
+    client.unadvertise("/temporary")
     client.subscribe(
         "/joint_states",
         subscription_id="joints",
@@ -261,6 +264,7 @@ def test_client_status_error_latches_and_surfaces_on_every_later_call(
 ) -> None:
     client = _client(stub_server)
     client.connect()
+    stub_server.send_status("warning", "slow publisher")
     stub_server.send_status("error", "message type mismatch")
     error = _wait_for_latched_error(client)
     assert isinstance(error, RosbridgeError)
@@ -375,11 +379,72 @@ def test_client_requires_connect_and_connect_failure_names_url(
     with pytest.raises(ConnectionError, match="call connect"):
         client.latest("/joint_states")
     client.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.connect()
 
     unreachable = RosbridgeClient("ws://127.0.0.1:9", connect_timeout_s=0.05)
     with pytest.raises(ConnectionError, match=r"ws://127\.0\.0\.1:9"):
         unreachable.connect()
     unreachable.close()
+
+
+def test_client_send_failure_latches_first_connection_error() -> None:
+    class FailingSocket:
+        def send(self, _message: str) -> None:
+            raise OSError("broken pipe")
+
+        def close(self) -> None:
+            pass
+
+    client = RosbridgeClient("ws://robot.example:9090")
+    client._ws = cast(Any, FailingSocket())
+    with pytest.raises(ConnectionError, match=r"robot\.example.*broken pipe") as exc_info:
+        client.publish("/arm/command", {"data": []})
+    assert client.latched_error is exc_info.value
+    with pytest.raises(ConnectionError) as repeated:
+        client.latest("/joint_states")
+    assert repeated.value is exc_info.value
+    client._latch(RuntimeError("later failure"))
+    assert client.latched_error is exc_info.value
+    client.close()
+
+
+def test_client_rejects_unsupported_incoming_frame_type() -> None:
+    class InvalidFrameSocket:
+        def recv(self) -> object:
+            return object()
+
+        def close(self) -> None:
+            pass
+
+    client = RosbridgeClient("ws://robot.example:9090")
+    client._ws = cast(Any, InvalidFrameSocket())
+    client._receive_loop()
+    error = client.latched_error
+    assert isinstance(error, RosbridgeError)
+    assert "unsupported frame type object" in str(error)
+    client.close()
+
+
+def test_client_service_wait_detects_concurrent_close() -> None:
+    class NoopSocket:
+        def send(self, _message: str) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    client = RosbridgeClient("ws://robot.example:9090")
+
+    def close_during_wait(_duration: float) -> None:
+        client._closed = True
+
+    client._sleep = close_during_wait
+    client._ws = cast(Any, NoopSocket())
+    with pytest.raises(ConnectionError, match=r"robot\.example.*closed"):
+        client.call_service("/home")
+    client._closed = False
+    client.close()
 
 
 def test_joint_state_reorders_shuffled_names() -> None:
@@ -531,6 +596,11 @@ def test_joint_trajectory_duration_rounding_carries_to_next_second() -> None:
 def test_joint_trajectory_rejects_invalid_inputs(kwargs: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         build_joint_trajectory(**kwargs, ros_version=2)
+
+
+def test_joint_trajectory_rejects_unknown_ros_version() -> None:
+    with pytest.raises(ValueError, match="ros_version must be 1 or 2"):
+        build_joint_trajectory(("joint_1",), [1.0], period_s=0.1, ros_version=3)
 
 
 def test_float64_and_gripper_command_builders_preserve_raw_values() -> None:
@@ -767,11 +837,16 @@ def test_scalar_coerced_one_dof_bounds_are_accepted() -> None:
     "kwargs,match",
     [
         ({"joints": None}, "joints is required"),
+        ({"joints": ""}, "at least one joint name"),
         ({"command_topic": None}, "command_topic is required"),
         ({"action_low": None}, "action_low is required"),
         ({"action_high": None}, "action_high is required"),
+        ({"action_low": "bad,1"}, "comma-separated list of numbers"),
+        ({"action_low": ""}, "at least one numeric bound"),
         ({"action_low": (-1.0,)}, "1 bounds for 2 joints"),
         ({"action_high": (1.0,)}, "1 bounds for 2 joints"),
+        ({"action_low": (-math.inf, -3.0)}, "bounds must all be finite"),
+        ({"action_low": (3.0, -3.0)}, "elementwise <="),
         ({"joints": ("joint_1", "joint_1")}, "duplicate"),
         (
             {
@@ -792,6 +867,15 @@ def test_scalar_coerced_one_dof_bounds_are_accepted() -> None:
             },
             "less than",
         ),
+        (
+            {
+                "gripper_topic": "/gripper/command",
+                "gripper_joint": "finger",
+                "gripper_low": 0.0,
+                "gripper_high": math.inf,
+            },
+            "gripper_low and gripper_high must be finite",
+        ),
         ({"gripper_topic": "/gripper/command"}, "required when gripper_topic"),
         ({"gripper_joint": "finger"}, "only when gripper_topic"),
         ({"control_hz": 0.0}, "positive and finite"),
@@ -800,6 +884,20 @@ def test_scalar_coerced_one_dof_bounds_are_accepted() -> None:
         ({"command_type": "effort"}, "command_type"),
         ({"gripper_command_type": "action"}, "gripper_command_type"),
         ({"gripper_closed_at": "left"}, "gripper_closed_at"),
+        ({"fresh_obs_timeout_s": 0.0}, "fresh_obs_timeout_s must be positive and finite"),
+        ({"camera_throttle_ms": -1}, "camera_throttle_ms must be >= 0"),
+        ({"obs_timeout_s": 0.0}, "obs_timeout_s must be positive and finite"),
+        ({"connect_timeout_s": math.inf}, "connect_timeout_s must be positive and finite"),
+        ({"request_timeout_s": 0.0}, "request_timeout_s must be positive and finite"),
+        ({"staleness_s": -1.0}, "staleness_s must be finite and >= 0"),
+        ({"cameras": ","}, "parsed to no cameras"),
+        ({"cameras": "wrist=/cam=640x480"}, "name:topic:WxH"),
+        ({"cameras": "wrist:/cam:640by480"}, "must be WxH"),
+        ({"cameras": "wrist:/cam:widex480"}, "integer width and height"),
+        ({"cameras": {"wrist": ("/cam", 480)}}, "must map to"),
+        ({"cameras": {"wrist-cam": ("/cam", 480, 640)}}, "valid identifier"),
+        ({"cameras": {"wrist": ("", 480, 640)}}, "non-empty string"),
+        ({"cameras": {"wrist": ("/cam", 0, 640)}}, "positive integers"),
         (
             {"cameras": "wrist:/a:640x480,wrist:/b:320x240"},
             "duplicate name",
@@ -1163,6 +1261,86 @@ def test_close_delegates_idempotently_to_client() -> None:
     embodiment.close()
     embodiment.close()
     assert client.closed
+
+
+def test_context_manager_returns_embodiment_and_closes_client() -> None:
+    embodiment, client, _clock = _ready_embodiment()
+    with embodiment as entered:
+        assert entered is embodiment
+    assert client.closed
+
+
+def test_initialization_advertises_configured_gripper() -> None:
+    clock = _FakeClock()
+    embodiment = _embodiment(
+        clock=clock,
+        sleep=clock.sleep,
+        gripper_topic="/gripper/command",
+        gripper_joint="finger",
+        gripper_low=0.0,
+        gripper_high=0.08,
+    )
+    client = _FakeClient(clock)
+
+    def provide_joint_state(topic: str, _after: int) -> None:
+        client.put(topic, _joint_message())
+
+    client.on_wait = provide_joint_state
+    embodiment._client = cast(Any, client)
+    embodiment._ensure_initialized()
+    advertisements = [operation for operation in client.operations if operation[0] == "advertise"]
+    assert [(operation[1], operation[2]) for operation in advertisements] == [
+        ("/arm/command", "trajectory_msgs/msg/JointTrajectory"),
+        ("/gripper/command", "std_msgs/msg/Float64MultiArray"),
+    ]
+
+
+def test_preflight_stops_when_one_second_deadline_is_reached() -> None:
+    clock = _FakeClock()
+    embodiment = _embodiment(clock=clock, sleep=clock.sleep)
+    client = _FakeClient(clock)
+
+    def delayed_joint_state(topic: str, _after: int) -> None:
+        clock.advance(1.0)
+        client.put(topic, _joint_message())
+
+    client.on_wait = delayed_joint_state
+    embodiment._client = cast(Any, client)
+    with pytest.warns(RuntimeWarning, match="exactly one message"):
+        embodiment._joint_state_preflight()
+    assert len(client.wait_timeouts) == 1
+
+
+def test_shared_observation_deadline_names_later_missing_topic() -> None:
+    clock = _FakeClock()
+    embodiment = _embodiment(clock=clock, sleep=clock.sleep)
+    client = _FakeClient(clock)
+
+    def consume_deadline(topic: str, _after: int) -> None:
+        clock.advance(1.0)
+        client.put(topic, {})
+
+    client.on_wait = consume_deadline
+    embodiment._client = cast(Any, client)
+    with pytest.raises(TimeoutError, match=r"missing topic '/camera'.*obs_timeout_s=1s"):
+        embodiment._wait_for_sequences({"/joint_states": 0, "/camera": 0}, 1.0, "obs_timeout_s")
+
+
+def test_camera_resolution_validation_is_only_applied_to_first_frame() -> None:
+    embodiment, client, _clock = _ready_embodiment(cameras={"wrist": ("/camera/compressed", 2, 3)})
+    embodiment._validate_camera_resolutions()
+    client.put(
+        "/camera/compressed",
+        _compressed_image_message(np.zeros((4, 5, 3), dtype=np.uint8), "PNG", "png"),
+    )
+    embodiment._validate_camera_resolutions()
+
+
+def test_observation_assembly_rejects_missing_cached_sample() -> None:
+    embodiment, client, _clock = _ready_embodiment()
+    client.samples.pop(embodiment.joint_states_topic)
+    with pytest.raises(RuntimeError, match=r"no cached message.*joint_states"):
+        embodiment._assemble_observation()
 
 
 def test_connection_failure_names_url_and_both_rosbridge_launch_commands() -> None:
