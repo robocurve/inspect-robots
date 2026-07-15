@@ -93,6 +93,7 @@ Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
+Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a transcript observation to its stored frame.
 
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the

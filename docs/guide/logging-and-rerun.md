@@ -101,3 +101,16 @@ inspect-robots video logs/adhoc_xxxx.json
 
 `inspect-robots inspect` prints the frames directory and this command as a
 hint whenever a log has stored frames.
+
+## Policy transcripts
+
+Policies can persist a per-trial audit record in the eval log. The agent policy
+stores its conversation, with streamed image bytes replaced by
+`[image omitted: streamed camera frame]`. The preceding label, such as
+`camera 'top_cam' (step 480):`, provides the step join key from a transcript
+observation to the stored frame.
+
+`FrameStore` sanitizes trial and camera names with `_safe()` before building
+`{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
+`StepRecord.image_refs` and `FrameRef.path` as the authoritative mapping instead
+of assembling the path from the transcript label.
