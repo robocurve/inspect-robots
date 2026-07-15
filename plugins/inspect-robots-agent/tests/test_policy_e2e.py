@@ -171,6 +171,69 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert logs[0].eval.policy_config["model"] == "test/model"
     assert logs[0].eval.policy_config["max_llm_calls"] == 100
     assert logs[0].eval.policy_config["max_speed_frac"] == 0.1
+    (transcript,) = logs[0].samples[0].policy_transcripts
+    serialized = json.dumps(logs[0].to_dict())
+    assert transcript is not None
+    assert "move_by" in serialized and "done" in serialized
+    assert "data:" not in serialized
+
+
+def test_transcript_is_none_before_first_reset() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    assert policy.transcript() is None
+
+
+def test_transcript_strips_images_and_preserves_text_and_tools() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+    tool_call = {
+        "id": "call_move",
+        "type": "function",
+        "function": {"name": "move_by", "arguments": '{"dx": 0.1}'},
+    }
+    policy._messages.extend(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "camera 'top':"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,secret"},
+                    },
+                ],
+            },
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call_move", "content": "moved"},
+        ]
+    )
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[-3]["content"] == [
+        {"type": "text", "text": "camera 'top':"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    assert transcript[-2]["tool_calls"] == [tool_call]
+    assert transcript[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_move",
+        "content": "moved",
+    }
+
+
+def test_transcript_is_deeply_isolated_in_both_directions() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+    first = policy.transcript()
+    assert first is not None
+
+    first[0]["content"] = "changed return"
+    assert policy._messages[0]["content"] != "changed return"
+
+    policy._messages[1]["content"] = "changed live state"
+    assert first[1]["content"] == "Goal: reach"
 
 
 def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:

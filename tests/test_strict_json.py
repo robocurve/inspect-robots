@@ -135,3 +135,17 @@ def test_scene_instruction_and_judgements_serialize_strict(tmp_path: Path) -> No
     assert isinstance(sample, dict)
     assert sample["instruction"] == "reach"
     assert sample["operator_judgements"] == [None]
+
+
+def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> None:
+    class _NonFiniteTranscriptPolicy(ScriptedPolicy):
+        def transcript(self) -> object:
+            return {"inf": float("inf"), "nan": float("nan")}
+
+    eval(_task(), _NonFiniteTranscriptPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    (path,) = tmp_path.glob("*.json")
+    data = _read_strict(path)
+    samples = data["samples"]
+    assert isinstance(samples, list)
+    transcript = samples[0]["policy_transcripts"][0]
+    assert transcript == {"inf": None, "nan": None}

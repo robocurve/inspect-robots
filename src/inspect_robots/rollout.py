@@ -9,6 +9,7 @@ gate, logging each step to the sinks, and returns an immutable
 
 from __future__ import annotations
 
+import json
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,8 @@ from inspect_robots.types import Action, Observation, StepResult
 
 if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
+
+_TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -83,6 +86,37 @@ class TrialRecord:
     operator_judgement: str | None = None
     # Typed transcript of what happened during the trial.
     events: list[Event] = field(default_factory=list)
+    # The policy's optional per-trial audit record (e.g. an LLM conversation),
+    # collected via the duck-typed transcript() hook and normalized to plain
+    # JSON types by _collect_transcript. None when the policy has no hook.
+    policy_transcript: Any = None
+
+
+def _collect_transcript(policy: object) -> Any:
+    """Normalize a policy's optional audit hook without affecting trial outcome."""
+    try:
+        transcript = getattr(policy, "transcript", None)
+        if not callable(transcript):
+            return None
+        raw = transcript()
+        if raw is None:
+            return None
+        dumped = json.dumps(raw, default=str)
+        normalized = json.loads(dumped)
+        size = len(dumped.encode())
+        if size > _TRANSCRIPT_BYTE_LIMIT:
+            return {
+                "transcript_dropped": True,
+                "bytes": size,
+                "note": "exceeds inline limit; policies must not embed binary data",
+            }
+        return normalized
+    except Exception as exc:
+        try:
+            detail = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            detail = type(exc).__name__
+        return {"transcript_error": detail}
 
 
 def _effective_control_hz(
@@ -159,10 +193,12 @@ def rollout(
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
     expected_dim = embodiment.info.action_space.dim
+    policy_reset_ok = False
 
     try:
         try:
             policy.reset(scene)
+            policy_reset_ok = True
         except InspectRobotsError as exc:
             _record_failure(record, exc, -1)
             raise
@@ -268,4 +304,6 @@ def rollout(
         record.inference_latencies = [
             lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None
         ]
+        if policy_reset_ok:  # pragma: no branch - false only while an exception unwinds
+            record.policy_transcript = _collect_transcript(policy)
     return record

@@ -134,6 +134,8 @@ Run the LLM on the robot:
 inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
 ```
 
+Read the recorded agent conversation with `inspect-robots inspect LOG.json --transcript`.
+
 ### Run in simulation
 
 The same instruction runs on your configured simulator instead of the

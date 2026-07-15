@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
@@ -54,12 +54,19 @@ class PolicyInfo:
 class Policy(Protocol):
     """The VLA contract.
 
-    Policies may additionally define an **optional** ``bind(embodiment_info)``
-    hook (not part of this Protocol, so existing policies stay conformant):
-    ``eval()`` calls it after resolving both components and before the
-    compatibility check, letting embodiment-adaptive policies — e.g. an LLM
-    agent that drives whatever it is paired with — adopt the embodiment's
-    spaces. ``PolicyBase`` ships a no-op default.
+    Policies may additionally define two optional hooks, neither part of this
+    Protocol so existing policies stay conformant. ``bind(embodiment_info)``
+    lets embodiment-adaptive policies adopt the embodiment's spaces; ``eval()``
+    calls it after resolving both components and before compatibility checking.
+    ``transcript()`` returns a small JSON-serializable audit record for the
+    current trial, such as an LLM conversation. The framework calls it once per
+    trial at trial end after a successful ``reset()``, including errored trials.
+    It must be idempotent and safe between resets, must not mutate policy state,
+    and its return value must not alias live state. Camera images must not be
+    embedded because frame sidecars already persist them. Collection runs on
+    the rollout thread and is best-effort: the framework normalizes and bounds
+    the result, and a raising or misbehaving hook cannot change trial outcome.
+    ``PolicyBase`` ships defaults for both hooks.
     """
 
     info: PolicyInfo
@@ -85,6 +92,10 @@ class PolicyBase(ABC):
 
     def reset(self, scene: Scene) -> None:  # noqa: B027 - intentional no-op default
         """Default: stateless policies need no per-scene reset."""
+
+    def transcript(self) -> Any | None:
+        """Return a JSON-serializable audit record for the current trial, or None."""
+        return None
 
     @abstractmethod
     def act(self, observation: Observation) -> ActionChunk:

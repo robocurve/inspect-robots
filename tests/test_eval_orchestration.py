@@ -585,3 +585,56 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+def test_policy_transcripts_parallel_scored_and_errored_epochs(tmp_path: Path) -> None:
+    class _TranscriptBoomOnSecondEpoch(_BoomOnSecondEpochPolicy):
+        def transcript(self) -> object:
+            return {"reset": self._resets}
+
+    (log,) = eval(
+        _task(epochs=2),
+        _TranscriptBoomOnSecondEpoch(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    scene = log.samples[0]
+    assert scene.epochs[0] and scene.epochs[1] == {}
+    assert scene.policy_transcripts == ({"reset": 1}, {"reset": 2})
+    assert len(scene.policy_transcripts) == len(scene.epochs)
+
+
+def test_halted_trial_transcript_reaches_the_persisted_log(tmp_path: Path) -> None:
+    class _TranscriptScripted(ScriptedPolicy):
+        def transcript(self) -> object:
+            return [{"role": "assistant", "content": "walking to the cube"}]
+
+    (log,) = eval(
+        _task(epochs=2),
+        _TranscriptScripted(),
+        _FaultAfterEpochsEmbodiment(good_epochs=1),
+        log_dir=str(tmp_path),
+    )
+    scene = log.samples[0]
+    assert log.status == "error"
+    assert len(scene.policy_transcripts) == len(scene.epochs) == 2
+    # The faulted second trial keeps its transcript: forensics matter most
+    # exactly when the trial died.
+    assert scene.policy_transcripts[1] == [{"role": "assistant", "content": "walking to the cube"}]
+
+
+def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
+    class _HooklessPolicy:
+        def __init__(self) -> None:
+            self._delegate = ScriptedPolicy()
+            self.info = self._delegate.info
+            self.config = self._delegate.config
+
+        def reset(self, scene: Scene) -> None:
+            self._delegate.reset(scene)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return self._delegate.act(observation)
+
+    (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].policy_transcripts == (None, None)

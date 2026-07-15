@@ -10,6 +10,7 @@ chain — this module contains no safety-critical code path of its own
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass
@@ -150,6 +151,23 @@ class LLMAgentPolicy(PolicyBase):
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
         self._calls_used = 0
+
+    def transcript(self) -> list[dict[str, Any]] | None:
+        """Return an image-free deep copy of the current trial's conversation."""
+        if not self._messages:
+            return None
+        messages = copy.deepcopy(self._messages)
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for index, part in enumerate(content):
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    content[index] = {
+                        "type": "text",
+                        "text": "[image omitted: streamed camera frame]",
+                    }
+        return messages
 
     # -- the loop ------------------------------------------------------------------
 
