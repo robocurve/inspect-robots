@@ -166,6 +166,13 @@ Pretty-print a saved eval log:
 inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
+Render a `--store-frames` run's camera frames to MP4 videos (needs the
+`ffmpeg` binary on PATH):
+
+```bash
+inspect-robots video logs/cubepick-reach_*.json
+```
+
 ### Python API
 
 Everything is a Python API. No hardware or simulator needed: the

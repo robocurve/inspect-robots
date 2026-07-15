@@ -10,6 +10,8 @@ Subcommands:
   written log's path is printed at the end.
 - ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
   optionally append recorded policy conversations.
+- ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
+  camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
@@ -25,9 +27,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import shutil
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from inspect_robots import __version__
@@ -83,7 +88,7 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "inspect", "config", "setup", "doctor")
+_SUBCOMMANDS = ("list", "run", "inspect", "video", "config", "setup", "doctor")
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -210,6 +215,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript",
         action="store_true",
         help="append recorded policy transcripts",
+    )
+
+    p_video = sub.add_parser(
+        "video",
+        help="render a log's stored camera frames to one MP4 per camera stream",
+    )
+    p_video.add_argument("log", help="path to an EvalLog JSON file from a --store-frames run")
+    p_video.add_argument(
+        "--out",
+        default=None,
+        metavar="DIR",
+        help="output directory (default: the frames directory itself)",
+    )
+    p_video.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="playback rate (default: the log's control_hz, else 10)",
+    )
+    p_video.add_argument(
+        "--ffmpeg",
+        default=None,
+        metavar="PATH",
+        help="ffmpeg executable to use (default: found on PATH)",
     )
 
     p_doctor = sub.add_parser(
@@ -570,6 +599,15 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
                 _DIM,
             )
         )
+    if log.stats.frames_dir is not None:
+        from inspect_robots._video import count_frames, resolve_frames_dir
+
+        # Gate on frames actually existing: a camera-less --store-frames run
+        # records a frames_dir but writes nothing, and the hint must not
+        # point at a command that would exit "no frames found".
+        root = resolve_frames_dir(log.stats.frames_dir, Path(log_path))
+        if root is not None and count_frames(root):
+            print(_styled(f"hint: render videos with: inspect-robots video {log_path}", _DIM))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -760,6 +798,19 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
     if log.results.errored_trials:
         trials += f" ({log.results.errored_trials} errored)"
     print(f"scenes:      {log.results.total_scenes}   {trials}")
+    if log.stats.frames_dir is not None:
+        from inspect_robots._video import count_frames, resolve_frames_dir
+
+        root = resolve_frames_dir(log.stats.frames_dir, Path(path))
+        if root is None:
+            print(f"frames:      {log.stats.frames_dir} (not found from this directory)")
+        else:
+            # The resolved path, not the stored string: after a machine move
+            # the stored string is exactly the path that does not work.
+            n_frames = count_frames(root)
+            print(f"frames:      {root} ({n_frames} frames)")
+            if n_frames:
+                print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {value:.4g}")
@@ -780,6 +831,90 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
     elif _has_policy_transcripts(log):
         print("policy transcripts: recorded (--transcript to print)")
     return 0 if log.status == "success" else 1
+
+
+def _cmd_video(args: argparse.Namespace) -> int:
+    """Render a log's stored frames to one MP4 per (trial, camera) stream.
+
+    Per-stream failures are isolated: each is reported on stderr, the
+    remaining streams still encode, and the exit code is 1 if any failed.
+    Results (``wrote ...`` lines, the fps note, the final summary) go to
+    stdout; warnings and failure reports go to stderr.
+    """
+    from inspect_robots import read_eval_log
+    from inspect_robots._video import (
+        default_fps,
+        discover_streams,
+        encode_stream,
+        frames_dir_candidates,
+        resolve_frames_dir,
+    )
+
+    log = read_eval_log(args.log)
+    frames_dir = log.stats.frames_dir
+    if frames_dir is None:
+        raise SystemExit("this log has no stored frames (re-run with --store-frames)")
+    log_path = Path(args.log)
+    root = resolve_frames_dir(frames_dir, log_path)
+    if root is None:
+        as_is, fallback = frames_dir_candidates(frames_dir, log_path)
+        raise SystemExit(f"frames directory not found; tried {as_is} and {fallback}")
+
+    streams, strays = discover_streams(root)
+    for stray in strays:
+        print(
+            f"warning: skipping {stray.name}: does not match the frame filename pattern",
+            file=sys.stderr,
+        )
+    if not streams:
+        raise SystemExit(f"no frames found in {root}")
+
+    if args.fps is not None:
+        if not (math.isfinite(args.fps) and args.fps > 0):
+            raise SystemExit("--fps must be a positive finite number")
+        fps, fps_source = args.fps, "--fps"
+    else:
+        fps, fps_source = default_fps(log.eval.embodiment_info)
+    print(f"fps: {fps:g} ({fps_source})")
+
+    if args.ffmpeg is not None:
+        if not (os.path.isfile(args.ffmpeg) and os.access(args.ffmpeg, os.X_OK)):
+            raise SystemExit(f"--ffmpeg {args.ffmpeg} is not an executable file")
+        ffmpeg = args.ffmpeg
+    else:
+        which = shutil.which("ffmpeg")
+        if which is None:
+            raise SystemExit(
+                "ffmpeg not found on PATH; install it (e.g. apt install ffmpeg) "
+                "or pass --ffmpeg PATH"
+            )
+        ffmpeg = which
+
+    out_dir = root if args.out is None else Path(args.out)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise SystemExit(f"--out {out_dir} exists and is not a directory")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failed = 0
+    for prefix, frames in streams.items():
+        out_path = out_dir / f"{prefix}.mp4"
+        result = encode_stream(frames, out_path, fps, ffmpeg)
+        if result.skipped_empty:
+            print(
+                f"warning: {prefix}: skipped {result.skipped_empty} empty frames",
+                file=sys.stderr,
+            )
+        if result.error is not None:
+            failed += 1
+            print(f"failed: {prefix}: {result.error}", file=sys.stderr)
+        else:
+            print(f"wrote {out_path} ({result.piped} frames)")
+    total = len(streams)
+    summary = f"wrote {total - failed}/{total} streams"
+    if failed:
+        summary += f", {failed} failed"
+    print(summary)
+    return 1 if failed else 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -875,6 +1010,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log, transcript=args.transcript)
+    if args.command == "video":
+        return _cmd_video(args)
     if args.command == "config":
         return _cmd_config(args)
     if args.command == "setup":
