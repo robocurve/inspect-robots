@@ -35,8 +35,11 @@ last *approved command* held in the trial store, while `move_joints`
 interpolates from the *observed* state. When the two diverge (hardware
 tracking error, a prior clamp, an operator nudge), the first steps of a new
 chunk can still exceed `max_delta` relative to the stored reference and get
-clamped. That is the backstop doing its job; the plugin's claim is only that
-it never *provokes* clamping through its own step sizing.
+clamped. Similarly, if proprioception reads slightly *outside* the box, the
+early actions interpolated from that state are out-of-box and
+`ClampApprover` trims them. Both are the guardrails doing their job; the
+plugin's claim is only that it never provokes clamping through its own step
+sizing from in-box state.
 
 Resolved knobs (user decisions, 2026-07-14):
 
@@ -67,13 +70,10 @@ Resolved knobs (user decisions, 2026-07-14):
   the backstop is per-step. Zero-width dimensions (`high == low`, common
   padding in VLA action spaces) have a zero limit and are legal at bind
   time.
-- Per call, for each *named* dimension, validated in this order:
-  - `target_i` outside `[low_i, high_i]` returns a structured error
-    (`"target for {label} is outside [{low}, {high}]"`). Letting it through
-    would recreate §1's silent divergence: the sizing satisfies the delta
-    limiter while `ClampApprover` pins every step at the bound and the note
-    claims the full motion executed. Bounds are guaranteed finite by §3d,
-    so the check is always meaningful.
+- Per call, for each *named* dimension, validated in this order (zero-width
+  first — a zero-width dimension's off-value targets are also out of its
+  degenerate `[v, v]` box, so the bounds check would otherwise shadow the
+  more instructive error):
   - Zero-width dimensions (`limit == 0`): `target_i != low_i` returns
     `"dimension {label} is fixed at {value}"`. The comparison is against
     the *bound*, not the observed state — on hardware the observation
@@ -82,6 +82,12 @@ Resolved knobs (user decisions, 2026-07-14):
     because the schema's `bounds_text` renders at 4 significant figures
     (`.4g`) and may not match on the first attempt; the error then teaches
     the exact value.
+  - Otherwise, `target_i` outside `[low_i, high_i]` returns a structured
+    error (`"target for {label} is outside [{low}, {high}]"`). Letting it
+    through would recreate §1's silent divergence: the sizing satisfies the
+    delta limiter while `ClampApprover` pins every step at the bound and
+    the note claims the full motion executed. Bounds are guaranteed finite
+    by §3d, so the check is always meaningful.
   - Zero-width dimensions contribute nothing to the step count; dimensions
     with zero distance to the observed state likewise contribute nothing.
 - Non-finite observed state: if the proprioceptive reference vector contains
@@ -135,8 +141,16 @@ Resolved knobs (user decisions, 2026-07-14):
 computed `steps > max_steps` returns a structured `ToolResult(error=...)`
 telling the LLM the request exceeds the playout cap and to split the move
 into smaller motions — advice that always works, because the computed steps
-shrink toward 1 as the motion shrinks. At the default speed a
-full-range `move_joints` needs 2 s, so in practice only large `move_by`
+shrink toward 1 as the motion shrinks. The distance/limit ratios are
+computed with NumPy float64 (inf-tolerant: a huge finite `move_by` delta
+like `1e308` overflows the division to `inf`, never raising) and the cap
+comparison runs *before* `ceil` — `math.ceil(inf)` raises `OverflowError`,
+which would escape as a trial-killing `PolicyError` for what is an
+LLM-correctable mistake, violating the module's errors-not-exceptions
+contract. (`move_joints` cannot reach this: targets are bounds-checked
+first, so its ratio is capped at `1 / step_frac`.) At the default speed a
+full-range `move_joints` needs 21 steps (2.1 s at 10 Hz — the §3a headroom
+bumps the exact 20-split), so in practice only large `move_by`
 totals hit this.
 
 ### 3d. Bind-time bound requirements (never guess)
@@ -155,8 +169,9 @@ with actionable messages (same stance as `DeltaLimitApprover`):
 - Both modes: a declared `control_hz` that is non-finite or `<= 0` is
   rejected at bind time (`None` stays allowed and falls back to
   `_FALLBACK_HZ` for step computation). Core never validates `control_hz`,
-  and `hz = 0` would make §3a floor every motion to a single step while §3c
-  errors every call — contradictory outcomes this check makes unreachable.
+  and `hz = 0` would make §3c's `max_steps = 0`, turning every call into an
+  error — a nonsense configuration this check rejects with a clear message
+  instead.
 - The "no bounds; move conservatively" `bounds_text` fallback becomes dead
   in both modes (finite bounds are now required everywhere) and is removed
   outright.
@@ -167,9 +182,12 @@ motions in them were never actually speed-safe.
 ### 3e. Toolset construction
 
 `Toolset.__init__` / `build_toolset` grow `max_speed_frac: float` (default
-`0.5`) and precompute the per-dimension speed (absolute) or per-side
-per-step limits (displacement). `bounds_text` keeps documenting the box to
-the LLM.
+`0.5`) and precompute the per-dimension per-step limits (absolute) or
+per-side per-step limits (displacement). `build_toolset` owns frac
+validation for direct constructions (`ToolsetError` for non-finite or
+`<= 0`); `LLMAgentPolicy.__init__` additionally validates with `ValueError`
+so a bad `-P max_speed_frac` fails at construction, before any LLM call
+(§4). `bounds_text` keeps documenting the box to the LLM.
 
 ## 4. Policy changes (`policy.py`)
 
@@ -255,7 +273,9 @@ cap" claim.
 - Over-cap request errors with the split-the-move message; boundary exactly
   at `max_steps` succeeds. Covered for both tools: `move_by` with a large
   total, and `move_joints` with a tiny frac (e.g. `max_speed_frac=0.01` →
-  a full-range move needs 100 s).
+  a full-range move needs 1001 steps, 100.1 s).
+- Huge finite `move_by` delta (`1e308`) returns the split-the-move error —
+  never raises (the §3c inf-tolerant cap check).
 - Schemas no longer advertise `duration_s`; a call carrying a stray
   `duration_s` key still succeeds (extra keys were and remain ignored).
 - `control_hz=None`: steps computed at the 10 Hz fallback, chunk emitted
@@ -269,7 +289,9 @@ cap" claim.
   displacement boxes not containing zero are rejected; declared
   `control_hz` of `0`, negative, or non-finite is rejected while `None`
   binds.
-- `max_speed_frac` validation errors (0, negative, non-finite).
+- `max_speed_frac` validation errors (0, negative, non-finite) at both
+  layers: `build_toolset` (`ToolsetError`) and `LLMAgentPolicy.__init__`
+  (`ValueError`; lives in the policy tests).
 - Speed derivation honors non-default frac (absolute modes).
 
 `tests/test_policy_e2e.py`: existing flows updated (tool calls no longer
