@@ -79,8 +79,10 @@ Ripple effects inside core:
   already captured verbatim in the per-trial policy transcript, which is the
   audit surface that matters. Leave the projection unchanged.
 - Mock embodiments: `CubePick` gains a one-paragraph docs string, which
-  doubles as the in-tree usage example and exercises the field end to end in
-  the existing agent-plugin-against-mock tests (if any) and core tests.
+  doubles as the in-tree usage example. The existing agent-plugin e2e test
+  (`tests/test_policy_e2e.py`) asserts on the system prompt via substring
+  (`"cubepick" in …`), so it survives CubePick gaining docs; extend it to
+  also assert the docs section is present.
 - Nothing in `log.py` persists `EmbodimentInfo`, so no schema bump.
 
 ### 3.2 Agent plugin: render docs into the system prompt
@@ -121,7 +123,12 @@ modes (absolute and displacement; today's `state_key` is only computed for
 absolute modes, which would silently skip YAM `joint_delta` runs):
 
 1. If the toolset's existing `state_key` is set (absolute modes), label that
-   field.
+   field. Rule 1 deliberately has **no** canonical-vocab check, unlike
+   rule 2: `build_toolset` already selected that field as the motion
+   reference, which is what makes the labels honest — and yam eef mode's
+   reference key `eef_state` is *not* in `CANONICAL_STATE_UNITS`, so
+   "harmonizing" rule 1 with rule 2's filter would silently disable
+   labeling for yam eef runs. Do not add the filter to rule 1.
 2. Otherwise (displacement modes): if the observation space declares no
    `StateSpec` at all (e.g. CubePick, which lists `state_keys` but no
    spec'd fields), **no labeling**. If a spec exists, the candidates are
@@ -150,9 +157,9 @@ and the mode) and passed to the `Toolset` constructor as a precomputed
 simply returns it. Do **not** detect synthesized labels by comparing the
 resolved labels against `("0", "1", …)` — an embodiment may legitimately
 name its dims that way; use the presence of `semantics.dim_labels` at the
-point of synthesis. The policy calls `state_labels()` once and passes the
-result into `_observation_content` as an optional parameter (default `None`
-keeps the current rendering).
+point of synthesis. The policy calls `state_labels()` once per `bind()`,
+caches the result on itself, and passes it into `_observation_content` as
+an optional parameter (default `None` keeps the current rendering).
 
 All other state fields keep the existing unlabeled rendering. Rounding stays
 as-is. This is a pure prompt-format change; update the plugin tests that
@@ -220,7 +227,9 @@ Agent plugin:
   attribute does not raise (test will need a `cast`, since `bind()` is
   typed against `EmbodimentInfo`).
 - `state_labels()`, one test per branch: absolute mode returns the proprio
-  field labels; displacement mode with a unique canonical-keyed shape match
+  field labels **including when the reference key is non-canonical**
+  (mirror yam's `eef_state` shape — guards the rule-1 asymmetry);
+  displacement mode with a unique canonical-keyed shape match
   returns it; **no StateSpec at all** returns None (use real
   `CubePickEmbodiment().info` — CubePick declares `state_keys` but no
   spec); **two canonical shape-matching fields** returns None (needs a
@@ -232,15 +241,20 @@ Agent plugin:
 YAM plugin (companion PR):
 
 - joints-mode docs mention every label `left_j0`…`right_gripper` exactly
-  once in the bullet list; the gripper polarity sentence is asserted as a
+  once in the bullet list, where "bullet list" means the lines starting
+  with `"- "` (labels may additionally appear in surrounding prose — only
+  the bulleted lines are counted); the gripper polarity sentence is asserted as a
   literal matching the wire convention hardcoded in the yam
   `embodiment.py` gripper normalization (cmd 1 → open). The convention is
   structural there, not a derivable constant — a literal is the honest test.
 - eef-mode docs mention every eef label; the no-restated-bounds rule is
-  guarded concretely: assert that none of the formatted default
-  `eef_low`/`eef_high` component values from `config.py` appear as
-  substrings of the docs (the docs legitimately contain other numbers —
-  link lengths, reach — so "no numbers" is not the test).
+  guarded concretely but collision-safely: assert with word-boundary
+  regexes that none of the tokens `0.48`, `0.15`, `0.03` (the default x
+  bounds and z low, formatted `.4g`) appear in the docs. Deliberately
+  excluded from the check: `0.25` (y bound — substring-collides with the
+  required forearm length "0.252"), `0.4` (z high — too generic), the yaw
+  bounds (π), and the gripper 0/1 endpoints (the polarity sentence must
+  state them). This is a drift tripwire, not an exhaustive guard.
 - `docs_extra` appended verbatim (including braces); empty default adds
   nothing.
 
