@@ -106,7 +106,9 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
     assert "error:" not in out
-    assert "hint:" not in out
+    # A clean run still teaches how to read the log — and nothing else hints.
+    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert out.count("hint:") == 1
 
 
 def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
@@ -157,7 +159,7 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     assert "scene-0" not in out  # successful scenes are not failure context
     assert out.count("EmbodimentFault: reset exploded") == 1
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: inspect-robots inspect {written}" in out
+    assert f"hint: view it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_prints_distinct_scene_error(
@@ -238,7 +240,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
     assert "[error] scene-0: PolicyError: invalid API key" in out
     assert "trials: 1 (1 errored)" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: inspect-robots inspect {written}" in out
+    assert f"hint: view it with: inspect-robots inspect {written}" in out
     # And `inspect` on the written log shows the same headline facts.
     assert main(["inspect", str(written)]) == 1
     out = capsys.readouterr().out
@@ -291,7 +293,7 @@ def test_cli_partial_errors_stay_success_but_are_visible(
     assert "trials: 2 (1 errored)" in out
     assert "[error] scene-1: PolicyError: policy reset exploded" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: inspect-robots inspect {written}" in out
+    assert f"hint: view it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(

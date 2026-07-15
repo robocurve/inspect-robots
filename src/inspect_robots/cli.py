@@ -464,8 +464,9 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     for name, value in sorted(log.results.metrics.items()):
         print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
-    if failed or errored_count:
-        print(_styled(f"hint: inspect-robots inspect {log_path}", _DIM))
+    # Every run ends with the copy-pasteable read-back command (issue #90):
+    # a bare path teaches a first-time user nothing about what to do next.
+    print(_styled(f"hint: view it with: inspect-robots inspect {log_path}", _DIM))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
