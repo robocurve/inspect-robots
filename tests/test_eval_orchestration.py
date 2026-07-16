@@ -476,3 +476,26 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
     assert scene.trial_metadata == ({"test_key": "test_val"}, {})
     assert len(seen_ids) == 2
     assert seen_ids[0] == seen_ids[1]
+
+
+def test_on_trial_end_hook_error_on_already_errored_trial(tmp_path: Path) -> None:
+    # A test to cover the branch where status is ALREADY "error" when the hook throws.
+    # This happens if a previous epoch's hook already failed, setting global status="error".
+    class _DoubleCrashPolicy(ScriptedPolicy):
+        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+            raise RuntimeError("hook exploded")
+
+    # We run 2 epochs. Epoch 0 throws in hook, setting status="error".
+    # Epoch 1 throws in hook, covering the `if status == "success"` False branch.
+    (log,) = eval(
+        _task(epochs=2),
+        _DoubleCrashPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    scene = log.samples[0]
+    assert scene.status == "error"
+    assert scene.error is not None
+    # Both epochs ran the hook and failed
+    assert "hook exploded" in scene.error
