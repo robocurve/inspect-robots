@@ -25,9 +25,14 @@ before any motion.
 
 ## Prerequisites
 
-- A CUDA GPU with roughly 10 GB of free VRAM for the 3B checkpoint. Blackwell
-  GPUs (RTX 5090, `sm_120`) work with the PyTorch build Isaac-GR00T pins
-  (torch 2.7.1 cu128 wheels).
+- A CUDA GPU with roughly 8 GB of free VRAM for the 3B checkpoint (measured:
+  7.1 GiB during inference on an RTX 5090). Blackwell GPUs (`sm_120`) work
+  with the PyTorch build Isaac-GR00T pins (torch 2.7.1 cu128 wheels).
+- A Hugging Face account with access to
+  [nvidia/Cosmos-Reason2-2B](https://huggingface.co/nvidia/Cosmos-Reason2-2B).
+  GR00T N1.7 loads its vision-language backbone from that gated repository
+  even when the fine-tune itself is public, so accept the license there once
+  (approval is automatic).
 - The YAM rig set up per the
   [inspect-robots-yam README](https://github.com/robocurve/inspect-robots-yam#run-on-hardware):
   CAN channels, three cameras, `config.ini` written by `inspect-robots setup`.
@@ -47,11 +52,13 @@ uv sync
 source .venv/bin/activate
 ```
 
-Add the shim's serving dependencies (they are not part of Isaac-GR00T) and
+Add the shim's serving dependencies (they are not part of Isaac-GR00T), log
+in to Hugging Face (required for the gated backbone, see prerequisites), and
 download the checkpoint (about 7 GB):
 
 ```bash
 uv pip install fastapi uvicorn json_numpy
+hf auth login
 hf download robocurve/gr00t-n1.7-yam-molmoact2
 ```
 
@@ -122,7 +129,9 @@ print(len(chunk), chunk.actions[0].data.round(3))
 
 Expect a 16-step chunk of plausible joint radians. The client rejects
 non-finite values and wrong shapes loudly, so a clean print here means the
-wire format, camera mapping, and action packing all hold.
+wire format, camera mapping, and action packing all hold. For scale: on an
+RTX 5090 the first request takes about 1.2 s (warmup) and warm requests
+about 90 ms per 16-step chunk.
 
 Then run the plugin's preflight, which checks the full
 `(policy, embodiment)` pair without motion:
@@ -188,6 +197,7 @@ uses the returned chunk length; this field is log metadata).
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `uv sync` fails with "Invalid zip file structure" on a flash-attn or torchcodec wheel | The Isaac-GR00T checkout vendors aarch64 wheels via git-lfs; without lfs they are pointer files | `git lfs install --local && git lfs pull --include "scripts/deployment/dgpu/wheels/*"`, then re-run `uv sync` |
+| Shim exits with `401 ... gated repo` for `nvidia/Cosmos-Reason2-2B` | GPU host is not logged in to Hugging Face, or the account has not accepted the backbone license | `hf auth login`, accept the license on the [model page](https://huggingface.co/nvidia/Cosmos-Reason2-2B), restart the shim |
 | Shim exits with "keys must equal" or width errors | Checkpoint does not follow the bimanual-YAM layout | Wrong checkpoint for this rig; do not bypass the check |
 | Shim exits with radians/normalized range errors | Checkpoint trained in degrees or unnormalized grippers | Same: incompatible checkpoint |
 | `no policy named 'gr00t'` | Plugin older than 0.13.0, or `uv run` re-synced the venv and removed it | `uv pip install -U inspect-robots-yam`, and invoke plain `inspect-robots`, not `uv run inspect-robots` |
