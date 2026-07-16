@@ -561,11 +561,27 @@ def test_run_outcome_groups_counts_and_orders_by_count_then_phrase(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    log = _step_limit_log(reasons=("success", "max_steps", "success"))
+    # Insertion order (max_steps first) differs from the required order, so
+    # this fails if the count-descending sort is dropped.
+    log = _step_limit_log(reasons=("max_steps", "success", "success"))
 
     assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
 
     assert "outcome: 2 succeeded, 1 hit step limit" in capsys.readouterr().out
+
+
+def test_run_outcome_breaks_count_ties_alphabetically_by_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Insertion order ("succeeded" first) differs from alphabetical order, so
+    # this fails if the tie-break is dropped.
+    log = _step_limit_log(reasons=("success", "max_steps"))
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
+
+    assert "outcome: 1 hit step limit, 1 succeeded" in capsys.readouterr().out
 
 
 def test_inspect_outcome_maps_give_up_reason(
@@ -613,13 +629,14 @@ def test_unmapped_outcome_degrades_lone_surrogate_in_run_and_inspect(
     assert _run_with_synthesized_log(log, monkeypatch, tmp_path / "run") == 0
     run_out = capsys.readouterr().out
     assert "\ud800" not in run_out
-    assert "outcome: bad � reason" in run_out or "outcome: bad ? reason" in run_out
+    # encode(errors="replace") substitutes ASCII "?" on the encode side.
+    assert "outcome: bad ? reason" in run_out
 
     path = _write_log(log, tmp_path, "hostile-reason.json")
     assert main(["inspect", str(path)]) == 0
     inspect_out = capsys.readouterr().out
     assert "\ud800" not in inspect_out
-    assert "outcome:     bad � reason" in inspect_out or "outcome:     bad ? reason" in inspect_out
+    assert "outcome:     bad ? reason" in inspect_out
 
 
 def test_outcome_is_omitted_without_recorded_reasons_in_run_and_inspect(
