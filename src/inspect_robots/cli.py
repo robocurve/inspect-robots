@@ -77,6 +77,18 @@ _GREEN = "32"
 _RED = "31"
 _YELLOW = "33"
 
+_STATUS_DISPLAY = {"success": "completed"}
+
+_OUTCOME_PHRASES = {
+    "success": "succeeded",
+    "failure": "failed",
+    "max_steps": "hit step limit",
+    "give_up": "gave up",
+    "done": "reported done",
+    "policy_stop": "stopped by policy",
+    "truncated": "truncated",
+}
+
 
 _KIND_BY_PLURAL = {
     "tasks": "task",
@@ -453,6 +465,37 @@ def _step_limit_count(log: EvalLog) -> int:
     )
 
 
+def _display_status(status: str) -> str:
+    """Return the human-facing form of a run status."""
+    return _STATUS_DISPLAY.get(status, status)
+
+
+def _outcome_line(log: EvalLog) -> tuple[str, bool] | None:
+    """Return an outcome digest and unmapped flag, or ``None`` with no reasons."""
+    reasons: list[object] = [
+        reason for scene in log.samples for reason in scene.termination_reasons
+    ]
+    if not reasons:
+        return None
+
+    counts: dict[str, int] = {}
+    has_unmapped = False
+    for reason in reasons:
+        text = "" if reason is None else str(reason)
+        if not text:
+            phrase = "no reason recorded"
+        else:
+            phrase = _OUTCOME_PHRASES.get(text, text)
+            if text not in _OUTCOME_PHRASES:
+                has_unmapped = True
+        counts[phrase] = counts.get(phrase, 0) + 1
+
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(reasons) == 1:
+        return ordered[0][0], has_unmapped
+    return ", ".join(f"{count} {phrase}" for phrase, count in ordered), has_unmapped
+
+
 def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
     """Print the shared timeout note and the horizon-ownership hint when needed."""
     count = _step_limit_count(log)
@@ -571,7 +614,15 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     failed = log.status != "success"
     errored_count = log.results.errored_trials
     status_color = _RED if failed else _GREEN
-    print(f"{_styled('status:', _CYAN)} {_styled(log.status, status_color)}")
+    print(f"{_styled('run status:', _CYAN)} {_styled(_display_status(log.status), status_color)}")
+    outcome = _outcome_line(log)
+    if outcome is not None:
+        digest, has_unmapped = outcome
+        line = f"{_styled('outcome:', _CYAN)} {digest}"
+        if has_unmapped:
+            _print_degraded(line)
+        else:
+            print(line)
     if failed and log.error is not None:
         print(f"{_styled('error:', _CYAN)} {_styled(log.error, _RED)}")
     if failed or errored_count:
@@ -799,7 +850,15 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
         _print_degraded(f"instruction: {shared}")
     print(f"policy:      {log.eval.policy}")
     print(f"embodiment:  {log.eval.embodiment}")
-    print(f"status:      {log.status}")
+    print(f"run status:  {_display_status(log.status)}")
+    outcome = _outcome_line(log)
+    if outcome is not None:
+        digest, has_unmapped = outcome
+        line = f"outcome:     {digest}"
+        if has_unmapped:
+            _print_degraded(line)
+        else:
+            print(line)
     print(f"created:     {log.eval.created}")
     print(f"git:         {log.eval.git_commit}")
     trials = f"trials: {log.results.total_trials}"

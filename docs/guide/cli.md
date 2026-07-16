@@ -194,7 +194,7 @@ run a single ad-hoc scene.
 
 The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
-scene; a run in which every trial errored reports `status: error` and exits `1`.
+scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
 ## `inspect-robots doctor`
 
@@ -217,7 +217,8 @@ inspect-robots inspect logs/cubepick-reach_xxxx.json
 task:        cubepick-reach
 policy:      scripted
 embodiment:  cubepick
-status:      success
+run status:  completed
+outcome:     5 succeeded
 scenes:      5   trials: 5
 metrics:
   success_at_end: 1
@@ -225,6 +226,9 @@ scenes:
   [success] scene-0: success_at_end=1
   ...
 ```
+
+`completed` is the display form of the log's `success` status value; the
+on-disk field and Python API keep `success`.
 
 ## `inspect-robots video`
 
