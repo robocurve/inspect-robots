@@ -89,7 +89,11 @@ motion fall short of the tool's requested total.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`max_llm_calls` (default `100`), `temperature`, `effort`, `max_speed_frac`.
+`max_llm_calls` (default `100`), `temperature`, `effort`, `max_speed_frac`,
+`transcript_echo`.
+Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
+stderr, including goals, observation summaries, assistant output, tool calls,
+and tool results.
 The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
