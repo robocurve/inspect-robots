@@ -18,6 +18,9 @@ again = read_eval_log("logs/cubepick-reach_xxxx.json")   # always re-readable
 Logs are written atomically (temp file + rename), schema-versioned, and carry
 a read-back guarantee: a newer Inspect Robots always reads an older log.
 
+Pressing Ctrl-C during a rollout writes a log with `status: "cancelled"` and
+everything gathered so far, including the partial trial record and transcript.
+
 ## Sinks
 
 A [`LogSink`][inspect_robots.logging.LogSink] observes the run lifecycle
@@ -101,3 +104,18 @@ inspect-robots video logs/adhoc_xxxx.json
 
 `inspect-robots inspect` prints the frames directory and this command as a
 hint whenever a log has stored frames.
+
+## Policy transcripts
+
+Policies can persist a per-trial audit record in the eval log; read it with
+`inspect-robots inspect LOG.json --transcript`. The agent policy stores its
+conversation, with streamed image bytes replaced by
+`[image omitted: streamed camera frame]`. The preceding label, such as
+`camera 'top_cam' (step 480):`, is emitted whether or not frames are stored,
+and when they are (`store_frames=True`) it provides the step join key from a
+transcript observation to the stored frame.
+
+`FrameStore` sanitizes trial and camera names before building
+`{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
+`StepRecord.image_refs` and `FrameRef.path` as the authoritative mapping instead
+of assembling the path from the transcript label.

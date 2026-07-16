@@ -102,7 +102,7 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "status: success" in out
+    assert "run status: completed" in out
     assert "success_at_end" in out
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
@@ -110,6 +110,58 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # A clean run still teaches how to read the log — and nothing else hints.
     assert f"hint: view it with: inspect-robots inspect {written}" in out
     assert out.count("hint:") == 1
+
+
+@pytest.mark.parametrize(
+    ("path_state", "expected"),
+    [
+        ("existing", "partial log written"),
+        ("none", "no log written"),
+        ("missing", "no log written"),
+    ],
+)
+def test_cli_cancelled_run_reports_partial_log_state(
+    path_state: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    import inspect_robots.logging
+
+    path = tmp_path / f"{path_state}.json"
+    if path_state == "existing":
+        path.write_text("{}", encoding="utf-8")
+
+    class _CancelSink:
+        def __init__(self, log_dir: str) -> None:
+            del log_dir
+            self.path: Path | None = None if path_state == "none" else path
+
+    def interrupted_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(inspect_robots.logging, "JsonLogSink", _CancelSink)
+    monkeypatch.setattr(inspect_robots, "eval", interrupted_eval)
+
+    rc = main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 130
+    assert f"cancelled: {expected}" in capsys.readouterr().out
 
 
 def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
@@ -154,7 +206,7 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "status: error" in out
+    assert "run status: error" in out
     assert "error: EmbodimentFault: reset exploded" in out
     assert "  [error] scene-1\n" in out
     assert "scene-0" not in out  # successful scenes are not failure context
@@ -236,7 +288,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
 
     assert rc == 1
     out = capsys.readouterr().out
-    assert "status: error" in out
+    assert "run status: error" in out
     assert "error: all 1 trial(s) errored; nothing was scored" in out
     assert "[error] scene-0: PolicyError: invalid API key" in out
     assert "trials: 1 (1 errored)" in out
@@ -245,7 +297,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
     # And `inspect` on the written log shows the same headline facts.
     assert main(["inspect", str(written)]) == 1
     out = capsys.readouterr().out
-    assert "status:      error" in out
+    assert "run status:  error" in out
     assert "trials: 1 (1 errored)" in out
 
 
@@ -290,7 +342,7 @@ def test_cli_partial_errors_stay_success_but_are_visible(
 
     assert rc == 0  # data survived; library semantics unchanged for partials
     out = capsys.readouterr().out
-    assert "status: success" in out
+    assert "run status: completed" in out
     assert "trials: 2 (1 errored)" in out
     assert "[error] scene-1: PolicyError: policy reset exploded" in out
     (written,) = tmp_path.glob("*.json")
@@ -454,6 +506,224 @@ def _transcript_log(*, status: str = "success") -> EvalLog:
     )
 
 
+def _run_with_synthesized_log(log: EvalLog, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> int:
+    import inspect_robots
+
+    def synthesized_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        return [log]
+
+    monkeypatch.setattr(inspect_robots, "eval", synthesized_eval)
+    return main(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+
+
+def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(log.to_dict()), encoding="utf-8")
+    return path
+
+
+def test_run_outcome_shows_timeout_without_a_count(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\n"
+        "policy = scripted\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "max_steps = 3\n",
+    )
+
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+
+    out = capsys.readouterr().out
+    assert "run status: completed" in out
+    assert "outcome: hit step limit" in out
+
+
+def test_run_outcome_groups_counts_and_orders_by_count_then_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Insertion order (max_steps first) differs from the required order, so
+    # this fails if the count-descending sort is dropped.
+    log = _step_limit_log(reasons=("max_steps", "success", "success"))
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
+
+    assert "outcome: 2 succeeded, 1 hit step limit" in capsys.readouterr().out
+
+
+def test_run_outcome_breaks_count_ties_alphabetically_by_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Insertion order ("succeeded" first) differs from alphabetical order, so
+    # this fails if the tie-break is dropped.
+    log = _step_limit_log(reasons=("success", "max_steps"))
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
+
+    assert "outcome: 1 hit step limit, 1 succeeded" in capsys.readouterr().out
+
+
+def test_inspect_outcome_maps_give_up_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("give_up",)), tmp_path, "give-up.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "outcome:     gave up" in capsys.readouterr().out
+
+
+def test_run_outcome_keeps_errored_trial_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(reasons=(None,))
+    scene = dataclasses.replace(
+        log.samples[0], status="error", error="PolicyError: policy exploded"
+    )
+    log = dataclasses.replace(
+        log,
+        status="error",
+        results=dataclasses.replace(log.results, errored_trials=1),
+        samples=(scene,),
+        error="all 1 trial(s) errored; nothing was scored",
+    )
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 1
+
+    out = capsys.readouterr().out
+    assert "outcome: no reason recorded" in out
+    assert "[error] s0: PolicyError: policy exploded" in out
+    assert "trials: 1 (1 errored)" in out
+
+
+def test_unmapped_outcome_degrades_lone_surrogate_in_run_and_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(reasons=("bad \ud800 reason",))
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path / "run") == 0
+    run_out = capsys.readouterr().out
+    assert "\ud800" not in run_out
+    # encode(errors="replace") substitutes ASCII "?" on the encode side.
+    assert "outcome: bad ? reason" in run_out
+
+    path = _write_log(log, tmp_path, "hostile-reason.json")
+    assert main(["inspect", str(path)]) == 0
+    inspect_out = capsys.readouterr().out
+    assert "\ud800" not in inspect_out
+    assert "outcome:     bad ? reason" in inspect_out
+
+
+def test_outcome_is_omitted_without_recorded_reasons_in_run_and_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _transcript_log()
+
+    assert _run_with_synthesized_log(log, monkeypatch, tmp_path / "run") == 0
+    assert "outcome:" not in capsys.readouterr().out
+
+    path = _write_log(log, tmp_path, "old-log.json")
+    assert main(["inspect", str(path)]) == 0
+    assert "outcome:" not in capsys.readouterr().out
+
+
+def test_inspect_cancelled_status_and_singular_no_reason_outcome_are_aligned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = _step_limit_log(reasons=(None,))
+    scene = dataclasses.replace(log.samples[0], status="cancelled")
+    log = dataclasses.replace(log, status="cancelled", samples=(scene,))
+    path = _write_log(log, tmp_path, "cancelled.json")
+
+    assert main(["inspect", str(path)]) == 1
+
+    out = capsys.readouterr().out
+    assert "run status:  cancelled\n" in out
+    assert "outcome:     no reason recorded\n" in out
+
+
+def test_inspect_started_status_uses_raw_fallback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = dataclasses.replace(_step_limit_log(reasons=("done",)), status="started")
+    path = _write_log(log, tmp_path, "started.json")
+
+    assert main(["inspect", str(path)]) == 1
+
+    assert "run status:  started" in capsys.readouterr().out
+
+
+def test_inspect_outcome_coerces_non_string_hand_edited_reasons(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = _step_limit_log(reasons=("success", "success", "success")).to_dict()
+    data["samples"][0]["termination_reasons"] = [3, True, ["nested"]]
+    path = tmp_path / "non-string-reasons.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "outcome:     1 3, 1 True, 1 ['nested']" in capsys.readouterr().out
+
+
+def test_inspect_outcome_folds_empty_reason_into_no_reason_recorded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("",)), tmp_path, "empty-reason.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "outcome:     no reason recorded" in capsys.readouterr().out
+
+
+def test_inspect_outcome_merges_phrase_collision_and_uses_degraded_print(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("give_up", "gave up")), tmp_path, "collision.json")
+    degraded_lines: list[str] = []
+    original_print_degraded = cli._print_degraded
+
+    def record_degraded(line: str) -> None:
+        degraded_lines.append(line)
+        original_print_degraded(line)
+
+    monkeypatch.setattr(cli, "_print_degraded", record_degraded)
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "outcome:     2 gave up" in capsys.readouterr().out
+    assert "outcome:     2 gave up" in degraded_lines
+
+
 def test_inspect_transcript_renders_chat_and_unknown_shapes_after_summary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -507,6 +777,20 @@ def test_run_summary_adds_agent_conversation_hint_when_recorded(
     out = capsys.readouterr().out
     assert "hint: view it with: inspect-robots inspect run.json" in out
     assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
+
+
+def test_run_summary_shows_cancelled_scene_detail(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _transcript_log(status="cancelled")
+    cancelled_scene = dataclasses.replace(
+        log.samples[0], status="cancelled", error="cancelled by user"
+    )
+    log = dataclasses.replace(log, samples=(cancelled_scene,))
+
+    cli._print_run_summary(log, "run.json", is_adhoc=False)
+
+    assert "[cancelled] s0: cancelled by user" in capsys.readouterr().out
 
 
 def test_transcript_rendering_degrades_lone_surrogates_instead_of_crashing(
@@ -1418,7 +1702,7 @@ def test_sim_works_with_registered_task(
     out = capsys.readouterr().out
     # env beats config for the sim chain, and the header says so.
     assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
-    assert "status: success" in out
+    assert "run status: completed" in out
 
 
 def test_sim_ignores_real_embodiment_env_var(

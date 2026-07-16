@@ -25,7 +25,13 @@ from inspect_robots.approver import Approver, AutoApprover
 from inspect_robots.compat import assert_compatible
 from inspect_robots.controller import Controller, DefaultController
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.errors import (
+    ConfigError,
+    EmbodimentFault,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.frames import FrameStore
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
@@ -140,6 +146,14 @@ def eval(
 
     A run in which **every** trial errored (nothing was scored) always ends
     with ``status == "error"``, regardless of ``fail_on_error``.
+
+    Ctrl-C during a rollout records the partial trial and writes a log with
+    ``status == "cancelled"``, then re-raises the interrupt (as a
+    ``KeyboardInterrupt`` subclass chaining the original) after
+    ``on_eval_end`` completes. An interrupt outside the rollout
+    call (during scoring, reducers, or log assembly), or a second interrupt
+    during the cancellation handlers, may still prevent the log from being
+    written.
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
@@ -284,6 +298,7 @@ def _run_eval(
 
     halted = False
     stopped = False
+    cancelled_exc: _CancelledTrial | None = None
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
@@ -311,6 +326,14 @@ def _run_eval(
                     control_hz=task.control_hz,
                     frame_store=frame_store,
                 )
+            except _CancelledTrial as exc:
+                status = "cancelled"
+                error = str(exc)
+                scene_status = "cancelled"
+                scene_error = error
+                halted = True
+                cancelled_exc = exc
+                record = exc.record
             except (EmbodimentFault, SafetyAbort) as exc:
                 # Hardware/safety failures always halt the whole eval; the
                 # partial trial record (if any) is preserved below.
@@ -336,12 +359,13 @@ def _run_eval(
                 total_trials += 1
                 total_steps += len(record.steps)
                 all_latencies.extend(record.inference_latencies)
-                if record.status == "error":
-                    # Errored trials are not scored: a failed trial must not
-                    # masquerade as data (e.g. an inf min-distance poisoning
-                    # the metric mean). It stays visible via scene status.
+                if record.status != "success":
+                    # Non-successful trials are not scored: a partial trial
+                    # must not masquerade as data (e.g. an inf min-distance
+                    # poisoning the metric mean). It stays visible via status.
                     epoch_dicts.append({})
-                    errored_trials += 1
+                    if record.status == "error":
+                        errored_trials += 1
                     judgements.append(None)
                     termination_reasons.append(record.termination_reason)
                     policy_transcripts.append(record.policy_transcript)
@@ -444,6 +468,8 @@ def _run_eval(
         error=error,
     )
     bus.on_eval_end(log)
+    if cancelled_exc is not None:
+        raise cancelled_exc
     return [log]
 
 
