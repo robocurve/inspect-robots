@@ -62,8 +62,9 @@ class ActionChunk:
     Modern VLAs (π0, ACT, diffusion policies) predict ``H`` future actions that
     are executed open-loop because inference is slower than the control rate.
     ``H == 1`` is the degenerate "reactive policy" case. ``control_hz`` is the
-    rate the chunk was intended to be played at (``None`` defers to the
-    embodiment's native rate); ``inference_latency_s``, when measured, is logged.
+    rate the chunk was intended to be played at — advisory metadata a consumer
+    may honor (the rollout enforces no rate; ``None`` leaves it unspecified).
+    ``inference_latency_s``, when measured, is logged.
     """
 
     actions: Sequence[Action]

@@ -62,7 +62,7 @@ def test_info_describes_franka_joint_pos() -> None:
     assert sem.control_mode == "joint_pos"
     assert sem.gripper == "binary"
     assert "privileged_success" in emb.info.capabilities
-    assert "self_paced" not in emb.info.capabilities  # sim is framework-paced
+    assert "self_paced" not in emb.info.capabilities  # sim runs unthrottled, as fast as it steps
 
 
 def test_action_dim_tracks_arm_joints() -> None:

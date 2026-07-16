@@ -30,7 +30,7 @@ from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import register, registered, resolve
-from inspect_robots.rollout import StepRecord, TrialRecord, _effective_control_hz, rollout
+from inspect_robots.rollout import StepRecord, TrialRecord, rollout
 from inspect_robots.scene import ListSceneDataset, Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end, value_to_float
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
@@ -238,14 +238,6 @@ def test_min_distance_without_signal() -> None:
 # --------------------------------------------------------------------------- #
 # rollout
 # --------------------------------------------------------------------------- #
-def test_effective_control_hz_precedence() -> None:
-    # First non-None of chunk -> task -> embodiment (R1).
-    assert _effective_control_hz(None, None, None) is None
-    assert _effective_control_hz(30.0, 20.0, 10.0) == 30.0
-    assert _effective_control_hz(None, 20.0, 10.0) == 20.0
-    assert _effective_control_hz(None, None, 10.0) == 10.0
-
-
 class _PolicyErrorPolicy:
     def __init__(self) -> None:
         self.info = PolicyInfo(name="perr", action_space=Box(shape=(2,), semantics=_CUBE_SEM))

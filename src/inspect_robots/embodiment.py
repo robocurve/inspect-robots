@@ -9,9 +9,11 @@ Designed around real-robot reality: ``reset`` may drive to a home pose and block
 on human confirmation; there is no guaranteed privileged success oracle.
 Simulators are a stricter special case that opt into extra ``capabilities``.
 
-Per R1 (see the design doc): ``step()`` returns as soon as the command is issued
-and does NOT block for the control period — the framework owns pacing — unless
-the embodiment declares the ``"self_paced"`` capability.
+Per R1 (see the design doc): ``rollout()`` applies no wall-clock pacing of its
+own — ``step()`` is called as fast as the policy/controller/approver can
+produce actions. An embodiment that needs real-time cadence (e.g. matching a
+real robot's control period) paces itself inside ``step()``, and declares the
+``"self_paced"`` capability to document that it does.
 """
 
 from __future__ import annotations
@@ -86,7 +88,9 @@ class Embodiment(Protocol):
         ...
 
     def step(self, action: Action) -> StepResult:
-        """Issue one action without waiting for the control period unless ``self_paced``."""
+        """Issue one action. The rollout does not wait for the control period between
+        calls; declare ``"self_paced"`` if this embodiment paces itself to real time.
+        """
         ...
 
     def close(self) -> None:
@@ -106,7 +110,9 @@ class EmbodimentBase(ABC):
 
     @abstractmethod
     def step(self, action: Action) -> StepResult:
-        """Issue one action without waiting for the control period unless ``self_paced``."""
+        """Issue one action. The rollout does not wait for the control period between
+        calls; declare ``"self_paced"`` if this embodiment paces itself to real time.
+        """
         ...
 
     def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
