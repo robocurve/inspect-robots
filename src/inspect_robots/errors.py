@@ -22,6 +22,14 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 
 
+class _CancelledTrial(KeyboardInterrupt):
+    """Ctrl-C during a trial, carrying the partial record (mirrors exc.record)."""
+
+    def __init__(self, message: str, record: TrialRecord) -> None:
+        super().__init__(message)
+        self.record = record
+
+
 class InspectRobotsError(Exception):
     """Base class for all Inspect Robots errors.
 

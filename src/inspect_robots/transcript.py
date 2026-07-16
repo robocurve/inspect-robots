@@ -49,9 +49,9 @@ def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
     return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
 
 
-def operator_event(t: int, verdict: str) -> Event:
-    """Record the operator's verdict after the rollout ends."""
-    return Event(kind="operator", t=t, data={"verdict": verdict})
+def operator_event(t: int, verdict: str, source: str = "prompt") -> Event:
+    """Record the operator's verdict and its source after the rollout ends."""
+    return Event(kind="operator", t=t, data={"verdict": verdict, "source": source})
 
 
 def error_event(t: int, error_type: str, message: str) -> Event:

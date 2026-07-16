@@ -9,6 +9,8 @@ gate, logging each step to the sinks, and returns an immutable
 
 from __future__ import annotations
 
+import json
+import warnings
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -19,7 +21,13 @@ import numpy as np
 from inspect_robots.approver import Approver
 from inspect_robots.controller import _INFER_KEY, Controller
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import EmbodimentFault, InspectRobotsError, PolicyError, SafetyAbort
+from inspect_robots.errors import (
+    EmbodimentFault,
+    InspectRobotsError,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.frames import FrameRef, FrameStore
 from inspect_robots.policy import Policy
 from inspect_robots.scene import Scene
@@ -35,6 +43,8 @@ from inspect_robots.types import Action, Observation, StepResult
 
 if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
+
+_TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -75,7 +85,7 @@ class TrialRecord:
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
-    status: str = "success"  # "success" (ran to completion) | "error"
+    status: str = "success"  # "success" (ran to completion) | "error" | "cancelled"
     error: str | None = None
     inference_latencies: list[float] = field(default_factory=list)
     # Human operator's success verdict, captured once during rollout (R6). Read
@@ -83,6 +93,37 @@ class TrialRecord:
     operator_judgement: str | None = None
     # Typed transcript of what happened during the trial.
     events: list[Event] = field(default_factory=list)
+    # The policy's optional per-trial audit record (e.g. an LLM conversation),
+    # collected via the duck-typed transcript() hook and normalized to plain
+    # JSON types by _collect_transcript. None when the policy has no hook.
+    policy_transcript: Any = None
+
+
+def _collect_transcript(policy: object) -> Any:
+    """Normalize a policy's optional audit hook without affecting trial outcome."""
+    try:
+        transcript = getattr(policy, "transcript", None)
+        if not callable(transcript):
+            return None
+        raw = transcript()
+        if raw is None:
+            return None
+        dumped = json.dumps(raw, default=str)
+        normalized = json.loads(dumped)
+        size = len(dumped.encode())
+        if size > _TRANSCRIPT_BYTE_LIMIT:
+            return {
+                "transcript_dropped": True,
+                "bytes": size,
+                "note": "exceeds inline limit; policies must not embed binary data",
+            }
+        return normalized
+    except Exception as exc:
+        try:
+            detail = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            detail = type(exc).__name__
+        return {"transcript_error": detail}
 
 
 def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> InspectRobotsError:
@@ -145,10 +186,16 @@ def rollout(
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
     expected_dim = embodiment.info.action_space.dim
+    policy_reset_ok = False
+    delta_hook: Any = getattr(policy, "transcript_delta", None)
+    messages_hook: Any = getattr(sink, "log_policy_messages", None)
+    stream_ok = callable(delta_hook) and callable(messages_hook)
 
     try:
+        t = -1
         try:
             policy.reset(scene)
+            policy_reset_ok = True
         except InspectRobotsError as exc:
             _record_failure(record, exc, -1)
             raise
@@ -166,7 +213,9 @@ def rollout(
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
             try:
-                action = controller.next_action(policy, obs, t, store)
+                action = controller.next_action(
+                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                )
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -177,6 +226,20 @@ def rollout(
             if len(inferences) > prev_inferences:
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
+                if stream_ok:
+                    try:
+                        delta = delta_hook()
+                        entries = list(delta) if delta is not None else []
+                        if entries:
+                            messages_hook(t, entries)
+                    except Exception as exc:
+                        stream_ok = False
+                        warnings.warn(
+                            "Live policy transcript streaming disabled for this "
+                            f"trial after {type(exc).__name__}: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
             # A malformed action is the policy's fault; catching it here keeps it
             # from surfacing inside the approver/embodiment as a halting fault.
@@ -249,9 +312,16 @@ def rollout(
         else:
             record.truncated = True
             record.termination_reason = "max_steps"
+    except KeyboardInterrupt as exc:
+        record.status = "cancelled"
+        record.error = "cancelled by user (KeyboardInterrupt)"
+        record.events.append(error_event(t, "KeyboardInterrupt", "cancelled by user"))
+        raise _CancelledTrial(record.error, record) from exc
     finally:
         # Preserve measured latencies even when the trial ends in an error.
         record.inference_latencies = [
             lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None
         ]
+        if policy_reset_ok:  # pragma: no branch - false only while an exception unwinds
+            record.policy_transcript = _collect_transcript(policy)
     return record

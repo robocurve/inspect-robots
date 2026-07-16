@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Live agent-policy transcript rows on the Rerun `step` timeline, with
+  best-effort non-blocking streaming and complete eval-log persistence (#124).
+- Remote Rerun streaming via `inspect-robots run --rerun-connect [URL]`, so
+  headless evaluations can connect over gRPC to a viewer on another machine
+  (including through an SSH reverse tunnel) (#86).
 - Plugin-declared embodiment device slots for V4L2 cameras, SocketCAN
   interfaces, and serial devices. `inspect-robots setup` probes and interviews
   declared slots, enforces grouped all-or-none assignments, and suggests udev
@@ -47,6 +52,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Operator scoring no longer prompts twice for self-confirming embodiments**
+  (#53). On interactive ad-hoc runs, definitive `success` or `failure`
+  termination verdicts are adopted as the operator judgement, announced on the
+  terminal, and identified as embodiment-sourced in the in-memory transcript.
 - **Literal percent signs in config values now round-trip unchanged** (#54).
   Config reads no longer treat `%` as interpolation syntax, so values such as
   `policy = 50%off` work with `config set`, `config show`, and normal runs.

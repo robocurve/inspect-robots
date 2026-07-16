@@ -63,6 +63,11 @@ class CubePickEmbodiment:
             capabilities=frozenset(
                 {SEEDABLE, RESETTABLE, AUTO_RESET, PRIVILEGED_SUCCESS, RENDERABLE}
             ),
+            docs=(
+                "The red point is the end effector and the green point is the cube in the "
+                "top camera; world-frame +x points right and +y points down in the image, "
+                "and both positions stay within the unit square."
+            ),
         )
 
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:

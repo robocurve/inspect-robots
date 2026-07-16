@@ -7,9 +7,12 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -17,13 +20,19 @@ import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
 from inspect_robots.task import Task
+from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_agent._llm import ChatClient, resolve_provider
+from inspect_robots_agent._png import encode_png
+from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, AgentPolicyConfig, _observation_content
 
 # --- scripted-conversation harness ---------------------------------------------
 
@@ -52,6 +61,47 @@ def _text_response(text: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
 
 
+def _text_and_tool_response(text: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": text,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{name}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+def _multi_tool_response(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{index}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                        for index, (name, arguments) in enumerate(calls)
+                    ],
+                }
+            }
+        ]
+    }
+
+
 class _Script:
     """Serves queued responses; repeats the last one when the queue runs dry."""
 
@@ -63,6 +113,21 @@ class _Script:
         self.requests.append(json.loads(request.content))
         payload = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
         return httpx.Response(200, json=payload)
+
+
+class _FlushRecordingStream(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_calls: list[str] = []
+        self.flush_calls = 0
+
+    def write(self, text: str) -> int:
+        self.write_calls.append(text)
+        return super().write(text)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        super().flush()
 
 
 def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
@@ -92,13 +157,43 @@ class _RecordingSink(NullSink):
         self.records.append(record)
 
 
+class _AbsoluteEmbodiment:
+    def __init__(self) -> None:
+        self._q = np.array([0.0])
+        self.info = EmbodimentInfo(
+            name="absolute-test",
+            action_space=Box(
+                shape=(1,),
+                low=np.array([-1.0]),
+                high=np.array([1.0]),
+                semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
+            ),
+            observation_space=ObservationSpace(
+                state=StateSpec(fields=(StateField(key="q", shape=(1,)),))
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+        )
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        self._q = np.array([0.0])
+        return Observation(state={"q": self._q.copy()}, instruction=scene.instruction)
+
+    def step(self, action: Action) -> StepResult:
+        self._q = np.asarray(action.data, dtype=np.float64).copy()
+        return StepResult(observation=Observation(state={"q": self._q.copy()}))
+
+    def close(self) -> None:
+        return None
+
+
 # --- tests -----------------------------------------------------------------------
 
 
 def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}}),
             _tool_response("done", {"summary": "close enough"}),
         ]
     )
@@ -110,10 +205,445 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     (record,) = sink.records
     assert record.truncated is True
     assert record.termination_reason == "done"
-    # 5 interpolated steps + 1 hold-still stop action.
-    assert len(record.steps) == 6
+    # Headroom splits a box-sized move into two steps, then done holds once.
+    assert len(record.steps) == 3
     assert logs[0].eval.policy_config["model"] == "test/model"
-    assert logs[0].eval.policy_config["max_llm_calls"] == 50
+    assert logs[0].eval.policy_config["max_llm_calls"] == 100
+    assert logs[0].eval.policy_config["max_speed_frac"] == 0.1
+    (transcript,) = logs[0].samples[0].policy_transcripts
+    serialized = json.dumps(logs[0].to_dict())
+    assert transcript is not None
+    assert "move_by" in serialized and "done" in serialized
+    assert "data:" not in serialized
+
+
+def test_transcript_is_none_before_first_reset() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    assert policy.transcript() is None
+
+
+def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="(unbound)", budget=100)
+
+
+def test_embodiment_docs_are_appended_verbatim_after_formatting() -> None:
+    docs = '  Keep {x/y} literal.\n```json\n{"open": 1}\n```  '
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == (
+        _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+        + "\n\nEmbodiment notes:\n"
+        + docs.strip()
+    )
+
+
+@pytest.mark.parametrize("docs", [None, "", " \n\t "])
+def test_absent_embodiment_docs_leave_the_prompt_unchanged(docs: str | None) -> None:
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+
+
+def test_bind_accepts_legacy_embodiment_info_without_docs() -> None:
+    current = CubePickEmbodiment().info
+
+    class _LegacyInfo:
+        name = current.name
+        action_space = current.action_space
+        observation_space = current.observation_space
+        control_hz = current.control_hz
+
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(cast(EmbodimentInfo, _LegacyInfo()))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert "Embodiment notes:" not in transcript[0]["content"]
+
+
+def test_observation_content_labels_the_selected_state_field_exactly() -> None:
+    content = _observation_content(
+        Observation(state={"joint_pos": np.array([0.01, -0.02, 0.98])}),
+        ("joint_pos", ("left_j0", "left_j1", "right_gripper")),
+    )
+
+    assert content == [
+        {
+            "type": "text",
+            "text": (
+                "Current observation.\n"
+                "state[joint_pos]: left_j0=0.01 left_j1=-0.02 right_gripper=0.98"
+            ),
+        }
+    ]
+
+
+def test_observation_content_uses_unlabeled_fallback_for_length_mismatch() -> None:
+    content = _observation_content(
+        Observation(state={"joint_pos": np.array([0.01, -0.02])}),
+        ("joint_pos", ("left_j0", "left_j1", "right_gripper")),
+    )
+
+    assert content[0]["text"] == "Current observation.\nstate[joint_pos]: [0.01, -0.02]"
+
+
+def test_observation_content_labels_every_camera_with_the_environment_step() -> None:
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    content = _observation_content(
+        Observation(
+            images={"top_cam": image, "left_cam": image},
+            extra={"env_step": 480},
+        )
+    )
+
+    assert content[1]["text"] == "camera 'top_cam' (step 480):"
+    assert content[2]["type"] == "image_url"
+    assert content[3]["text"] == "camera 'left_cam' (step 480):"
+    assert content[4]["type"] == "image_url"
+
+
+def test_observation_content_step_label_fallbacks() -> None:
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    without_step = _observation_content(Observation(images={"top": image}))
+    string_step = _observation_content(
+        Observation(images={"top": image}, extra={"env_step": "480"})
+    )
+    bool_step = _observation_content(Observation(images={"top": image}, extra={"env_step": True}))
+    numpy_step = _observation_content(
+        Observation(images={"top": image}, extra={"env_step": np.int64(480)})
+    )
+
+    assert without_step[1]["text"] == "camera 'top':"
+    assert string_step[1]["text"] == "camera 'top':"
+    assert bool_step[1]["text"] == "camera 'top' (step True):"
+    assert numpy_step[1]["text"] == "camera 'top':"
+
+
+def test_transcript_echo_defaults_off(capsys: pytest.CaptureFixture[str]) -> None:
+    policy = _policy(_Script([_tool_response("done", {"summary": "quiet"})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe quietly"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    assert capsys.readouterr().err == ""
+
+
+def test_transcript_echo_reports_conversation_in_order(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_text_and_tool_response("The goal is complete.", "done", {"summary": "ok"})]),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect the cube"))
+    policy.act(
+        Observation(
+            state={"eef_pos": np.array([0.123456, -0.2])},
+            extra={"env_step": 0},
+        )
+    )
+
+    lines = capsys.readouterr().err.splitlines()
+    expected = [
+        "[agent] goal: inspect the cube",
+        "[agent] >> step 0: 0 camera(s), state[eef_pos]: [0.1235, -0.2]",
+        "[agent] << The goal is complete.",
+        '[agent] << tool_call done({"summary": "ok"})',
+        "[agent] -- done: ok",
+    ]
+    positions = [lines.index(line) for line in expected]
+    assert positions == sorted(positions)
+
+
+def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script(
+            [
+                _multi_tool_response(
+                    [
+                        ("done", {"summary": "first executes"}),
+                        ("give_up", {"reason": "extra"}),
+                        ("give_up", {"reason": "second extra"}),
+                    ]
+                )
+            ]
+        ),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    event_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if "tool_call" in line or line.startswith("[agent] --")
+    ]
+    assert event_lines == [
+        '[agent] << tool_call done({"summary": "first executes"})',
+        '[agent] << tool_call give_up({"reason": "extra"})',
+        '[agent] << tool_call give_up({"reason": "second extra"})',
+        "[agent] -- ignored: one tool call per turn",
+        "[agent] -- ignored: one tool call per turn",
+        "[agent] -- done: first executes",
+    ]
+
+
+def test_transcript_echo_flushes_every_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "flushed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="flush"))
+    stream = _FlushRecordingStream()
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    policy.act(Observation(extra={"env_step": 0}))
+
+    newline_count = sum(part.count("\n") for part in stream.write_calls)
+    assert newline_count > 0
+    assert stream.flush_calls >= newline_count
+
+
+def test_transcript_echo_observation_omits_image_payloads(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "observed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(
+        Observation(
+            state={"eef_pos": np.array([0.123456])},
+            images={"top": np.zeros((1, 1, 3), dtype=np.uint8)},
+            extra={"env_step": 0},
+        )
+    )
+
+    stderr = capsys.readouterr().err
+    assert "[agent] >> step 0: 1 camera(s), state[eef_pos]: [0.1235]" in stderr
+    assert "data:image" not in stderr
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"env_step": "3"}],
+    ids=["missing", "non_int_string"],
+)
+def test_transcript_echo_observation_without_environment_step(
+    extra: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "observed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(Observation(state={"eef_pos": np.array([0.0])}, extra=extra))
+
+    stderr = capsys.readouterr().err
+    assert "[agent] >> observation: 0 camera(s), state[eef_pos]: [0.0]" in stderr
+    assert ">> step" not in stderr
+
+
+def test_transcript_echo_never_echoes_retry_nudge(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script(
+            [
+                _text_response("thinking out loud, no tool call"),
+                _tool_response("done", {"summary": "recovered"}),
+            ]
+        ),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="recover"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    stderr = capsys.readouterr().err
+    assert "[agent] << thinking out loud, no tool call" in stderr
+    assert "Respond with exactly one tool call." not in stderr
+
+
+def test_transcript_echo_reports_forced_give_up(capsys: pytest.CaptureFixture[str]) -> None:
+    policy = _policy(
+        _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})]),
+        max_llm_calls=1,
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    policy.act(Observation(extra={"env_step": 0}))
+    policy.act(Observation(extra={"env_step": 1}))
+
+    assert "[agent] -- LLM call budget exhausted; forcing give_up" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _tool_response("done", {"summary": "no text"}),
+        _text_and_tool_response("", "done", {"summary": "no text"}),
+    ],
+    ids=["content_none", "content_empty_string"],
+)
+def test_transcript_echo_omits_empty_assistant_text(
+    response: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy = _policy(_Script([response]), transcript_echo=True)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    assistant_lines = [
+        line for line in capsys.readouterr().err.splitlines() if line.startswith("[agent] <<")
+    ]
+    assert assistant_lines == ['[agent] << tool_call done({"summary": "no text"})']
+
+
+def test_transcript_echo_lands_in_policy_config() -> None:
+    policy = _policy(_Script([_text_response("unused")]), transcript_echo=True)
+
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.transcript_echo is True
+
+
+def test_transcript_preserves_step_label_next_to_elided_image() -> None:
+    policy = _policy(_Script([_tool_response("done", {"summary": "observed"})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(
+        Observation(
+            images={"top_cam": np.zeros((1, 1, 3), dtype=np.uint8)},
+            extra={"env_step": 480},
+        )
+    )
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[-3]["content"][-2:] == [
+        {"type": "text", "text": "camera 'top_cam' (step 480):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+
+def test_transcript_strips_images_and_preserves_text_and_tools() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+    tool_call = {
+        "id": "call_move",
+        "type": "function",
+        "function": {"name": "move_by", "arguments": '{"dx": 0.1}'},
+    }
+    policy._messages.extend(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "camera 'top':"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,secret"},
+                    },
+                ],
+            },
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call_move", "content": "moved"},
+        ]
+    )
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[-3]["content"] == [
+        {"type": "text", "text": "camera 'top':"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    assert transcript[-2]["tool_calls"] == [tool_call]
+    assert transcript[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_move",
+        "content": "moved",
+    }
+
+
+def test_transcript_is_deeply_isolated_in_both_directions() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+    first = policy.transcript()
+    assert first is not None
+
+    first[0]["content"] = "changed return"
+    assert policy._messages[0]["content"] != "changed return"
+
+    policy._messages[1]["content"] = "changed live state"
+    assert first[1]["content"] == "Goal: reach"
+
+
+def test_transcript_delta_tracks_new_sanitized_messages_and_reset() -> None:
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.05}}),
+            _tool_response("done", {"summary": "finished"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    scene = Scene(id="s0", instruction="reach")
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+    policy.reset(scene)
+
+    policy.act(Observation(images={"top": image}))
+    first = policy.transcript_delta()
+    assert first is not None
+    assert policy.transcript_delta() is None
+    assert "data:image" not in json.dumps(first)
+
+    policy.act(Observation(images={"top": image}))
+    second = policy.transcript_delta()
+    assert second is not None
+    assert second[0]["role"] == "user"
+    assert all(message["role"] != "system" for message in second)
+    assert "data:image" not in json.dumps(second)
+
+    full = policy.transcript()
+    assert full is not None
+    assert len(full) == len(first) + len(second)
+    assert full[: len(first)] == first
+    assert full[len(first) :] == second
+
+    policy.reset(scene)
+    reset_delta = policy.transcript_delta()
+    assert reset_delta is not None
+    assert [message["role"] for message in reset_delta] == ["system", "user"]
 
 
 def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
@@ -124,6 +654,9 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
     assert [t["function"]["name"] for t in first["tools"]] == ["move_by", "done", "give_up"]
     system, goal, observation = first["messages"]
     assert "cubepick" in system["content"]
+    assert "Embodiment notes:\n" in system["content"]
+    docs = CubePickEmbodiment().info.docs
+    assert docs is not None and docs in system["content"]
     assert goal["content"] == "Goal: reach the cube"
     text_parts = [p["text"] for p in observation["content"] if p["type"] == "text"]
     assert any("state[eef_pos]" in t for t in text_parts)
@@ -135,7 +668,7 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
     def run(approver: Any) -> TrialRecord:
         script = _Script(
             [
-                _tool_response("move_by", {"deltas": {"dx": 5.0}, "duration_s": 0.5}),
+                _tool_response("move_by", {"deltas": {"dx": 0.08}}),
                 _tool_response("done", {"summary": "stop"}),
             ]
         )
@@ -151,18 +684,19 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
         return sink.records[0]
 
     space = CubePickEmbodiment().info.action_space
-    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space)))
+    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.02)))
     approvals = [e for e in guarded.events if e.kind == "approval"]
-    assert approvals, "the 1.0-per-step swing must be clamped to the 0.1 bound"
-    assert all(abs(float(np.asarray(s.action.data)[0])) <= 0.1 for s in guarded.steps)
+    assert approvals
+    assert any(e.data.get("detail") == "delta_clamped" for e in approvals)
+    assert float(np.asarray(guarded.steps[0].action.data)[0]) == 0.02
 
     unguarded = run(None)  # eval()'s Python-API default is the permissive AutoApprover
     assert not [e for e in unguarded.events if e.kind == "approval"]
-    assert any(abs(float(np.asarray(s.action.data)[0])) > 0.1 for s in unguarded.steps)
+    assert float(np.asarray(unguarded.steps[0].action.data)[0]) == 0.08
 
 
 def test_llm_call_budget_forces_give_up(tmp_path: Path) -> None:
-    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.05}, "duration_s": 0.5})])
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.05}})])
     sink = _RecordingSink()
     logs = ir_eval(
         _task(),
@@ -182,9 +716,11 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
     logs = ir_eval(
         _task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
     )
-    # A PolicyError marks the trial errored (never scored); the eval survives.
+    # A PolicyError marks the trial errored (never scored); the eval still
+    # returns a log, and with its only trial errored the log reports "error".
     (sample,) = logs[0].samples
     assert sample.status == "error"
+    assert logs[0].status == "error"
     (record,) = sink.records
     assert record.error is not None and "no tool call" in record.error
 
@@ -192,8 +728,8 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
 def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> None:
     script = _Script(
         [
-            _tool_response("move_by", {"deltas": {"dz": 0.1}, "duration_s": 0.5}),  # bad dim
-            _tool_response("move_by", {"deltas": {"dx": 0.1}, "duration_s": 0.5}),
+            _tool_response("move_by", {"deltas": {"dz": 0.1}}),  # bad dim
+            _tool_response("move_by", {"deltas": {"dx": 0.1}}),
             _tool_response("done", {"summary": "recovered"}),
         ]
     )
@@ -208,6 +744,40 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
         m for request in script.requests for m in request["messages"] if m.get("role") == "tool"
     ]
     assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
+
+
+def test_persistent_tool_errors_become_policy_error(tmp_path: Path) -> None:
+    script = _Script([_tool_response("move_by", {"deltas": {"dz": 0.1}})])
+    sink = _RecordingSink()
+    logs = ir_eval(
+        _task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
+    )
+    assert logs[0].status == "error"
+    assert sink.records[0].error is not None
+    assert "tool calls kept failing" in sink.records[0].error
+
+
+def test_extra_tool_calls_are_answered_but_not_executed(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_by", {"deltas": {"dx": 0.05}}),
+                    ("give_up", {"reason": "extra"}),
+                ]
+            ),
+            _tool_response("done", {"summary": "only the first call ran"}),
+        ]
+    )
+    sink = _RecordingSink()
+    ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+    assert sink.records[0].termination_reason == "done"
+    ignored = [
+        message
+        for message in script.requests[1]["messages"]
+        if message.get("content") == "ignored: one tool call per turn"
+    ]
+    assert len(ignored) == 1
 
 
 def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
@@ -226,7 +796,14 @@ def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script, effort=None), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert "reasoning_effort" not in script.requests[0]
 
-    with pytest.raises(ValueError, match="effort"):
+    # "none" is a wire value, distinct from None (omit the field): GPT-5.x
+    # rejects function tools on chat completions unless reasoning_effort is
+    # explicitly "none", and omitting the field 400s the same way.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == "none"
+
+    with pytest.raises(ValueError, match=r"or None to omit the field, got 'turbo'"):
         _policy(_Script([]), effort="turbo")
 
 
@@ -235,6 +812,75 @@ def test_registry_resolves_agent_policy() -> None:
 
     policy = resolve("policy", "agent", model="m", base_url="http://x/v1")
     assert isinstance(policy, LLMAgentPolicy)
+
+
+def test_non_default_speed_fraction_is_forwarded_through_bind(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("done", {"summary": "moved"}),
+        ]
+    )
+    sink = _RecordingSink()
+    ir_eval(
+        _task(max_steps=20),
+        _policy(script, max_speed_frac=0.25),
+        _AbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+    # Distance 0.5 / (0.25 / 10 * range 2) plus relative headroom.
+    assert len(sink.records[0].steps) == 12  # 11 motion steps + done
+
+
+@pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
+def test_policy_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
+    with pytest.raises(ValueError, match="max_speed_frac must be finite and > 0"):
+        _policy(_Script([]), max_speed_frac=max_speed_frac)
+
+
+def test_policy_rejects_empty_call_budget_and_reads_process_environment() -> None:
+    with pytest.raises(ValueError, match="max_llm_calls must be >= 1"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            max_llm_calls=0,
+            env={},
+        )
+
+    policy = LLMAgentPolicy(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    )
+    assert policy.info.name == "agent"
+
+
+def test_chat_transport_failure_and_close_are_well_defined() -> None:
+    provider = resolve_provider(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        api_key_env=None,
+        env={},
+    )
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    client = ChatClient(
+        provider,
+        transport=httpx.MockTransport(fail),
+        max_retries=1,
+        backoff_s=0.0,
+    )
+    with pytest.raises(RuntimeError, match="offline"):
+        client.complete(messages=[], tools=[])
+    client.close()
+
+
+def test_png_encoder_accepts_float_grayscale_frames() -> None:
+    encoded = encode_png(np.array([[0.5]], dtype=np.float64))
+    assert encoded.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_unbound_act_raises_clear_error() -> None:

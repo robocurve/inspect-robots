@@ -87,17 +87,21 @@ robot.
 ### Operator scoring
 
 An arbitrary instruction has no success oracle, so ad-hoc runs default to the
-`operator` scorer: when run on an interactive terminal, the CLI asks after
-each trial,
+`operator` scorer. When run on an interactive terminal, the CLI asks after each
+trial unless the embodiment already terminated the episode with a definitive
+`success` or `failure` verdict. In that case, the CLI records the embodiment's
+verdict as the operator judgement instead of asking the operator a second time,
+and prints `operator verdict adopted from embodiment: success` (or `failure`) so
+the operator can catch a mistaken adoption live.
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 ```
 
-and records the verdict in the log (`skip` records nothing). Piped/CI
-stdin, `--no-prompt`, or a registered `--task` run never prompt: unattended
-runs stay non-blocking, and an unjudged trial honestly scores as failure with
-"no operator judgement recorded".
+Prompted verdicts are recorded in the log (`skip` records nothing). Piped/CI
+stdin, `--no-prompt`, or a registered `--task` run never prompt or adopt an
+embodiment verdict: unattended runs stay non-blocking, and an unjudged trial
+honestly scores as failure with "no operator judgement recorded".
 
 ## `inspect-robots setup`
 
@@ -188,7 +192,9 @@ the path of the written log is printed.
 the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene.
 
-The exit code is `0` on a successful eval, `1` otherwise.
+The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
+the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
+scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
 ## `inspect-robots doctor`
 
@@ -211,7 +217,8 @@ inspect-robots inspect logs/cubepick-reach_xxxx.json
 task:        cubepick-reach
 policy:      scripted
 embodiment:  cubepick
-status:      success
+run status:  completed
+outcome:     5 succeeded
 scenes:      5   trials: 5
 metrics:
   success_at_end: 1
@@ -219,6 +226,33 @@ scenes:
   [success] scene-0: success_at_end=1
   ...
 ```
+
+`completed` is the display form of the log's `success` status value; the
+on-disk field and Python API keep `success`.
+
+## `inspect-robots video`
+
+Render a `--store-frames` run's stored camera frames into one MP4 per
+(trial, camera) stream:
+
+```bash
+inspect-robots video logs/adhoc_xxxx.json
+```
+
+```text
+fps: 10 (control_hz from log)
+wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote 2/2 streams
+```
+
+Encoding is done by the `ffmpeg` binary (no Python dependencies are added);
+install it from your package manager, or point at a specific build with
+`--ffmpeg PATH`. Videos land in the frames directory by default (`--out DIR`
+overrides). The playback rate defaults to the log's `control_hz` and can be
+overridden with `--fps N`. A stream that fails to encode is reported on
+stderr and the remaining streams still encode; the exit code is 1 if any
+stream failed.
 
 ## `inspect-robots --version`
 

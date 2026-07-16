@@ -32,6 +32,22 @@ class Epochs:
             raise ConfigError(f"Epochs count must be >= 1, got {self.count}")
 
 
+@dataclass(frozen=True)
+class TaskEnvelope:
+    """Identity and rollout limits of a task, safe to hand to adapters.
+
+    This is what ``eval()`` passes to an embodiment's optional
+    ``bind_task(envelope)`` hook: enough for the adapter to display or
+    pre-allocate for the run (e.g. an operator countdown against
+    ``max_steps``), and nothing that would let it second-guess scoring or the
+    dataset. Deliberately carries no control rate — the effective rate is
+    R1's chunk → task → embodiment precedence, unknowable before inference.
+    """
+
+    name: str
+    max_steps: int
+
+
 @dataclass
 class Task:
     """A benchmark: scenes + scorer(s) + horizon, independent of any embodiment.
@@ -75,3 +91,8 @@ class Task:
     def epoch_spec(self) -> Epochs:
         """Normalize an integer epoch count to an ``Epochs`` specification."""
         return self.epochs if isinstance(self.epochs, Epochs) else Epochs(count=self.epochs)
+
+    @property
+    def envelope(self) -> TaskEnvelope:
+        """The adapter-safe view of this task handed to ``bind_task`` hooks."""
+        return TaskEnvelope(name=self.name, max_steps=self.max_steps)

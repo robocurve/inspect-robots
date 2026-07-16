@@ -63,8 +63,18 @@ uv venv && uv pip install inspect-robots
 ```
 
 Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
-`pip` and console scripts); with uv, run commands through `uv run` as shown
-below and no activation is needed.
+`pip` and console scripts). Either way, activate the venv once
+(`source .venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
+`inspect-robots` directly, as shown below.
+
+> [!NOTE]
+> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`.
+> Inside a uv project, `uv run` first re-syncs the environment to the
+> project's lockfile, downgrading whatever the `uv pip install` commands
+> above just added back to the locked versions; the only trace is an
+> easy-to-miss "Uninstalled N / Installed N packages" line. To use
+> `uv run` anyway, pass `--no-sync`, or declare everything as real
+> dependencies with `uv add inspect-robots` plus your plugins.
 
 ## Quickstart
 
@@ -72,8 +82,9 @@ Install the plugin for your rig (the wizard suggests this one's components)
 and set your defaults once:
 
 ```bash
+source .venv/bin/activate
 uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms rig
-uv run inspect-robots setup
+inspect-robots setup
 ```
 
 The wizard picks your defaults and finds your cameras (unplug one when asked
@@ -85,25 +96,46 @@ by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
 Then tell the robot what to do:
 
 ```bash
-uv run inspect-robots "place the fork on the plate"
+inspect-robots "place the fork on the plate"
 ```
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. CLI flags override any default
+policy sees while the robot moves. The viewer starts with a 2 GiB memory cap
+so long sessions stay responsive; after upgrading, kill any already-running
+Rerun viewer once so the cap applies. CLI flags override any default
 (`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
 
 The policy slot is not limited to VLAs. With the
-[inspect-robots-agent](plugins/inspect-robots-agent/) plugin installed
-(`uv pip install inspect-robots-agent`) and `$ANTHROPIC_API_KEY` set, a
-frontier LLM drives the same rig through tool calls, one approver-checked
-motion chunk per call:
+[inspect-robots-agent](plugins/inspect-robots-agent/) plugin, a frontier LLM
+drives the same rig through tool calls, one approver-checked motion chunk
+per call.
+
+Put a `.env` with your API key in the working directory, reusing one you
+already have or copying the [.env.example](.env.example) template (the CLI
+loads it automatically; real environment variables take precedence over its
+values):
+
+```ini
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Install the add-on:
 
 ```bash
-uv run inspect-robots "place the fork on the plate" --policy agent -P model=anthropic/claude-fable-5
+uv pip install inspect-robots-agent
 ```
+
+Run the LLM on the robot:
+
+```bash
+inspect-robots "place the fork on the plate" --policy agent \
+    -P model=anthropic/claude-fable-5 -P effort=low
+```
+
+Read the recorded agent conversation with `inspect-robots inspect LOG.json --transcript`.
 
 ### Run in simulation
 
@@ -111,7 +143,7 @@ The same instruction runs on your configured simulator instead of the
 real robot:
 
 ```bash
-uv run inspect-robots "place the fork on the plate" --sim
+inspect-robots "place the fork on the plate" --sim
 ```
 
 ### More CLI commands
@@ -120,19 +152,26 @@ The full command line resolves any registered task/policy/embodiment
 (builtins + installed plugins). List what is registered:
 
 ```bash
-uv run inspect-robots list
+inspect-robots list
 ```
 
 Run a registered task with explicit components:
 
 ```bash
-uv run inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
+inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 ```
 
 Pretty-print a saved eval log:
 
 ```bash
-uv run inspect-robots inspect logs/cubepick-reach_*.json
+inspect-robots inspect logs/cubepick-reach_*.json
+```
+
+Render a `--store-frames` run's camera frames to MP4 videos (needs the
+`ffmpeg` binary on PATH):
+
+```bash
+inspect-robots video logs/cubepick-reach_*.json
 ```
 
 ### Python API
@@ -172,7 +211,10 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 - **Safe unattended.** An explicit error taxonomy separates "record and continue"
   from "halt and require a human", so a faulted robot never auto-advances overnight.
 - **Rerun visualization.** Stream camera images, 3D poses, joint/action
-  time-series, and success markers to a `.rrd` recording.
+  time-series, and success markers to a `.rrd` recording. Logging is non-blocking:
+  a slow viewer connection drops camera frames first (whole steps only under
+  sustained stall) instead of delaying the robot control loop, and camera
+  streams are JPEG-compressed by default.
 - **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
   packages. Entry points make them appear in `inspect-robots list` automatically.
 - **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
@@ -184,6 +226,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 Both halves of an eval (the "body" and the "brain") have a ready-made
 adapter shipped from this repo as separate packages:
 
+- **[inspect-robots-ros](plugins/inspect-robots-ros/)**: run evals on ROS 1 or
+  ROS 2 arms through rosbridge, with no ROS installation on the eval machine
+  (`--embodiment ros`).
 - **[inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/)**: run evals
   against an [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) simulation
   (`--embodiment isaacsim`).
@@ -205,8 +250,32 @@ inspect-robots run --task my-task --embodiment isaacsim \
 # Claude driving the mock world, no hardware or GPU required:
 export ANTHROPIC_API_KEY=sk-ant-...
 inspect-robots "pick up the cube" --policy agent \
-    -P model=anthropic/claude-fable-5 --embodiment cubepick
+    -P model=anthropic/claude-fable-5 -P effort=low --embodiment cubepick
 ```
+
+### Real robots via ROS
+
+The ROS embodiment connects to any ROS 1 or ROS 2 arm that exposes standard
+joint, compressed-image, and optional pose topics through `rosbridge_server`.
+It publishes joint-position commands at a configured control rate and works
+with every compatible policy, including `agent` and XPolicyLab-served VLAs.
+
+```bash
+uv pip install inspect-robots-ros
+
+inspect-robots run --task my-task --policy agent --embodiment ros \
+    -E url=ws://robot:9090 \
+    -E joints=joint1,joint2,joint3,joint4,joint5,joint6 \
+    -E command_topic=/joint_trajectory_controller/joint_trajectory \
+    -E action_low=-3.1,-2.2,-2.9,-3.1,-2.9,-3.1 \
+    -E action_high=3.1,2.2,2.9,3.1,2.9,3.1
+```
+
+Swap `--policy agent` for `--policy xpolicylab -P url=ws://gpu-box:19000` to
+evaluate any XPolicyLab-served VLA on the same arm; the `-E` robot arguments
+stay unchanged. Robot bringup, controller mappings, safety requirements,
+camera configuration, and reset behavior are documented in the
+[ROS plugin README](plugins/inspect-robots-ros/).
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
 the embodiment's action space) are wired into every CLI run by default, for
