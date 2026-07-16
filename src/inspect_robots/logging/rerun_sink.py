@@ -14,8 +14,8 @@ Emission happens on a daemon worker thread: ``log_step`` snapshots the
 transition and enqueues it, so a slow or stalled viewer connection can never
 block the control-rate rollout loop. Under backpressure the sink degrades
 visualization instead of delaying control: camera frames are dropped first
-(scalar plots stay complete), then whole steps, and the drop counts are
-reported as a ``RuntimeWarning`` when the eval ends. The queue is drained at
+(scalar plots stay complete), then whole steps or transcript rows, and the drop
+counts are reported as a ``RuntimeWarning`` when the eval ends. The queue is drained at
 every trial boundary (bounded by ``flush_timeout``), so an eval that aborts
 mid-run loses at most the current trial's queued tail. Camera frames are
 JPEG-compressed by default (``jpeg_quality=75``); pass ``jpeg_quality=None``
@@ -59,9 +59,48 @@ import numpy.typing as npt
 from inspect_robots.types import ImageArray
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from inspect_robots.log import EvalLog, EvalSpec
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.types import Action, Observation, StepResult
+
+
+def _render_message(message: Any) -> tuple[str, str]:
+    if not isinstance(message, dict):
+        return "INFO", str(message)
+
+    role = str(message.get("role", "unknown"))
+    level = {
+        "assistant": "INFO",
+        "user": "INFO",
+        "tool": "DEBUG",
+    }.get(role, "TRACE")
+    lines: list[str] = []
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        lines.append(content)
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+            else:
+                part_type = part.get("type", "unknown") if isinstance(part, dict) else "unknown"
+                parts.append(f"[{part_type} part]")
+        if parts:
+            lines.append("\n".join(parts))
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            if not isinstance(function, dict):
+                function = {}
+            name = function.get("name", "")
+            arguments = function.get("arguments", "")
+            lines.append(f"tool_call {name}({arguments})")
+    return level, f"{role}: " + "\n".join(lines)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,6 +115,15 @@ class _StepPayload:
     reward: float | None
     terminated: bool
     termination_reason: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class _TranscriptPayload:
+    """Rendered conversation rows snapshotted for one control step."""
+
+    prefix: str
+    t: int
+    entries: tuple[tuple[str, str], ...]
 
 
 @dataclasses.dataclass
@@ -131,12 +179,13 @@ class RerunSink:
         self._warned = False
         self._disabled = False
         self._prefix = "trial"
-        self._queue: deque[_StepPayload] = deque()
+        self._queue: deque[_StepPayload | _TranscriptPayload] = deque()
         self._cond = threading.Condition()
         self._worker: threading.Thread | None = None
         self._state: _WorkerState | None = None
         self._dropped_frames = 0
         self._dropped_steps = 0
+        self._dropped_transcripts = 0
         self._image_watermark = max(1, queue_size // 4)
         self._emit_warned = False
         self._compress_warned = False
@@ -205,7 +254,10 @@ class RerunSink:
             stacklevel=2,
         )
 
-    def _emit(self, rr: Any, payload: _StepPayload) -> None:
+    def _emit(self, rr: Any, payload: _StepPayload | _TranscriptPayload) -> None:
+        if isinstance(payload, _TranscriptPayload):
+            self._emit_transcript(rr, payload)
+            return
         self._set_step(rr, payload.t)
         pre = payload.prefix
         for cam, image in payload.images.items():
@@ -223,6 +275,11 @@ class RerunSink:
                 rr.TextLog(payload.termination_reason or "terminated"),
             )
 
+    def _emit_transcript(self, rr: Any, payload: _TranscriptPayload) -> None:
+        self._set_step(rr, payload.t)
+        for level, text in payload.entries:
+            rr.log(f"{payload.prefix}/llm", rr.TextLog(text, level=level))
+
     def _ensure_worker(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
@@ -236,15 +293,22 @@ class RerunSink:
         )
         self._worker.start()
 
-    def _enqueue(self, payload: _StepPayload) -> None:
+    def _enqueue(self, payload: _StepPayload | _TranscriptPayload) -> None:
         with self._cond:
-            if payload.images and len(self._queue) >= self._image_watermark:
+            if (
+                isinstance(payload, _StepPayload)
+                and payload.images
+                and len(self._queue) >= self._image_watermark
+            ):
                 self._dropped_frames += len(payload.images)
                 payload = dataclasses.replace(payload, images={})
             if len(self._queue) >= self.queue_size:
                 evicted = self._queue.popleft()
-                self._dropped_steps += 1
-                self._dropped_frames += len(evicted.images)
+                if isinstance(evicted, _StepPayload):
+                    self._dropped_steps += 1
+                    self._dropped_frames += len(evicted.images)
+                else:
+                    self._dropped_transcripts += 1
             self._queue.append(payload)
             self._cond.notify_all()
 
@@ -302,8 +366,12 @@ class RerunSink:
                 if wedged:
                     # Disown the wedged worker: clear its backlog into the drop
                     # counters so a restarted worker never double-consumes it.
-                    self._dropped_steps += len(self._queue)
-                    self._dropped_frames += sum(len(p.images) for p in self._queue)
+                    for payload in self._queue:
+                        if isinstance(payload, _StepPayload):
+                            self._dropped_steps += 1
+                            self._dropped_frames += len(payload.images)
+                        else:
+                            self._dropped_transcripts += 1
                     self._queue.clear()
             self._emit_warned = False
 
@@ -317,10 +385,16 @@ class RerunSink:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        if self._dropped_frames or self._dropped_steps:
+        if self._dropped_frames or self._dropped_steps or self._dropped_transcripts:
+            transcript_fragment = (
+                f" and {self._dropped_transcripts} transcript update(s)"
+                if self._dropped_transcripts
+                else ""
+            )
             warnings.warn(
                 f"RerunSink dropped {self._dropped_frames} camera frame(s) and "
-                f"{self._dropped_steps} full step(s) to keep the control loop "
+                f"{self._dropped_steps} full step(s){transcript_fragment} "
+                "to keep the control loop "
                 "unblocked; record to a .rrd file or reduce camera bandwidth "
                 "to avoid drops",
                 RuntimeWarning,
@@ -328,6 +402,7 @@ class RerunSink:
             )
             self._dropped_frames = 0
             self._dropped_steps = 0
+            self._dropped_transcripts = 0
 
     def _probe_recording_flush(self) -> None:
         rr = self._rr
@@ -421,6 +496,19 @@ class RerunSink:
             reward=None if result.reward is None else float(result.reward),
             terminated=result.terminated,
             termination_reason=result.termination_reason,
+        )
+        self._ensure_worker()
+        self._enqueue(payload)
+
+    def log_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
+        """Queue best-effort transcript rows without mutating policy messages."""
+        rr = self._ensure_rerun()
+        if rr is None:
+            return
+        payload = _TranscriptPayload(
+            prefix=self._prefix,
+            t=t,
+            entries=tuple(_render_message(message) for message in messages),
         )
         self._ensure_worker()
         self._enqueue(payload)

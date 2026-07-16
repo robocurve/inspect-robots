@@ -74,6 +74,20 @@ The three modes are mutually exclusive: rerun's `save`/`spawn`/`connect_grpc`
 calls each replace the SDK's global sink, so combining them raises `ValueError`
 rather than silently dropping a stream.
 
+### Live transcript in the viewer
+
+Policies that support transcript streaming automatically add conversation rows
+at `trial/<scene>/e<epoch>/llm`. In the Rerun viewer, add a TextLog view and
+select that entity path. Tool results use the DEBUG level and system prompts use
+TRACE, so enable both levels in the view's log-level filter to see the whole
+conversation.
+
+Scrubbing the `step` timeline highlights the transcript rows emitted for that
+control step alongside its camera and state data. This live stream is a
+best-effort visualization and transcript updates may be dropped under
+backpressure. The transcript persisted in the eval log is collected separately
+at trial end and remains the complete audit record.
+
 On a headless robot box, `spawn=True` has nowhere to open a window. Run the
 viewer on your own machine instead and stream to it: `rerun` on your laptop,
 `ssh -R 9876:localhost:9876 <robot>` for the tunnel, then

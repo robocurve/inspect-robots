@@ -10,6 +10,7 @@ gate, logging each step to the sinks, and returns an immutable
 from __future__ import annotations
 
 import json
+import warnings
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -200,6 +201,9 @@ def rollout(
     store: dict[str, Any] = {}
     expected_dim = embodiment.info.action_space.dim
     policy_reset_ok = False
+    delta_hook: Any = getattr(policy, "transcript_delta", None)
+    messages_hook: Any = getattr(sink, "log_policy_messages", None)
+    stream_ok = callable(delta_hook) and callable(messages_hook)
 
     try:
         t = -1
@@ -236,6 +240,20 @@ def rollout(
             if len(inferences) > prev_inferences:
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
+                if stream_ok:
+                    try:
+                        delta = delta_hook()
+                        entries = list(delta) if delta is not None else []
+                        if entries:
+                            messages_hook(t, entries)
+                    except Exception as exc:
+                        stream_ok = False
+                        warnings.warn(
+                            "Live policy transcript streaming disabled after "
+                            f"{type(exc).__name__}: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
             # A malformed action is the policy's fault; catching it here keeps it
             # from surfacing inside the approver/embodiment as a halting fault.

@@ -45,6 +45,22 @@ done; if it cannot be achieved call give_up. You have a budget of \
 {budget} LLM calls for the whole trial."""
 
 
+def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return an image-free deep copy suitable for persistence or visualization."""
+    sanitized = copy.deepcopy(messages)
+    for message in sanitized:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for index, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                content[index] = {
+                    "type": "text",
+                    "text": "[image omitted: streamed camera frame]",
+                }
+    return sanitized
+
+
 @dataclass(frozen=True)
 class AgentPolicyConfig(PolicyConfig):
     """Inference-time configuration recorded in the eval log.
@@ -126,6 +142,7 @@ class LLMAgentPolicy(PolicyBase):
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
         self._messages: list[dict[str, Any]] = []
+        self._delta_cursor = 0
         self._calls_used = 0
 
     # -- lifecycle ---------------------------------------------------------------
@@ -163,24 +180,20 @@ class LLMAgentPolicy(PolicyBase):
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
         self._echo(f"[agent] goal: {scene.instruction}")
+        self._delta_cursor = 0
         self._calls_used = 0
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""
         if not self._messages:
             return None
-        messages = copy.deepcopy(self._messages)
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for index, part in enumerate(content):
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    content[index] = {
-                        "type": "text",
-                        "text": "[image omitted: streamed camera frame]",
-                    }
-        return messages
+        return _sanitize(self._messages)
+
+    def transcript_delta(self) -> list[dict[str, Any]] | None:
+        """Sanitized messages appended since the previous call (core live-stream hook)."""
+        new = self._messages[self._delta_cursor :]
+        self._delta_cursor = len(self._messages)
+        return _sanitize(new) if new else None
 
     # -- the loop ------------------------------------------------------------------
 

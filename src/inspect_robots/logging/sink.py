@@ -1,8 +1,18 @@
-"""The LogSink protocol and a no-op base implementation.
+"""The LogSink protocol, its optional extension, and a no-op base implementation.
 
 A sink observes a run's lifecycle. The rollout engine and ``eval()`` call these
 hooks in a fixed order: ``on_eval_start`` → (per trial: ``on_trial_start`` →
 ``log_step``* → ``on_trial_end``) → ``on_eval_end``.
+
+Sinks may additionally define the duck-typed
+``log_policy_messages(t, messages)`` extension. The rollout calls it at most
+once per control step and only when the policy performed an inference. Policy
+implementations are expected to supply plain-JSON-type messages shaped like
+``TrialRecord.policy_transcript`` entries, but core does not enforce or
+normalize that shape on this live path, so sinks must render defensively.
+Sinks must not mutate the supplied messages. The extension deliberately stays
+off both ``LogSink`` and ``NullSink``: it must not change structural protocol
+conformance or advertise a no-op that makes policies build transcript deltas.
 """
 
 from __future__ import annotations
