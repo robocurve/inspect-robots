@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import os
+import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
@@ -11,15 +14,19 @@ from typing import ClassVar
 import pytest
 
 from inspect_robots._setup import (
+    _VIDIOC_ENUM_FMT,
+    _VIDIOC_QUERYCAP,
     SUGGESTED,
     _can_serial,
     _identify_by_replug,
+    _prompt_device_slot,
     _read_raw_config,
     _render_config,
     _scan_cameras,
     _scan_can,
     _scan_serial,
     _suggest_can_pinning,
+    _v4l2_color_capture,
     run_setup,
 )
 from inspect_robots.conformance import DeviceSlot
@@ -39,6 +46,35 @@ def _scripted_input(
         return response
 
     return input_fn, prompts
+
+
+def _prompt_current_device(
+    tmp_path: Path,
+    kind: str,
+    by_id_devices: list[str],
+    by_path_devices: list[str],
+    current: str,
+    responses: list[str | BaseException],
+) -> tuple[str | None, list[str], str]:
+    input_fn, prompts = _scripted_input(responses)
+    out = io.StringIO()
+    selected, _active_is_by_id = _prompt_device_slot(
+        "inspection camera" if kind == "v4l2" else "left CAN channel",
+        kind,
+        by_id_devices,
+        by_path_devices,
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        current,
+        {},
+        False,
+        input_fn=input_fn,
+        out=out,
+        rescan_by_id=lambda: by_id_devices,
+        rescan_by_path=lambda: by_path_devices,
+    )
+    return selected, prompts, out.getvalue()
 
 
 def _config_path(tmp_path: Path) -> Path:
@@ -106,7 +142,37 @@ def _empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("inspect_robots.registry.registered", lambda _kind: {})
 
 
-def test_scan_cameras_prefers_sorted_absolute_index0_entries(tmp_path: Path) -> None:
+def test_scan_cameras_prefers_color_capture_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    v4l_dir = tmp_path / "by-id"
+    v4l_dir.mkdir()
+    # RealSense-style layout: index0 is the depth node, index2 the IR pair,
+    # index4 the color stream — the name says nothing about capturability.
+    verdicts = {
+        "usb-realsense-video-index0": False,
+        "usb-realsense-video-index2": False,
+        "usb-realsense-video-index4": True,
+        "usb-webcam-video-index0": True,
+        "usb-webcam-video-index1": None,
+    }
+    for name in verdicts:
+        (v4l_dir / name).touch()
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture",
+        lambda path: verdicts[Path(path).name],
+    )
+
+    devices = _scan_cameras(v4l_dir)
+
+    assert devices == [
+        str(v4l_dir / "usb-realsense-video-index4"),
+        str(v4l_dir / "usb-webcam-video-index0"),
+    ]
+    assert all(Path(device).is_absolute() for device in devices)
+
+
+def test_scan_cameras_lists_all_entries_when_probe_is_inconclusive(tmp_path: Path) -> None:
     v4l_dir = tmp_path / "by-id"
     v4l_dir.mkdir()
     for name in (
@@ -121,8 +187,8 @@ def test_scan_cameras_prefers_sorted_absolute_index0_entries(tmp_path: Path) -> 
     assert devices == [
         str(v4l_dir / "usb-camera-a-video-index0"),
         str(v4l_dir / "usb-camera-b-video-index0"),
+        str(v4l_dir / "usb-camera-b-video-index1"),
     ]
-    assert all(Path(device).is_absolute() for device in devices)
 
 
 def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
@@ -140,6 +206,152 @@ def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
 
 def test_scan_cameras_missing_directory_returns_empty(tmp_path: Path) -> None:
     assert _scan_cameras(tmp_path / "missing") == []
+
+
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_META_CAPTURE = 0x00800000
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+
+
+def _fake_v4l2_ioctl(
+    capabilities: int, device_caps: int, fourccs: list[bytes]
+) -> Callable[[int, int, bytearray], int]:
+    """Simulate the kernel's VIDIOC_QUERYCAP / VIDIOC_ENUM_FMT ioctl ABI.
+
+    Buffer offsets follow ``struct v4l2_capability`` (capabilities at byte 84,
+    device_caps at 88) and ``struct v4l2_fmtdesc`` (index/type at 0/4,
+    pixelformat at 44) — fixed kernel layouts, not implementation choices.
+    """
+
+    def ioctl(fd: int, request: int, buf: bytearray) -> int:
+        if request == _VIDIOC_QUERYCAP:
+            struct.pack_into("=II", buf, 84, capabilities, device_caps)
+        elif request == _VIDIOC_ENUM_FMT:
+            index, buf_type = struct.unpack_from("=II", buf, 0)
+            assert buf_type == 1  # V4L2_BUF_TYPE_VIDEO_CAPTURE
+            if index >= len(fourccs):
+                raise OSError(errno.EINVAL, "format enumeration exhausted")
+            buf[44:48] = fourccs[index]
+        else:
+            raise AssertionError(f"unexpected ioctl request {request:#x}")
+        return 0
+
+    return ioctl
+
+
+def _endless_v4l2_ioctl() -> Callable[[int, int, bytearray], int]:
+    """Simulate a misbehaving driver whose format enumeration never ends."""
+
+    def ioctl(fd: int, request: int, buf: bytearray) -> int:
+        if request == _VIDIOC_QUERYCAP:
+            struct.pack_into("=II", buf, 84, _V4L2_CAP_DEVICE_CAPS, _V4L2_CAP_VIDEO_CAPTURE)
+        else:
+            buf[44:48] = b"Z16 "
+        return 0
+
+    return ioctl
+
+
+def _probe_target(tmp_path: Path) -> Path:
+    node = tmp_path / "cam"
+    node.touch()
+    return node
+
+
+_needs_fcntl = pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_true_for_color_capable_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS,
+            _V4L2_CAP_VIDEO_CAPTURE,
+            [b"GREY", b"YUYV"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is True
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_true_for_bayer_only_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Raw Bayer nodes are color cameras OpenCV can debayer; hiding them in a
+    # mixed rig would silently drop a working camera from the listing.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS,
+            _V4L2_CAP_VIDEO_CAPTURE,
+            [b"RGGB"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is True
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_depth_only_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No DEVICE_CAPS flag: the probe must fall back to `capabilities`.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(_V4L2_CAP_VIDEO_CAPTURE, 0, [b"Z16 "]),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_endless_format_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A driver that never terminates VIDIOC_ENUM_FMT must yield False, not a
+    # hung wizard.
+    monkeypatch.setattr("fcntl.ioctl", _endless_v4l2_ioctl())
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+@_needs_fcntl
+def test_v4l2_color_capture_false_for_metadata_node_without_enumerating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Color fourccs are on offer, but a node without VIDEO_CAPTURE must be
+    # rejected on capabilities alone — enumerating it would report True.
+    monkeypatch.setattr(
+        "fcntl.ioctl",
+        _fake_v4l2_ioctl(
+            _V4L2_CAP_DEVICE_CAPS | _V4L2_CAP_META_CAPTURE,
+            _V4L2_CAP_META_CAPTURE,
+            [b"YUYV"],
+        ),
+    )
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is False
+
+
+def test_v4l2_color_capture_none_for_unopenable_path(tmp_path: Path) -> None:
+    assert _v4l2_color_capture(tmp_path / "missing") is None
+
+
+def test_v4l2_color_capture_none_for_non_v4l2_file(tmp_path: Path) -> None:
+    # A regular file opens fine but rejects V4L2 ioctls (ENOTTY).
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is None
+
+
+def test_v4l2_color_capture_none_without_fcntl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+
+    assert _v4l2_color_capture(_probe_target(tmp_path)) is None
 
 
 def test_scan_can_filters_type_280_sorts_and_skips_unreadable(tmp_path: Path) -> None:
@@ -368,7 +580,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     assert f"Found 3 camera device(s) under {by_id}:" in output
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
-    assert 'Next: uv run inspect-robots "place the fork on the plate"' in output
+    assert 'Next: inspect-robots "place the fork on the plate"' in output
 
 
 def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:
@@ -376,6 +588,7 @@ def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) ->
     out = io.StringIO()
     note = (
         "no display detected (SSH?): the rerun viewer cannot open here; "
+        "use --rerun-connect to stream to a viewer on another machine; "
         "frames still record with store_frames"
     )
 
@@ -1215,7 +1428,12 @@ def test_run_setup_path_toggle_is_accepted_when_not_advertised(tmp_path: Path) -
     by_id = tmp_path / "by-id"
     by_path = tmp_path / "by-path"
     by_id_devices = _make_devices(by_id)
-    _make_devices(by_path)
+    by_path.mkdir()
+    try:
+        for device in by_id_devices:
+            (by_path / Path(device).name).symlink_to(device)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
     input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "p", "p", "1", "2", "3"])
     out = io.StringIO()
 
@@ -1234,7 +1452,7 @@ def test_run_setup_path_toggle_is_accepted_when_not_advertised(tmp_path: Path) -
     assert output.count(f"Found 3 camera device(s) under {by_id}:") == 2
     assert output.count(f"Found 3 camera device(s) under {by_path}:") == 1
     assert all("'p'" not in prompt for prompt in role_prompts)
-    assert "only 3 by-id entries" not in output
+    assert "by-path camera nodes have no by-id entry" not in output
     assert f"top_cam_device = {by_id_devices[0]}" in _config_path(tmp_path).read_text(
         encoding="utf-8"
     )
@@ -1258,8 +1476,9 @@ def test_run_setup_advertises_by_path_when_by_id_entries_collide(tmp_path: Path)
     )
 
     explanation = (
-        "only 1 by-id entries for 3 detected cameras — identical cameras without serials "
-        "collide there; by-path names are stable per physical USB port"
+        "3 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "camera-1-video-index0, camera-2-video-index0, camera-3-video-index0; "
+        "by-path names are stable per physical USB port; press 'p' to switch listing"
     )
     role_prompts = [prompt for prompt in prompts if " camera — " in prompt]
     text = _config_path(tmp_path).read_text(encoding="utf-8")
@@ -1268,6 +1487,43 @@ def test_run_setup_advertises_by_path_when_by_id_entries_collide(tmp_path: Path)
     assert all("'p' to switch listing" in prompt for prompt in role_prompts)
     assert f"Found 3 camera device(s) under {by_path}:" in out.getvalue()
     assert all(device in text for device in by_path_devices)
+
+
+def test_run_setup_by_path_hint_omits_toggle_when_listing_is_already_active(
+    tmp_path: Path,
+) -> None:
+    by_path = tmp_path / "by-path"
+    targets = tmp_path / "targets"
+    by_path.mkdir()
+    targets.mkdir()
+    entry_names = [f"pci-camera-{number}" for number in range(1, 4)]
+    try:
+        for name in entry_names:
+            target = targets / name
+            target.touch()
+            (by_path / name).symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=by_path,
+    )
+
+    explanation = (
+        "3 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "pci-camera-1, pci-camera-2, pci-camera-3; "
+        "by-path names are stable per physical USB port"
+    )
+    assert result == 0
+    assert out.getvalue().count(explanation) == 1
+    assert "press 'p' to switch listing" not in out.getvalue()
 
 
 def test_run_setup_declining_duplicate_device_reprompts_role(tmp_path: Path) -> None:
@@ -1351,6 +1607,131 @@ def test_run_setup_enter_accepts_detected_current_camera_defaults(tmp_path: Path
     assert all(device in text for device in devices)
 
 
+def test_prompt_camera_warns_for_probe_false_then_second_enter_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "stale-depth-node"
+    current.touch()
+    probe_paths: list[Path] = []
+
+    def probe(path: Path) -> bool:
+        probe_paths.append(path)
+        return False
+
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", probe)
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [], str(current), ["", ""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 2
+    assert probe_paths == [current]
+    assert output.count("offers no color capture format") == 1
+    assert "likely a depth or metadata node" in output
+    assert "enter a device number" not in output
+
+
+def test_prompt_camera_can_pick_number_after_probe_false_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "stale-depth-node"
+    current.touch()
+    picked = tmp_path / "by-id" / "camera-1"
+    picked.parent.mkdir()
+    picked.touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: False)
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [str(picked)], [], str(current), ["", "1"]
+    )
+
+    assert selected == str(picked)
+    assert len(prompts) == 2
+    assert output.count("offers no color capture format") == 1
+
+
+@pytest.mark.parametrize("verdict", [None, True])
+def test_prompt_camera_silently_accepts_inconclusive_or_true_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: bool | None,
+) -> None:
+    current = tmp_path / "current-camera"
+    current.touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: verdict)
+
+    selected, prompts, output = _prompt_current_device(tmp_path, "v4l2", [], [], str(current), [""])
+
+    assert selected == str(current)
+    assert len(prompts) == 1
+    assert "warning:" not in output
+
+
+def test_prompt_camera_accepts_by_path_member_without_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "by-path" / "camera-1"
+    current.parent.mkdir()
+    current.touch()
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [str(current)], str(current), [""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 1
+    assert probe_paths == []
+    assert "warning:" not in output
+
+
+def test_prompt_camera_warns_for_missing_current_then_second_enter_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "remote-camera"
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "v4l2", [], [], str(current), ["", ""]
+    )
+
+    assert selected == str(current)
+    assert len(prompts) == 2
+    assert probe_paths == []
+    assert (
+        output.count(
+            f"warning: {current} does not exist here (ok if this config is for another machine)"
+        )
+        == 1
+    )
+    assert "enter a device number" not in output
+
+
+def test_prompt_can_not_detected_current_still_accepts_single_enter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_paths: list[Path] = []
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture", lambda path: probe_paths.append(path)
+    )
+
+    selected, prompts, output = _prompt_current_device(
+        tmp_path, "can", ["can0"], ["can0"], "can9", [""]
+    )
+
+    assert selected == "can9"
+    assert len(prompts) == 1
+    assert probe_paths == []
+    assert "warning:" not in output
+
+
 def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> None:
     by_id = tmp_path / "by-id"
     _make_devices(by_id)
@@ -1366,12 +1747,13 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
         + "\n",
         encoding="utf-8",
     )
-    input_fn, prompts = _scripted_input([""] * 10)
+    input_fn, prompts = _scripted_input([""] * 13)
+    out = io.StringIO()
 
     result = run_setup(
         {"XDG_CONFIG_HOME": str(tmp_path)},
         input_fn=input_fn,
-        out=io.StringIO(),
+        out=out,
         interactive=True,
         by_id_dir=by_id,
         by_path_dir=tmp_path / "none-path",
@@ -1382,6 +1764,11 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
     assert result == 0
     assert all("(current, not detected)" in prompt for prompt in role_prompts)
     assert all(device in text for device in current_devices)
+    assert all(
+        f"warning: {device} does not exist here (ok if this config is for another machine)"
+        in out.getvalue()
+        for device in current_devices
+    )
 
 
 def test_render_config_comment_at_exact_boundary_never_glues(tmp_path: Path) -> None:
@@ -2120,7 +2507,12 @@ def test_run_setup_v4l2_slot_can_switch_to_by_path_listing(
     )
 
     assert result == 0
-    assert "only 1 by-id entries for 2 detected cameras" in out.getvalue()
+    assert (
+        "2 by-path camera nodes have no by-id entry (udev serial collision or missing symlink): "
+        "camera-1-video-index0, camera-2-video-index0; "
+        "by-path names are stable per physical USB port; press 'p' to switch listing"
+        in out.getvalue()
+    )
     assert any("'s' to skip, 'p' to switch listing" in prompt for prompt in prompts)
     assert f"camera_device = {by_path_devices[1]}" in _config_path(tmp_path).read_text(
         encoding="utf-8"

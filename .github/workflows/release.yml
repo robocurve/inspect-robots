@@ -12,10 +12,10 @@ name: Release
 #   2. Manual: publish a GitHub release by hand — the publish jobs run on the
 #      release event. The tag must point at a commit that contains this file.
 #
-# The isaacsim plugin has its own static version (plugins/*/pyproject.toml);
-# it is published alongside every core release, with skip-existing so an
-# unchanged plugin version is a no-op. To release the plugin, bump its
-# version in a PR, then cut any release.
+# First-party plugins have static versions in plugins/*/pyproject.toml. They are
+# published alongside every core release, with skip-existing so unchanged
+# plugin versions are no-ops. To release a plugin, bump its version in a PR,
+# then cut any release.
 on:
   release:
     types: [published]
@@ -123,6 +123,29 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Build sdist + wheel
         run: uv build --package inspect-robots-xpolicylab
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # The plugin is versioned independently; a core release that doesn't
+          # bump it must not fail on the already-uploaded file.
+          skip-existing: true
+
+  publish-ros:
+    name: publish inspect-robots-ros
+    needs: [cut]
+    if: ${{ !cancelled() && (github.event_name == 'release' || needs.cut.result == 'success') }}
+    runs-on: ubuntu-latest
+    environment: pypi-ros
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.cut.outputs.tag || github.ref }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build --package inspect-robots-ros
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

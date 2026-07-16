@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import os
 import re
+import struct
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
@@ -46,6 +47,35 @@ V4L_BY_ID: Path = Path("/dev/v4l/by-id")
 V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
 SYSFS_NET: Path = Path("/sys/class/net")
 SERIAL_BY_ID: Path = Path("/dev/serial/by-id")
+
+# Kernel V4L2 ABI: ioctl request numbers and the byte offsets used below
+# (capabilities at 84 in struct v4l2_capability, pixelformat at 44 in
+# struct v4l2_fmtdesc) are fixed by <linux/videodev2.h>.
+_VIDIOC_QUERYCAP = 0x80685600
+_VIDIOC_ENUM_FMT = 0xC0405602
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+# UYVY/GREY are deliberately absent: RealSense stereo-IR nodes advertise them,
+# and listing those would offer IR streams as cameras. RGGB/GRBG/GBRG/BA81 are
+# the 8-bit raw Bayer layouts OpenCV debayers to color.
+_V4L2_COLOR_FOURCCS = frozenset(
+    {
+        "YUYV",
+        "MJPG",
+        "JPEG",
+        "H264",
+        "NV12",
+        "NV21",
+        "YU12",
+        "YV12",
+        "RGB3",
+        "BGR3",
+        "RGGB",
+        "GRBG",
+        "GBRG",
+        "BA81",
+    }
+)
 
 _DEFAULT_COMMENTS: dict[str, str] = {
     "policy": "from the inspect-robots-yam plugin",
@@ -179,6 +209,7 @@ def _prompt_defaults(
             print(
                 _paint(
                     "no display detected (SSH?): the rerun viewer cannot open here; "
+                    "use --rerun-connect to stream to a viewer on another machine; "
                     "frames still record with store_frames",
                     _YELLOW,
                     out,
@@ -213,6 +244,32 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
     print(f"Found {len(devices)} camera device(s) under {directory}:", file=out)
     for number, device in enumerate(devices, start=1):
         print(f"  {number}. {Path(device).name}", file=out)
+
+
+def _print_camera_path_hint(
+    by_id_devices: list[str],
+    by_path_devices: list[str],
+    active_is_by_id: bool,
+    out: IO[str],
+) -> None:
+    """Name by-path camera nodes whose resolved targets have no by-id entry."""
+    by_id_targets = {Path(device).resolve(strict=False) for device in by_id_devices}
+    extra_by_path = [
+        device
+        for device in by_path_devices
+        if Path(device).resolve(strict=False) not in by_id_targets
+    ]
+    if not extra_by_path:
+        return
+    names = ", ".join(Path(device).name for device in extra_by_path)
+    message = (
+        f"{len(extra_by_path)} by-path camera nodes have no by-id entry "
+        f"(udev serial collision or missing symlink): {names}; "
+        "by-path names are stable per physical USB port"
+    )
+    if active_is_by_id:
+        message += "; press 'p' to switch listing"
+    print(_paint(message, _YELLOW, out), file=out)
 
 
 def _identify_by_replug(
@@ -307,6 +364,7 @@ def _prompt_device_slot(
     camera_role: str | None = None,
 ) -> tuple[str | None, bool]:
     """Prompt for one slot and return its device plus active listing state."""
+    warned_current = False
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
         device_dir = by_id_dir if active_is_by_id else by_path_dir
@@ -349,6 +407,27 @@ def _prompt_device_slot(
             if selected is None:
                 continue
         elif not entered and current is not None:
+            if (
+                kind == "v4l2"
+                and not warned_current
+                and current not in by_id_devices
+                and current not in by_path_devices
+            ):
+                warning: str | None = None
+                if not Path(current).exists():
+                    warning = (
+                        f"warning: {current} does not exist here "
+                        "(ok if this config is for another machine)"
+                    )
+                elif _v4l2_color_capture(Path(current)) is False:
+                    warning = (
+                        f"warning: {current} offers no color capture format "
+                        "(likely a depth or metadata node)"
+                    )
+                if warning is not None:
+                    print(_paint(warning, _YELLOW, out), file=out)
+                    warned_current = True
+                    continue
             selected = current
         elif kind != "can" and (entered.startswith("/") or Path(entered).is_absolute()):
             # startswith("/") keeps POSIX rig paths accepted on Windows
@@ -454,17 +533,7 @@ def _camera_section(
             _paint("no /dev/v4l devices found (not Linux, or no cameras attached)", _YELLOW, out),
             file=out,
         )
-    if advertise_path_toggle:
-        print(
-            _paint(
-                f"only {len(by_id_devices)} by-id entries for "
-                f"{len(by_path_devices)} detected cameras — identical cameras without serials "
-                "collide there; by-path names are stable per physical USB port",
-                _YELLOW,
-                out,
-            ),
-            file=out,
-        )
+    _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
         assignments: dict[str, str] = {}
@@ -598,17 +667,8 @@ def _device_section(
         if slot.kind not in listed_kinds:
             _print_slot_listing(slot.kind, current_devices, current_dir, out)
             listed_kinds.add(slot.kind)
-            if slot.kind == "v4l2" and advertise_path_toggle:
-                print(
-                    _paint(
-                        f"only {len(by_id_devices)} by-id entries for "
-                        f"{len(by_path_devices)} detected cameras — identical cameras without "
-                        "serials collide there; by-path names are stable per physical USB port",
-                        _YELLOW,
-                        out,
-                    ),
-                    file=out,
-                )
+            if slot.kind == "v4l2":
+                _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
         selected, active_is_by_id = _prompt_device_slot(
             slot.label,
@@ -662,13 +722,54 @@ def _device_section(
     return assignments
 
 
+def _v4l2_color_capture(path: Path) -> bool | None:
+    """Return whether a node captures color, or ``None`` when probing is inconclusive."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_NONBLOCK)
+    except OSError:
+        return None
+
+    try:
+        capability = bytearray(104)
+        try:
+            fcntl.ioctl(fd, _VIDIOC_QUERYCAP, capability)
+        except OSError:
+            return None
+
+        capabilities, device_caps = struct.unpack_from("=II", capability, 84)
+        effective_caps = device_caps if capabilities & _V4L2_CAP_DEVICE_CAPS else capabilities
+        if not effective_caps & _V4L2_CAP_VIDEO_CAPTURE:
+            return False
+
+        # Bounded far above any real device's format count, so a driver that
+        # never ends the enumeration cannot hang the wizard.
+        for index in range(64):
+            description = bytearray(64)
+            struct.pack_into("=II", description, 0, index, 1)
+            try:
+                fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, description)
+            except OSError:
+                return False
+            fourcc = description[44:48].decode("ascii", errors="replace")
+            if fourcc in _V4L2_COLOR_FOURCCS:
+                return True
+        return False
+    finally:
+        os.close(fd)
+
+
 def _scan_cameras(v4l_dir: Path) -> list[str]:
-    """Return sorted device paths, preferring V4L2 color-stream entries."""
+    """Return V4L2-probed color paths, or all sorted entries when none are confirmed."""
     try:
         entries = sorted(v4l_dir.iterdir())
     except FileNotFoundError:
         return []
-    color_entries = [entry for entry in entries if entry.name.endswith("-video-index0")]
+    color_entries = [entry for entry in entries if _v4l2_color_capture(entry) is True]
     return [str(entry) for entry in color_entries or entries]
 
 
@@ -977,6 +1078,6 @@ def run_setup(
             [f"setup complete, but {count} runtime {dependency} missing:", *runtime_lines]
         )
         print(_paint(block, _YELLOW, out), file=out)
-    next_cmd = 'uv run inspect-robots "place the fork on the plate"'
+    next_cmd = 'inspect-robots "place the fork on the plate"'
     print(f"Next: {_paint(next_cmd, _CYAN, out)}", file=out)
     return 0

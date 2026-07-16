@@ -18,14 +18,20 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from inspect_robots import __version__
 from inspect_robots.approver import Approver, AutoApprover
 from inspect_robots.compat import assert_compatible
 from inspect_robots.controller import Controller, DefaultController
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.errors import (
+    ConfigError,
+    EmbodimentFault,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.frames import FrameStore
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
@@ -78,6 +84,18 @@ class _Broadcast:
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
+        for sink in sinks:
+            hook = getattr(sink, "log_policy_messages", None)
+            if callable(hook):
+                policy_message_hooks.append(hook)
+        self._policy_message_hooks = policy_message_hooks
+        if policy_message_hooks:
+            self.log_policy_messages = self._fan_policy_messages
+
+    def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
+        for hook in self._policy_message_hooks:
+            hook(t, messages)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
@@ -137,6 +155,17 @@ def eval(
     delivered to sinks) but never scored, so a failed trial cannot masquerade
     as data in the metrics; it stays visible via ``SceneResult.status`` and an
     empty entry in ``SceneResult.epochs``.
+
+    A run in which **every** trial errored (nothing was scored) always ends
+    with ``status == "error"``, regardless of ``fail_on_error``.
+
+    Ctrl-C during a rollout records the partial trial and writes a log with
+    ``status == "cancelled"``, then re-raises the interrupt (as a
+    ``KeyboardInterrupt`` subclass chaining the original) after
+    ``on_eval_end`` completes. An interrupt outside the rollout
+    call (during scoring, reducers, or log assembly), or a second interrupt
+    during the cancellation handlers, may still prevent the log from being
+    written.
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
@@ -210,6 +239,14 @@ def _run_eval(
     if callable(bind):
         bind(embodiment.info)
 
+    # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs
+    # here too, so the adapter can learn the rollout envelope (e.g. for an
+    # operator countdown) before any hardware is touched. Duck-typed —
+    # bind_task is not part of the Embodiment Protocol.
+    bind_task = getattr(embodiment, "bind_task", None)
+    if callable(bind_task):
+        bind_task(task.envelope)
+
     # Fail fast on incompatible pairings before touching any hardware/sim.
     assert_compatible(policy, embodiment, task, remap=remap)
 
@@ -255,6 +292,7 @@ def _run_eval(
             "capabilities": sorted(embodiment.info.capabilities),
         },
         seed=seed,
+        max_steps=task.max_steps,
     )
     bus.on_eval_start(spec)
 
@@ -268,13 +306,17 @@ def _run_eval(
     status = "success"
     error: str | None = None
     error_count = 0
+    errored_trials = 0
 
     halted = False
     stopped = False
+    cancelled_exc: _CancelledTrial | None = None
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        termination_reasons: list[str | None] = []
+        policy_transcripts: list[Any] = []
         scene_status = "success"
         scene_error: str | None = None
 
@@ -296,6 +338,14 @@ def _run_eval(
                     control_hz=task.control_hz,
                     frame_store=frame_store,
                 )
+            except _CancelledTrial as exc:
+                status = "cancelled"
+                error = str(exc)
+                scene_status = "cancelled"
+                scene_error = error
+                halted = True
+                cancelled_exc = exc
+                record = exc.record
             except (EmbodimentFault, SafetyAbort) as exc:
                 # Hardware/safety failures always halt the whole eval; the
                 # partial trial record (if any) is preserved below.
@@ -321,12 +371,16 @@ def _run_eval(
                 total_trials += 1
                 total_steps += len(record.steps)
                 all_latencies.extend(record.inference_latencies)
-                if record.status == "error":
-                    # Errored trials are not scored: a failed trial must not
-                    # masquerade as data (e.g. an inf min-distance poisoning
-                    # the metric mean). It stays visible via scene status.
+                if record.status != "success":
+                    # Non-successful trials are not scored: a partial trial
+                    # must not masquerade as data (e.g. an inf min-distance
+                    # poisoning the metric mean). It stays visible via status.
                     epoch_dicts.append({})
+                    if record.status == "error":
+                        errored_trials += 1
                     judgements.append(None)
+                    termination_reasons.append(record.termination_reason)
+                    policy_transcripts.append(record.policy_transcript)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -340,6 +394,8 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
+                    termination_reasons.append(record.termination_reason)
+                    policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
             if halted:
@@ -381,10 +437,19 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                termination_reasons=tuple(termination_reasons),
+                policy_transcripts=tuple(policy_transcripts),
             )
         )
         if stopped:
             break
+
+    if status == "success" and total_trials > 0 and errored_trials == total_trials:
+        # Every trial errored: there is no surviving data for fail_on_error's
+        # flaky-trial tolerance to protect, and a "success" log would hide a
+        # total failure (issue #73).
+        status = "error"
+        error = f"all {total_trials} trial(s) errored; nothing was scored"
 
     metrics: dict[str, float] = {}
     for scorer in scorers:
@@ -408,12 +473,15 @@ def _run_eval(
             total_scenes=len(scene_results),
             total_trials=total_trials,
             metrics=metrics,
+            errored_trials=errored_trials,
         ),
         stats=stats,
         samples=tuple(scene_results),
         error=error,
     )
     bus.on_eval_end(log)
+    if cancelled_exc is not None:
+        raise cancelled_exc
     return [log]
 
 

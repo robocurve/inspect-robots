@@ -7,6 +7,8 @@ import dataclasses
 import numpy as np
 import pytest
 
+from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import (
     ActionSemantics,
     Box,
@@ -16,6 +18,33 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
+
+
+def test_embodiment_info_docs_preserve_frozen_value_semantics() -> None:
+    action_space = Box(shape=(1,))
+    observation_space = ObservationSpace()
+    info = EmbodimentInfo(
+        name="test",
+        action_space=action_space,
+        observation_space=observation_space,
+    )
+    same = EmbodimentInfo(
+        name="test",
+        action_space=action_space,
+        observation_space=observation_space,
+    )
+
+    assert info.docs is None
+    assert info == same
+    assert hash(info) == hash(same)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        info.docs = "changed"  # type: ignore[misc]
+
+
+def test_cubepick_publishes_operating_notes() -> None:
+    docs = CubePickEmbodiment().info.docs
+    assert docs is not None
+    assert docs.strip()
 
 
 def test_core_types_are_frozen() -> None:
@@ -95,6 +124,17 @@ def test_observation_space_rejects_inconsistent_state_keys() -> None:
     # ...but a silent disagreement is not.
     with pytest.raises(ValueError, match="inconsistent"):
         ObservationSpace(state_keys=frozenset({"eef_pos"}), state=spec)
+
+
+def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task, TaskEnvelope
+
+    scene = Scene(id="s", instruction="x")
+    task = Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=80)
+    assert task.envelope == TaskEnvelope(name="t", max_steps=80)
+    with pytest.raises(AttributeError):
+        task.envelope.max_steps = 81  # type: ignore[misc]
 
 
 def test_task_validation_and_scorer_names() -> None:

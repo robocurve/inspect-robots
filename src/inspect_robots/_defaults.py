@@ -32,7 +32,15 @@ ADHOC_MAX_STEPS_FALLBACK = 300
 
 
 def parse_value(text: str) -> Any:
-    """Best-effort scalar parse for ``k=v`` args (bool/int/float/None/str)."""
+    """Best-effort scalar parse for ``k=v`` args (bool/int/float/None/str).
+
+    A value wrapped in matching single or double quotes is returned as the
+    literal inner string with no coercion — the escape hatch for strings the
+    heuristics would otherwise claim (``-P effort="'none'"`` sends the wire
+    string ``none`` instead of omitting the parameter).
+    """
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
     low = text.lower()
     if low in ("true", "false"):
         return low == "true"

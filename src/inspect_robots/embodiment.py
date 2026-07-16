@@ -18,11 +18,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.types import Action, Observation, StepResult
+
+if TYPE_CHECKING:
+    from inspect_robots.task import TaskEnvelope
 
 # Opt-in capability flags an embodiment may advertise.
 Capability = str
@@ -36,7 +39,15 @@ SELF_PACED: Capability = "self_paced"
 
 @dataclass(frozen=True)
 class EmbodimentInfo:
-    """Static description of an embodiment for compatibility checking + logging."""
+    """Static description of an embodiment for compatibility checking + logging.
+
+    ``docs`` contains free-form markdown operating notes for policies that can
+    read text, such as joint layout and positive directions, zero-pose
+    geometry, gripper polarity, frame conventions, and workspace hints. Keep
+    it concise because consumers inject it into system prompts verbatim.
+    ``None`` means no notes are offered; consumers must treat empty and
+    whitespace-only strings the same as absence.
+    """
 
     name: str
     action_space: Box
@@ -48,11 +59,25 @@ class EmbodimentInfo:
     # scene-realizability checks). Empty means "unconstrained" for the tracer.
     supported_setups: frozenset[str] = field(default_factory=frozenset)
     supported_target_kinds: frozenset[str] = field(default_factory=frozenset)
+    docs: str | None = None
 
 
 @runtime_checkable
 class Embodiment(Protocol):
-    """The robot/simulator contract."""
+    """The robot/simulator contract.
+
+    Embodiments may additionally define an **optional** ``bind_task(envelope)``
+    hook (not part of this Protocol, so existing embodiments stay conformant):
+    ``eval()`` calls it with the task's
+    [`TaskEnvelope`][inspect_robots.task.TaskEnvelope] before the
+    compatibility check, letting adapters learn the rollout horizon — e.g. an
+    operator countdown showing elapsed/total. The hook is optional *input*,
+    not a guarantee: it never fires on direct ``rollout()`` calls or on older
+    cores, so adapters must keep a graceful fallback. It fires once per
+    ``eval()``, which can be several times over an embodiment's lifetime;
+    each call replaces the previous envelope. ``EmbodimentBase`` ships a
+    no-op default.
+    """
 
     info: EmbodimentInfo
 
@@ -83,6 +108,9 @@ class EmbodimentBase(ABC):
     def step(self, action: Action) -> StepResult:
         """Issue one action without waiting for the control period unless ``self_paced``."""
         ...
+
+    def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
+        """Default: embodiments with nothing to display or pre-allocate ignore it."""
 
     def close(self) -> None:  # noqa: B027 - intentional no-op default
         """Default: nothing to release."""

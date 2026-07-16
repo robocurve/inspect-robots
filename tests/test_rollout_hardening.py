@@ -11,11 +11,11 @@ import pytest
 from inspect_robots import eval
 from inspect_robots.approver import Approver, AutoApprover, ClampApprover
 from inspect_robots.controller import DefaultController
-from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort, _CancelledTrial
 from inspect_robots.frames import FrameStore
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.policy import PolicyConfig, PolicyInfo
+from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
@@ -78,6 +78,36 @@ def test_policy_exception_wrapped_as_policy_error() -> None:
 def test_embodiment_exception_wrapped_as_fault() -> None:
     with pytest.raises(EmbodimentFault, match="motor stalled"):
         _run(ScriptedPolicy(), _FaultyEmbodiment())
+
+
+def test_keyboard_interrupt_from_step_carries_partial_record_and_transcript() -> None:
+    original = KeyboardInterrupt("stop now")
+
+    class _InterruptingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def step(self, action: Action):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 2:
+                raise original
+            return super().step(action)
+
+    class _AuditedPolicy(ScriptedPolicy):
+        def transcript(self) -> object:
+            return {"inferences": self.num_inferences}
+
+    with pytest.raises(_CancelledTrial) as excinfo:
+        _run(_AuditedPolicy(chunk_size=1), _InterruptingEmbodiment())
+
+    record = excinfo.value.record
+    assert record.status == "cancelled"
+    assert len(record.steps) == 1
+    assert record.policy_transcript == {"inferences": 2}
+    assert record.events[-1].kind == "error"
+    assert record.events[-1].t == 1
+    assert excinfo.value.__cause__ is original
 
 
 def test_safety_abort_propagates() -> None:
@@ -413,3 +443,119 @@ def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
     # Every trial raises -> proportion 1.0 >= 0.5 threshold -> eval status error.
     logs = eval(task, _BoomPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), fail_on_error=0.5)
     assert logs[0].status == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Policy transcripts: best-effort capture on every post-reset exit path.
+# --------------------------------------------------------------------------- #
+class _TranscriptPolicy(_StopPolicy):
+    """Stops after one action and exposes a configurable audit payload."""
+
+    def __init__(self, transcript: object) -> None:
+        super().__init__({"request_stop": True})
+        self._transcript = transcript
+
+    def transcript(self) -> object:
+        return self._transcript
+
+
+def test_policy_transcript_captured_on_success() -> None:
+    raw = [{"role": "assistant", "content": "done"}]
+    record = _run(_TranscriptPolicy(raw), CubePickEmbodiment())
+    assert record.policy_transcript == raw
+    assert record.policy_transcript is not raw
+
+
+def test_policy_transcript_captured_on_partial_policy_error() -> None:
+    class _TranscriptBoomLater(_BoomLaterPolicy):
+        def transcript(self) -> object:
+            return {"calls": self._calls}
+
+    with pytest.raises(PolicyError) as excinfo:
+        _run(_TranscriptBoomLater(), CubePickEmbodiment())
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.policy_transcript == {"calls": 2}
+
+
+def test_policy_transcript_not_collected_when_policy_reset_fails() -> None:
+    class _StaleTranscriptPolicy(_ResetBoomPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.transcript_calls = 0
+
+        def transcript(self) -> object:
+            self.transcript_calls += 1
+            return {"stale": True}
+
+    policy = _StaleTranscriptPolicy()
+    with pytest.raises(PolicyError) as excinfo:
+        _run(policy, CubePickEmbodiment())
+    assert policy.transcript_calls == 0
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.policy_transcript is None
+
+
+def test_raising_policy_transcript_becomes_error_marker() -> None:
+    class _RaisingTranscriptPolicy(_StopPolicy):
+        def transcript(self) -> object:
+            raise RuntimeError("audit exploded")
+
+    record = _run(_RaisingTranscriptPolicy({"request_stop": True}), CubePickEmbodiment())
+    assert record.policy_transcript == {"transcript_error": "RuntimeError: audit exploded"}
+
+
+def test_unprintable_transcript_exception_uses_type_only_marker() -> None:
+    class _UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("cannot format")
+
+    class _RaisingTranscriptPolicy(_StopPolicy):
+        def transcript(self) -> object:
+            raise _UnprintableError
+
+    record = _run(_RaisingTranscriptPolicy({"request_stop": True}), CubePickEmbodiment())
+    assert record.policy_transcript == {"transcript_error": "_UnprintableError"}
+
+
+def test_hookless_policy_records_none_transcript() -> None:
+    record = _run(_StopPolicy({"request_stop": True}), CubePickEmbodiment())
+    assert record.policy_transcript is None
+
+
+def test_policy_base_default_transcript_is_none() -> None:
+    class _MinimalPolicy(PolicyBase):
+        info = PolicyInfo(name="minimal", action_space=_BOX)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.zeros(2))])
+
+    policy = _MinimalPolicy()
+    assert policy.transcript() is None
+    assert _run(policy, CubePickEmbodiment()).policy_transcript is None
+
+
+def test_policy_transcript_normalizes_numpy_leaves_to_strings() -> None:
+    array = np.arange(10_000)
+    raw = {"scalar": np.float32(1.25), "array": array}
+    record = _run(_TranscriptPolicy(raw), CubePickEmbodiment())
+    assert record.policy_transcript == {"scalar": "1.25", "array": str(array)}
+    assert "..." in record.policy_transcript["array"]
+
+
+def test_circular_policy_transcript_becomes_error_marker() -> None:
+    circular: list[object] = []
+    circular.append(circular)
+    record = _run(_TranscriptPolicy(circular), CubePickEmbodiment())
+    assert record.policy_transcript == {
+        "transcript_error": "ValueError: Circular reference detected"
+    }
+
+
+def test_oversized_policy_transcript_becomes_dropped_marker() -> None:
+    payload = "x" * (2 * 1024 * 1024)
+    record = _run(_TranscriptPolicy(payload), CubePickEmbodiment())
+    assert record.policy_transcript == {
+        "transcript_dropped": True,
+        "bytes": 2 * 1024 * 1024 + 2,
+        "note": "exceeds inline limit; policies must not embed binary data",
+    }

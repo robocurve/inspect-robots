@@ -21,8 +21,12 @@ it shows up in ``inspect-robots list policies`` without being imported first.
 
 from __future__ import annotations
 
+from importlib.metadata import version
+
 from inspect_robots_agent.policy import AgentPolicyConfig, LLMAgentPolicy, agent_policy
 
 __all__ = ["AgentPolicyConfig", "LLMAgentPolicy", "agent_policy"]
 
-__version__ = "0.1.0"
+# Derived from package metadata so it can never drift from pyproject again
+# (0.2.0 and 0.2.1 shipped with a stale hardcoded "0.1.0").
+__version__ = version("inspect-robots-agent")

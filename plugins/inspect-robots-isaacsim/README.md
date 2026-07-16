@@ -80,6 +80,7 @@ constructor exposes hooks so you don't edit the adapter:
 | `obs_group` | top-level obs-dict group to read (default `"policy"`) |
 | `image_keys` / `state_keys` | map Inspect Robots keys → your task's raw dict keys |
 | `success_info_key` | where the task reports success in `info` (default `"success"`) |
+| `terminated_implies_success` | whether to fallback to treating `terminated` as success if the success key is missing in `info` (default `False`). If `False`, episodes missing the success key are scored as failures. |
 | `num_arm_joints` | arm DoF; action dim is this `+ 1` for the gripper |
 
 ## Memory & GPU hygiene

@@ -72,6 +72,119 @@ def test_openrouter_is_the_universal_fallback() -> None:
     assert p.model == "anthropic/claude-fable-5"  # OpenRouter takes the full string
 
 
+@pytest.mark.parametrize(
+    ("model", "key_env", "host", "bare"),
+    [
+        (
+            "google/gemini-3.1-flash-lite",
+            "GEMINI_API_KEY",
+            "googleapis.com",
+            "gemini-3.1-flash-lite",
+        ),
+        ("x-ai/grok-4.3", "XAI_API_KEY", "api.x.ai", "grok-4.3"),
+        ("xai/grok-4.3", "XAI_API_KEY", "api.x.ai", "grok-4.3"),
+        # Groq serves ids that themselves contain a slash; only the first
+        # segment is the routing prefix.
+        (
+            "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+            "GROQ_API_KEY",
+            "api.groq.com",
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+        ),
+        ("mistralai/mistral-medium-3", "MISTRAL_API_KEY", "api.mistral.ai", "mistral-medium-3"),
+        ("deepseek/deepseek-chat", "DEEPSEEK_API_KEY", "api.deepseek.com", "deepseek-chat"),
+    ],
+)
+def test_direct_provider_table(model: str, key_env: str, host: str, bare: str) -> None:
+    p = resolve_provider(
+        model=model,
+        base_url=None,
+        api_key_env=None,
+        env={key_env: "sk-provider", "OPENROUTER_API_KEY": "or-key"},
+    )
+    assert host in p.base_url
+    assert p.api_key == "sk-provider"  # provider key preferred over OpenRouter
+    assert p.model == bare
+
+
+def test_openrouter_variant_suffix_is_never_claimed_directly() -> None:
+    # ":nitro"/":free" mean something to OpenRouter only; the direct endpoint
+    # would 404 on them even with the provider key set.
+    p = resolve_provider(
+        model="google/gemini-3.5-flash:nitro",
+        base_url=None,
+        api_key_env=None,
+        env={"GEMINI_API_KEY": "gk", "OPENROUTER_API_KEY": "or-key"},
+    )
+    assert "openrouter.ai" in p.base_url
+    assert p.model == "google/gemini-3.5-flash:nitro"
+
+
+def test_fine_tune_colons_still_resolve_directly() -> None:
+    # Only the closed variant set defers to OpenRouter; fine-tune ids carry
+    # colons that the provider's own API understands.
+    p = resolve_provider(
+        model="openai/ft:gpt-4o-mini-2024-07-18:org:suffix:id",
+        base_url=None,
+        api_key_env=None,
+        env={"OPENAI_API_KEY": "oai", "OPENROUTER_API_KEY": "or-key"},
+    )
+    assert "api.openai.com" in p.base_url
+    assert p.model == "ft:gpt-4o-mini-2024-07-18:org:suffix:id"
+
+
+def test_table_provider_without_its_key_falls_back_to_openrouter() -> None:
+    p = resolve_provider(
+        model="google/gemini-3.5-flash",
+        base_url=None,
+        api_key_env=None,
+        env={"OPENROUTER_API_KEY": "or-key"},  # no GEMINI_API_KEY
+    )
+    assert "openrouter.ai" in p.base_url
+    assert p.model == "google/gemini-3.5-flash"
+
+
+def test_variant_suffix_without_openrouter_key_is_a_guided_error() -> None:
+    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
+        resolve_provider(
+            model="google/gemini-3.5-flash:nitro",
+            base_url=None,
+            api_key_env=None,
+            env={"GEMINI_API_KEY": "gk"},
+        )
+
+
+def test_bare_prefix_without_model_id_is_not_claimed() -> None:
+    # "anthropic" alone must not resolve to an empty model id on the compat
+    # endpoint; it falls through the ladder like any unroutable string.
+    p = resolve_provider(
+        model="anthropic",
+        base_url=None,
+        api_key_env=None,
+        env={"ANTHROPIC_API_KEY": "ant-key", "OPENROUTER_API_KEY": "or-key"},
+    )
+    assert "openrouter.ai" in p.base_url
+    assert p.model == "anthropic"  # the full unmodified string reaches OpenRouter
+
+
+def test_bare_prefix_without_openrouter_key_is_a_guided_error() -> None:
+    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
+        resolve_provider(
+            model="anthropic",
+            base_url=None,
+            api_key_env=None,
+            env={"ANTHROPIC_API_KEY": "ant-key"},  # provider key alone can't route it
+        )
+
+
+def test_guided_error_names_the_new_provider_keys() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        resolve_provider(model="google/gemini-3.5-flash", base_url=None, api_key_env=None, env={})
+    message = str(excinfo.value)
+    assert "GEMINI_API_KEY" in message
+    assert "google/*" in message
+
+
 def test_missing_model_is_a_guided_error() -> None:
     with pytest.raises(ConfigError, match="INSPECT_ROBOTS_MODEL"):
         resolve_provider(model=None, base_url=None, api_key_env=None, env={})

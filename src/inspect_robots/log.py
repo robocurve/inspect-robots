@@ -9,7 +9,9 @@ Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
 dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
 ``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``)
-remain plain mutable dicts. Treat a log as read-only; nothing deep-freezes it.
+remain plain mutable dicts, and ``SceneResult.policy_transcripts`` entries are
+arbitrary mutable JSON values. Treat a log as read-only; nothing deep-freezes
+it.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class EvalSpec:
-    """Top-level identity of an eval: what was run, with what, when."""
+    """Top-level identity and configured horizon of a reproducible eval."""
 
     task: str
     policy: str
@@ -35,6 +37,7 @@ class EvalSpec:
     policy_config: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
+    max_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,7 @@ class SceneResult:
     """Per-scene result: the reduced score(s) plus the raw per-epoch scores."""
 
     scene_id: str
-    status: str  # "success" | "error"
+    status: str  # "success" | "error" | "cancelled"
     reduced: dict[str, float] = field(default_factory=dict)
     epochs: tuple[dict[str, float], ...] = ()
     error: str | None = None
@@ -65,6 +68,12 @@ class SceneResult:
     # trial, ``None`` when the trial errored or no judgement was captured.
     # Defaults keep logs written before these fields existed readable.
     operator_judgements: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: why each recorded trial ended, or
+    # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
+    termination_reasons: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: the policy's audit record per trial,
+    # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
+    policy_transcripts: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,10 @@ class EvalResults:
     total_scenes: int
     total_trials: int
     metrics: dict[str, float] = field(default_factory=dict)
+    # Errored trials, which are recorded but never scored (visible per-scene
+    # as empty entries in ``SceneResult.epochs``). The default keeps logs
+    # written before this field existed readable.
+    errored_trials: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,7 +94,7 @@ class EvalLog:
     """The full record returned by [`eval`][inspect_robots.eval.eval] and persisted to disk."""
 
     version: int
-    status: str  # "started" | "success" | "error"
+    status: str  # "started" | "success" | "error" | "cancelled"
     eval: EvalSpec
     results: EvalResults
     stats: EvalStats
@@ -111,6 +124,8 @@ class EvalLog:
             # written before ``operator_judgements`` existed (newer reads older).
             sample["epochs"] = tuple(sample.get("epochs", ()))
             sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
+            sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
+            sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],
