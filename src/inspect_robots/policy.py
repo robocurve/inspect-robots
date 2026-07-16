@@ -54,7 +54,7 @@ class PolicyInfo:
 class Policy(Protocol):
     """The VLA contract.
 
-    Policies may additionally define two optional hooks, neither part of this
+    Policies may additionally define three optional hooks, none part of this
     Protocol so existing policies stay conformant. ``bind(embodiment_info)``
     lets embodiment-adaptive policies adopt the embodiment's spaces; ``eval()``
     calls it after resolving both components and before compatibility checking.
@@ -66,7 +66,14 @@ class Policy(Protocol):
     embedded because frame sidecars already persist them. Collection runs on
     the rollout thread and is best-effort: the framework normalizes and bounds
     the result, and a raising or misbehaving hook cannot change trial outcome.
-    ``PolicyBase`` ships defaults for both hooks.
+    ``transcript_delta()`` returns plain-JSON-type messages appended since its
+    previous call, or since ``reset()`` on the first call, and returns ``None``
+    or an empty list when nothing is new. Implementations must sanitize only
+    the new slice in O(new messages), including eliding image bytes before the
+    result reaches visualization sinks, and ``reset()`` must rewind the cursor.
+    ``PolicyBase`` ships defaults for ``bind()`` and ``transcript()`` but
+    deliberately has no ``transcript_delta()`` default: policies must opt in so
+    every inference does not pay for a no-op hook call.
     """
 
     info: PolicyInfo

@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Live agent-policy transcript rows on the Rerun `step` timeline, with
+  best-effort non-blocking streaming and complete eval-log persistence (#124).
 - Remote Rerun streaming via `inspect-robots run --rerun-connect [URL]`, so
   headless evaluations can connect over gRPC to a viewer on another machine
   (including through an SSH reverse tunnel) (#86).

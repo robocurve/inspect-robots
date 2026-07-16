@@ -608,6 +608,44 @@ def test_transcript_is_deeply_isolated_in_both_directions() -> None:
     assert first[1]["content"] == "Goal: reach"
 
 
+def test_transcript_delta_tracks_new_sanitized_messages_and_reset() -> None:
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.05}}),
+            _tool_response("done", {"summary": "finished"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    scene = Scene(id="s0", instruction="reach")
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+    policy.reset(scene)
+
+    policy.act(Observation(images={"top": image}))
+    first = policy.transcript_delta()
+    assert first is not None
+    assert policy.transcript_delta() is None
+    assert "data:image" not in json.dumps(first)
+
+    policy.act(Observation(images={"top": image}))
+    second = policy.transcript_delta()
+    assert second is not None
+    assert second[0]["role"] == "user"
+    assert all(message["role"] != "system" for message in second)
+    assert "data:image" not in json.dumps(second)
+
+    full = policy.transcript()
+    assert full is not None
+    assert len(full) == len(first) + len(second)
+    assert full[: len(first)] == first
+    assert full[len(first) :] == second
+
+    policy.reset(scene)
+    reset_delta = policy.transcript_delta()
+    assert reset_delta is not None
+    assert [message["role"] for message in reset_delta] == ["system", "user"]
+
+
 def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
     script = _Script([_tool_response("done", {"summary": "looked around"})])
     ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))

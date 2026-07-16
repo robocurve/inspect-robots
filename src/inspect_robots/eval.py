@@ -84,6 +84,18 @@ class _Broadcast:
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
+        for sink in sinks:
+            hook = getattr(sink, "log_policy_messages", None)
+            if callable(hook):
+                policy_message_hooks.append(hook)
+        self._policy_message_hooks = policy_message_hooks
+        if policy_message_hooks:
+            self.log_policy_messages = self._fan_policy_messages
+
+    def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
+        for hook in self._policy_message_hooks:
+            hook(t, messages)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
