@@ -243,3 +243,31 @@ def test_unbound_act_raises_clear_error() -> None:
     policy = _policy(_Script([_text_response("hi")]))
     with pytest.raises(RuntimeError, match="bind"):
         policy.act(Observation())
+
+
+def test_transcript_delta(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}, "duration_s": 0.5}),
+            _tool_response("done", {"summary": "close enough"}),
+        ]
+    )
+    sink = _RecordingSink()
+    logged_messages = []
+    class CustomSink(NullSink):
+        def log_policy_messages(self, t: int, messages: list[dict[str, Any]]) -> None:
+            logged_messages.append((t, messages))
+
+    policy_instance = _policy(script)
+    logs = ir_eval(
+        _task(), policy_instance, CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink, CustomSink()]
+    )
+    assert logs[0].status == "success"
+    assert len(logged_messages) > 0
+    for t, messages in logged_messages:
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    assert part.get("type") != "image_url"
+

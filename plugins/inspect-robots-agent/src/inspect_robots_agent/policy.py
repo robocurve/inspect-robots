@@ -112,6 +112,8 @@ class LLMAgentPolicy(PolicyBase):
         self._embodiment_name = "(unbound)"
         self._messages: list[dict[str, Any]] = []
         self._calls_used = 0
+        self._last_transcript_index = 0
+
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -142,6 +144,8 @@ class LLMAgentPolicy(PolicyBase):
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
         self._calls_used = 0
+        self._last_transcript_index = 0
+
 
     # -- the loop ------------------------------------------------------------------
 
@@ -204,6 +208,22 @@ class LLMAgentPolicy(PolicyBase):
         result = toolset.execute(synthetic, observation)
         assert result.chunk is not None
         return result.chunk
+
+    def transcript_delta(self) -> list[dict[str, Any]]:
+        """Returns the sanitized transcript messages appended since the previous call."""
+        delta = []
+        for msg in self._messages[self._last_transcript_index:]:
+            msg_copy = dict(msg)
+            content = msg_copy.get("content")
+            if isinstance(content, list):
+                msg_copy["content"] = [
+                    part for part in content
+                    if not (isinstance(part, dict) and part.get("type") == "image_url")
+                ]
+            delta.append(msg_copy)
+        self._last_transcript_index = len(self._messages)
+        return delta
+
 
 
 def _observation_content(observation: Observation) -> list[dict[str, Any]]:

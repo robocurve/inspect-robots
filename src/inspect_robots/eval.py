@@ -101,6 +101,13 @@ class _Broadcast:
         for s in self._sinks:
             s.on_eval_end(log)
 
+    def log_policy_messages(self, t: int, messages: list[dict[str, Any]]) -> None:
+        for s in self._sinks:
+            log_policy_messages = getattr(s, "log_policy_messages", None)
+            if callable(log_policy_messages):
+                log_policy_messages(t, messages)
+
+
 
 def eval(
     task: Task | str,

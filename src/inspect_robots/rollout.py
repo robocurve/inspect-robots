@@ -191,6 +191,13 @@ def rollout(
             if len(inferences) > prev_inferences:
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
+                transcript_delta = getattr(policy, "transcript_delta", None)
+                if callable(transcript_delta):
+                    messages = transcript_delta()
+                    if messages:
+                        log_policy_messages = getattr(sink, "log_policy_messages", None)
+                        if callable(log_policy_messages):
+                            log_policy_messages(t, messages)
 
             # A malformed action is the policy's fault; catching it here keeps it
             # from surfacing inside the approver/embodiment as a halting fault.

@@ -7,7 +7,7 @@ hooks in a fixed order: ``on_eval_start`` → (per trial: ``on_trial_start`` →
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog, EvalSpec
@@ -66,3 +66,8 @@ class NullSink:
     def on_eval_end(self, log: EvalLog) -> None:
         """Provide the optional no-op for sinks that need no finalization."""
         return None
+
+    def log_policy_messages(self, t: int, messages: list[dict[str, Any]]) -> None:
+        """Provide the optional no-op for logging LLM policy messages."""
+        return None
+

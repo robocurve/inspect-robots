@@ -139,3 +139,43 @@ class RerunSink:
     def on_eval_end(self, log: EvalLog) -> None:
         """Keep the completed recording available after evaluation ends."""
         return None
+
+    def log_policy_messages(self, t: int, messages: list[dict[str, Any]]) -> None:
+        """Stream LLM policy messages to the rerun timeline."""
+        rr = self._ensure_rerun()
+        if rr is None:
+            return
+        self._set_step(rr, t)
+        pre = self._prefix
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                text_content = "\n".join(text_parts)
+            else:
+                text_content = str(content)
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                tc_str_list = []
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name", tc.get("name", ""))
+                    args = func.get("arguments", tc.get("arguments", ""))
+                    tc_str_list.append(f"Tool Call: {name}({args})")
+                if tc_str_list:
+                    text_content += "\n" + "\n".join(tc_str_list)
+
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                text_content = f"Tool response [{tool_call_id}]: {text_content}"
+
+            log_entry = f"[{role.upper()}]: {text_content}"
+            rr.log(f"{pre}/llm", rr.TextLog(log_entry))
+

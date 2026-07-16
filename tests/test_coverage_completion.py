@@ -523,3 +523,32 @@ def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> Non
     assert log.status == "success"
     assert "time" in calls  # rr.set_time (>=0.23) was used
     assert paths and all(p.startswith("trial/s/e0/") for p in paths)
+
+
+def test_rerun_sink_logs_policy_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    class _TranscriptDeltaPolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.called = False
+
+        def transcript_delta(self) -> list[dict[str, Any]]:
+            if not self.called:
+                self.called = True
+                return [{"role": "user", "content": "Goal: test"}]
+            return []
+
+    calls: list[str] = []
+    paths: list[str] = []
+    monkeypatch.setitem(sys.modules, "rerun", _fake_rerun_module(calls, paths, new_api=True))
+
+    from inspect_robots.logging.rerun_sink import RerunSink
+
+    sink = RerunSink()
+    policy = _TranscriptDeltaPolicy()
+    (log,) = eval(_task(max_steps=40), policy, CubePickEmbodiment(), sinks=[sink])
+    assert log.status == "success"
+    # Ensure RerunSink logs "trial/s/e0/llm"
+    assert "trial/s/e0/llm" in paths
+
