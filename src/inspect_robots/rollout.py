@@ -249,8 +249,8 @@ def rollout(
                     except Exception as exc:
                         stream_ok = False
                         warnings.warn(
-                            "Live policy transcript streaming disabled after "
-                            f"{type(exc).__name__}: {exc}",
+                            "Live policy transcript streaming disabled for this "
+                            f"trial after {type(exc).__name__}: {exc}",
                             RuntimeWarning,
                             stacklevel=2,
                         )

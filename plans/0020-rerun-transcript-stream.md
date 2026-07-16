@@ -1,6 +1,6 @@
 # 0020 — Stream the LLM transcript onto the Rerun step timeline
 
-Issue: #124. Status: draft.
+Issue: #124. Status: approved (critique rounds 1-4 applied; round 4 found no substantive design issues).
 
 ## Problem
 
