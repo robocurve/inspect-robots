@@ -419,9 +419,9 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert rc == 0
     out = capsys.readouterr().out
     assert "tasks: kb/a, kb/b" in out
-    assert "status: success" in out
-    assert "[success] kb/a" in out
-    assert "[success] kb/b" in out
+    assert "run status: completed" in out
+    assert "[completed] kb/a" in out
+    assert "[completed] kb/b" in out
     assert out.count("log dir:") == 1  # one shared line, not one per task
     assert len(list(tmp_path.glob("*.json"))) == 2
 
@@ -673,8 +673,8 @@ def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
         reg._FACTORIES["task"].pop("kb/b", None)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "status: error" in out
-    assert "[success] kb/a" in out
+    assert "run status: error" in out
+    assert "[completed] kb/a" in out
     assert "[error] kb/b" in out
     assert "reset exploded" in out
 
@@ -715,7 +715,7 @@ def test_cli_eval_set_policy_errors_every_reset_without_fail_on_error(
         reg._FACTORIES["task"].pop("kb/a", None)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "status: error" in out
+    assert "run status: error" in out
     assert "[error] kb/a  all 1 trial(s) errored; nothing was scored" in out
 
 
@@ -744,8 +744,46 @@ def test_cli_eval_set_zero_scene_task_has_no_metric_or_error_detail(
         reg._FACTORIES["task"].pop("kb/a", None)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "status: success" in out
-    assert "[success] kb/a\n" in out  # no trailing metric/error detail
+    assert "run status: completed" in out
+    assert "[completed] kb/a\n" in out  # no trailing metric/error detail
+
+
+def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C mid-set points at the log dir and returns 130 instead of a traceback.
+
+    eval_set writes per-task logs and eval() persists a cancelled log for the
+    interrupted task (#118), but eval-set doesn't hold the sink paths, so the
+    hint points at the shared dir.
+    """
+    import inspect_robots
+
+    def interrupted_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(inspect_robots, "eval_set", interrupted_eval_set)
+    _register_task("kb/a")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 130
+    out = capsys.readouterr().out
+    assert f"cancelled: partial logs are under {tmp_path}" in out
+    assert "inspect-robots inspect" in out
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
