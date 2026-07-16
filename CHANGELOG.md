@@ -21,6 +21,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **`inspect-robots eval-set TASK [TASK ...]`**: run several registered tasks
+  against one resolved policy/embodiment pair in a single invocation, matching
+  task names exactly or by shell-quoted `fnmatch` glob (e.g.
+  `'kitchenbench/*'`). Thin CLI wrapper over
+  [`eval_set`][inspect_robots.eval.eval_set] that resolves the embodiment once
+  for the whole set rather than once per task, and prints one status line plus
+  a compact per-task row instead of a full summary per task (#45).
 - Live agent-policy transcript rows on the Rerun `step` timeline, with
   best-effort non-blocking streaming and complete eval-log persistence (#124).
 - Remote Rerun streaming via `inspect-robots run --rerun-connect [URL]`, so
