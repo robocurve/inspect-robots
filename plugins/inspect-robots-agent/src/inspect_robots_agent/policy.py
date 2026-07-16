@@ -210,7 +210,6 @@ class LLMAgentPolicy(PolicyBase):
         failures = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
-                self._echo("[agent] -- LLM call budget exhausted; forcing give_up")
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
             message = self._client.complete(
                 self._messages,
@@ -262,6 +261,9 @@ class LLMAgentPolicy(PolicyBase):
             return result.chunk
 
     def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
+        # Echoed but never appended to _messages: the synthetic call is not
+        # model output, so it stays out of the transcript.
+        self._echo(f"[agent] -- {why}; forcing give_up")
         synthetic = ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))
         result = toolset.execute(synthetic, observation)
         assert result.chunk is not None
@@ -276,6 +278,7 @@ def _state_lines(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
+    """One state[key] line per state entry, shared by prompt and echo so they never drift."""
     lines: list[str] = []
     for key, value in observation.state.items():
         array = np.asarray(value, dtype=np.float64)
@@ -293,6 +296,7 @@ def _state_lines(
 
 
 def _step_label(observation: Observation) -> str:
+    """Shared prompt/echo step gate: "step {n}" for int env_step (bool included), else ""."""
     step = observation.extra.get("env_step")
     return f"step {step}" if isinstance(step, int) else ""
 
