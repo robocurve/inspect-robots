@@ -388,6 +388,7 @@ def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
                     [
                         ("done", {"summary": "first executes"}),
                         ("give_up", {"reason": "extra"}),
+                        ("give_up", {"reason": "second extra"}),
                     ]
                 )
             ]
@@ -406,6 +407,8 @@ def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
     assert event_lines == [
         '[agent] << tool_call done({"summary": "first executes"})',
         '[agent] << tool_call give_up({"reason": "extra"})',
+        '[agent] << tool_call give_up({"reason": "second extra"})',
+        "[agent] -- ignored: one tool call per turn",
         "[agent] -- ignored: one tool call per turn",
         "[agent] -- done: first executes",
     ]
@@ -448,17 +451,45 @@ def test_transcript_echo_observation_omits_image_payloads(
     assert "data:image" not in stderr
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"env_step": "3"}],
+    ids=["missing", "non_int_string"],
+)
 def test_transcript_echo_observation_without_environment_step(
-    capsys: pytest.CaptureFixture[str],
+    extra: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
     policy = _policy(
         _Script([_tool_response("done", {"summary": "observed"})]), transcript_echo=True
     )
     policy.bind(CubePickEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="observe"))
-    policy.act(Observation(state={"eef_pos": np.array([0.0])}))
+    policy.act(Observation(state={"eef_pos": np.array([0.0])}, extra=extra))
 
-    assert "[agent] >> observation: 0 camera(s), state[eef_pos]: [0.0]" in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert "[agent] >> observation: 0 camera(s), state[eef_pos]: [0.0]" in stderr
+    assert ">> step" not in stderr
+
+
+def test_transcript_echo_never_echoes_retry_nudge(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script(
+            [
+                _text_response("thinking out loud, no tool call"),
+                _tool_response("done", {"summary": "recovered"}),
+            ]
+        ),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="recover"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    stderr = capsys.readouterr().err
+    assert "[agent] << thinking out loud, no tool call" in stderr
+    assert "Respond with exactly one tool call." not in stderr
 
 
 def test_transcript_echo_reports_forced_give_up(capsys: pytest.CaptureFixture[str]) -> None:
@@ -475,19 +506,26 @@ def test_transcript_echo_reports_forced_give_up(capsys: pytest.CaptureFixture[st
     assert "[agent] -- LLM call budget exhausted; forcing give_up" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        _tool_response("done", {"summary": "no text"}),
+        _text_and_tool_response("", "done", {"summary": "no text"}),
+    ],
+    ids=["content_none", "content_empty_string"],
+)
 def test_transcript_echo_omits_empty_assistant_text(
-    capsys: pytest.CaptureFixture[str],
+    response: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    policy = _policy(
-        _Script([_tool_response("done", {"summary": "no text"})]), transcript_echo=True
-    )
+    policy = _policy(_Script([response]), transcript_echo=True)
     policy.bind(CubePickEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="stop"))
     policy.act(Observation(extra={"env_step": 0}))
 
-    assert not any(
-        line in {"[agent] <<", "[agent] << "} for line in capsys.readouterr().err.splitlines()
-    )
+    assistant_lines = [
+        line for line in capsys.readouterr().err.splitlines() if line.startswith("[agent] <<")
+    ]
+    assert assistant_lines == ['[agent] << tool_call done({"summary": "no text"})']
 
 
 def test_transcript_echo_lands_in_policy_config() -> None:
