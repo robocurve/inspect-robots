@@ -98,6 +98,7 @@ The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
 Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a transcript observation to its stored frame.
+Live Rerun transcript streaming happens automatically when a Rerun sink is attached.
 
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the

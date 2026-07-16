@@ -12,12 +12,19 @@ import time
 import types
 import warnings
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
 from inspect_robots import eval
 from inspect_robots.logging import RerunSink
+from inspect_robots.logging.rerun_sink import (
+    _render_message,
+    _StepPayload,
+    _TranscriptPayload,
+    _WorkerState,
+)
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import registered
 from inspect_robots.scene import Scene
@@ -255,11 +262,15 @@ def _install_fake_rerun(
 
     fake.init = lambda *a, **k: None  # type: ignore[attr-defined]
     fake.save = lambda p: None  # type: ignore[attr-defined]
-    fake.set_time = lambda *a, **k: None  # type: ignore[attr-defined]
+
+    def _set_time(timeline: str, **kwargs: object) -> None:
+        logged.append(("set_time", (timeline, kwargs)))
+
+    fake.set_time = _set_time  # type: ignore[attr-defined]
     fake.log = _log  # type: ignore[attr-defined]
     fake.Image = image_cls  # type: ignore[attr-defined]
     fake.Scalars = lambda v: ("Scalars", v)  # type: ignore[attr-defined]
-    fake.TextLog = lambda t: ("TextLog", t)  # type: ignore[attr-defined]
+    fake.TextLog = lambda t, *, level=None: ("TextLog", t, level)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "rerun", fake)
     return logged
 
@@ -328,6 +339,201 @@ def _step_result() -> StepResult:
 
 def _log_one(sink: RerunSink, t: int = 0, *, with_image: bool = True) -> None:
     sink.log_step(t, _obs(with_image=with_image), Action(data=np.array([0.5])), _step_result())
+
+
+def _step_payload(t: int, *, with_image: bool = True) -> _StepPayload:
+    """Build a queue payload without starting a worker."""
+    images = {"cam": np.zeros((1, 1, 3), dtype=np.uint8)} if with_image else {}
+    return _StepPayload(
+        prefix="trial/scene/e0",
+        t=t,
+        images=images,
+        state={},
+        action=np.array([0.0]),
+        reward=None,
+        terminated=False,
+        termination_reason=None,
+    )
+
+
+def _arm_completed_worker(sink: RerunSink) -> None:
+    """Give shutdown a completed generation so it reports existing counters."""
+    worker = threading.Thread(target=lambda: None)
+    worker.start()
+    worker.join()
+    sink._worker = worker
+    sink._state = _WorkerState(stop=threading.Event())
+
+
+def test_policy_messages_emit_ordered_levels_on_the_step_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    sink = RerunSink()
+    sink.on_trial_start("scene", 2)
+
+    sink.log_policy_messages(
+        7,
+        [
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "question"},
+            {"role": "tool", "content": "result"},
+            {"role": "system", "content": "prompt"},
+            {"role": "critic", "content": "other"},
+        ],
+    )
+
+    assert sink.flush(timeout=5.0)
+    assert logged == [
+        ("set_time", ("step", {"sequence": 7})),
+        ("trial/scene/e2/llm", ("TextLog", "assistant: answer", "INFO")),
+        ("trial/scene/e2/llm", ("TextLog", "user: question", "INFO")),
+        ("trial/scene/e2/llm", ("TextLog", "tool: result", "DEBUG")),
+        ("trial/scene/e2/llm", ("TextLog", "system: prompt", "TRACE")),
+        ("trial/scene/e2/llm", ("TextLog", "critic: other", "TRACE")),
+    ]
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ({"role": "assistant", "content": "hello"}, ("INFO", "assistant: hello")),
+        (
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "camera 'top':"},
+                    {"type": "image_url", "image_url": {"url": "elided"}},
+                    {"type": "text", "text": "after"},
+                    7,
+                ],
+            },
+            ("INFO", "user: camera 'top':\n[image_url part]\nafter\n[unknown part]"),
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_move",
+                        "type": "function",
+                        "function": {"name": "move_by", "arguments": '{"dx": 0.1}'},
+                    }
+                ],
+            },
+            ("INFO", 'assistant: tool_call move_by({"dx": 0.1})'),
+        ),
+        ("plain row", ("INFO", "plain row")),
+        ({"content": "orphan"}, ("TRACE", "unknown: orphan")),
+        ({"role": "tool", "content": "result"}, ("DEBUG", "tool: result")),
+        ({"role": "system", "content": "prompt"}, ("TRACE", "system: prompt")),
+        ({"role": "assistant", "content": ""}, ("INFO", "assistant: ")),
+        (
+            {
+                "role": "assistant",
+                "content": [],
+                "tool_calls": [{"function": "malformed"}, "malformed"],
+            },
+            ("INFO", "assistant: tool_call ()\ntool_call ()"),
+        ),
+    ],
+)
+def test_policy_message_rendering_table(message: Any, expected: tuple[str, str]) -> None:
+    assert _render_message(message) == expected
+
+
+def test_mixed_queue_eviction_counts_transcripts_steps_and_images() -> None:
+    sink = RerunSink(queue_size=2)
+    sink._image_watermark = 99
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("INFO", "first"),)))
+    sink._enqueue(_step_payload(1))
+
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 2, (("INFO", "second"),)))
+    assert sink._dropped_transcripts == 1
+    assert sink._dropped_steps == 0
+    assert sink._dropped_frames == 0
+
+    sink._enqueue(_step_payload(3, with_image=False))
+    assert sink._dropped_transcripts == 1
+    assert sink._dropped_steps == 1
+    assert sink._dropped_frames == 1
+
+    with sink._cond:
+        sink._queue.clear()
+    _arm_completed_worker(sink)
+    with pytest.warns(RuntimeWarning, match=r"1 transcript update\(s\)"):
+        sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_transcript_only_drops_warn_and_reset_all_counters() -> None:
+    sink = RerunSink(queue_size=1)
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("INFO", "first"),)))
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 1, (("INFO", "second"),)))
+    with sink._cond:
+        sink._queue.clear()
+    _arm_completed_worker(sink)
+
+    with pytest.warns(RuntimeWarning, match=r"1 transcript update\(s\)"):
+        sink.on_eval_end(None)  # type: ignore[arg-type]
+
+    assert sink._dropped_frames == 0
+    assert sink._dropped_steps == 0
+    assert sink._dropped_transcripts == 0
+
+
+def test_policy_messages_as_first_trial_call_spawn_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    sink = RerunSink()
+
+    sink.log_policy_messages(0, [{"role": "assistant", "content": "first"}])
+
+    assert sink._worker is not None
+    assert sink.flush(timeout=5.0)
+    assert ("trial/llm", ("TextLog", "assistant: first", "INFO")) in logged
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_wedged_shutdown_accounts_for_mixed_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = threading.Event()
+    _install_fake_rerun(monkeypatch, gate=gate)
+    sink = RerunSink(flush_timeout=0.05)
+    worker: threading.Thread | None = None
+    try:
+        _log_one(sink, 0)
+        _wait_for_inflight(sink)
+        worker = sink._worker
+        assert worker is not None
+        with sink._cond:
+            sink._queue.append(_TranscriptPayload("trial/scene/e0", 1, (("INFO", "queued"),)))
+            sink._queue.append(_step_payload(2))
+        with pytest.warns(RuntimeWarning) as caught:
+            sink.on_eval_end(None)  # type: ignore[arg-type]
+        messages = [str(item.message) for item in caught]
+        assert any("1 transcript update(s)" in message for message in messages)
+        assert any("1 camera frame(s) and 1 full step(s)" in message for message in messages)
+    finally:
+        gate.set()
+    assert worker is not None
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
+def test_disabled_sink_silently_ignores_policy_messages() -> None:
+    sink = RerunSink()
+    sink._disabled = True
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sink.log_policy_messages(0, [{"role": "assistant", "content": "unused"}])
+
+    assert sink._worker is None
+    assert not sink._queue
 
 
 def test_images_jpeg_compressed_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
