@@ -335,7 +335,6 @@ def _run_eval(
                     controller=controller,
                     approver=approver,
                     sink=bus,
-                    control_hz=task.control_hz,
                     frame_store=frame_store,
                 )
             except _CancelledTrial as exc:

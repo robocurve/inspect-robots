@@ -128,22 +128,6 @@ def _collect_transcript(policy: object) -> Any:
         return {"transcript_error": detail}
 
 
-def _effective_control_hz(
-    chunk_hz: float | None, task_hz: float | None, embodiment_hz: float | None
-) -> float | None:
-    """First non-None of chunk → task → embodiment rate (R1).
-
-    Real-time pacing (sleeping the control loop to this rate, honoring the
-    ``SELF_PACED`` capability) is wired up together with the first real-robot
-    adapter; until then the test suite stays fast and this helper is unused by
-    the loop below.
-    """
-    for hz in (chunk_hz, task_hz, embodiment_hz):
-        if hz is not None:
-            return hz
-    return None
-
-
 def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> InspectRobotsError:
     """Mark ``record`` failed and attach it to ``exc`` (see ``InspectRobotsError.record``).
 
@@ -179,7 +163,6 @@ def rollout(
     controller: Controller,
     approver: Approver,
     sink: LogSink,
-    control_hz: float | None = None,
     frame_store: FrameStore | None = None,
 ) -> TrialRecord:
     """Run a single trial and return its record.
@@ -194,8 +177,11 @@ def rollout(
     raised from inside the trial carries the partial ``TrialRecord`` on
     ``exc.record`` for the orchestrator to preserve.
 
-    ``control_hz`` is accepted for R1's rate-precedence chain; real-time pacing
-    lands with the first real-robot adapter (see ``_effective_control_hz``).
+    The loop applies no wall-clock pacing of its own: ``embodiment.step()`` is
+    called as fast as the policy/controller/approver can produce actions. An
+    embodiment that needs real-time cadence paces itself inside ``step()`` and
+    declares the ``"self_paced"`` capability to document that it does (see
+    [`Embodiment`][inspect_robots.embodiment.Embodiment]).
     """
     trial_id = f"{scene.id}-e{epoch}"
     record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)

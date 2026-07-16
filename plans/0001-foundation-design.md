@@ -475,13 +475,23 @@ issues clustered in the rollout↔controller↔record triad. These resolutions a
 **binding** and supersede the prose above wherever they conflict:
 
 - **R1 — `step()` timing contract.** `Embodiment.step()` **returns as soon as the
-  command is issued** (it does *not* block until the control period elapses). The
-  **framework owns pacing** to the *effective rate* = `chunk.control_hz` →
-  `task.control_hz` → `embodiment.info.control_hz` (first non-None). A real-robot
-  adapter whose `step()` inherently blocks at the hardware rate declares
-  capability `"self_paced"`, and the rollout then skips its own pacing. `compat`
-  warns when the policy's emitted rate and the embodiment's native rate differ by
-  more than a tolerance.
+  command is issued** (it does *not* block until the control period elapses).
+  **Reversed 2026-07-14** (see issue tracker: rollout pacing was accepted-but-ignored
+  in practice — `_effective_control_hz`/`Task.control_hz` were dead code, and both
+  hardware adapters already self-paced as a workaround). The rollout applies **no
+  wall-clock pacing of its own**; an embodiment that needs real-time cadence paces
+  itself inside `step()` and declares capability `"self_paced"` to document that it
+  does. `Task.control_hz` is removed — the framework never had a rate of its own to
+  resolve. `compat` still warns when the policy's emitted rate and the embodiment's
+  native rate differ by more than a tolerance (unaffected by this reversal).
+
+  Original resolution (superseded above): The **framework owns pacing** to the
+  *effective rate* = `chunk.control_hz` → `task.control_hz` →
+  `embodiment.info.control_hz` (first non-None). A real-robot adapter whose
+  `step()` inherently blocks at the hardware rate declares capability
+  `"self_paced"`, and the rollout then skips its own pacing. `compat` warns when
+  the policy's emitted rate and the embodiment's native rate differ by more than a
+  tolerance.
 
 - **R2 — per-trial seeding.** The seed for scene `s`, epoch `e` is
   `derive_seed(eval_seed, s.init_seed, e)` (a stable hash mix), logged per trial.

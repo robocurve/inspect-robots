@@ -152,7 +152,9 @@ def check_compatibility(
     _resolve_keys(pobs.camera_names, eobs.camera_names, remap, "camera", issues)
     _resolve_keys(pobs.state_keys, eobs.state_keys, remap, "state", issues)
 
-    # Control-rate reconciliation (R1): only warn, since the framework paces.
+    # Control-rate reconciliation (R1): only warn — the rollout enforces no
+    # wall-clock rate of its own (R1, revised), so a mismatch is the policy's
+    # or embodiment's to reconcile, not a hard error.
     p_hz = getattr(policy.info, "control_hz", None)
     e_hz = embodiment.info.control_hz
     if p_hz is not None and e_hz is not None and abs(p_hz - e_hz) > _RATE_TOL:
@@ -161,7 +163,8 @@ def check_compatibility(
                 "warning",
                 "control_rate",
                 f"policy desires {p_hz} Hz but embodiment runs at {e_hz} Hz; "
-                "framework will pace to the effective rate",
+                "neither rate is enforced by the rollout — reconcile in the "
+                "policy or embodiment",
             )
         )
 
