@@ -163,6 +163,10 @@ class IsaacSimEmbodiment:
         on machines without a display (the usual eval box).
     obs_group / image_keys / state_keys / success_info_key:
         How to read the task's observation dict and success flag (see module docs).
+    terminated_implies_success:
+        If True, falls back to treating 'terminated' as success when the task
+        info dictionary does not contain the success key. If False (default), missing
+        success keys will log a warning and evaluate to False.
     name / supported_setups / supported_target_kinds:
         Surfaced on ``EmbodimentInfo`` for logging and R7 scene-realizability
         checks. Empty ``supported_*`` means "unconstrained".
@@ -183,6 +187,7 @@ class IsaacSimEmbodiment:
         image_keys: Mapping[str, str] | None = None,
         state_keys: Mapping[str, str] | None = None,
         success_info_key: str = "success",
+        terminated_implies_success: bool = False,
         name: str = "isaacsim",
         supported_setups: Sequence[str] = (),
         supported_target_kinds: Sequence[str] = (),
@@ -199,6 +204,7 @@ class IsaacSimEmbodiment:
         self.image_keys = dict(image_keys or {})
         self.state_keys = dict(state_keys or {})
         self.success_info_key = success_info_key
+        self.terminated_implies_success = terminated_implies_success
 
         camera_specs = tuple(CameraSpec(c[0], c[1], c[2], *(c[3:] or (3,))) for c in cameras)
         action_dim = num_arm_joints + 1  # arm joint targets + 1 binary gripper
@@ -266,10 +272,13 @@ class IsaacSimEmbodiment:
         if self._env is not None:
             return self._env
         self._ensure_app()
-        # Importing the tasks registers the gym ids; must happen AFTER the app boots.
-        import gymnasium as gym
-        import isaaclab_tasks  # noqa: F401  (registers Isaac-* gym ids)
-        from isaaclab_tasks.utils import parse_env_cfg
+        try:
+            # Importing the tasks registers the gym ids; must happen AFTER the app boots.
+            import gymnasium as gym
+            import isaaclab_tasks  # noqa: F401  (registers Isaac-* gym ids)
+            from isaaclab_tasks.utils import parse_env_cfg
+        except ImportError as exc:
+            raise _missing_isaac(exc) from exc
 
         # Isaac Lab envs take a mandatory cfg object (gym.make(task_id) alone
         # raises "missing 1 required positional argument: 'cfg'"); parse_env_cfg
@@ -362,8 +371,28 @@ class IsaacSimEmbodiment:
     def _read_success(self, info: Any, terminated: Any) -> bool:
         if isinstance(info, Mapping) and self.success_info_key in info:
             return bool(_scalar(info[self.success_info_key]))
-        # Fall back to "terminated implies success" when the task exposes no oracle.
-        return bool(_scalar(terminated))
+
+        if not hasattr(self, "_warned_missing_success"):
+            self._warned_missing_success = True
+            if self.terminated_implies_success:
+                logger.warning(
+                    "Isaac Lab task info dictionary is missing the success key '%s'. "
+                    "Falling back to treating 'terminated' as success because "
+                    "'terminated_implies_success' is enabled.",
+                    self.success_info_key,
+                )
+            else:
+                logger.warning(
+                    "Isaac Lab task info dictionary is missing the success key '%s'. "
+                    "Scoring as not successful. To treat 'terminated' as success, set "
+                    "'terminated_implies_success=True' in the embodiment constructor.",
+                    self.success_info_key,
+                )
+
+        if self.terminated_implies_success:
+            # Fall back to "terminated implies success" when requested.
+            return bool(_scalar(terminated))
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -388,11 +417,18 @@ def _to_float_array(value: Any) -> np.ndarray:
 
 
 def _to_image(value: Any) -> np.ndarray:
+    """Convert input value to a uint8 HWC image array.
+
+    Empty arrays are returned as-is. Floats are treated as normalized [0, 1] and
+    scaled to [0, 255]; values outside that range are clipped.
+    """
     arr = _np(value)
+    if arr.size == 0:
+        return arr.astype(np.uint8)
     if arr.ndim >= 1 and arr.shape[0] == 1:  # drop num_envs axis
         arr = arr[0]
     if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
         arr = np.transpose(arr, (1, 2, 0))  # CHW -> HWC
     if np.issubdtype(arr.dtype, np.floating):
-        arr = np.clip(arr * 255.0 if arr.max() <= 1.0 else arr, 0, 255)
+        arr = np.clip(arr, 0.0, 1.0) * 255.0
     return arr.astype(np.uint8)

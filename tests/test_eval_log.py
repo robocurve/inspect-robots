@@ -35,6 +35,7 @@ def _golden_log() -> EvalLog:
             inspect_robots_version="0.0.0",
             git_commit="deadbeef",
             seed=0,
+            max_steps=1200,
         ),
         results=EvalResults(total_scenes=1, total_trials=1, metrics={"success_at_end": 1.0}),
         stats=EvalStats(
@@ -52,6 +53,13 @@ def _golden_log() -> EvalLog:
                 instruction="reach the cube",
                 operator_judgements=("yes",),
                 trial_metadata=({"foo": "bar"},),
+                termination_reasons=("success",),
+                policy_transcripts=(
+                    [
+                        {"role": "user", "content": "reach the cube"},
+                        {"role": "assistant", "content": "moving"},
+                    ],
+                ),
             ),
         ),
     )
@@ -64,6 +72,14 @@ def test_eval_log_round_trips_through_dict() -> None:
     assert restored.results.metrics["success_at_end"] == 1.0
 
 
+def test_results_without_errored_trials_reads_with_default() -> None:
+    """Logs written before EvalResults.errored_trials existed must still read."""
+    data = _golden_log().to_dict()
+    data["results"].pop("errored_trials", None)
+    log = EvalLog.from_dict(data)
+    assert log.results.errored_trials == 0
+
+
 def test_golden_log_reads_back(tmp_path: Path) -> None:
     # A log written today must remain readable: persist, then read.
     path = tmp_path / "golden.json"
@@ -74,16 +90,27 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
     assert restored.samples[0].operator_judgements == ("yes",)
+    assert restored.samples[0].trial_metadata == ({"foo": "bar"},)
+    assert restored.samples[0].termination_reasons == ("success",)
+    assert restored.samples[0].policy_transcripts == (
+        [
+            {"role": "user", "content": "reach the cube"},
+            {"role": "assistant", "content": "moving"},
+        ],
+    )
+    assert restored.eval.max_steps == 1200
 
 
-def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path) -> None:
-    # Logs written before SceneResult grew instruction/operator_judgements
-    # must stay readable at the same schema version (newer reads older).
+def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
+    # Older schema-v1 logs missing additive fields must remain readable.
     data = _golden_log().to_dict()
+    del data["eval"]["max_steps"]
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["operator_judgements"]
         del sample["trial_metadata"]
+        del sample["termination_reasons"]
+        del sample["policy_transcripts"]
     path = tmp_path / "old.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     restored = read_eval_log(str(path))
@@ -91,6 +118,9 @@ def test_pre_instruction_log_without_new_scene_fields_reads_back(tmp_path: Path)
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
     assert restored.samples[0].trial_metadata == ()
+    assert restored.samples[0].termination_reasons == ()
+    assert restored.samples[0].policy_transcripts == ()
+    assert restored.eval.max_steps is None
 
 
 def test_eval_log_and_friends_are_frozen() -> None:
@@ -114,6 +144,7 @@ def test_eval_log_and_friends_are_frozen() -> None:
         log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].trial_metadata.append({})  # type: ignore[attr-defined]
+        log.samples[0].termination_reasons.append("failure")  # type: ignore[attr-defined]
 
 
 def test_unsupported_schema_version_rejected() -> None:

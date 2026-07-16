@@ -8,19 +8,26 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from inspect_robots import eval, eval_set
-from inspect_robots.errors import ConfigError, EmbodimentFault, PolicyError
+from inspect_robots import eval, eval_set, read_eval_log
+from inspect_robots.errors import (
+    ConfigError,
+    EmbodimentFault,
+    PolicyError,
+    SafetyAbort,
+    _CancelledTrial,
+)
 from inspect_robots.eval import _git_commit
 from inspect_robots.log import EvalLog
+from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
-from inspect_robots.scene import Scene
-from inspect_robots.scorer import min_distance_to_goal, operator_scorer, success_at_end
+from inspect_robots.scene import Scene, Target
+from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
-from inspect_robots.task import Epochs, Task
+from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 _BOX = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"))
@@ -93,6 +100,217 @@ class _BoomPolicy:
         raise RuntimeError("inference exploded")
 
 
+class _InterruptingPolicy(ScriptedPolicy):
+    """Raise one specific Ctrl-C during inference and expose an audit record."""
+
+    def __init__(self, interrupt: KeyboardInterrupt, *, interrupt_on_call: int = 2) -> None:
+        super().__init__(chunk_size=1)
+        self.interrupt = interrupt
+        self.interrupt_on_call = interrupt_on_call
+        self.act_calls = 0
+
+    def reset(self, scene: Scene) -> None:
+        self.act_calls = 0
+        super().reset(scene)
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self.act_calls += 1
+        if self.act_calls == self.interrupt_on_call:
+            raise self.interrupt
+        return super().act(observation)
+
+    def transcript(self) -> object:
+        return {"act_calls": self.act_calls}
+
+
+class _CountingScorer:
+    """Count every trajectory presented for scoring."""
+
+    name = "counting"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+        del record, target
+        self.calls += 1
+        return Score(value=1.0)
+
+
+# --------------------------------------------------------------------------- #
+# Ctrl-C during rollout writes a partial cancelled log before propagating.
+# --------------------------------------------------------------------------- #
+def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) -> None:
+    policy = _InterruptingPolicy(KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            policy,
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            store_frames=True,
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    scene = log.samples[0]
+    assert log.status == "cancelled"
+    assert scene.status == "cancelled"
+    assert scene.policy_transcripts == ({"act_calls": 2},)
+    assert scene.termination_reasons == (None,)
+    assert scene.epochs == ({},)
+    assert scene.reduced == {}
+    assert log.results.metrics == {}
+    assert log.results.errored_trials == 0
+    assert log.error == "cancelled by user (KeyboardInterrupt)"
+    assert log.stats.frames_dir is not None
+    assert list(Path(log.stats.frames_dir).rglob("*.npy"))
+
+
+def test_cancelled_eval_reraises_typed_exception_with_original_cause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from inspect_robots.rollout import rollout as actual_rollout
+
+    original = KeyboardInterrupt("operator interrupt")
+    raised: list[_CancelledTrial] = []
+
+    def capturing_rollout(*args: object, **kwargs: object) -> TrialRecord:
+        try:
+            return actual_rollout(*args, **kwargs)  # type: ignore[arg-type]
+        except _CancelledTrial as exc:
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "rollout", capturing_rollout)
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        eval(
+            _task(),
+            _InterruptingPolicy(original),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    assert isinstance(excinfo.value, _CancelledTrial)
+    assert excinfo.value is raised[0]
+    assert excinfo.value.__cause__ is original
+
+
+def test_cancelled_policy_reset_records_t_minus_one_and_zero_steps(tmp_path: Path) -> None:
+    class _ResetInterruptPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise KeyboardInterrupt
+
+    records = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _ResetInterruptPolicy(),
+            CubePickEmbodiment(),
+            sinks=[records, json_sink],
+        )
+
+    (record,) = records.records
+    assert record.status == "cancelled"
+    assert record.steps == []
+    assert record.events[-1].kind == "error"
+    assert record.events[-1].t == -1
+    assert json_sink.path is not None and json_sink.path.exists()
+    assert read_eval_log(str(json_sink.path)).status == "cancelled"
+
+
+def test_cancelled_first_scene_halts_before_second_scene(tmp_path: Path) -> None:
+    task = Task(
+        name="two-scenes",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            task,
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    assert log.results.total_scenes == 1
+    assert tuple(scene.scene_id for scene in log.samples) == ("s0",)
+
+
+def test_cancelled_trial_is_never_scored() -> None:
+    scorer = _CountingScorer()
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(scorer=scorer),
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            sinks=[NullSink()],
+        )
+
+    assert scorer.calls == 0
+
+
+def test_all_errored_guard_does_not_rewrite_cancelled_status(tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    (written,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(written))
+    assert log.status == "cancelled"
+    assert log.error == "cancelled by user (KeyboardInterrupt)"
+
+
+def test_errored_then_cancelled_epochs_preserve_both_records(tmp_path: Path) -> None:
+    class _ErrorThenCancelPolicy(_InterruptingPolicy):
+        def __init__(self) -> None:
+            super().__init__(KeyboardInterrupt(), interrupt_on_call=1)
+            self.resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self.resets += 1
+            if self.resets == 1:
+                raise RuntimeError("first epoch failed")
+            super().reset(scene)
+
+    records = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(epochs=2),
+            _ErrorThenCancelPolicy(),
+            CubePickEmbodiment(),
+            sinks=[records, json_sink],
+        )
+
+    assert json_sink.path is not None
+    log = read_eval_log(str(json_sink.path))
+    assert log.status == "cancelled"
+    assert log.results.errored_trials == 1
+    assert log.results.total_trials == 2
+    assert log.samples[0].epochs == ({}, {})
+    assert [record.status for record in records.records] == ["error", "cancelled"]
+
+
 # --------------------------------------------------------------------------- #
 # 1. A halted eval must still produce an error log, whatever the reducer.
 # --------------------------------------------------------------------------- #
@@ -106,6 +324,10 @@ def test_halted_eval_with_pass_at_k_reducer_still_writes_log(tmp_path: Path) -> 
     assert log.status == "error"
     assert log.error is not None and "motor stalled" in log.error
     assert log.samples[0].error is not None and "reducer" in log.samples[0].error
+    # The halt path keeps the parallel tuples aligned: the faulted trial gets
+    # a None reason next to its empty epoch entry.
+    assert log.samples[0].termination_reasons == ("success", "success", None)
+    assert len(log.samples[0].termination_reasons) == len(log.samples[0].epochs)
     assert list(tmp_path.glob("*.json"))  # the log reached disk
 
 
@@ -136,6 +358,38 @@ def test_errored_trials_are_not_scored(tmp_path: Path) -> None:
     assert scene.epochs[1] == {}  # ...as an empty (unscored) epoch entry
     # ...but the metric comes from the good epoch only: finite, not inf.
     assert np.isfinite(log.results.metrics["min_distance_to_goal"])
+    assert log.status == "success"  # data survived: partials stay tolerated
+    assert log.results.errored_trials == 1
+    assert log.results.total_trials == 2
+    assert scene.termination_reasons == ("success", None)
+    assert len(scene.termination_reasons) == len(scene.epochs)
+
+
+def test_step_limit_reason_and_horizon_are_recorded(tmp_path: Path) -> None:
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].termination_reasons == ("max_steps",)
+    assert log.eval.max_steps == 1
+
+
+def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
+    # Issue #73: a run that scored nothing must not report success.
+    (log,) = eval(_task(), _BoomPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error == "all 1 trial(s) errored; nothing was scored"
+    assert log.results.errored_trials == log.results.total_trials == 1
+    assert log.results.metrics == {}
+
+
+def test_halt_error_message_is_not_overwritten_by_all_errored(tmp_path: Path) -> None:
+    # A SafetyAbort halt already sets status/error; the all-errored degrade
+    # must not clobber the more specific message.
+    class _AbortPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise SafetyAbort("operator hit the e-stop")
+
+    (log,) = eval(_task(), _AbortPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error == "SafetyAbort: operator hit the e-stop"  # not the all-errored message
 
 
 # --------------------------------------------------------------------------- #
@@ -155,7 +409,7 @@ def test_policy_error_partial_record_reaches_sinks() -> None:
 
     sink = _RecordingSink()
     (log,) = eval(_task(), _BoomLaterPolicy(), CubePickEmbodiment(), sinks=[sink])
-    assert log.status == "success"  # fail_on_error=False: the eval itself ran
+    assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
     assert len(record.steps) == 4  # the steps walked before the failure survive
@@ -250,6 +504,110 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
+def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:
+    """bind_task fires once per eval with the task's envelope, before any reset."""
+
+    class _HorizonAware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[object] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.calls.append(envelope)
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.calls.append("reset")
+            return super().reset(scene, seed=seed)
+
+    two_scenes = Task(
+        name="t",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=7,
+        epochs=2,
+    )
+    aware = _HorizonAware()
+    (log,) = eval(two_scenes, ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert aware.calls[0] == TaskEnvelope(name="t", max_steps=7)
+    # Exactly one bind per eval — not per scene or per epoch; resets follow it.
+    assert aware.calls.count("reset") == 4
+    assert [c for c in aware.calls if c != "reset"] == [TaskEnvelope(name="t", max_steps=7)]
+
+
+def test_bind_task_rebinds_per_eval_latest_wins(tmp_path: Path) -> None:
+    class _HorizonAware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.envelopes: list[TaskEnvelope] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.envelopes.append(envelope)
+
+    aware = _HorizonAware()
+    eval(_task(max_steps=5), ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    eval(_task(max_steps=9), ScriptedPolicy(), aware, log_dir=str(tmp_path))
+    assert [e.max_steps for e in aware.envelopes] == [5, 9]
+
+
+def test_eval_ignores_non_callable_bind_task(tmp_path: Path) -> None:
+    class _OddAttr(CubePickEmbodiment):
+        bind_task = "not a hook"
+
+    (log,) = eval(_task(max_steps=5), ScriptedPolicy(), _OddAttr(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert _OddAttr.bind_task == "not a hook"
+
+
+class _BindRaisesEmbodiment(_ClosableEmbodiment):
+    def bind_task(self, envelope: TaskEnvelope) -> None:
+        raise RuntimeError("refusing this task")
+
+
+embodiment_decorator("bind-raises-cubepick")(_BindRaisesEmbodiment)
+
+
+def test_raising_bind_task_aborts_before_any_rollout(tmp_path: Path) -> None:
+    _CLOSED.clear()
+    with pytest.raises(RuntimeError, match="refusing this task"):
+        eval(_task(max_steps=5), ScriptedPolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
+    assert not list(tmp_path.glob("*.json"))  # no rollout started, no log written
+    assert _CLOSED == ["closed"]  # registry-owned embodiment still released
+
+
+def test_bind_task_runs_before_the_compatibility_check(tmp_path: Path) -> None:
+    """The hook fires pre-compat: a raising bind_task wins over an incompatible pairing."""
+
+    class _WidePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = PolicyInfo(
+                name="wide",
+                action_space=Box(shape=(9,), semantics=ActionSemantics("joint_pos")),
+            )
+
+    with pytest.raises(RuntimeError, match="refusing this task"):
+        eval(_task(max_steps=5), _WidePolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
+
+
+def test_embodiment_base_bind_task_is_a_noop() -> None:
+    from inspect_robots.embodiment import EmbodimentBase
+
+    class _Minimal(EmbodimentBase):
+        info = CubePickEmbodiment().info
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return CubePickEmbodiment().reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            raise NotImplementedError
+
+    _Minimal().bind_task(TaskEnvelope(name="t", max_steps=1))  # must exist and do nothing
+
+
 def test_policy_base_bind_is_a_noop() -> None:
     from inspect_robots.embodiment import EmbodimentInfo
     from inspect_robots.policy import PolicyBase
@@ -333,7 +691,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         sinks=[sink],
         controller=_EagerErrorController(),
     )
-    assert log.status == "success"  # fail_on_error=False
+    assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
 
@@ -499,3 +857,57 @@ def test_on_trial_end_hook_error_on_already_errored_trial(tmp_path: Path) -> Non
     assert scene.error is not None
     # Both epochs ran the hook and failed
     assert "hook exploded" in scene.error
+
+
+def test_policy_transcripts_parallel_scored_and_errored_epochs(tmp_path: Path) -> None:
+    class _TranscriptBoomOnSecondEpoch(_BoomOnSecondEpochPolicy):
+        def transcript(self) -> object:
+            return {"reset": self._resets}
+
+    (log,) = eval(
+        _task(epochs=2),
+        _TranscriptBoomOnSecondEpoch(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    scene = log.samples[0]
+    assert scene.epochs[0] and scene.epochs[1] == {}
+    assert scene.policy_transcripts == ({"reset": 1}, {"reset": 2})
+    assert len(scene.policy_transcripts) == len(scene.epochs)
+
+
+def test_halted_trial_transcript_reaches_the_persisted_log(tmp_path: Path) -> None:
+    class _TranscriptScripted(ScriptedPolicy):
+        def transcript(self) -> object:
+            return [{"role": "assistant", "content": "walking to the cube"}]
+
+    (log,) = eval(
+        _task(epochs=2),
+        _TranscriptScripted(),
+        _FaultAfterEpochsEmbodiment(good_epochs=1),
+        log_dir=str(tmp_path),
+    )
+    scene = log.samples[0]
+    assert log.status == "error"
+    assert len(scene.policy_transcripts) == len(scene.epochs) == 2
+    # The faulted second trial keeps its transcript: forensics matter most
+    # exactly when the trial died.
+    assert scene.policy_transcripts[1] == [{"role": "assistant", "content": "walking to the cube"}]
+
+
+def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
+    class _HooklessPolicy:
+        def __init__(self) -> None:
+            self._delegate = ScriptedPolicy()
+            self.info = self._delegate.info
+            self.config = self._delegate.config
+
+        def reset(self, scene: Scene) -> None:
+            self._delegate.reset(scene)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return self._delegate.act(observation)
+
+    (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.samples[0].policy_transcripts == (None, None)
+

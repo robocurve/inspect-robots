@@ -110,6 +110,8 @@ nav:
       - guide/plugins.md
       - guide/adapters.md
       - guide/cli.md
+  - Cookbooks:
+      - cookbooks/gr00t-on-yam.md
   - API reference: api/index.md
 
 extra:

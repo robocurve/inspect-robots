@@ -19,10 +19,53 @@ from inspect_robots.errors import ConfigError
 
 ENV_MODEL = "INSPECT_ROBOTS_MODEL"
 
-_ANTHROPIC_BASE = "https://api.anthropic.com/v1"
-_OPENAI_BASE = "https://api.openai.com/v1"
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 _OPENROUTER_KEY = "OPENROUTER_API_KEY"
+
+
+@dataclass(frozen=True)
+class _DirectProvider:
+    """A provider with a stable OpenAI-compatible endpoint and conventional key name."""
+
+    base_url: str
+    key_env: str
+
+
+# OpenRouter-style prefixes that resolve to the provider's own endpoint when its
+# key is present. The prefix is stripped: these endpoints want the bare model id.
+_DIRECT_PROVIDERS: dict[str, _DirectProvider] = {
+    "anthropic": _DirectProvider("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
+    "openai": _DirectProvider("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "google": _DirectProvider(
+        "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"
+    ),
+    "x-ai": _DirectProvider("https://api.x.ai/v1", "XAI_API_KEY"),
+    "xai": _DirectProvider("https://api.x.ai/v1", "XAI_API_KEY"),
+    "groq": _DirectProvider("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+    "mistralai": _DirectProvider("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
+    "deepseek": _DirectProvider("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+}
+
+
+# OpenRouter routing-variant suffixes. The variant only means something to
+# OpenRouter, so ids carrying one are never claimed by a direct provider. A
+# closed set, not "any colon": OpenAI/Mistral fine-tune ids legitimately
+# contain colons (ft:gpt-4o-mini:org:suffix:id) and must keep routing direct.
+_OPENROUTER_VARIANTS = frozenset({"free", "nitro", "floor", "extended", "online", "thinking"})
+
+
+def _has_openrouter_variant(model_id: str) -> bool:
+    """True when the id ends in a known OpenRouter ``:variant`` suffix."""
+    _, sep, suffix = model_id.rpartition(":")
+    return bool(sep) and suffix in _OPENROUTER_VARIANTS
+
+
+def _provider_key_hints() -> str:
+    """One ``$KEY for prefix/*`` hint per distinct key, for the guided error."""
+    seen: dict[str, str] = {}
+    for prefix, direct in _DIRECT_PROVIDERS.items():
+        seen.setdefault(direct.key_env, prefix)
+    return ", ".join(f"${key} for {prefix}/*" for key, prefix in seen.items())
 
 
 @dataclass(frozen=True)
@@ -45,10 +88,13 @@ def resolve_provider(
     1. Explicit ``base_url`` — any OpenAI-compatible endpoint; the key comes
        from ``api_key_env`` (default ``OPENROUTER_API_KEY``), and a missing
        key is allowed (local vLLM/Ollama endpoints are typically keyless).
-    2. ``anthropic/*`` model + ``ANTHROPIC_API_KEY`` — the Anthropic compat
-       endpoint (provider prefix stripped from the model id).
-    3. ``openai/*`` model + ``OPENAI_API_KEY`` — OpenAI (prefix stripped).
-    4. ``OPENROUTER_API_KEY`` — OpenRouter, which takes the full
+    2. A known ``prefix/*`` model + that provider's key (``_DIRECT_PROVIDERS``:
+       anthropic, openai, google, x-ai/xai, groq, mistralai, deepseek) — the
+       provider's own endpoint, prefix stripped from the model id. Ids ending
+       in a known OpenRouter variant suffix (``_OPENROUTER_VARIANTS``, e.g.
+       ``:free``, ``:nitro``) are never claimed here — the variant only means
+       something to OpenRouter. Other colons (fine-tune ids) pass through.
+    3. ``OPENROUTER_API_KEY`` — OpenRouter, which takes the full
        ``provider/model`` string.
 
     Anything else is a guided [`ConfigError`][inspect_robots.errors.ConfigError]
@@ -64,16 +110,20 @@ def resolve_provider(
         key_env = api_key_env or _OPENROUTER_KEY
         return Provider(base_url=base_url.rstrip("/"), api_key=env.get(key_env, ""), model=model)
     provider_prefix, _, bare_model = model.partition("/")
-    if provider_prefix == "anthropic" and (key := env.get("ANTHROPIC_API_KEY")):
-        return Provider(base_url=_ANTHROPIC_BASE, api_key=key, model=bare_model)
-    if provider_prefix == "openai" and (key := env.get("OPENAI_API_KEY")):
-        return Provider(base_url=_OPENAI_BASE, api_key=key, model=bare_model)
+    direct = _DIRECT_PROVIDERS.get(provider_prefix)
+    if (
+        direct is not None
+        and bare_model  # a bare "anthropic" must not resolve to an empty model id
+        and not _has_openrouter_variant(bare_model)
+        and (key := env.get(direct.key_env))
+    ):
+        return Provider(base_url=direct.base_url, api_key=key, model=bare_model)
     if key := env.get(_OPENROUTER_KEY):
         return Provider(base_url=_OPENROUTER_BASE, api_key=key, model=model)
     raise ConfigError(
         f"no API key found for model {model!r}.\n"
         f"fix: set ${_OPENROUTER_KEY} (works for any model), or the provider's "
-        "key ($ANTHROPIC_API_KEY for anthropic/*, $OPENAI_API_KEY for openai/*), "
+        f"key ({_provider_key_hints()}), "
         "or pass -P base_url=... (+ -P api_key_env=NAME) for a custom endpoint"
     )
 

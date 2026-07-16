@@ -41,6 +41,6 @@ def test_cli_inspect(tmp_path: Path, capsys: object) -> None:
         rc = main(["inspect", str(log_path)])
     assert rc == 0
     out = buf.getvalue()
-    assert "status:      success" in out
+    assert "run status:  completed" in out
     assert "success_at_end" in out
     assert "scenes:" in out
