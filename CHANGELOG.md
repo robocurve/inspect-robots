@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Removed
+
+- **`Task.control_hz`** (breaking). `rollout()` never actually paced the
+  control loop to it — `_effective_control_hz` was dead code and the loop
+  never slept — so the field only misled adapter authors and eval
+  reproducibility records. The rollout now documents plainly that it applies
+  no wall-clock pacing of its own; an embodiment that needs real-time cadence
+  paces itself in `step()` and declares the `"self_paced"` capability. Plan
+  0001 §9 R1 is updated to match (see the inline reversal note there for
+  rationale). `compat`'s policy/embodiment rate-mismatch warning is
+  unaffected.
+
 ### Added
 
 - Live agent-policy transcript rows on the Rerun `step` timeline, with

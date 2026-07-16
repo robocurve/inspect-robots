@@ -49,8 +49,9 @@ if TYPE_CHECKING:
     from inspect_robots import Action
 
 # Isaac Lab simulators expose a privileged success oracle, are resettable and
-# seedable, and can render — but they are NOT self-paced (they step as fast as the
-# GPU allows; Inspect Robots owns wall-clock pacing).
+# seedable, and can render — and they do NOT declare self_paced: they step as
+# fast as the GPU allows, and the rollout adds no wall-clock pacing of its own,
+# so evaluation runs at full sim speed rather than being throttled to real time.
 _DEFAULT_CAPABILITIES = frozenset({"seedable", "resettable", "privileged_success", "renderable"})
 
 # Isaac Sim allows exactly ONE SimulationApp per process. Track it module-side so a
