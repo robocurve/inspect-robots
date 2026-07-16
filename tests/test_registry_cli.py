@@ -682,9 +682,10 @@ def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
 def test_cli_eval_set_policy_errors_every_reset_without_fail_on_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No metrics, no top-level error: PolicyError-class failures without
-    --fail-on-error degrade every scene silently, so the eval-set summary
-    row has neither a metric nor an error to show (see _print_eval_set_summary).
+    """A task where every trial errors degrades to a top-level error log even
+    without --fail-on-error (issue #73): there is no surviving data for
+    fail_on_error's flaky-trial tolerance to protect, so eval-set surfaces it
+    as [error] with the "all N trial(s) errored" detail, not a silent success.
     """
     from inspect_robots.registry import policy as policy_decorator
     from inspect_robots.scene import Scene
@@ -712,7 +713,36 @@ def test_cli_eval_set_policy_errors_every_reset_without_fail_on_error(
     finally:
         reg._FACTORIES["policy"].pop(name, None)
         reg._FACTORIES["task"].pop("kb/a", None)
-    assert rc == 0  # PolicyErrors without --fail-on-error never flip the top-level status
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "status: error" in out
+    assert "[error] kb/a  all 1 trial(s) errored; nothing was scored" in out
+
+
+def test_cli_eval_set_zero_scene_task_has_no_metric_or_error_detail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No metrics, no top-level error: a task with zero scenes succeeds
+    trivially (nothing ran, nothing to reduce), so its eval-set summary row
+    has neither a metric nor an error to show (see _print_eval_set_summary).
+    """
+    _register_task("kb/a", num_scenes=0)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 0
     out = capsys.readouterr().out
     assert "status: success" in out
     assert "[success] kb/a\n" in out  # no trailing metric/error detail
