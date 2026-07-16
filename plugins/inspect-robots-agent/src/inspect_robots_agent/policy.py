@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,7 @@ class AgentPolicyConfig(PolicyConfig):
     max_llm_calls: int = 100
     effort: str | None = "low"
     max_speed_frac: float = 0.1
+    transcript_echo: bool = False
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -78,6 +80,7 @@ class LLMAgentPolicy(PolicyBase):
         temperature: float | None = None,
         effort: str | None = "low",
         max_speed_frac: float = 0.1,
+        transcript_echo: bool = False,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -105,6 +108,7 @@ class LLMAgentPolicy(PolicyBase):
         # below the model, so effort trades thinking time, not safety).
         self._effort = effort
         self._max_speed_frac = max_speed_frac
+        self._transcript_echo = transcript_echo
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -113,6 +117,7 @@ class LLMAgentPolicy(PolicyBase):
             max_llm_calls=max_llm_calls,
             effort=effort,
             max_speed_frac=max_speed_frac,
+            transcript_echo=transcript_echo,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -157,6 +162,7 @@ class LLMAgentPolicy(PolicyBase):
             },
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
+        self._echo(f"[agent] goal: {scene.instruction}")
         self._calls_used = 0
 
     def transcript(self) -> list[dict[str, Any]] | None:
@@ -192,9 +198,19 @@ class LLMAgentPolicy(PolicyBase):
                 "content": _observation_content(observation, self._state_labels),
             }
         )
+        summary = f"{len(observation.images)} camera(s)"
+        state_summary = " | ".join(_state_lines(observation, self._state_labels))
+        if state_summary:
+            summary = f"{summary}, {state_summary}"
+        step_label = _step_label(observation)
+        if step_label:
+            self._echo(f"[agent] >> {step_label}: {summary}")
+        else:
+            self._echo(f"[agent] >> observation: {summary}")
         failures = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
+                self._echo("[agent] -- LLM call budget exhausted; forcing give_up")
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
             message = self._client.complete(
                 self._messages,
@@ -203,7 +219,13 @@ class LLMAgentPolicy(PolicyBase):
                 reasoning_effort=self._effort,
             )
             self._calls_used += 1
-            self._messages.append(message.raw())
+            raw_message = message.raw()
+            self._messages.append(raw_message)
+            content = raw_message.get("content")
+            if isinstance(content, str) and content:
+                self._echo(f"[agent] << {content}")
+            for tool_call in message.tool_calls:
+                self._echo(f"[agent] << tool_call {tool_call.name}({tool_call.arguments})")
 
             if not message.tool_calls:
                 failures += 1
@@ -225,10 +247,12 @@ class LLMAgentPolicy(PolicyBase):
                         "content": "ignored: one tool call per turn",
                     }
                 )
+                self._echo("[agent] -- ignored: one tool call per turn")
             result = toolset.execute(call, observation)
             self._messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result.error or result.note}
             )
+            self._echo(f"[agent] -- {result.error or result.note}")
             if result.error:
                 failures += 1
                 if failures >= _MAX_CONSECUTIVE_FAILURES:
@@ -243,15 +267,16 @@ class LLMAgentPolicy(PolicyBase):
         assert result.chunk is not None
         return result.chunk
 
+    def _echo(self, text: str) -> None:
+        if self._transcript_echo:
+            print(text, file=sys.stderr, flush=True)
 
-def _observation_content(
+
+def _state_lines(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
-) -> list[dict[str, Any]]:
-    """State as readable text plus camera frames as inline PNG data URLs."""
-    lines = ["Current observation."]
-    if observation.instruction:
-        lines.append(f"Instruction: {observation.instruction}")
+) -> list[str]:
+    lines: list[str] = []
     for key, value in observation.state.items():
         array = np.asarray(value, dtype=np.float64)
         rounded = np.round(array, 4).tolist()
@@ -264,9 +289,26 @@ def _observation_content(
                 lines.append(f"state[{key}]: {labeled}")
                 continue
         lines.append(f"state[{key}]: {rounded}")
-    parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
+    return lines
+
+
+def _step_label(observation: Observation) -> str:
     step = observation.extra.get("env_step")
-    suffix = f" (step {step})" if isinstance(step, int) else ""
+    return f"step {step}" if isinstance(step, int) else ""
+
+
+def _observation_content(
+    observation: Observation,
+    state_labels: tuple[str, tuple[str, ...]] | None = None,
+) -> list[dict[str, Any]]:
+    """State as readable text plus camera frames as inline PNG data URLs."""
+    lines = ["Current observation."]
+    if observation.instruction:
+        lines.append(f"Instruction: {observation.instruction}")
+    lines.extend(_state_lines(observation, state_labels))
+    parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
+    step_label = _step_label(observation)
+    suffix = f" ({step_label})" if step_label else ""
     for name, image in observation.images.items():
         parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})

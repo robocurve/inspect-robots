@@ -7,7 +7,9 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -30,7 +32,7 @@ from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
-from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, _observation_content
+from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, AgentPolicyConfig, _observation_content
 
 # --- scripted-conversation harness ---------------------------------------------
 
@@ -57,6 +59,26 @@ def _tool_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _text_response(text: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+def _text_and_tool_response(text: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": text,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{name}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
 
 
 def _multi_tool_response(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -91,6 +113,21 @@ class _Script:
         self.requests.append(json.loads(request.content))
         payload = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
         return httpx.Response(200, json=payload)
+
+
+class _FlushRecordingStream(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_calls: list[str] = []
+        self.flush_calls = 0
+
+    def write(self, text: str) -> int:
+        self.write_calls.append(text)
+        return super().write(text)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        super().flush()
 
 
 def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
@@ -302,6 +339,162 @@ def test_observation_content_step_label_fallbacks() -> None:
     assert string_step[1]["text"] == "camera 'top':"
     assert bool_step[1]["text"] == "camera 'top' (step True):"
     assert numpy_step[1]["text"] == "camera 'top':"
+
+
+def test_transcript_echo_defaults_off(capsys: pytest.CaptureFixture[str]) -> None:
+    policy = _policy(_Script([_tool_response("done", {"summary": "quiet"})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe quietly"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    assert capsys.readouterr().err == ""
+
+
+def test_transcript_echo_reports_conversation_in_order(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_text_and_tool_response("The goal is complete.", "done", {"summary": "ok"})]),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect the cube"))
+    policy.act(
+        Observation(
+            state={"eef_pos": np.array([0.123456, -0.2])},
+            extra={"env_step": 0},
+        )
+    )
+
+    lines = capsys.readouterr().err.splitlines()
+    expected = [
+        "[agent] goal: inspect the cube",
+        "[agent] >> step 0: 0 camera(s), state[eef_pos]: [0.1235, -0.2]",
+        "[agent] << The goal is complete.",
+        '[agent] << tool_call done({"summary": "ok"})',
+        "[agent] -- done: ok",
+    ]
+    positions = [lines.index(line) for line in expected]
+    assert positions == sorted(positions)
+
+
+def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script(
+            [
+                _multi_tool_response(
+                    [
+                        ("done", {"summary": "first executes"}),
+                        ("give_up", {"reason": "extra"}),
+                    ]
+                )
+            ]
+        ),
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    event_lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if "tool_call" in line or line.startswith("[agent] --")
+    ]
+    assert event_lines == [
+        '[agent] << tool_call done({"summary": "first executes"})',
+        '[agent] << tool_call give_up({"reason": "extra"})',
+        "[agent] -- ignored: one tool call per turn",
+        "[agent] -- done: first executes",
+    ]
+
+
+def test_transcript_echo_flushes_every_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "flushed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="flush"))
+    stream = _FlushRecordingStream()
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    policy.act(Observation(extra={"env_step": 0}))
+
+    newline_count = sum(part.count("\n") for part in stream.write_calls)
+    assert newline_count > 0
+    assert stream.flush_calls >= newline_count
+
+
+def test_transcript_echo_observation_omits_image_payloads(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "observed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(
+        Observation(
+            state={"eef_pos": np.array([0.123456])},
+            images={"top": np.zeros((1, 1, 3), dtype=np.uint8)},
+            extra={"env_step": 0},
+        )
+    )
+
+    stderr = capsys.readouterr().err
+    assert "[agent] >> step 0: 1 camera(s), state[eef_pos]: [0.1235]" in stderr
+    assert "data:image" not in stderr
+
+
+def test_transcript_echo_observation_without_environment_step(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "observed"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="observe"))
+    policy.act(Observation(state={"eef_pos": np.array([0.0])}))
+
+    assert "[agent] >> observation: 0 camera(s), state[eef_pos]: [0.0]" in capsys.readouterr().err
+
+
+def test_transcript_echo_reports_forced_give_up(capsys: pytest.CaptureFixture[str]) -> None:
+    policy = _policy(
+        _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})]),
+        max_llm_calls=1,
+        transcript_echo=True,
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    policy.act(Observation(extra={"env_step": 0}))
+    policy.act(Observation(extra={"env_step": 1}))
+
+    assert "[agent] -- LLM call budget exhausted; forcing give_up" in capsys.readouterr().err
+
+
+def test_transcript_echo_omits_empty_assistant_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "no text"})]), transcript_echo=True
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    policy.act(Observation(extra={"env_step": 0}))
+
+    assert not any(
+        line in {"[agent] <<", "[agent] << "} for line in capsys.readouterr().err.splitlines()
+    )
+
+
+def test_transcript_echo_lands_in_policy_config() -> None:
+    policy = _policy(_Script([_text_response("unused")]), transcript_echo=True)
+
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.transcript_echo is True
 
 
 def test_transcript_preserves_step_label_next_to_elided_image() -> None:
