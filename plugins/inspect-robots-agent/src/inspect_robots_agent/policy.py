@@ -187,7 +187,8 @@ class LLMAgentPolicy(PolicyBase):
         self._delta_cursor = 0
         self._calls_used = 0
 
-    def on_trial_end(self, record: "TrialRecord", log_dir: str, run_id: str) -> None:
+    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        """Persist the transcript at the end of the trial."""
         if not self._messages:
             return
 
