@@ -40,8 +40,9 @@ class TaskEnvelope:
     ``bind_task(envelope)`` hook: enough for the adapter to display or
     pre-allocate for the run (e.g. an operator countdown against
     ``max_steps``), and nothing that would let it second-guess scoring or the
-    dataset. Deliberately carries no control rate — the effective rate is
-    R1's chunk → task → embodiment precedence, unknowable before inference.
+    dataset. Deliberately carries no control rate — the rollout enforces no
+    wall-clock rate of its own (R1, revised); a self-paced embodiment owns its
+    own cadence.
     """
 
     name: str
