@@ -30,6 +30,27 @@ class ExecutionResult:
     raised: bool
 
 
+class _TurnView(dict[str, Any]):
+    """Turn-scoped ``obs`` mapping that resolves zero-arg callable values on access.
+
+    Embodiments may provide bulk ``observation.extra`` entries (depth,
+    intrinsics, extrinsics) as zero-argument callables to keep trial records
+    small; resolving them here keeps the documented ``obs[...]`` idioms
+    working unchanged for both forms.
+    """
+
+    def __getitem__(self, key: str) -> Any:
+        value = super().__getitem__(key)
+        return value() if callable(value) else value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return the resolved value for ``key``, or ``default`` when absent."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 class CodeSandbox:
     """Persistent per-trial Python namespace with observation-bound robot helpers."""
 
@@ -79,10 +100,12 @@ class CodeSandbox:
             ) from exc
         self._observation = observation
         self._motion.begin_turn(state)
-        obs: dict[str, Any] = {
-            "images": observation.images,
-            "state": observation.state,
-        }
+        obs = _TurnView(
+            {
+                "images": observation.images,
+                "state": observation.state,
+            }
+        )
         obs.update(observation.extra)
         self._namespace["obs"] = obs
 

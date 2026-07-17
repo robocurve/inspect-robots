@@ -143,3 +143,18 @@ def test_motion_helpers_share_one_cursor_and_queue(capx_stub: CapxStub) -> None:
     sandbox.reset()
     assert motion.has_actions() is False
     assert motion.cursor is None
+
+
+def test_obs_access_resolves_callable_values(capx_stub: CapxStub) -> None:
+    sandbox, _, _ = _sandbox(capx_stub)
+    sandbox.set_observation(_observation(extrinsics=lambda: np.eye(4)))
+
+    result = sandbox.execute(
+        "import numpy as np\n"
+        "pose = obs['extrinsics'] @ np.eye(4)\n"
+        "assert pose.shape == (4, 4)\n"
+        "assert obs.get('extrinsics').shape == (4, 4)\n"
+        "assert obs.get('absent') is None"
+    )
+
+    assert result.raised is False, result.stderr

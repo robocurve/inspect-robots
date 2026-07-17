@@ -184,6 +184,35 @@ def test_control_words_return_one_action_stop_hold(word: str) -> None:
     assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": word}
 
 
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [("FINISH.", "FINISH"), ("GIVE_UP!", "GIVE_UP"), ("finish", "FINISH")],
+)
+def test_control_words_tolerate_punctuation_and_case(reply: str, reason: str) -> None:
+    policy = _bound_policy(_ScriptedTransport([_completion(reply)]))
+
+    chunk = policy.act(_observation())
+
+    assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": reason}
+
+
+def test_prose_wrapped_fenced_code_executes_the_fenced_block() -> None:
+    script = _ScriptedTransport(
+        [
+            _completion(
+                "Sure, here is the corrected code:\n"
+                "```python\nimport numpy as np\nmove_to_joints(np.array([0.1, -0.1]))\n```\n"
+                "Let me know how it goes."
+            ),
+        ]
+    )
+    policy = _bound_policy(script)
+
+    chunk = policy.act(_observation())
+
+    assert np.array_equal(chunk.actions[-1].data, np.array([0.1, -0.1, 1.0]))
+
+
 def test_perception_only_turn_feeds_report_back_then_returns_motion() -> None:
     script = _ScriptedTransport(
         [

@@ -5,6 +5,7 @@ from __future__ import annotations
 from itertools import pairwise
 
 import numpy as np
+import pytest
 
 from inspect_robots.approver import DeltaLimitApprover
 from inspect_robots.spaces import ActionSemantics, Box
@@ -120,3 +121,15 @@ def test_gripper_values_come_from_box_bounds_with_configurable_polarity() -> Non
     assert normal.gripper_closed_value == 0.0
     assert inverted.gripper_open_value == 0.0
     assert inverted.gripper_closed_value == 1.0
+
+
+def test_offset_bounds_with_coarse_float_grid_are_rejected() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([1e16, 0.0]),
+        high=np.array([1e16 + 2.0, 1.0]),
+        semantics=ActionSemantics("joint_pos", gripper="continuous", dim_labels=("j0", "gripper")),
+    )
+
+    with pytest.raises(ValueError, match="too coarse"):
+        MotionQueue(space, control_hz=10.0, max_speed_frac=0.1, gripper_index=1)

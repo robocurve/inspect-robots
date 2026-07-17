@@ -57,9 +57,18 @@ class MotionQueue:
         float64_range = high64 - low64
         if not bool(np.all(np.isfinite(native_range)) and np.all(np.isfinite(float64_range))):
             raise ValueError("action-space range (high - low) overflows; bounds are too large")
+        movable = high64 > low64
+        # Interpolants snap to the float grid at the bounds' magnitude; if that
+        # grid is coarse relative to the backstop (offset boxes like
+        # [1e16, 1e16 + 2]), emitted steps can exceed the approver's budget.
+        spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
+        if bool(np.any(movable & (spacing > 5e-7 * native_backstop))):
+            raise ValueError(
+                "bounds are too coarse at this magnitude for speed-limited "
+                "interpolation (float spacing exceeds the per-step budget)"
+            )
         step_frac = min(max_speed_frac / control_hz, _BACKSTOP_STEP_FRAC)
         step_limits = np.minimum(step_frac * float64_range, native_backstop)
-        movable = high64 > low64
         if bool(np.any(movable & (step_limits <= 0))):
             raise ValueError("speed fraction underflows the per-step limit for a movable dimension")
 

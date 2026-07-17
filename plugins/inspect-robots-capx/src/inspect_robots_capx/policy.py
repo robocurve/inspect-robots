@@ -44,6 +44,8 @@ _EXECUTION_REPORT_CHAR_LIMIT = 16_000
 _REPORT_TRUNCATION_MARKER = "[execution report truncated; tail follows]\n"
 
 _FENCED_CODE = re.compile(r"^```(?:python)?[ \t]*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+_FENCED_ANYWHERE = re.compile(r"```(?:python)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+_CONTROL_WORD = re.compile(r"(FINISH|GIVE_UP)[.!]?", re.IGNORECASE)
 
 _HELPER_DOCS = """Helpers available in the persistent namespace:
 
@@ -63,8 +65,9 @@ open_gripper() / close_gripper() -> None
 
 `obs` is the current turn's dict with `images`, `state`, and every
 observation.extra entry. Depth (`{depth_key}`), intrinsics (`{intrinsics_key}`),
-and extrinsics (`{extrinsics_key}`) may be arrays or zero-argument callables;
-helper functions call callable values when needed.
+and extrinsics (`{extrinsics_key}`) may be provided by the embodiment as
+arrays or zero-argument callables; `obs[...]` access and the helper functions
+resolve callable values automatically.
 """
 
 _SYSTEM_TEMPLATE = """You generate Python code to directly solve a robot manipulation task.
@@ -405,10 +408,11 @@ class CapxPolicy(PolicyBase):
             reply = (message.content or "").strip()
             if reply:
                 self._echo(f"[capx] << {reply}")
-            if reply in {"FINISH", "GIVE_UP"}:
+            control = _CONTROL_WORD.fullmatch(reply)
+            if control is not None:
                 return motion.hold_chunk(
                     state,
-                    stop_reason=reply,
+                    stop_reason=control.group(1).upper(),
                     inference_latency_s=llm_latency,
                 )
 
@@ -453,13 +457,21 @@ class CapxPolicy(PolicyBase):
 
 
 def _extract_code(message: AssistantMessage) -> str:
-    """Normalize raw, fenced, or ``REGENERATE``-prefixed assistant code."""
+    """Normalize raw, fenced, prose-wrapped, or ``REGENERATE``-prefixed code.
+
+    A reply that is exactly one fenced block (or a bare snippet) is used as
+    is; otherwise the first fenced block wins, so surrounding prose does not
+    burn a failure turn on a ``SyntaxError``.
+    """
     code = (message.content or "").strip()
     first, separator, remainder = code.partition("\n")
     if first.strip() == "REGENERATE" and separator:
         code = remainder.strip()
     fenced = _FENCED_CODE.fullmatch(code)
-    return fenced.group(1) if fenced is not None else code
+    if fenced is not None:
+        return fenced.group(1)
+    embedded = _FENCED_ANYWHERE.search(code)
+    return embedded.group(1) if embedded is not None else code
 
 
 def _execution_report(code: str, result: ExecutionResult) -> str:
