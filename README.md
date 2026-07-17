@@ -151,7 +151,8 @@ inspect-robots "place the fork on the plate" --policy agent \
 
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
-`inspect-robots view LOG.json`.
+`inspect-robots view LOG.json`, including the camera frames the model saw (for
+`--store-frames` runs).
 
 ### Run in simulation
 
