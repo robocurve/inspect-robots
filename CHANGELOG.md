@@ -79,6 +79,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`DeltaLimitApprover` no longer rejects displacement pose modes with
+  rotation deltas** (#143). The per-dimension rotation-repr refusal now fires
+  only for **absolute** pose modes (`eef_abs_pose`), where clamping an absolute
+  euler/quat orientation has wraparound and axis-coupling problems. A
+  displacement pose mode (`eef_delta_pose`) carries small rotation deltas that
+  clamp per dimension like any other bounded displacement, so an euler-delta
+  embodiment (e.g. BridgeData V2's 7-D xyz+euler deltas) is now guardrail-ready:
+  `doctor` reports it conformant, and CLI runs keep delta limiting instead of
+  silently degrading to clamp-only.
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the
