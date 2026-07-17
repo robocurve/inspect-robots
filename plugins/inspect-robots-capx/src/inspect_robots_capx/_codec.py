@@ -1,10 +1,10 @@
 """CaP-X HTTP wire codecs isolated for protocol-drift review.
 
 The schemas mirror ``capx/serving`` in https://github.com/capgym/cap-x as
-inspected on ``main`` in July 2026, when that repository contained seven
-commits. The source plan did not preserve the upstream Git SHA, so it cannot be
-truthfully recorded here from this network-isolated worktree. The small golden
-tests below this module pin the exact bytes and shapes that were inspected.
+validated against upstream commit
+``53e9966d7a8e2fa7494676772bccc35280f5c0ed`` (2026-04-09). The protocol has no
+version field, so the small golden tests below this module pin the exact bytes
+and shapes that were inspected.
 """
 
 from __future__ import annotations
