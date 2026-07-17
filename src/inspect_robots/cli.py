@@ -15,6 +15,8 @@ Subcommands:
   per-task row instead of a full summary per task.
 - ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
   optionally append recorded policy conversations.
+- ``inspect-robots view LOG.json [-o OUT.html] [--open]`` — render a saved eval log
+  as a self-contained HTML report.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
@@ -39,7 +41,7 @@ import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from inspect_robots import __version__
 from inspect_robots._defaults import (
@@ -55,6 +57,15 @@ from inspect_robots._defaults import (
     set_default,
 )
 from inspect_robots._dotenv import init_dotenv
+from inspect_robots._html import (
+    _STATUS_DISPLAY as _STATUS_DISPLAY,
+)
+from inspect_robots._html import (
+    _chat_content,
+    _display_status,
+    _is_chat_transcript,
+    render_html,
+)
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
@@ -83,8 +94,6 @@ _GREEN = "32"
 _RED = "31"
 _YELLOW = "33"
 
-_STATUS_DISPLAY = {"success": "completed"}
-
 _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
@@ -106,7 +115,17 @@ _KIND_BY_PLURAL = {
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
 
-_SUBCOMMANDS = ("list", "run", "eval-set", "inspect", "video", "config", "setup", "doctor")
+_SUBCOMMANDS = (
+    "list",
+    "run",
+    "eval-set",
+    "inspect",
+    "view",
+    "video",
+    "config",
+    "setup",
+    "doctor",
+)
 
 _ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
 
@@ -259,6 +278,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript",
         action="store_true",
         help="append recorded policy transcripts",
+    )
+
+    p_view = sub.add_parser("view", help="render a saved eval log as a self-contained HTML report")
+    p_view.add_argument("log", help="path to an EvalLog JSON file")
+    p_view.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help="output HTML file (default: LOG with an .html suffix; - writes to stdout)",
+    )
+    p_view.add_argument(
+        "--open",
+        action="store_true",
+        help="open the written report in the default web browser",
     )
 
     p_video = sub.add_parser(
@@ -522,11 +556,6 @@ def _step_limit_count(log: EvalLog) -> int:
     )
 
 
-def _display_status(status: str) -> str:
-    """Return the human-facing form of a run status."""
-    return _STATUS_DISPLAY.get(status, status)
-
-
 def _outcome_line(log: EvalLog) -> tuple[str, bool] | None:
     """Return an outcome digest and unmapped flag, or ``None`` with no reasons."""
     reasons: list[object] = [
@@ -593,30 +622,6 @@ def _print_degraded(line: str) -> None:
     reader must degrade, never crash, on the episodes it exists to explain.
     """
     print(line.encode("utf-8", errors="replace").decode("utf-8"))
-
-
-def _chat_content(content: object) -> str | None:
-    """Render text from an OpenAI-style content value, collapsing media parts."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return None
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, dict) and part.get("type") == "text":
-            parts.append(str(part.get("text", "")))
-        else:
-            parts.append("[image]")
-    return "\n".join(parts)
-
-
-def _is_chat_transcript(transcript: object) -> bool:
-    """Recognize a non-empty list of role-bearing message dictionaries."""
-    return (
-        isinstance(transcript, list)
-        and bool(transcript)
-        and all(isinstance(message, dict) and "role" in message for message in transcript)
-    )
 
 
 def _render_chat_transcript(transcript: list[object]) -> None:
@@ -699,7 +704,8 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
-    print(_styled(f"hint: view it with: inspect-robots inspect {log_path}", _DIM))
+    print(_styled(f"hint: inspect it with: inspect-robots inspect {log_path}", _DIM))
+    print(_styled(f"hint: HTML viewer: inspect-robots view {log_path}", _DIM))
     if _has_policy_transcripts(log):
         print(
             _styled(
@@ -919,7 +925,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
                 _print_degraded(f"cancelled: partial log written to {sink.path}")
-                print(_styled(f"hint: view it with: inspect-robots inspect {sink.path}", _DIM))
+                print(_styled(f"hint: inspect it with: inspect-robots inspect {sink.path}", _DIM))
             else:
                 _print_degraded("cancelled: no log written")
             return 130
@@ -964,6 +970,12 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
                 _DIM,
             )
         )
+    print(
+        _styled(
+            f"hint: HTML viewer: inspect-robots view {log_dir}/<task>_<id>.json",
+            _DIM,
+        )
+    )
 
 
 def _cmd_eval_set(args: argparse.Namespace) -> int:
@@ -1016,6 +1028,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 _styled(
                     f"hint: inspect a log with: inspect-robots inspect "
                     f"{args.log_dir}/<task>_<id>.json",
+                    _DIM,
+                )
+            )
+            print(
+                _styled(
+                    f"hint: HTML viewer: inspect-robots view {args.log_dir}/<task>_<id>.json",
                     _DIM,
                 )
             )
@@ -1092,7 +1110,52 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
         _print_policy_transcripts(log)
     elif _has_policy_transcripts(log):
         print("policy transcripts: recorded (--transcript to print)")
+        print(_styled(f"hint: HTML viewer: inspect-robots view {path}", _DIM))
     return 0 if log.status == "success" else 1
+
+
+def _cmd_view(args: argparse.Namespace) -> int:
+    """Render a saved log to a UTF-8 HTML artifact and optionally open it."""
+    import webbrowser
+
+    from inspect_robots import read_eval_log
+
+    stdout_mode = args.out == "-"
+    if stdout_mode and args.open:
+        raise SystemExit("--open cannot be used with -o -: no file to open")
+
+    log_path = Path(args.log)
+    out_path = (
+        None
+        if stdout_mode
+        else (log_path.with_suffix(".html") if args.out is None else Path(args.out))
+    )
+    if out_path is not None and out_path.exists() and out_path.is_dir():
+        raise SystemExit(f"--out {out_path} is a directory; pass an HTML file path")
+
+    log = read_eval_log(args.log)
+    document = render_html(log, title=f"{log.eval.task} - {log_path.name}")
+    if stdout_mode:
+        degraded = document.encode("utf-8", errors="replace").decode("utf-8")
+        sys.stdout.write(degraded)
+        return 0
+
+    file_path = cast(Path, out_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("w", encoding="utf-8", errors="replace") as handle:
+        handle.write(document)
+    print(f"wrote {file_path}")
+
+    if args.open:
+        uri = file_path.resolve().as_uri()
+        try:
+            opened = webbrowser.open(uri)
+        except Exception as exc:
+            print(f"warning: could not open browser for {file_path}: {exc}", file=sys.stderr)
+        else:
+            if not opened:
+                print(f"warning: could not open browser for {file_path}", file=sys.stderr)
+    return 0
 
 
 def _cmd_video(args: argparse.Namespace) -> int:
@@ -1277,6 +1340,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_eval_set(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log, transcript=args.transcript)
+    if args.command == "view":
+        return _cmd_view(args)
     if args.command == "video":
         return _cmd_video(args)
     if args.command == "config":

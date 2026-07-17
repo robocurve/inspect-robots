@@ -107,9 +107,10 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
     assert "error:" not in out
-    # A clean run still teaches how to read the log — and nothing else hints.
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
-    assert out.count("hint:") == 1
+    # A clean run teaches both terminal and browser read-back commands.
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
+    assert f"hint: HTML viewer: inspect-robots view {written}" in out
+    assert out.count("hint:") == 2
 
 
 @pytest.mark.parametrize(
@@ -212,7 +213,7 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     assert "scene-0" not in out  # successful scenes are not failure context
     assert out.count("EmbodimentFault: reset exploded") == 1
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_prints_distinct_scene_error(
@@ -293,7 +294,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
     assert "[error] scene-0: PolicyError: invalid API key" in out
     assert "trials: 1 (1 errored)" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
     # And `inspect` on the written log shows the same headline facts.
     assert main(["inspect", str(written)]) == 1
     out = capsys.readouterr().out
@@ -346,7 +347,7 @@ def test_cli_partial_errors_stay_success_but_are_visible(
     assert "trials: 2 (1 errored)" in out
     assert "[error] scene-1: PolicyError: policy reset exploded" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(
@@ -423,6 +424,7 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert "[completed] kb/a" in out
     assert "[completed] kb/b" in out
     assert out.count("log dir:") == 1  # one shared line, not one per task
+    assert "hint: HTML viewer: inspect-robots view" in out
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
@@ -784,6 +786,7 @@ def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
     out = capsys.readouterr().out
     assert f"cancelled: partial logs are under {tmp_path}" in out
     assert "inspect-robots inspect" in out
+    assert "inspect-robots view" in out
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -796,6 +799,10 @@ def test_cli_help_lists_setup(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert excinfo.value.code == 0
     assert "setup" in capsys.readouterr().out
+
+
+def test_view_is_protected_by_instruction_sugar_guard() -> None:
+    assert "view" in cli._SUBCOMMANDS
 
 
 def test_setup_is_protected_by_instruction_sugar_guard() -> None:
@@ -941,6 +948,156 @@ def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
     path = tmp_path / name
     path.write_text(json.dumps(log.to_dict()), encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize("name", ["run.json", "run"])
+def test_view_derives_default_html_path(
+    name: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, name)
+    expected = path.with_suffix(".html")
+
+    assert main(["view", str(path)]) == 0
+
+    document = expected.read_text(encoding="utf-8")
+    assert document.startswith("<!doctype html>")
+    assert f"<title>adhoc - {name}</title>" in document
+    assert capsys.readouterr().out == f"wrote {expected}\n"
+
+
+def test_view_honors_output_override(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.htm"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert capsys.readouterr().out == f"wrote {output}\n"
+
+
+def test_view_stdout_contains_only_the_document(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    assert main(["view", str(path), "-o", "-"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("<!doctype html>")
+    assert "wrote " not in out
+
+
+def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "existing-directory"
+    output.mkdir()
+
+    with pytest.raises(SystemExit, match="is a directory; pass an HTML file path"):
+        main(["view", str(path), "-o", str(output)])
+
+
+def test_view_rejects_open_with_stdout(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="no file to open"):
+        main(["view", str(path), "-o", "-", "--open"])
+
+
+def test_view_creates_missing_output_parents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "new" / "nested" / "report.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert output.is_file()
+    assert capsys.readouterr().out == f"wrote {output}\n"
+
+
+@pytest.mark.parametrize("stdout_mode", [False, True])
+def test_view_degrades_lone_surrogates_in_both_output_modes(
+    stdout_mode: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log()
+    scene = dataclasses.replace(log.samples[0], instruction="bad \ud800 data")
+    path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "hostile.json")
+
+    if stdout_mode:
+        assert main(["view", str(path), "-o", "-"]) == 0
+        document = capsys.readouterr().out
+    else:
+        output = tmp_path / "hostile.html"
+        assert main(["view", str(path), "-o", str(output)]) == 0
+        capsys.readouterr()
+        document = output.read_text(encoding="utf-8")
+
+    assert "\ud800" not in document
+    assert "bad ? data" in document
+
+
+def test_view_open_receives_resolved_file_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.html"
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    assert main(["view", str(path), "-o", str(output), "--open"]) == 0
+    assert opened == [output.resolve().as_uri()]
+    assert capsys.readouterr().err == ""
+
+
+def test_view_false_browser_result_warns_without_changing_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    monkeypatch.setattr("webbrowser.open", lambda _uri: False)
+
+    assert main(["view", str(path), "--open"]) == 0
+
+    assert "warning: could not open browser" in capsys.readouterr().err
+
+
+def test_view_browser_exception_warns_without_changing_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    def fail_to_open(_uri: str) -> bool:
+        raise RuntimeError("browser unavailable")
+
+    monkeypatch.setattr("webbrowser.open", fail_to_open)
+
+    assert main(["view", str(path), "--open"]) == 0
+
+    err = capsys.readouterr().err
+    assert "warning: could not open browser" in err
+    assert "browser unavailable" in err
+
+
+@pytest.mark.parametrize("status", ["success", "error"])
+def test_view_exit_code_reports_artifact_production_not_eval_status(
+    status: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_transcript_log(status=status), tmp_path, f"{status}.json")
+
+    assert main(["view", str(path)]) == 0
+    capsys.readouterr()
 
 
 def test_run_outcome_shows_timeout_without_a_count(
@@ -1175,6 +1332,7 @@ def test_plain_inspect_mentions_recorded_policy_transcripts(
     assert main(["inspect", str(path)]) == 0
     out = capsys.readouterr().out
     assert "policy transcripts: recorded (--transcript to print)" in out
+    assert f"hint: HTML viewer: inspect-robots view {path}" in out
     assert "scene s0, trial 0:" not in out
 
 
@@ -1183,7 +1341,8 @@ def test_run_summary_adds_agent_conversation_hint_when_recorded(
 ) -> None:
     cli._print_run_summary(_transcript_log(), "run.json", is_adhoc=False)
     out = capsys.readouterr().out
-    assert "hint: view it with: inspect-robots inspect run.json" in out
+    assert "hint: inspect it with: inspect-robots inspect run.json" in out
+    assert "hint: HTML viewer: inspect-robots view run.json" in out
     assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
 
 
