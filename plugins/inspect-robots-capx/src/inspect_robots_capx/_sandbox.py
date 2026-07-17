@@ -44,11 +44,15 @@ class _TurnView(dict[str, Any]):
         return value() if callable(value) else value
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Return the resolved value for ``key``, or ``default`` when absent."""
-        try:
-            return self[key]
-        except KeyError:
+        """Return the resolved value for ``key``, or ``default`` when absent.
+
+        Membership decides absence, so a ``KeyError`` raised inside an
+        embodiment-provided thunk propagates instead of masquerading as a
+        missing key.
+        """
+        if key not in self:
             return default
+        return self[key]
 
 
 class CodeSandbox:

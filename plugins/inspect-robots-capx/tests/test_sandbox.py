@@ -158,3 +158,16 @@ def test_obs_access_resolves_callable_values(capx_stub: CapxStub) -> None:
     )
 
     assert result.raised is False, result.stderr
+
+
+def test_obs_get_propagates_errors_raised_inside_thunks(capx_stub: CapxStub) -> None:
+    def broken() -> Any:
+        raise KeyError("embodiment thunk bug")
+
+    sandbox, _, _ = _sandbox(capx_stub)
+    sandbox.set_observation(_observation(depth=broken))
+
+    result = sandbox.execute("value = obs.get('depth')")
+
+    assert result.raised is True
+    assert "embodiment thunk bug" in result.stderr
