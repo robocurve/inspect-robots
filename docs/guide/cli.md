@@ -264,6 +264,28 @@ scenes:
 `completed` is the display form of the log's `success` status value; the
 on-disk field and Python API keep `success`.
 
+## `inspect-robots view`
+
+Render a saved [`EvalLog`][inspect_robots.log.EvalLog] as a self-contained HTML
+report:
+
+```bash
+inspect-robots view logs/cubepick-reach_xxxx.json
+```
+
+The report puts the run status, configuration, metrics, scene results, and
+recorded policy conversations on one page. Agent notes from tool calls are
+highlighted above their call lines. The file contains its stylesheet inline
+and uses native browser controls to collapse transcripts, so it has no network
+or JavaScript dependency.
+
+By default, `view` replaces the log path's suffix with `.html` and prints the
+written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
+the HTML document to stdout, or `--open` to launch the written file in the
+default browser. Missing output directories are created. The command returns
+0 whenever it produces the report, even when the evaluation recorded a failed
+or cancelled run.
+
 ## `inspect-robots video`
 
 Render a `--store-frames` run's stored camera frames into one MP4 per

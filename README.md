@@ -149,7 +149,9 @@ inspect-robots "place the fork on the plate" --policy agent \
     -P model=anthropic/claude-fable-5 -P effort=low
 ```
 
-Read the recorded agent conversation with `inspect-robots inspect LOG.json --transcript`.
+Read the recorded agent conversation with
+`inspect-robots inspect LOG.json --transcript`, or open the HTML report with
+`inspect-robots view LOG.json`.
 
 ### Run in simulation
 
@@ -179,6 +181,12 @@ Pretty-print a saved eval log:
 
 ```bash
 inspect-robots inspect logs/cubepick-reach_*.json
+```
+
+Render a saved eval log as a self-contained HTML report:
+
+```bash
+inspect-robots view logs/cubepick-reach_*.json
 ```
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
