@@ -80,8 +80,14 @@ class ClampApprover:
 # change, limited directly). Together these cover every ControlMode literal.
 _ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
 _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
-# Rotation reps that survive independent per-dimension clamping (same set the
-# EnsemblingController accepts for per-dimension averaging).
+# Absolute pose modes only: clamping an absolute euler/quat orientation per
+# dimension has wraparound and axis-coupling problems, so those reps are
+# refused. Displacement pose modes (eef_delta_pose) carry small rotation
+# *deltas*, which clamp per dimension like any other bounded displacement.
+_ABSOLUTE_POSE_MODES = _ABSOLUTE_MODES & _POSE_MODES
+# Rotation reps that survive independent per-dimension clamping of an absolute
+# orientation (same set the EnsemblingController accepts for per-dimension
+# averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
 _LAST_APPROVED_KEY = "delta_limit:last"
 
@@ -103,8 +109,9 @@ class DeltaLimitApprover:
     explicit ``max_delta`` the limiter adds nothing beyond ``ClampApprover``.
 
     Construction never guesses: missing semantics, a needed missing/non-finite
-    bound without an explicit ``max_delta``, or a pose mode whose rotation
-    representation cannot be clamped per-dimension all raise ``ValueError``.
+    bound without an explicit ``max_delta``, or an **absolute** pose mode whose
+    rotation representation cannot be clamped per-dimension all raise
+    ``ValueError`` (a displacement pose mode's rotation deltas clamp fine).
     ``NaN`` anywhere in a reviewed action raises
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A modified action is
     flagged ``meta["delta_clamped"]``; an unmodified one is returned as the
@@ -119,10 +126,11 @@ class DeltaLimitApprover:
                 "DeltaLimitApprover: action space declares no semantics; the "
                 "limiter cannot tell absolute targets from displacements"
             )
-        if sem.control_mode in _POSE_MODES and sem.rotation_repr not in _LIMITABLE_ROT:
+        if sem.control_mode in _ABSOLUTE_POSE_MODES and sem.rotation_repr not in _LIMITABLE_ROT:
             raise ValueError(
-                f"DeltaLimitApprover: cannot clamp rotation_repr {sem.rotation_repr!r} "
-                f"per dimension; only {sorted(_LIMITABLE_ROT)} are safe"
+                f"DeltaLimitApprover: cannot clamp absolute rotation_repr "
+                f"{sem.rotation_repr!r} per dimension; only {sorted(_LIMITABLE_ROT)} "
+                f"are safe (displacement pose modes carry rotation deltas and are fine)"
             )
         self._absolute = sem.control_mode in _ABSOLUTE_MODES
         dim = action_space.dim

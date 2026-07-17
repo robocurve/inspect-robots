@@ -13,7 +13,7 @@ import pytest
 
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
 from inspect_robots.errors import SafetyAbort
-from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.spaces import ActionSemantics, Box, RotationRepr
 from inspect_robots.types import Action
 
 
@@ -44,7 +44,9 @@ def test_refuses_missing_semantics() -> None:
         DeltaLimitApprover(Box(shape=(2,), low=np.zeros(2), high=np.ones(2)))
 
 
-def test_refuses_pose_mode_with_unaverageable_rotation() -> None:
+def test_refuses_absolute_pose_mode_with_unaverageable_rotation() -> None:
+    # Absolute euler/quat orientations have wraparound + axis coupling, so
+    # per-dim clamping is unsound and refused.
     space = Box(
         shape=(7,),
         low=np.full(7, -1.0),
@@ -53,6 +55,24 @@ def test_refuses_pose_mode_with_unaverageable_rotation() -> None:
     )
     with pytest.raises(ValueError, match="rotation_repr"):
         DeltaLimitApprover(space)
+
+
+@pytest.mark.parametrize("rotation_repr", ["euler_xyz", "quat_wxyz", "axis_angle"])
+def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -> None:
+    # eef_delta_pose carries small rotation *deltas*, not absolute orientations,
+    # so any rotation_repr clamps per dimension like a bounded displacement (#143).
+    # BridgeData V2 shape: 3 xyz + 3 euler deltas + 1 gripper.
+    space = Box(
+        shape=(7,),
+        low=np.full(7, -0.1),
+        high=np.full(7, 0.1),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
+    )
+    approver = DeltaLimitApprover(space, max_delta=0.05)
+    # A large rotation-delta dim (dpitch, index 4) clamps to the ±max_delta box.
+    out = approver.review(Action(data=np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])), {})
+    assert np.isclose(out.data[4], 0.05)
+    assert out.meta.get("delta_clamped") is True
 
 
 def test_refuses_derived_default_without_bounds() -> None:
