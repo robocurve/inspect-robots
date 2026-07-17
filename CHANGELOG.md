@@ -21,6 +21,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin:** move tool calls now require a note describing the current
+  observation and why the agent chose the motion, so users can follow its
+  perception and decisions live and in saved transcripts (#130).
 - **`inspect-robots eval-set TASK [TASK ...]`**: run several registered tasks
   against one resolved policy/embodiment pair in a single invocation, matching
   task names exactly or by shell-quoted `fnmatch` glob (e.g.
