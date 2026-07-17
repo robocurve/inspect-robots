@@ -21,6 +21,8 @@ _ARM_LABELS = tuple(
     for side in ("left", "right")
     for part in (*[f"j{i}" for i in range(6)], "gripper")
 )
+_DEFAULT_MOVE_NOTE = "The robot state is visible, so I chose this motion to make progress."
+_NOTE_ERROR = "note is required: describe what you observe and why you chose this motion"
 
 
 def _bimanual_space() -> Box:
@@ -66,6 +68,8 @@ def _delta_space(
 
 
 def _call(name: str, **arguments: object) -> ToolCall:
+    if name in ("move_joints", "move_to", "move_by"):
+        arguments.setdefault("note", _DEFAULT_MOVE_NOTE)
     return ToolCall(id="call_1", name=name, arguments=json.dumps(arguments))
 
 
@@ -79,6 +83,7 @@ def _execute_absolute(
     *,
     control_hz: float | None = 10.0,
     max_speed_frac: float = 0.1,
+    note: object = _DEFAULT_MOVE_NOTE,
 ) -> ToolResult:
     toolset = build_toolset(
         _absolute_space(),
@@ -87,7 +92,7 @@ def _execute_absolute(
         max_speed_frac=max_speed_frac,
     )
     return toolset.execute(
-        _call("move_joints", targets={"joint": target}),
+        _call("move_joints", note=note, targets={"joint": target}),
         _obs({"q": np.array([current])}),
     )
 
@@ -380,12 +385,36 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
     move_schema = json.dumps(absolute.schemas()[0])
     assert "left_j0" in move_schema and "right_gripper" in move_schema
     assert "duration_s" not in move_schema
-    assert absolute.schemas()[0]["function"]["parameters"]["required"] == ["targets"]
+    absolute_parameters = [schema["function"]["parameters"] for schema in absolute.schemas()]
+    assert [parameters["required"] for parameters in absolute_parameters] == [
+        ["targets", "note"],
+        ["summary"],
+        ["reason"],
+    ]
+    assert absolute_parameters[0]["properties"]["note"] == {
+        "type": "string",
+        "description": (
+            "What you observe right now in the observation (images, if any, and state), and why "
+            "you chose this motion. The user reads these notes live and in the saved transcript "
+            "to follow what you see and what you decide. Write for them, in one or two plain "
+            "sentences."
+        ),
+    }
+    assert "note" not in absolute_parameters[1]["properties"]
+    assert "note" not in absolute_parameters[2]["properties"]
 
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     names = [t["function"]["name"] for t in displacement.schemas()]
     assert names == ["move_by", "done", "give_up"]
-    assert displacement.schemas()[0]["function"]["parameters"]["required"] == ["deltas"]
+    displacement_parameters = [
+        schema["function"]["parameters"] for schema in displacement.schemas()
+    ]
+    assert [parameters["required"] for parameters in displacement_parameters] == [
+        ["deltas", "note"],
+        ["summary"],
+        ["reason"],
+    ]
+    assert displacement_parameters[0]["properties"]["note"]["type"] == "string"
 
 
 # --- absolute-mode synthesis ---------------------------------------------------
@@ -524,7 +553,11 @@ def test_broken_sensor_raises_even_with_malformed_arguments() -> None:
     # correctable structured error.
     with pytest.raises(ValueError, match="non-finite"):
         toolset.execute(
-            _call("move_joints", targets={"unknown_dim": 0.1}),
+            ToolCall(
+                id="call_1",
+                name="move_joints",
+                arguments=json.dumps({"targets": {"unknown_dim": 0.1}}),
+            ),
             _obs({"q": np.array([float("nan")])}),
         )
 
@@ -674,6 +707,51 @@ def test_arbitrary_precision_json_integer_is_a_structured_error() -> None:
 # --- done, notes, and structured errors ---------------------------------------
 
 
+def test_missing_move_note_is_a_structured_error_in_both_modes() -> None:
+    absolute = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    absolute_call = ToolCall(
+        id="call_1",
+        name="move_joints",
+        arguments=json.dumps({"targets": {"joint": 0.1}}),
+    )
+    absolute_result = absolute.execute(absolute_call, _obs())
+    assert absolute_result.chunk is None
+    assert absolute_result.error == _NOTE_ERROR
+
+    displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    displacement_call = ToolCall(
+        id="call_1",
+        name="move_by",
+        arguments=json.dumps({"deltas": {"0": 0.05}}),
+    )
+    displacement_result = displacement.execute(displacement_call, _obs({}))
+    assert displacement_result.chunk is None
+    assert displacement_result.error == _NOTE_ERROR
+
+
+@pytest.mark.parametrize("note", ["", "   ", 42])
+def test_invalid_move_note_is_a_structured_error(note: object) -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    result = toolset.execute(_call("move_by", note=note, deltas={"0": 0.05}), _obs({}))
+    assert result.chunk is None
+    assert result.error == _NOTE_ERROR
+
+
+def test_valid_move_note_does_not_change_the_motion_chunk() -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    result = toolset.execute(
+        _call(
+            "move_by",
+            note="The end effector is short of the target, so I will move it along x.",
+            deltas={"0": 0.05},
+        ),
+        _obs({}),
+    )
+    assert result.error is None and result.chunk is not None
+    assert len(result.chunk.actions) == 1
+    assert result.chunk.actions[0].data.tobytes() == np.array([0.05, 0.0]).tobytes()
+
+
 def test_done_and_give_up_emit_control_mode_hold() -> None:
     absolute = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
     state = np.full(14, 0.3)
@@ -697,7 +775,11 @@ def test_done_and_give_up_emit_control_mode_hold() -> None:
 def test_tool_errors_are_messages_not_exceptions() -> None:
     toolset = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
     cases = [
-        _call("move_joints", targets={"left_elbow": 0.1}),
+        _call(
+            "move_joints",
+            note="The arm is centered, so I will test an invalid named joint.",
+            targets={"left_elbow": 0.1},
+        ),
         _call("move_joints", targets={"left_j0": float("nan")}),
         _call("move_joints", targets={"left_j0": "fast"}),
         _call("move_joints", targets={}),
@@ -716,7 +798,12 @@ def test_tool_errors_are_messages_not_exceptions() -> None:
 def test_stray_duration_key_is_ignored() -> None:
     toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     result = toolset.execute(
-        _call("move_by", deltas={"0": 0.05}, duration_s=0.001),
+        _call(
+            "move_by",
+            note="The target is ahead, so I will move slightly along x.",
+            deltas={"0": 0.05},
+            duration_s=0.001,
+        ),
         _obs({}),
     )
     assert result.error is None and result.chunk is not None
