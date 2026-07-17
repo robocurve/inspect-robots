@@ -315,3 +315,23 @@ def test_client_error_does_not_retry() -> None:
     with pytest.raises(RuntimeError, match="bad tool schema"):
         client.complete(messages=[], tools=[])
     assert calls["n"] == 1  # 4xx is our bug, not weather; retrying can't help
+
+
+def test_reasoning_tools_rejection_has_responses_wire_guidance() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            text=(
+                "Function tools with reasoning_effort are not supported. "
+                "To use function tools, use /v1/responses."
+            ),
+        )
+
+    client = _client(handler, backoff_s=0.0)
+    with pytest.raises(RuntimeError) as excinfo:
+        client.complete(messages=[], tools=[])
+
+    assert str(excinfo.value).endswith(
+        "fix: pass -P wire=responses (needs a direct OpenAI endpoint, e.g. "
+        "$OPENAI_API_KEY set), or -P effort=none"
+    )

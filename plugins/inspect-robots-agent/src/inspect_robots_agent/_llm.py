@@ -139,7 +139,7 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class AssistantMessage:
-    """The parsed ``choices[0].message`` of a chat completion."""
+    """One parsed assistant turn shared by the supported API wire clients."""
 
     content: str | None
     tool_calls: tuple[ToolCall, ...]
@@ -216,7 +216,13 @@ class ChatClient:
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code not in (429,) and response.status_code < 500:
                     # A 4xx is our request's fault; retrying cannot help.
-                    raise RuntimeError(f"LLM request rejected — {last_error}")
+                    guidance = ""
+                    if "reasoning_effort" in response.text and "/v1/responses" in response.text:
+                        guidance = (
+                            "\nfix: pass -P wire=responses (needs a direct OpenAI endpoint, e.g. "
+                            "$OPENAI_API_KEY set), or -P effort=none"
+                        )
+                    raise RuntimeError(f"LLM request rejected — {last_error}{guidance}")
             if attempt + 1 < self._max_retries:
                 time.sleep(self._backoff_s * 2**attempt)
         raise RuntimeError(f"LLM request failed after {self._max_retries} attempts — {last_error}")

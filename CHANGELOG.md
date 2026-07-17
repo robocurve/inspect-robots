@@ -19,6 +19,15 @@ All notable changes to this project are documented here. The format is based on
   rationale). `compat`'s policy/embodiment rate-mismatch warning is
   unaffected.
 
+### Changed
+
+- **Agent plugin:** move tool calls now require a note describing the current
+  observation and why the agent chose the motion, so users can follow its
+  perception and decisions live and in saved transcripts (#130). This tightens
+  the tool contract: a model that persistently omits the note errors the trial
+  (unscored) after three consecutive failures, and each correction turn spends
+  one `max_llm_calls` unit.
+
 ### Added
 
 - **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
@@ -34,6 +43,24 @@ All notable changes to this project are documented here. The format is based on
   are stripped from the transcript to save space, as they are already
   recorded in the frame store. The relative path to the transcript is
   stored in the trial's metadata for easy post-hoc analysis (#40).
+- **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
+  so reasoning effort works together with function tools on recent OpenAI
+  models (Chat Completions rejects the combination, observed on
+  `gpt-5.6-sol`). The chat-wire rejection now names the fix in its error
+  message (#131).
+- **`inspect-robots view LOG.json`**: render a saved eval log as a
+  self-contained HTML report with run metadata, scores, scene results,
+  collapsible policy conversations, highlighted agent notes, and the camera
+  frames the model saw in `--store-frames` runs. `--no-frames` keeps
+  placeholders and `--frames-budget` controls the inline payload limit (#132,
+  #141).
+- **`inspect-robots eval-set TASK [TASK ...]`**: run several registered tasks
+  against one resolved policy/embodiment pair in a single invocation, matching
+  task names exactly or by shell-quoted `fnmatch` glob (e.g.
+  `'kitchenbench/*'`). Thin CLI wrapper over
+  [`eval_set`][inspect_robots.eval.eval_set] that resolves the embodiment once
+  for the whole set rather than once per task, and prints one status line plus
+  a compact per-task row instead of a full summary per task (#45).
 - Live agent-policy transcript rows on the Rerun `step` timeline, with
   best-effort non-blocking streaming and complete eval-log persistence (#124).
 - Remote Rerun streaming via `inspect-robots run --rerun-connect [URL]`, so

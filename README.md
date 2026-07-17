@@ -93,6 +93,20 @@ and it identifies which is which), then writes
 instead and type its component names at the prompts; to write the config file
 by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
 
+The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
+server is listening, and the server does not start itself or survive a
+reboot (full setup in the
+[yam plugin README](https://github.com/robocurve/inspect-robots-yam#install-on-the-robotgpu-machine)):
+
+```bash
+# On the GPU machine, from the MolmoAct2 repo. Leave it running, e.g. in tmux:
+python examples/yam/host_server_yam.py --host 0.0.0.0 --port 8202
+curl http://127.0.0.1:8202/act      # 200 means the server is ready
+```
+
+On a different rig, start whatever serves your policy instead; in-process
+policies (such as `agent` or the mock `scripted`) need no server.
+
 Then tell the robot what to do:
 
 ```bash
@@ -135,7 +149,31 @@ inspect-robots "place the fork on the plate" --policy agent \
     -P model=anthropic/claude-fable-5 -P effort=low
 ```
 
-Read the recorded agent conversation with `inspect-robots inspect LOG.json --transcript`.
+Read the recorded agent conversation with
+`inspect-robots inspect LOG.json --transcript`, or open the HTML report with
+`inspect-robots view LOG.json`, including the camera frames the model saw (for
+`--store-frames` runs).
+
+### Generate robot policy code with CaP-X:
+
+The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a
+code-as-policy agent in the same policy slot. The LLM writes Python against
+SAM3 segmentation, Contact-GraspNet planning, Pyroki IK, and speed-limited
+joint-motion helpers. CaP-X model servers run separately, while the persistent
+code namespace and action queue run inside the evaluator.
+
+```bash
+uv pip install inspect-robots-capx
+
+inspect-robots "place the fork on the plate" --policy capx \
+    --embodiment <joint-space-embodiment> \
+    -P model=anthropic/claude-fable-5 -P sam3_url=http://gpu-box:8114
+```
+
+The v1 adapter requires one `joint_pos` arm with a declared gripper, full
+joint-state proprioception, a control rate, and a camera. See the
+[plugin README](plugins/inspect-robots-capx/) for model-server bringup, depth
+metadata, gripper polarity, and the model-code trust boundary.
 
 ### Run in simulation
 
@@ -165,6 +203,12 @@ Pretty-print a saved eval log:
 
 ```bash
 inspect-robots inspect logs/cubepick-reach_*.json
+```
+
+Render a saved eval log as a self-contained HTML report:
+
+```bash
+inspect-robots view logs/cubepick-reach_*.json
 ```
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
@@ -241,6 +285,10 @@ adapter shipped from this repo as separate packages:
   embodiment through tool calls, as a first-class policy. The same
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
   next to fine-tuned VLAs.
+- **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
+  code-as-policy agents against a joint-space embodiment. Model-generated
+  Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
+  then queues approver-checked joint targets behind `--policy capx`.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:

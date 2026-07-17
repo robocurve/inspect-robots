@@ -43,8 +43,8 @@ class ToolsetError(Exception):
 class ToolResult:
     """One executed tool call: an action chunk to play, or an error for the LLM.
 
-    Exactly one of ``chunk``/``error`` is set. ``note`` is the human/LLM-facing
-    confirmation text for successful calls.
+    Exactly one of ``chunk``/``error`` is set. ``note`` is the result confirmation
+    text for a successful call, distinct from the call's required ``note`` argument.
     """
 
     chunk: ActionChunk | None = None
@@ -146,8 +146,18 @@ class Toolset:
                                 + ", ".join(self._labels)
                             ),
                         },
+                        "note": {
+                            "type": "string",
+                            "description": (
+                                "What you observe right now in the observation (images, if any, "
+                                "and state), and why you chose this motion. The user reads these "
+                                "notes live and in the saved transcript to follow what you see "
+                                "and what you decide. Write for them, in one or two plain "
+                                "sentences."
+                            ),
+                        },
                     },
-                    "required": [values_key],
+                    "required": [values_key, "note"],
                 },
             },
         }
@@ -221,6 +231,12 @@ class Toolset:
             current = self._current_state(observation)
             if not bool(np.all(np.isfinite(current))):
                 raise ValueError("proprioceptive reference contains a non-finite value")
+
+        call_note = arguments.get("note")
+        if not isinstance(call_note, str) or not call_note.strip():
+            return ToolResult(
+                error=("note is required: describe what you observe and why you chose this motion")
+            )
 
         values_key = "targets" if self._absolute else "deltas"
         values = arguments.get(values_key)

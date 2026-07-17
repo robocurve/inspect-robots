@@ -45,6 +45,10 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
+The wire format defaults to Chat Completions (`-P wire=chat`) for broad
+OpenAI-compatible endpoint support. Switch to `-P wire=responses` when a
+direct OpenAI or compatible endpoint requires the Responses API.
+
 ## How it works
 
 Motion tool calls state where to go, not how long to move. For absolute modes,
@@ -58,6 +62,11 @@ split-the-move error and issues it as two smaller motions; raise the fraction
 (up to `0.5` before the ceiling binds at 10 Hz) for faster arms. The tool
 result reports the computed step count and, when the embodiment declares
 `control_hz`, the corresponding playout time. `duration_s` is not part of either motion tool.
+
+Every move tool call also requires a `note` with one or two plain sentences
+describing the current observation and why the agent chose that motion. The
+user reads these notes live and in the saved transcript to follow what the
+agent sees and decides.
 
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
@@ -89,11 +98,12 @@ motion fall short of the tool's requested total.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`max_llm_calls` (default `100`), `temperature`, `effort`, `max_speed_frac`,
-`transcript_echo`.
+`wire`, `max_llm_calls` (default `100`), `temperature`, `effort`,
+`max_speed_frac`, `transcript_echo`.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
+Move notes appear inside the echoed tool-call arguments.
 The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
@@ -110,3 +120,22 @@ pass `-P effort=none` to omit the parameter for endpoints that reject it
 chat completions requires the literal `none` when function tools are in
 play (any other value, or omitting the field, is a 400). In Python,
 `effort=None` omits the field and `effort="none"` sends the wire value.
+
+## Reasoning effort on OpenAI models
+
+Recent OpenAI reasoning models can reject function tools on the Chat
+Completions wire with an error like this:
+
+```text
+Function tools with reasoning_effort are not supported. To use function
+tools, use /v1/responses or set reasoning_effort to 'none'.
+```
+
+This is a Chat Completions API restriction, not an inspect-robots bug. Use a
+direct OpenAI endpoint and select the Responses wire to keep reasoning enabled:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=openai/gpt-5.6-sol -P wire=responses -P effort=medium \
+    --embodiment cubepick
+```

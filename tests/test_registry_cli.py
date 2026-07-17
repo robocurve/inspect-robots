@@ -107,9 +107,10 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (written,) = tmp_path.glob("*.json")
     assert f"log: {written}" in out  # the CLI tells the user where the log went
     assert "error:" not in out
-    # A clean run still teaches how to read the log — and nothing else hints.
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
-    assert out.count("hint:") == 1
+    # A clean run teaches both terminal and browser read-back commands.
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
+    assert f"hint: HTML viewer: inspect-robots view {written}" in out
+    assert out.count("hint:") == 2
 
 
 @pytest.mark.parametrize(
@@ -212,7 +213,7 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     assert "scene-0" not in out  # successful scenes are not failure context
     assert out.count("EmbodimentFault: reset exploded") == 1
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_prints_distinct_scene_error(
@@ -293,7 +294,7 @@ def test_cli_all_errored_run_exits_nonzero_with_diagnostics(
     assert "[error] scene-0: PolicyError: invalid API key" in out
     assert "trials: 1 (1 errored)" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
     # And `inspect` on the written log shows the same headline facts.
     assert main(["inspect", str(written)]) == 1
     out = capsys.readouterr().out
@@ -346,7 +347,7 @@ def test_cli_partial_errors_stay_success_but_are_visible(
     assert "trials: 2 (1 errored)" in out
     assert "[error] scene-1: PolicyError: policy reset exploded" in out
     (written,) = tmp_path.glob("*.json")
-    assert f"hint: view it with: inspect-robots inspect {written}" in out
+    assert f"hint: inspect it with: inspect-robots inspect {written}" in out
 
 
 def test_cli_run_epochs_fail_on_error_store_frames(
@@ -378,6 +379,416 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
+def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
+    from inspect_robots.registry import task as task_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import success_at_end
+    from inspect_robots.task import Task
+
+    @task_decorator(name)
+    def _factory() -> Task:
+        return Task(
+            name=name,
+            scenes=[Scene(id=f"s{i}", instruction="reach", init_seed=i) for i in range(num_scenes)],
+            scorer=success_at_end(),
+            max_steps=max_steps,
+        )
+
+
+def test_cli_eval_set_runs_multiple_exact_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out
+    assert "run status: completed" in out
+    assert "[completed] kb/a" in out
+    assert "[completed] kb/b" in out
+    assert out.count("log dir:") == 1  # one shared line, not one per task
+    assert "hint: HTML viewer: inspect-robots view" in out
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_cli_eval_set_glob_matches_by_prefix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    _register_task("other/c")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/*",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+        reg._FACTORIES["task"].pop("other/c", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out
+    assert "other/c" not in out
+
+
+def test_cli_eval_set_dedups_overlapping_patterns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/*",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tasks: kb/a, kb/b" in out  # kb/a not repeated despite matching twice
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_cli_eval_set_unmatched_pattern_errors() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "eval-set",
+                "does-not-exist/*",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+            ]
+        )
+    message = str(excinfo.value)
+    assert "no task matches 'does-not-exist/*'" in message
+    assert "registered tasks: " in message
+
+
+def test_cli_eval_set_epochs_override_applies_to_every_task(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                "2",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 0
+    from inspect_robots import read_eval_log
+
+    logs = [read_eval_log(str(p)) for p in tmp_path.glob("*.json")]
+    assert len(logs) == 2
+    assert all(log.results.total_trials == 2 for log in logs)  # --epochs overrode both tasks
+
+
+def test_cli_eval_set_sim_and_embodiment_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(["eval-set", "cubepick-reach", "--sim", "--embodiment", "cubepick"])
+
+
+def test_cli_eval_set_guardrail_flags_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--disable-guardrails",
+                "--max-action-delta",
+                "0.1",
+            ]
+        )
+
+
+def test_cli_eval_set_disable_guardrails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(
+        [
+            "eval-set",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--disable-guardrails",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert "guardrails: disabled (--disable-guardrails)" in out
+    assert "WARNING: guardrails disabled" in err
+
+
+def test_cli_eval_set_degraded_guardrails_warn_but_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same bare-space case as test_cli_degraded_guardrails_warn_but_run, via eval-set.
+    from dataclasses import replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.spaces import Box
+
+    class _BareSpaceEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(self.info, action_space=Box(shape=(2,)))
+
+    name = "bare-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_BareSpaceEmbodiment)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "guardrails: none active" in captured.out
+    assert "no guardrails" in captured.err
+
+
+def test_cli_eval_set_sim_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV_SIM_EMBODIMENT, "cubepick")
+    rc = main(
+        [
+            "eval-set",
+            "cubepick-reach",
+            "--policy",
+            "scripted",
+            "--sim",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
+
+
+def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Observation
+
+    class _FaultOnSecondTask(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("reset exploded")
+            return super().reset(scene, seed=seed)
+
+    name = "fault-on-second-task-for-eval-set-test"
+    embodiment_decorator(name)(_FaultOnSecondTask)
+    _register_task("kb/a")
+    _register_task("kb/b")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "kb/b",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+        reg._FACTORIES["task"].pop("kb/a", None)
+        reg._FACTORIES["task"].pop("kb/b", None)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "run status: error" in out
+    assert "[completed] kb/a" in out
+    assert "[error] kb/b" in out
+    assert "reset exploded" in out
+
+
+def test_cli_eval_set_policy_errors_every_reset_without_fail_on_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A task where every trial errors degrades to a top-level error log even
+    without --fail-on-error (issue #73): there is no surviving data for
+    fail_on_error's flaky-trial tolerance to protect, so eval-set surfaces it
+    as [error] with the "all N trial(s) errored" detail, not a silent success.
+    """
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _AlwaysFailsPolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise RuntimeError("policy reset exploded")
+
+    name = "always-fails-for-eval-set-test"
+    policy_decorator(name)(_AlwaysFailsPolicy)
+    _register_task("kb/a")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(name, None)
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "run status: error" in out
+    assert "[error] kb/a  all 1 trial(s) errored; nothing was scored" in out
+
+
+def test_cli_eval_set_zero_scene_task_has_no_metric_or_error_detail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No metrics, no top-level error: a task with zero scenes succeeds
+    trivially (nothing ran, nothing to reduce), so its eval-set summary row
+    has neither a metric nor an error to show (see _print_eval_set_summary).
+    """
+    _register_task("kb/a", num_scenes=0)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run status: completed" in out
+    assert "[completed] kb/a\n" in out  # no trailing metric/error detail
+
+
+def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C mid-set points at the log dir and returns 130 instead of a traceback.
+
+    eval_set writes per-task logs and eval() persists a cancelled log for the
+    interrupted task (#118), but eval-set doesn't hold the sink paths, so the
+    hint points at the shared dir.
+    """
+    import inspect_robots
+
+    def interrupted_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args, kwargs
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(inspect_robots, "eval_set", interrupted_eval_set)
+    _register_task("kb/a")
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/a",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+    assert rc == 130
+    out = capsys.readouterr().out
+    assert f"cancelled: partial logs are under {tmp_path}" in out
+    assert "inspect-robots inspect" in out
+    assert "inspect-robots view" in out
+
+
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     assert "Inspect Robots" in capsys.readouterr().out
@@ -388,6 +799,10 @@ def test_cli_help_lists_setup(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert excinfo.value.code == 0
     assert "setup" in capsys.readouterr().out
+
+
+def test_view_is_protected_by_instruction_sugar_guard() -> None:
+    assert "view" in cli._SUBCOMMANDS
 
 
 def test_setup_is_protected_by_instruction_sugar_guard() -> None:
@@ -533,6 +948,306 @@ def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
     path = tmp_path / name
     path.write_text(json.dumps(log.to_dict()), encoding="utf-8")
     return path
+
+
+def _view_frame_log(frames_dir: str) -> EvalLog:
+    log = _transcript_log()
+    chat = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "camera 'top_cam' (step 4):"},
+                {"type": "text", "text": "[image omitted: streamed camera frame]"},
+            ],
+        }
+    ]
+    scene = dataclasses.replace(log.samples[0], epochs=({},), policy_transcripts=(chat,))
+    return dataclasses.replace(
+        log,
+        stats=dataclasses.replace(log.stats, frames_dir=frames_dir),
+        samples=(scene,),
+    )
+
+
+def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    import numpy as np
+
+    log_dir = tmp_path / "logs"
+    frames_dir = log_dir / "frames" / "run-stamp"
+    frames_dir.mkdir(parents=True)
+    np.save(
+        frames_dir / "s0-e0_top_cam_000004.npy",
+        np.zeros((3, 4, 3), dtype=np.uint8),
+    )
+    recorded = str(tmp_path / "old-machine" / "run-stamp")
+    path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
+    return path, frames_dir
+
+
+@pytest.mark.parametrize("name", ["run.json", "run"])
+def test_view_derives_default_html_path(
+    name: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, name)
+    expected = path.with_suffix(".html")
+
+    assert main(["view", str(path)]) == 0
+
+    document = expected.read_text(encoding="utf-8")
+    assert document.startswith("<!doctype html>")
+    assert f"<title>adhoc - {name}</title>" in document
+    assert capsys.readouterr().out == f"wrote {expected}\n"
+
+
+def test_view_honors_output_override(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.htm"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert capsys.readouterr().out == f"wrote {output}\n"
+
+
+def test_view_stdout_contains_only_the_document(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    assert main(["view", str(path), "-o", "-"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("<!doctype html>")
+    assert "wrote " not in out
+
+
+def test_view_embeds_frames_resolved_from_log_relative_fallback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    output = tmp_path / "report.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert 'src="data:image/png;base64,' in document
+    assert "[image omitted: streamed camera frame]" not in document
+    capsys.readouterr()
+
+
+def test_view_no_frames_keeps_placeholders(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    output = tmp_path / "no-frames.html"
+
+    assert main(["view", str(path), "-o", str(output), "--no-frames"]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+def test_view_unresolvable_recorded_frames_degrade_without_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_view_frame_log(str(tmp_path / "missing" / "stamp")), tmp_path, "run.json")
+    output = tmp_path / "missing.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[int] = []
+
+    def fake_render_html(
+        log: EvalLog,
+        *,
+        title: str,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+    ) -> str:
+        del log, title, frames_dir
+        received.append(frames_budget_bytes)
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+
+    assert main(["view", str(path), "--frames-budget", "1.25"]) == 0
+    assert received == [1_250_000]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("document_size", "suffix"),
+    [(1_000_000, ""), (1_234_567, " (1.2 MB)")],
+)
+def test_view_wrote_line_reports_only_documents_over_one_megabyte(
+    document_size: int,
+    suffix: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.html"
+    monkeypatch.setattr(cli, "render_html", lambda *args, **kwargs: "x" * document_size)
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert capsys.readouterr().out == f"wrote {output}{suffix}\n"
+
+
+def test_view_stdout_embeds_resolved_frames(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+
+    assert main(["view", str(path), "-o", "-"]) == 0
+
+    out = capsys.readouterr().out
+    assert 'src="data:image/png;base64,' in out
+    assert "[image omitted: streamed camera frame]" not in out
+    assert "wrote " not in out
+
+
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
+        main(["view", str(path), "--frames-budget", budget])
+
+
+def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "existing-directory"
+    output.mkdir()
+
+    with pytest.raises(SystemExit, match="is a directory; pass an HTML file path"):
+        main(["view", str(path), "-o", str(output)])
+
+
+def test_view_rejects_overwriting_the_input_log(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="would overwrite the input log"):
+        main(["view", str(path), "-o", str(path)])
+
+
+def test_view_rejects_open_with_stdout(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="no file to open"):
+        main(["view", str(path), "-o", "-", "--open"])
+
+
+def test_view_creates_missing_output_parents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "new" / "nested" / "report.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert output.is_file()
+    assert capsys.readouterr().out == f"wrote {output}\n"
+
+
+@pytest.mark.parametrize("stdout_mode", [False, True])
+def test_view_degrades_lone_surrogates_in_both_output_modes(
+    stdout_mode: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log()
+    scene = dataclasses.replace(log.samples[0], instruction="bad \ud800 data")
+    path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "hostile.json")
+
+    if stdout_mode:
+        assert main(["view", str(path), "-o", "-"]) == 0
+        document = capsys.readouterr().out
+    else:
+        output = tmp_path / "hostile.html"
+        assert main(["view", str(path), "-o", str(output)]) == 0
+        capsys.readouterr()
+        document = output.read_text(encoding="utf-8")
+
+    assert "\ud800" not in document
+    assert "bad ? data" in document
+
+
+def test_view_open_receives_resolved_file_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.html"
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    assert main(["view", str(path), "-o", str(output), "--open"]) == 0
+    assert opened == [output.resolve().as_uri()]
+    assert capsys.readouterr().err == ""
+
+
+def test_view_false_browser_result_warns_without_changing_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    monkeypatch.setattr("webbrowser.open", lambda _uri: False)
+
+    assert main(["view", str(path), "--open"]) == 0
+
+    assert "warning: could not open browser" in capsys.readouterr().err
+
+
+def test_view_browser_exception_warns_without_changing_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    def fail_to_open(_uri: str) -> bool:
+        raise RuntimeError("browser unavailable")
+
+    monkeypatch.setattr("webbrowser.open", fail_to_open)
+
+    assert main(["view", str(path), "--open"]) == 0
+
+    err = capsys.readouterr().err
+    assert "warning: could not open browser" in err
+    assert "browser unavailable" in err
+
+
+@pytest.mark.parametrize("status", ["success", "error"])
+def test_view_exit_code_reports_artifact_production_not_eval_status(
+    status: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_transcript_log(status=status), tmp_path, f"{status}.json")
+
+    assert main(["view", str(path)]) == 0
+    capsys.readouterr()
 
 
 def test_run_outcome_shows_timeout_without_a_count(
@@ -767,6 +1482,7 @@ def test_plain_inspect_mentions_recorded_policy_transcripts(
     assert main(["inspect", str(path)]) == 0
     out = capsys.readouterr().out
     assert "policy transcripts: recorded (--transcript to print)" in out
+    assert f"hint: HTML viewer: inspect-robots view {path}" in out
     assert "scene s0, trial 0:" not in out
 
 
@@ -775,7 +1491,8 @@ def test_run_summary_adds_agent_conversation_hint_when_recorded(
 ) -> None:
     cli._print_run_summary(_transcript_log(), "run.json", is_adhoc=False)
     out = capsys.readouterr().out
-    assert "hint: view it with: inspect-robots inspect run.json" in out
+    assert "hint: inspect it with: inspect-robots inspect run.json" in out
+    assert "hint: HTML viewer: inspect-robots view run.json" in out
     assert "hint: agent conversation: inspect-robots inspect run.json --transcript" in out
 
 

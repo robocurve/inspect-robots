@@ -122,14 +122,24 @@ hint whenever a log has stored frames.
 ## Policy transcripts
 
 Policies can persist a per-trial audit record in the eval log; read it with
-`inspect-robots inspect LOG.json --transcript`. The agent policy stores its
-conversation, with streamed image bytes replaced by
+`inspect-robots inspect LOG.json --transcript`, or render a self-contained
+conversation page with [`inspect-robots view`](cli.md#inspect-robots-view):
+
+```bash
+inspect-robots view LOG.json
+```
+
+The agent policy stores its conversation, with streamed image bytes replaced by
 `[image omitted: streamed camera frame]`. The preceding label, such as
 `camera 'top_cam' (step 480):`, is emitted whether or not frames are stored,
 and when they are (`store_frames=True`) it provides the step join key from a
-transcript observation to the stored frame.
+transcript observation to the stored frame. `inspect-robots view` performs
+this step join internally, embedding only an exact match and otherwise leaving
+the placeholder in place.
 
 `FrameStore` sanitizes trial and camera names before building
 `{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
 `StepRecord.image_refs` and `FrameRef.path` as the authoritative mapping instead
-of assembling the path from the transcript label.
+of assembling the path from the transcript label. That remains the right advice
+for programmatic consumers. The `view` command performs this join internally
+with the same sanitizer and an exact-match-or-degrade contract.

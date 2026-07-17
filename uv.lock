@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "inspect-robots",
     "inspect-robots-agent",
+    "inspect-robots-capx",
     "inspect-robots-isaacsim",
     "inspect-robots-ros",
     "inspect-robots-xpolicylab",
@@ -358,7 +359,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -520,7 +521,7 @@ provides-extras = ["all", "dev", "docs", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-agent"
-version = "0.9.0"
+version = "0.12.0"
 source = { editable = "plugins/inspect-robots-agent" }
 dependencies = [
     { name = "httpx" },
@@ -541,6 +542,39 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "inspect-robots", editable = "." },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "inspect-robots-capx"
+version = "0.1.0"
+source = { editable = "plugins/inspect-robots-capx" }
+dependencies = [
+    { name = "httpx" },
+    { name = "inspect-robots" },
+    { name = "inspect-robots-agent" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "inspect-robots", editable = "." },
+    { name = "inspect-robots-agent", editable = "plugins/inspect-robots-agent" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
