@@ -4,13 +4,47 @@ from __future__ import annotations
 
 import html
 import json
+import math
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
+import numpy.typing as npt
+
+from inspect_robots._pngenc import png_data_url
+from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
 _STATUS_DISPLAY = {"success": "completed"}
 _JSON_STRING_LIMIT = 2048
+# \d{1,12}, not \d+: a hostile multi-thousand-digit "step" must miss the
+# regex and degrade rather than trip int()'s conversion-length limit.
+_FRAME_LABEL_RE = re.compile(r"camera '(?P<name>.*)' \(step (?P<step>\d{1,12})\):")
+_FRAME_PLACEHOLDER = "[image omitted: streamed camera frame]"
+_FRAME_MAX_SIDE = 448
+
+
+@dataclass
+class _FrameBudget:
+    """Shared mutable accounting for frame payloads in one document."""
+
+    limit: int
+    embedded: int = 0
+    payload_bytes: int = 0
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class _FrameContext:
+    """The filesystem correlation state for one trial transcript."""
+
+    frames_dir: Path
+    trial_prefix: str
+    budget: _FrameBudget
+
 
 _STYLES = """
 :root {
@@ -125,6 +159,10 @@ summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 .message.tool { border-color: var(--tool); margin-left: 20px; }
 .role { color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }
 .content { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
+img.frame {
+  display: block; max-width: 100%; height: auto; margin: 6px 0;
+  border: 1px solid var(--line); border-radius: 6px;
+}
 .system-message {
   margin: 13px 0; padding: 0 0 0 13px; border: 0;
   border-left: 3px solid var(--system);
@@ -260,7 +298,82 @@ def _render_tool_call(raw_call: object) -> str:
     return f'{notes}<div class="call">{_escape(name)}({_escape(shown_arguments)})</div>'
 
 
-def _render_message(raw_message: object) -> str:
+def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[np.uint8] | None:
+    """Load one exact-match stored frame, degrading every invalid artifact to ``None``."""
+    if frame_ctx.budget.truncated:
+        return None
+    path = frame_ctx.frames_dir / f"{frame_ctx.trial_prefix}_{_safe(name)}_{step:06d}.npy"
+    if not path.exists():
+        return None
+    try:
+        array = cast("npt.NDArray[Any]", np.load(path, allow_pickle=False))
+        if array.dtype != np.uint8 or array.size == 0:
+            return None
+        if not (array.ndim == 2 or (array.ndim == 3 and array.shape[2] in {1, 3, 4})):
+            return None
+    except Exception:
+        return None
+    longest = max(array.shape[0], array.shape[1])
+    if longest > _FRAME_MAX_SIDE:
+        stride = math.ceil(longest / _FRAME_MAX_SIDE)
+        array = array[::stride, ::stride]
+    return cast("npt.NDArray[np.uint8]", array)
+
+
+def _frame_image(frame_ctx: _FrameContext, name: str, step: int) -> str | None:
+    """Render one correlated frame if it is valid and fits the shared budget."""
+    array = _load_frame(frame_ctx, name, step)
+    if array is None:
+        return None
+    source = png_data_url(array)
+    payload_size = len(source.partition(",")[2])
+    budget = frame_ctx.budget
+    if budget.limit and budget.payload_bytes + payload_size > budget.limit:
+        budget.truncated = True
+        return None
+    budget.payload_bytes += payload_size
+    budget.embedded += 1
+    return (
+        f'<img class="frame" loading="lazy" alt="camera {_escape(name)} step {step}" '
+        f'src="{source}">'
+    )
+
+
+def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
+    """Render user content parts as text runs split only by successful frame embeds."""
+    runs: list[str] = []
+    buffered: list[str] = []
+    pending: tuple[str, int] | None = None
+    embedded = 0
+    for part in parts:
+        if isinstance(part, dict) and part.get("type") == "text":
+            raw_text = part.get("text", "")
+            part_text = str(raw_text)
+            if isinstance(raw_text, str):
+                label = _FRAME_LABEL_RE.fullmatch(raw_text)
+                if label is not None:
+                    pending = (label.group("name"), int(label.group("step")))
+                elif raw_text == _FRAME_PLACEHOLDER and pending is not None:
+                    name, step = pending
+                    pending = None
+                    image = _frame_image(frame_ctx, name, step)
+                    if image is not None:
+                        text = _escape("\n".join(buffered))
+                        runs.append(f'<div class="content">{text}</div>')
+                        runs.append(image)
+                        buffered = []
+                        embedded += 1
+                        continue
+            buffered.append(part_text)
+        else:
+            buffered.append("[image]")
+    if embedded == 0 or buffered:
+        text = _escape("\n".join(buffered))
+        runs.append(f'<div class="content">{text}</div>')
+    return "".join(runs)
+
+
+def _render_message(raw_message: object, frame_ctx: _FrameContext | None = None) -> str:
     """Render one tolerant chat message without trusting its role or content."""
     if not isinstance(raw_message, dict):
         return ""
@@ -271,7 +384,10 @@ def _render_message(raw_message: object) -> str:
         return f'<details class="system-message"><summary>system</summary>{body}</details>'
 
     role_class = role if role in {"user", "assistant", "tool"} else "unknown"
-    body = "" if content is None else f'<div class="content">{_escape(content)}</div>'
+    if frame_ctx is not None and role == "user" and isinstance(raw_message.get("content"), list):
+        body = _render_frame_parts(cast(list[object], raw_message["content"]), frame_ctx)
+    else:
+        body = "" if content is None else f'<div class="content">{_escape(content)}</div>'
     if role == "tool":
         return (
             f'<div class="message {role_class}"><div class="role">{_escape(role)}</div>{body}</div>'
@@ -286,11 +402,13 @@ def _render_message(raw_message: object) -> str:
     )
 
 
-def _render_chat_transcript(transcript: list[object]) -> str:
+def _render_chat_transcript(
+    transcript: list[object], frame_ctx: _FrameContext | None = None
+) -> str:
     """Render a defensive role-oriented conversation."""
     return (
         '<div class="conversation">'
-        + "".join(_render_message(message) for message in transcript)
+        + "".join(_render_message(message, frame_ctx) for message in transcript)
         + "</div>"
     )
 
@@ -311,10 +429,10 @@ def _elide_json_values(value: Any) -> Any:
     return value
 
 
-def _render_transcript(transcript: object) -> str:
+def _render_transcript(transcript: object, frame_ctx: _FrameContext | None = None) -> str:
     """Render chat-shaped records conversationally and all others as bounded JSON."""
     if _is_chat_transcript(transcript):
-        return _render_chat_transcript(cast(list[object], transcript))
+        return _render_chat_transcript(cast(list[object], transcript), frame_ctx)
     # Escaping happens on the dumped text below, so raw non-ASCII is safe and
     # far more readable than \uXXXX escapes.
     dumped = json.dumps(
@@ -331,7 +449,32 @@ def _score_chips(values: Mapping[str, float], *, prefix: str = "") -> str:
     )
 
 
-def _scene_section(scene: SceneResult, *, open_transcript: bool) -> str:
+def _trial_frame_context(
+    frame_ctx: _FrameContext | None, scene_id: str, trial: int
+) -> _FrameContext | None:
+    """Specialize a document frame context to one scene trial."""
+    if frame_ctx is None:
+        return None
+    return _FrameContext(
+        frame_ctx.frames_dir,
+        _safe(f"{scene_id}-e{trial}"),
+        frame_ctx.budget,
+    )
+
+
+def _render_trial_transcript(
+    transcript: object,
+    frame_ctx: _FrameContext | None,
+    scene_id: str,
+    trial: int,
+) -> str:
+    """Render one transcript with its enumerate-index frame correlation context."""
+    return _render_transcript(transcript, _trial_frame_context(frame_ctx, scene_id, trial))
+
+
+def _scene_section(
+    scene: SceneResult, *, open_transcript: bool, frame_ctx: _FrameContext | None = None
+) -> str:
     """Render one complete scene card and its available trial transcripts."""
     instruction = (
         ""
@@ -376,7 +519,9 @@ def _scene_section(scene: SceneResult, *, open_transcript: bool) -> str:
     transcripts = "".join(
         (
             f'<details class="transcript"{" open" if open_transcript else ""}>'
-            f"<summary>Trial {trial} transcript</summary>{_render_transcript(transcript)}</details>"
+            f"<summary>Trial {trial} transcript</summary>"
+            f"{_render_trial_transcript(transcript, frame_ctx, scene.scene_id, trial)}"
+            "</details>"
         )
         for trial, transcript in enumerate(scene.policy_transcripts)
         if transcript is not None
@@ -389,7 +534,13 @@ def _scene_section(scene: SceneResult, *, open_transcript: bool) -> str:
     )
 
 
-def render_html(log: EvalLog, *, title: str) -> str:
+def render_html(
+    log: EvalLog,
+    *,
+    title: str,
+    frames_dir: Path | None = None,
+    frames_budget_bytes: int = 50_000_000,
+) -> str:
     """Return one self-contained HTML document describing the complete evaluation log."""
     git = (
         'git <span class="chip">unknown</span>'
@@ -440,11 +591,28 @@ def render_html(log: EvalLog, *, title: str) -> str:
     transcript_count = sum(
         transcript is not None for scene in log.samples for transcript in scene.policy_transcripts
     )
+    budget = _FrameBudget(limit=frames_budget_bytes)
+    frame_ctx = None if frames_dir is None else _FrameContext(frames_dir, "", budget)
     scenes = "".join(
-        _scene_section(scene, open_transcript=transcript_count == 1) for scene in log.samples
+        _scene_section(
+            scene,
+            open_transcript=transcript_count == 1,
+            frame_ctx=frame_ctx,
+        )
+        for scene in log.samples
     )
     no_transcripts = (
         '<p class="none">no policy transcripts recorded</p>' if transcript_count == 0 else ""
+    )
+    frames_chip = (
+        ""
+        if not budget.truncated
+        else '<span class="chip">frames truncated at '
+        f"{frames_budget_bytes / 1_000_000:g} MB ({budget.embedded} embedded)</span>"
+    )
+    meta_tail = (
+        f"<span>inspect-robots {_escape(log.eval.inspect_robots_version)}</span>"
+        f"<span>{git}</span>{frames_chip}"
     )
     document = f"""<!doctype html>
 <html lang="en">
@@ -458,7 +626,7 @@ def render_html(log: EvalLog, *, title: str) -> str:
 <header><div class="header-inner">
   <div class="header-top"><h1>{_escape(log.eval.task)}</h1>{_status_badge(log.status)}</div>
   <div class="meta"><span>{_escape(log.eval.created)}</span>
-  <span>inspect-robots {_escape(log.eval.inspect_robots_version)}</span><span>{git}</span></div>
+  {meta_tail}</div>
 </div></header>
 <main>
   <section class="spec-strip"><dl>{"".join(definitions)}</dl></section>

@@ -37,7 +37,10 @@ All notable changes to this project are documented here. The format is based on
   message (#131).
 - **`inspect-robots view LOG.json`**: render a saved eval log as a
   self-contained HTML report with run metadata, scores, scene results,
-  collapsible policy conversations, and highlighted agent notes (#132).
+  collapsible policy conversations, highlighted agent notes, and the camera
+  frames the model saw in `--store-frames` runs. `--no-frames` keeps
+  placeholders and `--frames-budget` controls the inline payload limit (#132,
+  #141).
 - **`inspect-robots eval-set TASK [TASK ...]`**: run several registered tasks
   against one resolved policy/embodiment pair in a single invocation, matching
   task names exactly or by shell-quoted `fnmatch` glob (e.g.

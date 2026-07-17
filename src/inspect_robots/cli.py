@@ -291,6 +291,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the written report in the default web browser",
     )
+    p_view.add_argument(
+        "--no-frames",
+        action="store_true",
+        help="render placeholders instead of embedding stored camera frames",
+    )
+    p_view.add_argument(
+        "--frames-budget",
+        type=float,
+        default=50,
+        metavar="MB",
+        help="maximum inline frame payload in decimal MB (default: 50; 0 is unlimited)",
+    )
 
     p_video = sub.add_parser(
         "video",
@@ -1134,7 +1146,19 @@ def _cmd_view(args: argparse.Namespace) -> int:
         raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
 
     log = read_eval_log(args.log)
-    document = render_html(log, title=f"{log.eval.task} - {log_path.name}")
+    if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
+        raise SystemExit("--frames-budget must be a non-negative finite number")
+    frames_dir = None
+    if not args.no_frames and log.stats.frames_dir is not None:
+        from inspect_robots._video import resolve_frames_dir
+
+        frames_dir = resolve_frames_dir(log.stats.frames_dir, log_path)
+    document = render_html(
+        log,
+        title=f"{log.eval.task} - {log_path.name}",
+        frames_dir=frames_dir,
+        frames_budget_bytes=int(args.frames_budget * 1_000_000),
+    )
     if stdout_mode:
         degraded = document.encode("utf-8", errors="replace").decode("utf-8")
         sys.stdout.write(degraded)
@@ -1144,7 +1168,9 @@ def _cmd_view(args: argparse.Namespace) -> int:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", encoding="utf-8", errors="replace") as handle:
         handle.write(document)
-    print(f"wrote {file_path}")
+    document_size = len(document.encode("utf-8", errors="replace"))
+    size_suffix = f" ({document_size / 1_000_000:.1f} MB)" if document_size > 1_000_000 else ""
+    print(f"wrote {file_path}{size_suffix}")
 
     if args.open:
         uri = file_path.resolve().as_uri()

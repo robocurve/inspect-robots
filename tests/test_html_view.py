@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
+import re
+import struct
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import pytest
 
 from inspect_robots._html import _JSON_STRING_LIMIT, _render_chat_transcript, render_html
+from inspect_robots._pngenc import png_data_url
+from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
 
@@ -62,6 +71,40 @@ def _log(
         ),
         error="run warning",
     )
+
+
+def _frame_path(root: Path, name: str, step: int, *, epoch: int = 0) -> Path:
+    return root / f"{_safe(f'scene-0-e{epoch}')}_{_safe(name)}_{step:06d}.npy"
+
+
+def _save_frame(
+    root: Path,
+    name: str,
+    step: int,
+    image: npt.NDArray[Any],
+    *,
+    epoch: int = 0,
+) -> Path:
+    path = _frame_path(root, name, step, epoch=epoch)
+    np.save(path, image)
+    return path
+
+
+def _parts(name: str = "top_cam", step: int = 4) -> list[object]:
+    return [
+        {"type": "text", "text": f"camera {name!r} (step {step}):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+
+def _frame_log(parts: Sequence[object], *, role: str = "user") -> EvalLog:
+    return _log(transcripts=(_chat({"role": role, "content": list(parts)}),))
+
+
+def _png_dimensions_from_document(document: str) -> tuple[int, int]:
+    (source,) = re.findall(r'src="(data:image/png;base64,[^"]+)"', document)
+    encoded = base64.b64decode(source.partition(",")[2])
+    return struct.unpack(">II", encoded[16:24])
 
 
 @pytest.mark.parametrize(
@@ -357,3 +400,320 @@ def test_transcript_free_log_reports_none_recorded() -> None:
 
     assert "no policy transcripts recorded" in document
     assert '<details class="transcript"' not in document
+
+
+def test_stored_frame_embeds_between_escaped_text_runs(tmp_path: Path) -> None:
+    name = "cam <wide>"
+    parts = [
+        {"type": "text", "text": "caption <before>"},
+        *_parts(name, 7),
+        {"type": "text", "text": "after frame"},
+    ]
+    _save_frame(tmp_path, name, 7, np.arange(36, dtype=np.uint8).reshape(3, 4, 3))
+
+    document = render_html(_frame_log(parts), title="frames", frames_dir=tmp_path)
+
+    assert document.count('<img class="frame"') == 1
+    assert 'loading="lazy"' in document
+    assert 'src="data:image/png;base64,' in document
+    assert 'alt="camera cam &lt;wide&gt; step 7"' in document
+    assert document.index("caption &lt;before&gt;") < document.index('<img class="frame"')
+    assert document.index('<img class="frame"') < document.index("after frame")
+    assert "[image omitted: streamed camera frame]" not in document
+    assert document.count('<div class="content"></div>') == 0
+    assert "img.frame" in document
+
+
+@pytest.mark.parametrize("shape", [(3, 4), (3, 4, 1), (3, 4, 3), (3, 4, 4)])
+def test_viewer_embeds_every_allowed_frame_shape(tmp_path: Path, shape: tuple[int, ...]) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros(shape, dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="shape", frames_dir=tmp_path)
+
+    assert document.count('<img class="frame"') == 1
+
+
+def test_all_frame_misses_are_byte_identical_to_frames_off(tmp_path: Path) -> None:
+    transcript = _chat(
+        {"role": "user", "content": []},
+        {"role": "user", "content": "plain text"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text"},
+                {"type": "text", "text": 7},
+                {"type": "image_url"},
+                "not a dictionary",
+                *_parts("missing", 9),
+            ],
+        },
+    )
+    log = _log(transcripts=(transcript,))
+
+    assert render_html(log, title="same", frames_dir=tmp_path) == render_html(log, title="same")
+
+
+def test_errored_trial_final_step_with_no_file_degrades(tmp_path: Path) -> None:
+    log = _frame_log(_parts("top_cam", 11))
+    scene = dataclasses.replace(log.samples[0], status="error", error="step failed")
+
+    document = render_html(
+        dataclasses.replace(log, samples=(scene,)), title="missing", frames_dir=tmp_path
+    )
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_hostile_huge_step_label_degrades_instead_of_crashing(tmp_path: Path) -> None:
+    """A multi-thousand-digit step must miss the regex, not trip int()'s digit limit."""
+    parts = [
+        {"type": "text", "text": f"camera 'top_cam' (step {'1' * 5000}):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    document = render_html(_frame_log(parts), title="hostile", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_label_with_trailing_text_degrades(tmp_path: Path) -> None:
+    """fullmatch, not match: trailing text after the colon must not arm a lookup."""
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+    parts = [
+        {"type": "text", "text": "camera 'top_cam' (step 4): extra"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    document = render_html(_frame_log(parts), title="trailing", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+
+
+def test_truncation_is_sticky_even_for_a_smaller_later_frame(tmp_path: Path) -> None:
+    """The first overflow degrades every later lookup, including ones that would fit."""
+    big = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
+    small = np.zeros((1, 1, 1), dtype=np.uint8)
+    first_payload = len(png_data_url(big).partition(",")[2])
+    parts = [*_parts("first", 1), *_parts("second", 2), *_parts("third", 3)]
+    _save_frame(tmp_path, "first", 1, big)
+    _save_frame(tmp_path, "second", 2, big)
+    _save_frame(tmp_path, "third", 3, small)
+
+    document = render_html(
+        _frame_log(parts),
+        title="sticky",
+        frames_dir=tmp_path,
+        frames_budget_bytes=first_payload,
+    )
+
+    assert document.count('<img class="frame"') == 1
+    assert document.count("[image omitted: streamed camera frame]") == 2
+
+
+def test_label_without_step_suffix_degrades(tmp_path: Path) -> None:
+    parts = [
+        {"type": "text", "text": "camera 'top_cam':"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    document = render_html(_frame_log(parts), title="legacy", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_single_quote_camera_name_regex_miss_degrades(tmp_path: Path) -> None:
+    name = "'"
+    _save_frame(tmp_path, name, 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts(name)), title="quote", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_backslash_camera_name_regex_hit_but_file_lookup_misses(tmp_path: Path) -> None:
+    name = "rear\\cam"
+    stored = _save_frame(tmp_path, name, 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts(name)), title="slash", frames_dir=tmp_path)
+
+    assert stored.exists()
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_space_in_camera_name_reconstructs_and_embeds(tmp_path: Path) -> None:
+    name = "top camera"
+    _save_frame(tmp_path, name, 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts(name)), title="space", frames_dir=tmp_path)
+
+    assert document.count('<img class="frame"') == 1
+
+
+def test_placeholder_without_pending_label_degrades(tmp_path: Path) -> None:
+    parts = [{"type": "text", "text": "[image omitted: streamed camera frame]"}]
+
+    document = render_html(_frame_log(parts), title="orphan", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_label_without_following_placeholder_stays_text(tmp_path: Path) -> None:
+    parts = [{"type": "text", "text": "camera 'top_cam' (step 4):"}]
+
+    document = render_html(_frame_log(parts), title="label", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "camera &#x27;top_cam&#x27; (step 4):" in document
+
+
+def test_corrupt_frame_file_degrades(tmp_path: Path) -> None:
+    _frame_path(tmp_path, "top_cam", 4).write_bytes(b"not an npy file")
+
+    document = render_html(_frame_log(_parts()), title="corrupt", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_pickled_frame_file_degrades_without_unpickling(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.array([{"unsafe": True}], dtype=object))
+
+    document = render_html(_frame_log(_parts()), title="pickle", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_wrong_frame_channel_count_degrades(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 3, 2), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="channels", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_wrong_frame_rank_degrades(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((3,), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="rank", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_non_uint8_frame_degrades(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 3, 3), dtype=np.float32))
+
+    document = render_html(_frame_log(_parts()), title="dtype", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_zero_size_frame_degrades(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((0, 3, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="empty", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_three_camera_pairs_embed_in_part_order(tmp_path: Path) -> None:
+    parts: list[object] = []
+    for step, name in enumerate(("left", "top", "right"), start=1):
+        parts.extend(_parts(name, step))
+        _save_frame(tmp_path, name, step, np.full((2, 2, 3), step, dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="three", frames_dir=tmp_path)
+
+    assert document.count('<img class="frame"') == 3
+    assert document.index("camera left step 1") < document.index("camera top step 2")
+    assert document.index("camera top step 2") < document.index("camera right step 3")
+
+
+def test_transcript_index_is_used_as_epoch_for_frame_lookup(tmp_path: Path) -> None:
+    chat = _chat({"role": "user", "content": _parts()})
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8), epoch=1)
+
+    document = render_html(_log(transcripts=(None, chat)), title="epoch", frames_dir=tmp_path)
+
+    assert document.count('<img class="frame"') == 1
+    assert "Trial 1 transcript" in document
+
+
+def test_oversize_frame_is_stride_subsampled_below_limit(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((1000, 701, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="large", frames_dir=tmp_path)
+
+    width, height = _png_dimensions_from_document(document)
+    assert max(width, height) <= 448
+
+
+def test_frame_budget_embeds_first_then_truncates_remaining(tmp_path: Path) -> None:
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+    payload_size = len(png_data_url(frame).partition(",")[2])
+    parts = [*_parts("first", 1), *_parts("second", 2), *_parts("third", 3)]
+    for step, name in enumerate(("first", "second", "third"), start=1):
+        _save_frame(tmp_path, name, step, frame)
+
+    document = render_html(
+        _frame_log(parts),
+        title="budget",
+        frames_dir=tmp_path,
+        frames_budget_bytes=payload_size,
+    )
+
+    assert document.count('<img class="frame"') == 1
+    assert document.count("[image omitted: streamed camera frame]") == 2
+    budget_mb = payload_size / 1_000_000
+    assert f"frames truncated at {budget_mb:g} MB (1 embedded)" in document
+
+
+def test_zero_frame_budget_is_unlimited(tmp_path: Path) -> None:
+    parts = [*_parts("first", 1), *_parts("second", 2)]
+    for step, name in enumerate(("first", "second"), start=1):
+        _save_frame(tmp_path, name, step, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _frame_log(parts), title="unlimited", frames_dir=tmp_path, frames_budget_bytes=0
+    )
+
+    assert document.count('<img class="frame"') == 2
+    assert document.count("frames truncated at") == 0
+
+
+def test_non_truncated_frame_render_has_no_truncation_chip(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="fits", frames_dir=tmp_path)
+
+    assert document.count("frames truncated at") == 0
+
+
+def test_non_chat_transcript_never_embeds_frames(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+    transcript = {"parts": _parts()}
+
+    document = render_html(_log(transcripts=(transcript,)), title="json", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+@pytest.mark.parametrize("role", ["assistant", "tool"])
+def test_non_user_chat_messages_never_embed_frames(tmp_path: Path, role: str) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts(), role=role), title="role", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
