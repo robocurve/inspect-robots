@@ -1146,8 +1146,8 @@ def _cmd_view(args: argparse.Namespace) -> int:
         raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
 
     log = read_eval_log(args.log)
-    if args.frames_budget < 0:
-        raise SystemExit("--frames-budget must be non-negative")
+    if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
+        raise SystemExit("--frames-budget must be a non-negative finite number")
     frames_dir = None
     if not args.no_frames and log.stats.frames_dir is not None:
         from inspect_robots._video import resolve_frames_dir

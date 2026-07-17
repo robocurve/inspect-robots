@@ -1122,11 +1122,12 @@ def test_view_stdout_embeds_resolved_frames(
     assert "wrote " not in out
 
 
-def test_view_rejects_negative_frames_budget(tmp_path: Path) -> None:
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path: Path) -> None:
     path = _write_log(_step_limit_log(), tmp_path, "run.json")
 
-    with pytest.raises(SystemExit, match="--frames-budget must be non-negative"):
-        main(["view", str(path), "--frames-budget", "-0.1"])
+    with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
+        main(["view", str(path), "--frames-budget", budget])
 
 
 def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:

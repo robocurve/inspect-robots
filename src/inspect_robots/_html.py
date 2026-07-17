@@ -20,7 +20,9 @@ from inspect_robots.log import EvalLog, SceneResult
 
 _STATUS_DISPLAY = {"success": "completed"}
 _JSON_STRING_LIMIT = 2048
-_FRAME_LABEL_RE = re.compile(r"camera '(?P<name>.*)' \(step (?P<step>\d+)\):")
+# \d{1,12}, not \d+: a hostile multi-thousand-digit "step" must miss the
+# regex and degrade rather than trip int()'s conversion-length limit.
+_FRAME_LABEL_RE = re.compile(r"camera '(?P<name>.*)' \(step (?P<step>\d{1,12})\):")
 _FRAME_PLACEHOLDER = "[image omitted: streamed camera frame]"
 _FRAME_MAX_SIDE = 448
 

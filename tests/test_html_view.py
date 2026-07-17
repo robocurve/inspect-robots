@@ -465,6 +465,53 @@ def test_errored_trial_final_step_with_no_file_degrades(tmp_path: Path) -> None:
     assert "[image omitted: streamed camera frame]" in document
 
 
+def test_hostile_huge_step_label_degrades_instead_of_crashing(tmp_path: Path) -> None:
+    """A multi-thousand-digit step must miss the regex, not trip int()'s digit limit."""
+    parts = [
+        {"type": "text", "text": f"camera 'top_cam' (step {'1' * 5000}):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    document = render_html(_frame_log(parts), title="hostile", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+
+
+def test_label_with_trailing_text_degrades(tmp_path: Path) -> None:
+    """fullmatch, not match: trailing text after the colon must not arm a lookup."""
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+    parts = [
+        {"type": "text", "text": "camera 'top_cam' (step 4): extra"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    document = render_html(_frame_log(parts), title="trailing", frames_dir=tmp_path)
+
+    assert '<img class="frame"' not in document
+
+
+def test_truncation_is_sticky_even_for_a_smaller_later_frame(tmp_path: Path) -> None:
+    """The first overflow degrades every later lookup, including ones that would fit."""
+    big = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
+    small = np.zeros((1, 1, 1), dtype=np.uint8)
+    first_payload = len(png_data_url(big).partition(",")[2])
+    parts = [*_parts("first", 1), *_parts("second", 2), *_parts("third", 3)]
+    _save_frame(tmp_path, "first", 1, big)
+    _save_frame(tmp_path, "second", 2, big)
+    _save_frame(tmp_path, "third", 3, small)
+
+    document = render_html(
+        _frame_log(parts),
+        title="sticky",
+        frames_dir=tmp_path,
+        frames_budget_bytes=first_payload,
+    )
+
+    assert document.count('<img class="frame"') == 1
+    assert document.count("[image omitted: streamed camera frame]") == 2
+
+
 def test_label_without_step_suffix_degrades(tmp_path: Path) -> None:
     parts = [
         {"type": "text", "text": "camera 'top_cam':"},
