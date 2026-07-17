@@ -1,6 +1,6 @@
 # 0021 — `-P wire=responses`: dial reasoning effort on OpenAI models
 
-Issue: #131. Status: draft.
+Issue: #131. Status: accepted (3 critique rounds).
 
 ## Problem
 
@@ -43,10 +43,13 @@ Azure or proxy endpoint that serves the Responses API works unchanged.
 
 ### `ResponsesClient` (new module `_responses.py`)
 
-Same constructor and `complete(messages, tools, temperature, reasoning_effort)
--> AssistantMessage` signature as `ChatClient`, same bounded retry policy
-(429/5xx/transport retried with exponential backoff, other 4xx fail fast), so
-`policy.py`'s only change is choosing the client class in `__init__`.
+Same constructor (including `transport=` injection) and
+`complete(messages, tools, temperature, reasoning_effort)
+-> AssistantMessage` and `close()` surface as `ChatClient`, same bounded
+retry policy (429/5xx/transport retried with exponential backoff, other 4xx
+fail fast), so `policy.py`'s changes are confined to `__init__` (the `wire`
+param, its `ValueError` validation, client selection) and the config
+dataclass.
 `Provider`, `ToolCall`, `AssistantMessage`, and the retry loop shape are
 shared vocabulary from `_llm.py`; the retry loop itself is small enough to
 keep duplicated rather than extracting a base class.
@@ -64,8 +67,10 @@ does not accept (none/minimal/low/medium/high/xhigh). Construction-time
 validation stays wire-agnostic; `wire=responses` + `effort=max` fails fast
 with OpenAI's own 400, which names the valid values. Accepted, not guarded.
 
-Stateless by design (`store: false`): no server-side conversation retention,
-works on ZDR orgs, every request is reproducible from the transcript alone,
+Stateless by design (`store: false`): no server-side conversation state to
+lose, works on ZDR orgs, every request can be legally rebuilt from the
+transcript alone (byte-identical replay additionally needs the in-memory
+raw-item cache; a fresh client synthesizes a legal, if different, request),
 and tests are plain request/response pairs against `httpx.MockTransport`.
 `previous_response_id` chaining was rejected: it leaves conversation state on
 OpenAI's servers, breaks on ZDR orgs, and makes retries after an ambiguous
@@ -78,8 +83,9 @@ transport failure double-append.
 | `{"role": "system"/"user"/"assistant", "content": "<str>"}` | same-role **untyped** message (`{"role": ..., "content": "<str>"}`, no `"type"` key) — the untyped EasyInputMessage form is load-bearing: the typed `{"type": "message"}` item rejects plain-string assistant content (assistant parts must be `output_text`), so a "uniformity" refactor adding `type` would 400 |
 | user content part `{"type": "text", ...}` | `{"type": "input_text", "text": ...}` |
 | user content part `{"type": "image_url", "image_url": {"url": u}}` | `{"type": "input_image", "image_url": u}` |
-| assistant msg `tool_calls[i]` | `{"type": "function_call", "call_id": id, "name": ..., "arguments": ...}` (after the assistant text item, if any; skipped when the turn is served from the raw-item cache, below) |
+| assistant msg `tool_calls[i]` | `{"type": "function_call", "call_id": id, "name": ..., "arguments": ...}`, after the assistant text item if any — but a raw-item cache hit (below) replaces **every** synthesized item for that assistant message, text and tool calls alike, with the cached item list verbatim in cached order; emitting both would show the model its own text twice per turn |
 | `{"role": "tool", "tool_call_id": id, "content": c}` | `{"type": "function_call_output", "call_id": id, "output": c}` |
+| assistant msg, no tool calls, content `None` or `""` | **no input item** — the `incomplete`-status retry path appends exactly this message (`raw()` of an empty turn) before the nudge, and consecutive user messages are legal input; emitting `content: null` would 400 and turn a recoverable no-tool-call turn fatal |
 
 `ToolCall.id` carries the Responses `call_id` (that is what
 `function_call_output` must reference), so the policy's existing
@@ -107,19 +113,24 @@ required reasoning item". With `store: false` the reasoning item's content
 comes back encrypted (`reasoning.encrypted_content`) and is replayed
 verbatim.
 
-So the client keeps a raw-item cache: after each successful response, the
-response's verbatim `output` item list is stored keyed by the `call_id` of
-each `function_call` item in it. During translation, an assistant message
-whose first `tool_call.id` hits the cache emits the cached raw items instead
-of synthesized ones (this also preserves item `id`s and any interleaved
-message items exactly as the API produced them). A miss falls back to the
-synthesized `function_call` translation — correct for histories this client
-instance did not produce, and for non-reasoning models, where no reasoning
-item is required.
+So the client keeps a raw-item cache: after each successfully *parsed*
+response (never a failed or raising one), the response's verbatim `output`
+item list is stored keyed by the `call_id` of each `function_call` item in
+it. During translation, an assistant message whose first `tool_call.id` hits
+the cache emits the cached raw items in place of all synthesized items for
+that message (this preserves item `id`s and any interleaved message items
+exactly as the API produced them). A miss falls back to the synthesized
+translation — correct for histories this client instance did not produce,
+and for non-reasoning models, where no reasoning item is required.
 
 Cache lifetime: entries whose `call_id` no longer appears in the submitted
-history are pruned on each `complete()` call, so a `reset()` (fresh
-`_messages`) empties it without the client needing a reset hook.
+history are pruned on each `complete()` call, against the submitted history
+**before** the new response is cached (prune-after-store would evict every
+fresh entry and make the cache always miss) — call ids are harvested from
+both places history carries them, assistant `tool_calls[i].id` and tool
+message `tool_call_id`, so a future history-trimming feature cannot silently
+break replay. A `reset()` (fresh `_messages`) empties the cache without the
+client needing a reset hook.
 
 Accepted loss: text-only assistant turns (the no-tool-call retry path) cache
 nothing, so their reasoning items are dropped from replay. That is legal —
@@ -139,15 +150,23 @@ A body with `status: "failed"` (HTTP 200, top-level `error` object) raises
 `RuntimeError` carrying `error.message` — parsing it as an empty
 `AssistantMessage` would burn three "Respond with exactly one tool call."
 nudges and then die with a generic no-tool-call error while the real cause
-sits discarded in the body.
+sits discarded in the body. Decision: failed status fails fast, no retry
+(one request on the wire, mirroring the 4xx path) — the deliberate,
+message-bearing terminal state of a request the server accepted, unlike a
+5xx where the server never answered. A failed response never populates the
+raw-item cache.
 
 ### Guided error for the motivating failure
 
 When `ChatClient` (wire=chat) gets the 4xx above — detected by
 `"reasoning_effort"` and `"/v1/responses"` both appearing in the error body —
 the raised `RuntimeError` appends:
-`fix: pass -P wire=responses (OpenAI models), or -P effort=none`.
-House style: the error names the fix, never just the failure.
+`fix: pass -P wire=responses (needs a direct OpenAI endpoint, e.g.
+$OPENAI_API_KEY set), or -P effort=none`.
+The endpoint caveat matters: the same error is reachable via OpenRouter
+routing to an OpenAI model, where `wire=responses` alone would dead-end at a
+nonexistent `openrouter.ai/api/v1/responses`. House style: the error names
+the fix, never just the failure.
 
 ## Tests (`tests/test_responses.py` + small additions)
 
@@ -159,16 +178,24 @@ All against `httpx.MockTransport`, mirroring `test_llm.py` conventions.
 - Request body: `store: false`, `include`, `reasoning.effort` present only
   when effort set, `temperature` only when set, tools flattened with
   `strict: false`, history messages emitted in the untyped (no `"type"` key)
-  form.
-- Reasoning-item replay: turn 1 returns `reasoning` + `function_call` items;
-  the turn-2 request must contain both verbatim, before the
-  `function_call_output`. Plus cache-prune on a fresh history, and cache-miss
-  synthesis — including the tool-call-only turn (`content: None`), which must
-  emit no null-content message item, only the `function_call`.
+  form, and the request path is `{base_url}/responses`.
+- Reasoning-item replay: turn 1 returns `[reasoning, message, function_call]`;
+  the turn-2 request must contain all three verbatim, before the
+  `function_call_output`, with the message text appearing exactly once (no
+  extra synthesized assistant message for that turn). A second replay case
+  returns two `function_call` items on turn 1 and asserts each cached item
+  appears exactly once in the turn-2 request (cache hit is per assistant
+  message, keyed on the first call id — not per tool call). Plus cache-prune
+  on a fresh history, and cache-miss synthesis — including the tool-call-only turn
+  (`content: None`), which must emit no null-content message item, only the
+  `function_call`.
+- Empty assistant turn (`content: None`/`""`, no tool calls — the
+  `incomplete` retry path) translates to no input item.
 - Parsing: text-only, tool-call-only, text+tool-call, `output_text` spread
   across multiple message items; `status: "failed"` raises with
-  `error.message` in the text.
-- Retry/fail-fast parity with `ChatClient`.
+  `error.message` in the text, exactly one request on the wire, cache left
+  unpopulated.
+- Retry/fail-fast parity with `ChatClient`, plus `close()`.
 - Policy wiring: `wire="responses"` end-to-end through `LLMAgentPolicy.act()`
   (mock embodiment), invalid `wire` value raises, `wire` recorded in config.
 - Chat-side: the guided error suffix on the motivating 4xx body.
