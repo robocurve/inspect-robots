@@ -205,7 +205,8 @@ CLI:
 - `--open`: `webbrowser.open` receives the resolved `file://` URI
   (monkeypatched); a `False` return warns on stderr; a raising open warns
   on stderr; exit code unchanged in both.
-- Exit code 0 for success logs, 1 otherwise.
+- Exit code 0 once the page is produced, regardless of the log's run status
+  (artifact-producer convention, per the design section).
 - New hint lines from `run` summary and `inspect`; reworded existing
   "inspect it with" hints asserted.
 

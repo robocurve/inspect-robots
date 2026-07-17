@@ -58,9 +58,6 @@ from inspect_robots._defaults import (
 )
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
-    _STATUS_DISPLAY as _STATUS_DISPLAY,
-)
-from inspect_robots._html import (
     _chat_content,
     _display_status,
     _is_chat_transcript,
@@ -1132,6 +1129,9 @@ def _cmd_view(args: argparse.Namespace) -> int:
     )
     if out_path is not None and out_path.exists() and out_path.is_dir():
         raise SystemExit(f"--out {out_path} is a directory; pass an HTML file path")
+    if out_path is not None and out_path.resolve() == log_path.resolve():
+        # The one data-loss path in this command: rendering over the log it reads.
+        raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
 
     log = read_eval_log(args.log)
     document = render_html(log, title=f"{log.eval.task} - {log_path.name}")

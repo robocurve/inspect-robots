@@ -996,6 +996,13 @@ def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
         main(["view", str(path), "-o", str(output)])
 
 
+def test_view_rejects_overwriting_the_input_log(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="would overwrite the input log"):
+        main(["view", str(path), "-o", str(path)])
+
+
 def test_view_rejects_open_with_stdout(tmp_path: Path) -> None:
     path = _write_log(_step_limit_log(), tmp_path, "run.json")
 

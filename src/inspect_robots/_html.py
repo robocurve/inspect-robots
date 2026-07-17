@@ -74,8 +74,8 @@ main { width: min(1120px, calc(100% - 32px)); margin: 0 auto 64px; }
 header { border-bottom: 1px solid var(--line); background: var(--panel); }
 .header-inner { width: min(1120px, calc(100% - 32px)); margin: auto; padding: 28px 0 22px; }
 .header-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-h1 { margin: 0; font-size: 24px; font-weight: 650; }
-h2 { margin: 0; font-size: 18px; font-weight: 650; }
+h1 { margin: 0; font-size: 24px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+h2 { margin: 0; font-size: 18px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 h3 { margin: 24px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
 .meta { color: var(--muted); margin-top: 8px; display: flex; gap: 16px; flex-wrap: wrap; }
 .badge, .chip { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 12px; }
@@ -109,11 +109,12 @@ dd { margin: 2px 0 0; overflow-wrap: anywhere; }
   border: 1px solid var(--line); border-radius: 9px;
 }
 .scene-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.instruction, .error { margin: 12px 0 0; white-space: pre-wrap; }
+.instruction, .error { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .error { color: var(--red); }
 .score-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0 0; }
 .score-chip {
   border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px;
+  overflow-wrap: anywhere;
 }
 details { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 12px; }
 summary { cursor: pointer; color: var(--muted); font-weight: 600; }
@@ -193,7 +194,7 @@ def _value(value: object) -> str:
     """Format a scalar or structured spec value without HTML escaping it."""
     if isinstance(value, str):
         return value
-    return json.dumps(value, sort_keys=True)
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
 def _definition(label: object, value: object) -> str:
@@ -314,7 +315,11 @@ def _render_transcript(transcript: object) -> str:
     """Render chat-shaped records conversationally and all others as bounded JSON."""
     if _is_chat_transcript(transcript):
         return _render_chat_transcript(cast(list[object], transcript))
-    dumped = json.dumps(_elide_json_values(transcript), indent=2, sort_keys=True)
+    # Escaping happens on the dumped text below, so raw non-ASCII is safe and
+    # far more readable than \uXXXX escapes.
+    dumped = json.dumps(
+        _elide_json_values(transcript), indent=2, sort_keys=True, ensure_ascii=False
+    )
     return f"<pre>{_escape(dumped)}</pre>"
 
 
@@ -345,7 +350,7 @@ def _scene_section(scene: SceneResult, *, open_transcript: bool) -> str:
     epoch_block = (
         ""
         if not epoch_chips
-        else f'<h3>Epoch scores</h3><div class="score-row">{epoch_chips}</div>'
+        else f'<h3>Trial scores</h3><div class="score-row">{epoch_chips}</div>'
     )
     reasons = "".join(
         '<span class="score-chip">n/a</span>'

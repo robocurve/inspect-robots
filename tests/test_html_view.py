@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from inspect_robots._html import _render_chat_transcript, render_html
+from inspect_robots._html import _JSON_STRING_LIMIT, _render_chat_transcript, render_html
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
 
@@ -91,7 +91,7 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     assert "success_at_end" in document and "0.75" in document
     assert "scenes" in document and "trials" in document and "errored" in document
     assert "scene-0" in document and "pick up the cube" in document
-    assert "Reduced scores" in document and "Epoch scores" in document
+    assert "Reduced scores" in document and "Trial scores" in document
     assert "Termination reasons" in document and "Operator judgements" in document
     assert "one trial failed" in document
     assert document.count(">n/a</span>") == 2
@@ -131,7 +131,7 @@ def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     assert "pick up the cube" not in document
     assert "one trial failed" not in document
     assert "Reduced scores" not in document
-    assert "Epoch scores" not in document
+    assert "Trial scores" not in document
     assert "Termination reasons" not in document
     assert "Operator judgements" not in document
 
@@ -307,6 +307,15 @@ def test_media_parts_collapse_to_image_chip() -> None:
     assert "look here\n[image]\n[image]" in document
     assert "large-data" not in document
     assert "unknown media" not in document
+
+
+def test_json_fallback_keeps_a_string_at_exactly_the_limit_untruncated() -> None:
+    """A value of exactly the elision limit must not gain a truncation marker."""
+    transcript = ({"payload": "x" * _JSON_STRING_LIMIT},)
+
+    document = render_html(_log(transcripts=(transcript,)), title="boundary")
+
+    assert "chars truncated" not in document
 
 
 def test_non_chat_json_fallback_elides_long_raw_string_values_before_escaping() -> None:
