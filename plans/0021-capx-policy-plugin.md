@@ -241,8 +241,10 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
   — no runtime docstring scraping), the action-space/embodiment summary and
   embodiment `docs` notes, and the call budget.
 - user: `Goal: {scene.instruction}`.
-- clears the sandbox namespace and motion queue; `atexit`-safe `close()`
-  closes the httpx clients (mirrors 0007's lifecycle care).
+- clears the sandbox namespace, the motion queue, and the Pyroki IK
+  warm-start config (`prev_cfg` is `None` on the first call of each trial,
+  preserving trial independence); `atexit`-safe `close()` closes the httpx
+  clients (mirrors 0007's lifecycle care).
 
 **`act(observation)`** — the codegen loop:
 
