@@ -950,6 +950,40 @@ def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
     return path
 
 
+def _view_frame_log(frames_dir: str) -> EvalLog:
+    log = _transcript_log()
+    chat = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "camera 'top_cam' (step 4):"},
+                {"type": "text", "text": "[image omitted: streamed camera frame]"},
+            ],
+        }
+    ]
+    scene = dataclasses.replace(log.samples[0], epochs=({},), policy_transcripts=(chat,))
+    return dataclasses.replace(
+        log,
+        stats=dataclasses.replace(log.stats, frames_dir=frames_dir),
+        samples=(scene,),
+    )
+
+
+def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    import numpy as np
+
+    log_dir = tmp_path / "logs"
+    frames_dir = log_dir / "frames" / "run-stamp"
+    frames_dir.mkdir(parents=True)
+    np.save(
+        frames_dir / "s0-e0_top_cam_000004.npy",
+        np.zeros((3, 4, 3), dtype=np.uint8),
+    )
+    recorded = str(tmp_path / "old-machine" / "run-stamp")
+    path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
+    return path, frames_dir
+
+
 @pytest.mark.parametrize("name", ["run.json", "run"])
 def test_view_derives_default_html_path(
     name: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -985,6 +1019,115 @@ def test_view_stdout_contains_only_the_document(
     out = capsys.readouterr().out
     assert out.startswith("<!doctype html>")
     assert "wrote " not in out
+
+
+def test_view_embeds_frames_resolved_from_log_relative_fallback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    output = tmp_path / "report.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert 'src="data:image/png;base64,' in document
+    assert "[image omitted: streamed camera frame]" not in document
+    capsys.readouterr()
+
+
+def test_view_no_frames_keeps_placeholders(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    output = tmp_path / "no-frames.html"
+
+    assert main(["view", str(path), "-o", str(output), "--no-frames"]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+def test_view_unresolvable_recorded_frames_degrade_without_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_view_frame_log(str(tmp_path / "missing" / "stamp")), tmp_path, "run.json")
+    output = tmp_path / "missing.html"
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    document = output.read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[int] = []
+
+    def fake_render_html(
+        log: EvalLog,
+        *,
+        title: str,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+    ) -> str:
+        del log, title, frames_dir
+        received.append(frames_budget_bytes)
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+
+    assert main(["view", str(path), "--frames-budget", "1.25"]) == 0
+    assert received == [1_250_000]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("document_size", "suffix"),
+    [(1_000_000, ""), (1_234_567, " (1.2 MB)")],
+)
+def test_view_wrote_line_reports_only_documents_over_one_megabyte(
+    document_size: int,
+    suffix: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    output = tmp_path / "report.html"
+    monkeypatch.setattr(cli, "render_html", lambda *args, **kwargs: "x" * document_size)
+
+    assert main(["view", str(path), "-o", str(output)]) == 0
+
+    assert capsys.readouterr().out == f"wrote {output}{suffix}\n"
+
+
+def test_view_stdout_embeds_resolved_frames(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+
+    assert main(["view", str(path), "-o", "-"]) == 0
+
+    out = capsys.readouterr().out
+    assert 'src="data:image/png;base64,' in out
+    assert "[image omitted: streamed camera frame]" not in out
+    assert "wrote " not in out
+
+
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
+        main(["view", str(path), "--frames-budget", budget])
 
 
 def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:

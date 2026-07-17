@@ -275,9 +275,11 @@ inspect-robots view logs/cubepick-reach_xxxx.json
 
 The report puts the run status, configuration, metrics, scene results, and
 recorded policy conversations on one page. Agent notes from tool calls are
-highlighted above their call lines. The file contains its stylesheet inline
-and uses native browser controls to collapse transcripts, so it has no network
-or JavaScript dependency.
+highlighted above their call lines. For runs captured with `--store-frames`,
+the report also embeds the stored camera frames at the exact observation turns
+where the model saw them. The file contains its stylesheet and frame data
+inline and uses native browser controls to collapse transcripts, so it has no
+network or JavaScript dependency.
 
 By default, `view` replaces the log path's suffix with `.html` and prints the
 written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
@@ -285,6 +287,12 @@ the HTML document to stdout, or `--open` to launch the written file in the
 default browser. Missing output directories are created. The command returns
 0 whenever it produces the report, even when the evaluation recorded a failed
 or cancelled run.
+
+Frame embedding is on by default when the log's frame directory can be found.
+Use `--no-frames` to keep the transcript placeholders, or
+`--frames-budget MB` to change the default 50 MB inline-frame payload limit.
+`--frames-budget 0` removes the limit. Inlined frames make the HTML document
+larger, so use a smaller budget or `--no-frames` when page size matters.
 
 ## `inspect-robots video`
 
