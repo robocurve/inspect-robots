@@ -1,4 +1,4 @@
-# 0021 — `-P wire=responses`: dial reasoning effort on OpenAI models
+# 0022 — `-P wire=responses`: dial reasoning effort on OpenAI models
 
 Issue: #131. Status: accepted (3 critique rounds).
 
@@ -209,5 +209,6 @@ paragraph noting the default and when to switch.
 
 ## Version
 
-`inspect-robots-agent` 0.9.0 → 0.10.0 (new feature, backward compatible;
+`inspect-robots-agent` 0.9.0 → 0.11.0 (0.10.0 was claimed by #134 while this
+was in review; new feature, backward compatible;
 default behavior unchanged). Core untouched.

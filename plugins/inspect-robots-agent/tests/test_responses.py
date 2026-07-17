@@ -311,6 +311,9 @@ def test_two_function_calls_replay_cached_output_once_per_assistant_turn() -> No
     replay = requests[1]["input"]
     for cached_item in (reasoning, first_call, second_call):
         assert replay.count(cached_item) == 1
+    # No synthesized duplicates alongside the cached items: exactly the two
+    # cached function_call items, however they are keyed.
+    assert sum(item.get("type") == "function_call" for item in replay) == 2
 
 
 def test_cache_is_pruned_when_submitted_history_drops_call_ids() -> None:
