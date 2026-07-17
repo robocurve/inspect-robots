@@ -179,11 +179,11 @@ plugin's):
 | `pyroki_url` | `"http://127.0.0.1:8116"` | CaP-X Pyroki IK server |
 | `camera` | `None` (sole camera, error if several) | observation camera feeding perception |
 | `depth_key` | `"depth"` | `observation.extra` key holding `(H, W)` float depth (see below) |
-| `intrinsics_key` / `extrinsics_key` | `"intrinsics"` / `"extrinsics"` | `extra` keys for `(3, 3)` K and `(4, 4)` camera-to-world |
+| `intrinsics_key` / `extrinsics_key` | `"intrinsics"` / `"extrinsics"` | `extra` keys for `(3, 3)` K and `(4, 4)` camera-to-robot-base (the plugin treats world and base as the same frame, as CaP-X does: Pyroki solves in the URDF base frame with no world transform; the prompt and README state this) |
 | `max_llm_calls` | `100` | per-trial LLM budget; exhaustion forces give-up |
-| `max_code_failures` | `3` | consecutive exec-*error* turns before `RuntimeError` (clean perception-only turns reset it; they are bounded by the LLM budget) |
+| `max_code_failures` | `3` | consecutive exec-*error* turns before `RuntimeError`. Per-trial counter, persists across `act()` calls; any turn whose exec raised increments it (even one that queued actions first, which still returns its chunk); any turn that raised nothing resets it. Clean perception-only turns are bounded by the LLM budget |
 | `max_speed_frac` | `0.1` | joint-interpolation speed cap, same semantics as the agent plugin |
-| `request_timeout_s` | `120` | per server request (CaP-X models are slow) |
+| `request_timeout_s` | `120` | total wall-clock budget per helper call, retries included; each POST attempt gets `min(remaining, 30)` (CaP-X models are slow) |
 | `transcript_echo` | `False` | stderr live echo, same as agent |
 | `transport` / `env` | `None` | test injection, same as agent |
 
@@ -210,7 +210,11 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
   `semantics.gripper != "none"`. The gripper dim is located via the box's
   `dim_labels` (a label named `"gripper"`); when labels are absent the last
   dim is the documented fallback. Arm dof = the remaining dims; gripper
-  open/close values come from the box bounds on that dim.
+  open/close values come from the box bounds on that dim with a pinned
+  polarity — **high bound = open, low bound = closed**, mirroring core's
+  normalized-gripper *state* convention — overridable via a
+  `gripper_open_is_high: bool = True` constructor arg for
+  inverted-polarity embodiments.
 - a proprioceptive reference resolved from `observation_space.state` the
   same way the agent toolset does (`build_toolset`'s state-labels logic): a
   single state field whose shape equals the full action dim. The motion
@@ -242,10 +246,12 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
 
 **`act(observation)`** — the codegen loop:
 
-1. Append the observation message: labeled state text plus camera PNGs
-   (reused agent-plugin formatting). The previous turn's execution report is
-   already in `_messages` (step 4), so the observation message carries only
-   the fresh observation.
+1. Append the observation message: labeled state text plus camera PNGs,
+   formatted the same way as the agent plugin but **reimplemented** (~40
+   lines; the agent's `_state_lines`/`_observation_content` stay private —
+   only the §5 re-export list is imported, `png_data_url` included). The
+   previous turn's execution report is already in `_messages` (step 4), so
+   the observation message carries only the fresh observation.
 2. Ask the LLM. Accept raw Python or a single fenced block (strip fences —
    CaP-X asks for raw code, but its own multi-turn prompt then demands
    fenced code after `REGENERATE`; be liberal). Recognize the control words
