@@ -707,6 +707,19 @@ def test_arbitrary_precision_json_integer_is_a_structured_error() -> None:
 # --- done, notes, and structured errors ---------------------------------------
 
 
+def test_missing_note_error_precedes_values_validation() -> None:
+    """A call wrong in both ways reports the note error first (plan 0021 ordering)."""
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    call = ToolCall(
+        id="call_1",
+        name="move_by",
+        arguments=json.dumps({"deltas": {"not_a_dimension": 0.05}}),
+    )
+    result = toolset.execute(call, _obs())
+    assert result.chunk is None
+    assert result.error == _NOTE_ERROR
+
+
 def test_missing_move_note_is_a_structured_error_in_both_modes() -> None:
     absolute = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
     absolute_call = ToolCall(
