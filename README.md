@@ -93,6 +93,20 @@ and it identifies which is which), then writes
 instead and type its component names at the prompts; to write the config file
 by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
 
+The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
+server is listening, and the server does not start itself or survive a
+reboot (full setup in the
+[yam plugin README](https://github.com/robocurve/inspect-robots-yam#install-on-the-robotgpu-machine)):
+
+```bash
+# On the GPU machine, from the MolmoAct2 repo. Leave it running, e.g. in tmux:
+python examples/yam/host_server_yam.py --host 0.0.0.0 --port 8202
+curl http://127.0.0.1:8202/act      # 200 means the server is ready
+```
+
+On a different rig, start whatever serves your policy instead; in-process
+policies (such as `agent` or the mock `scripted`) need no server.
+
 Then tell the robot what to do:
 
 ```bash
