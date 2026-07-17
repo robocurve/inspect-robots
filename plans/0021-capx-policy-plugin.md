@@ -21,12 +21,18 @@ speed-limited joint targets; the queue becomes the returned `ActionChunk`.
 # terminal 1 — CaP-X checkout serves the models (GPU box is fine)
 uv run capx/serving/launch_sam3_server.py --port 8114
 uv run capx/serving/launch_contact_graspnet_server.py --port 8115
-uv run capx/serving/launch_pyroki_server.py --port 8116 --robot panda_description
+uv run python -c 'from capx.serving.launch_pyroki_server import main; main(robot="panda_description", port=8116)'
+# (launch_pyroki_server.py calls bare main() with no CLI parsing, unlike the
+#  other two servers, so flags on it are silently ignored)
 
-# terminal 2 — Inspect Robots drives any embodiment with it
-inspect-robots "pick up the red cube" --policy capx --embodiment cubepick \
+# terminal 2 — Inspect Robots drives any joint-space embodiment with it
+inspect-robots "pick up the red cube" --policy capx --embodiment <joint-space-embodiment> \
     -P model=anthropic/claude-fable-5 -P sam3_url=http://gpu-box:8114
 ```
+
+(The core `cubepick` mock is a 2-D `eef_delta_pos` world and does not fit the
+v1 joint-space profile below; the e2e test ships its own joint-space mock
+embodiment, §9. Real targets are the YAM / SO-101 / Isaac adapters.)
 
 One adapter ⇒ CaP-X-style agents become evaluable on any Inspect Robots
 embodiment, including ones CaP-X does not support (our YAM and SO-101
@@ -41,9 +47,9 @@ Non-goals (YAGNI, all deliberate):
 - No Molmo / OWL-ViT / SAM2 / cuRobo clients — SAM3 + GraspNet + Pyroki are
   the reduced-API pipeline the paper's headline results use.
 - No dual-arm and no end-effector control mode in v1: the policy requires a
-  single-arm `joint_pos` action space with a trailing gripper dim (the same
-  profile `inspect-robots-agent`'s toolset targets) and raises a clear
-  `bind()`-time error otherwise.
+  single-arm `joint_pos` action space whose semantics declare a gripper
+  (`ActionSemantics.gripper != "none"`) and raises a clear `bind()`-time
+  error otherwise.
 - No server *launching* (same doctrine as 0007: lifecycle belongs upstream;
   we connect to URLs).
 
@@ -126,11 +132,11 @@ README.md                             # + code-as-policy section
 CLAUDE.md                             # plugins list mentions the new package
 ```
 
-Dependencies: `inspect-robots>=0.4`, `inspect-robots-agent>=0.10`, `numpy`,
-`httpx`. No `capx`, no `requests`, no provider SDKs, no Pillow (PNG
-encode/decode reuses the agent plugin's `_png` writer plus a ~40-line pure
-NumPy PNG reader in `_codec.py`; masks and `.npy` arrays need no image
-library at all).
+Dependencies: `inspect-robots>=0.4`, `inspect-robots-agent>=0.12`, `numpy`,
+`httpx`. No `capx`, no `requests`, no provider SDKs, no Pillow. No PNG
+*reader* exists anywhere in the pipeline: SAM3 requests need PNG *encoding*
+(the agent plugin's `_png` writer, re-exported per §5), SAM3 masks return as
+raw uint8 bytes, GraspNet speaks `.npy`, and Pyroki speaks JSON floats.
 
 ## 5. Reuse from `inspect-robots-agent`, made explicit
 
@@ -139,10 +145,12 @@ and PNG data URLs — exactly what `inspect_robots_agent._llm` and `._png`
 already implement. Duplicating ~300 maintained lines is worse than a
 first-party dependency, so:
 
-- `inspect-robots-agent` bumps to 0.10.0 and re-exports `ChatClient`,
-  `resolve_provider`, `Provider`, `ToolCall` (unused here but part of the
-  client surface), and `png_data_url` from its package `__init__` with
-  docstrings; the modules stay where they are.
+- `inspect-robots-agent` bumps to 0.12.0 (it is at 0.11.0 today) and
+  re-exports `ChatClient`, `resolve_provider`, `Provider`, `ToolCall`
+  (part of the client surface), `ENV_MODEL` (capx mirrors the agent's
+  model-default env var), `png_data_url`, and `encode_png` (the raw PNG
+  writer; SAM3 requests need bare b64 PNG, not a data URL) from its package
+  `__init__`, extending its `__all__`; the modules stay where they are.
 - `inspect-robots-capx` imports only those names from
   `inspect_robots_agent` (never from underscore modules).
 - Both packages live in this repo's uv workspace and release together, so
@@ -164,7 +172,7 @@ plugin's):
 | `depth_key` | `"depth"` | `observation.extra` key holding `(H, W)` float depth (see below) |
 | `intrinsics_key` / `extrinsics_key` | `"intrinsics"` / `"extrinsics"` | `extra` keys for `(3, 3)` K and `(4, 4)` camera-to-world |
 | `max_llm_calls` | `100` | per-trial LLM budget; exhaustion forces give-up |
-| `max_code_failures` | `3` | consecutive exec-error/no-op turns before `RuntimeError` |
+| `max_code_failures` | `3` | consecutive exec-*error* turns before `RuntimeError` (clean perception-only turns reset it; they are bounded by the LLM budget) |
 | `max_speed_frac` | `0.1` | joint-interpolation speed cap, same semantics as the agent plugin |
 | `request_timeout_s` | `120` | per server request (CaP-X models are slow) |
 | `transcript_echo` | `False` | stderr live echo, same as agent |
@@ -179,12 +187,20 @@ key and the convention, which the model sees as stderr and can route around
 (segmentation and IK still work without depth). Nothing in core changes.
 
 **`bind(embodiment_info)`** adopts the embodiment spaces like the agent
-plugin: requires a `Box` action space with `control_mode="joint_pos"`, at
-least 2 dims, and a gripper dim (the last one, per the agent toolset's
-convention); derives arm dof, gripper open/close values from the box bounds,
-and per-step interpolation deltas from `control_hz` and `max_speed_frac`.
-Anything else fails bind with an actionable error naming this plan's v1
-profile.
+plugin. The v1 profile, enforced with an actionable error naming this plan:
+
+- `Box` action space, `control_mode="joint_pos"`, at least 2 dims, and
+  `semantics.gripper != "none"`. The gripper dim is located via the box's
+  `dim_labels` (a label named `"gripper"`); when labels are absent the last
+  dim is the documented fallback. Arm dof = the remaining dims; gripper
+  open/close values come from the box bounds on that dim.
+- a proprioceptive reference resolved from `observation_space.state` the
+  same way the agent toolset does (`build_toolset`'s state-labels logic): a
+  single state field whose shape equals the full action dim. The motion
+  cursor and the FINISH/GIVE_UP hold action read that one field from the
+  turn's observation; there is no split joint_pos/gripper key convention.
+- per-step interpolation deltas derived from `control_hz` and
+  `max_speed_frac`, both required.
 
 **`reset(scene)`** starts the per-trial conversation:
 
@@ -250,10 +266,13 @@ embodiment provides them).
   joints. Returns arm joint positions.
 - `move_to_joints(joints: np.ndarray) -> None` — queue speed-limited linear
   interpolation from the cursor to `joints` (gripper dim held); advances the
-  cursor. The cursor starts at the observation's `joint_pos` + `gripper`
-  each turn.
-- `open_gripper() / close_gripper() -> None` — queue a short gripper ramp at
-  the cursor's arm pose; advance the cursor's gripper value.
+  cursor. The cursor starts each turn at the bound proprioceptive state
+  field (§6) from the turn's observation.
+- `open_gripper() / close_gripper() -> None` — queue a gripper ramp at the
+  cursor's arm pose, interpolated under the same per-step delta limit as arm
+  moves (so the CLI's default `DeltaLimitApprover` never silently clamps a
+  gripper jump the sandbox reported as done); advance the cursor's gripper
+  value.
 - `print(...)` — captured stdout is the model's feedback channel (CaP-X
   convention).
 
@@ -263,8 +282,9 @@ docstring**: the code executes in-process with the evaluator's privileges,
 exactly as in CaP-X. This is the policy class under evaluation, not a
 sandboxing product; run untrusted models in a container. The safety story
 for the *robot* is unchanged: every queued action still passes the rollout's
-approver chain (Clamp + DeltaLimit by default), the same guarantee the agent
-plugin leans on.
+approver chain. The Clamp + DeltaLimit guardrails are the *CLI* default
+(`eval()` called programmatically defaults to `AutoApprover`); the README
+says exactly that and shows the programmatic approver wiring.
 
 ## 8. Wire clients: `_codec.py` + `_servers.py`
 
@@ -281,7 +301,8 @@ plugin leans on.
   checks never touch the network (0007's lazy-connection doctrine).
 - GraspNet client hardcodes CaP-X's client-side defaults (`segmap_id=1`,
   `local_regions/filter_grasps=True`, `z_range=[0.2, 2.0]`,
-  `forward_passes=3`) — they are model-tuning knobs, not user API.
+  `forward_passes=2`, `max_retries=10`) — they are model-tuning knobs, not
+  user API.
 
 ## 9. Tests (no GPU, no sockets, no capx checkout)
 
@@ -305,10 +326,14 @@ schemas (LLM stub reuses the agent plugin's canned-completion approach):
   turn loops then returns queued chunk; consecutive-failure and call-budget
   bounds; execution report truncation; transcript sanitization; chunk meta
   carries code/stdout/stderr.
-- e2e: `CapxPolicy` vs the core `CubePick` mock world with a scripted LLM
-  transport whose canned code calls `segment` → `solve_ik` → `move_to_joints`
-  → `close_gripper` and FINISHes on turn 2; assert the rollout completes and
-  the log carries the transcript.
+- e2e: `CapxPolicy` vs an in-test joint-space mock embodiment (arm dims +
+  labeled gripper dim, `joint_pos` semantics, a matching single-field
+  StateSpec, a small RGB camera — the pattern of the agent plugin's
+  `_AbsoluteEmbodiment` test double; core `CubePick` is `eef_delta_pos` and
+  deliberately out of profile) with a scripted LLM transport whose canned
+  code calls `segment` → `solve_ik` → `move_to_joints` → `close_gripper` and
+  FINISHes on turn 2; assert the rollout completes and the log carries the
+  transcript.
 - registry: entry point resolves; factory forwards `-P`-style kwargs.
 
 Coverage: plugin CI runs pytest without the core gate (per repo convention);
@@ -326,7 +351,7 @@ aim for full-line coverage of `policy.py`, `_motion.py`, `_sandbox.py`.
 - Release: `publish-capx` job in release.yml (environment `pypi-capx`);
   maintainer creates the PyPI trusted-publisher environment before first
   release (PR description calls this out; it is a settings action, not code).
-  The agent-plugin version bump to 0.10.0 rides the same PR.
+  The agent-plugin version bump to 0.12.0 rides the same PR.
 - Entry point: `[project.entry-points."inspect_robots.policies"]
   capx = "inspect_robots_capx.policy:capx_policy"`.
 - Docs: plugin README (server bringup from a CaP-X checkout, arg table,
@@ -346,7 +371,7 @@ aim for full-line coverage of `policy.py`, `_motion.py`, `_sandbox.py`.
 | 5-DOF arms can't reach 6-DOF grasp poses | Out of scope for the plugin (Pyroki returns best-effort IK); README notes the caveat and suggests top-down grasp filtering in the task prompt |
 | Model floods context with huge stdout | Execution report truncated to a documented cap, tail-first (errors are at the tail) |
 | Coupling to `inspect-robots-agent` internals | Only public re-exports imported (§5); workspace CI breaks loudly on drift |
-| Pyroki server robot ≠ embodiment robot | README makes the `--robot <urdf>` pairing explicit per embodiment; IK results that violate the action box get clamped by approvers and reported next turn |
+| Pyroki server robot ≠ embodiment robot | README documents the per-embodiment URDF pairing and the actual invocation (upstream's `__main__` ignores CLI flags, §1); IK results that violate the action box get clamped by approvers and reported next turn |
 | Cold-start latency of model servers | Retry-with-backoff bounded by `request_timeout_s`; error text names the launch command |
 
 ## 12. Execution steps (each a commit)
