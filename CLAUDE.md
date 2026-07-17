@@ -35,7 +35,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   (policy adapter speaking the XPolicyLab websocket protocol — 40+ served VLAs,
   no xpolicylab dep), and
   `plugins/inspect-robots-agent/` (LLMs as policies via the OpenAI-compatible
-  wire format — httpx only, no provider SDKs; registered as `agent`).
+  wire format — httpx only, no provider SDKs; registered as `agent`), and
+  `plugins/inspect-robots-capx/` (CaP-X code-as-policy over perception and IK
+  HTTP servers; registered as `capx`).
 
 ## Working here
 

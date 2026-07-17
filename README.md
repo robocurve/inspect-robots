@@ -154,6 +154,27 @@ Read the recorded agent conversation with
 `inspect-robots view LOG.json`, including the camera frames the model saw (for
 `--store-frames` runs).
 
+### Generate robot policy code with CaP-X:
+
+The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a
+code-as-policy agent in the same policy slot. The LLM writes Python against
+SAM3 segmentation, Contact-GraspNet planning, Pyroki IK, and speed-limited
+joint-motion helpers. CaP-X model servers run separately, while the persistent
+code namespace and action queue run inside the evaluator.
+
+```bash
+uv pip install inspect-robots-capx
+
+inspect-robots "place the fork on the plate" --policy capx \
+    --embodiment <joint-space-embodiment> \
+    -P model=anthropic/claude-fable-5 -P sam3_url=http://gpu-box:8114
+```
+
+The v1 adapter requires one `joint_pos` arm with a declared gripper, full
+joint-state proprioception, a control rate, and a camera. See the
+[plugin README](plugins/inspect-robots-capx/) for model-server bringup, depth
+metadata, gripper polarity, and the model-code trust boundary.
+
 ### Run in simulation
 
 The same instruction runs on your configured simulator instead of the
@@ -264,6 +285,10 @@ adapter shipped from this repo as separate packages:
   embodiment through tool calls, as a first-class policy. The same
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
   next to fine-tuned VLAs.
+- **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
+  code-as-policy agents against a joint-space embodiment. Model-generated
+  Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
+  then queues approver-checked joint targets behind `--policy capx`.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
