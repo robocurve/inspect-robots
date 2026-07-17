@@ -3,14 +3,14 @@ requires = ["hatchling>=1.18", "hatch-fancy-pypi-readme>=24.1"]
 build-backend = "hatchling.build"
 
 [project]
-name = "inspect-robots-agent"
-version = "0.12.0"
-description = "LLM agent policy for Inspect Robots: frontier LLMs (Claude, GPT, anything OpenAI-compatible) drive any registered embodiment through tool calls."
+name = "inspect-robots-capx"
+version = "0.1.0"
+description = "Code-as-policy manipulation for Inspect Robots using CaP-X perception and IK servers."
 dynamic = ["readme"]
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
-keywords = ["robotics", "llm", "agent", "vla", "inspect_robots", "evaluation"]
+keywords = ["robotics", "llm", "code-as-policy", "capx", "inspect_robots", "evaluation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -19,13 +19,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
-# NOTE: no provider SDKs. The adapters speak raw OpenAI wire formats over
-# httpx. Chat Completions remains the broad-compatibility default, while the
-# Responses wire is available for direct endpoints that serve it. This keeps
-# the same "speak the protocol, don't import the package" doctrine as the
-# xpolicylab plugin.
+# CaP-X itself is intentionally not a dependency. The research checkout owns
+# the model servers; this adapter speaks their small HTTP protocol directly.
 dependencies = [
     "inspect-robots>=0.4",
+    "inspect-robots-agent>=0.12",
     "numpy>=1.24",
     "httpx>=0.27",
 ]
@@ -33,33 +31,28 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
 
-# Entry-point discovery: an installed inspect-robots-agent appears in
-# `inspect-robots list policies` without being imported first. The registry
-# calls this factory by the name `agent`.
 [project.entry-points."inspect_robots.policies"]
-agent = "inspect_robots_agent.policy:agent_policy"
+capx = "inspect_robots_capx.policy:capx_policy"
 
 [project.urls]
-Homepage = "https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-agent"
+Homepage = "https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-capx"
 Repository = "https://github.com/robocurve/inspect-robots"
 
-# In the Inspect Robots monorepo this resolves the `inspect_robots` dependency
-# to the in-repo core package instead of PyPI. Harmless in a standalone
-# checkout (uv ignores a workspace source when there is no workspace root).
 [tool.uv.sources]
 inspect-robots = { workspace = true }
+inspect-robots-agent = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/inspect_robots_agent"]
+packages = ["src/inspect_robots_capx"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/inspect_robots_agent", "tests", "README.md"]
+include = ["src/inspect_robots_capx", "tests", "README.md"]
 
 [tool.ruff]
 extend = "../../pyproject.toml"
 
 [tool.ruff.lint.isort]
-known-first-party = ["inspect_robots", "inspect_robots_agent"]
+known-first-party = ["inspect_robots", "inspect_robots_agent", "inspect_robots_capx"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D1"]

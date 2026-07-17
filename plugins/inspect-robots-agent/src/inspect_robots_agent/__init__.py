@@ -23,9 +23,30 @@ from __future__ import annotations
 
 from importlib.metadata import version
 
+from inspect_robots_agent._llm import (
+    ENV_MODEL,
+    AssistantMessage,
+    ChatClient,
+    Provider,
+    resolve_provider,
+)
+from inspect_robots_agent._png import encode_png, png_data_url
+from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent.policy import AgentPolicyConfig, LLMAgentPolicy, agent_policy
 
-__all__ = ["AgentPolicyConfig", "LLMAgentPolicy", "agent_policy"]
+__all__ = [
+    "ENV_MODEL",
+    "AgentPolicyConfig",
+    "AssistantMessage",
+    "ChatClient",
+    "LLMAgentPolicy",
+    "Provider",
+    "ResponsesClient",
+    "agent_policy",
+    "encode_png",
+    "png_data_url",
+    "resolve_provider",
+]
 
 # Derived from package metadata so it can never drift from pyproject again
 # (0.2.0 and 0.2.1 shipped with a stale hardcoded "0.1.0").
