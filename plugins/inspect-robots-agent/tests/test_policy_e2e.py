@@ -36,8 +36,30 @@ from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, AgentPolicyConfig, _ob
 
 # --- scripted-conversation harness ---------------------------------------------
 
+_MOVE_TOOL_NAMES = frozenset({"move_joints", "move_to", "move_by"})
+_DEFAULT_MOVE_NOTE = "The target is ahead, so I chose this motion to move toward it."
+_NOTE_CONTRACT = (
+    "Every move tool call must include a `note`: in one or two sentences, say what you observe "
+    "in the current observation and why you chose this motion. The user is watching these notes "
+    "to see what you see and what you decide, so write them for a human reader."
+)
+_NOTE_ERROR = "note is required: describe what you observe and why you chose this motion"
 
-def _tool_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+
+def _with_default_note(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    wire_arguments = dict(arguments)
+    if name in _MOVE_TOOL_NAMES:
+        wire_arguments.setdefault("note", _DEFAULT_MOVE_NOTE)
+    return wire_arguments
+
+
+def _tool_response(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    add_default_note: bool = True,
+) -> dict[str, Any]:
+    wire_arguments = _with_default_note(name, arguments) if add_default_note else arguments
     return {
         "choices": [
             {
@@ -48,7 +70,7 @@ def _tool_response(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                         {
                             "id": f"call_{name}",
                             "type": "function",
-                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                            "function": {"name": name, "arguments": json.dumps(wire_arguments)},
                         }
                     ],
                 }
@@ -92,7 +114,10 @@ def _multi_tool_response(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, A
                         {
                             "id": f"call_{index}",
                             "type": "function",
-                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(_with_default_note(name, arguments)),
+                            },
                         }
                         for index, (name, arguments) in enumerate(calls)
                     ],
@@ -260,6 +285,17 @@ def test_absent_embodiment_docs_leave_the_prompt_unchanged(docs: str | None) -> 
 
     assert transcript is not None
     assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+
+
+def test_system_prompt_requires_human_readable_move_notes() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert _NOTE_CONTRACT in transcript[0]["content"]
 
 
 def test_bind_accepts_legacy_embodiment_info_without_docs() -> None:
@@ -744,6 +780,42 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
         m for request in script.requests for m in request["messages"] if m.get("role") == "tool"
     ]
     assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
+
+
+def test_missing_note_is_fed_back_and_corrected_in_persisted_transcript(
+    tmp_path: Path,
+) -> None:
+    corrected_note = "The cube is still ahead, so I will move the end effector toward it."
+    script = _Script(
+        [
+            _tool_response(
+                "move_by",
+                {"deltas": {"dx": 0.05}},
+                add_default_note=False,
+            ),
+            _tool_response(
+                "move_by",
+                {"deltas": {"dx": 0.05}, "note": corrected_note},
+            ),
+            _tool_response("done", {"summary": "corrected"}),
+        ]
+    )
+    logs = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    assert logs[0].status == "success"
+    correction_messages = [
+        message for message in script.requests[1]["messages"] if message.get("role") == "tool"
+    ]
+    assert any(message["content"] == _NOTE_ERROR for message in correction_messages)
+
+    (transcript,) = logs[0].samples[0].policy_transcripts
+    assert transcript is not None
+    tool_arguments = [
+        json.loads(call["function"]["arguments"])
+        for message in transcript
+        for call in message.get("tool_calls", [])
+    ]
+    assert any(arguments.get("note") == corrected_note for arguments in tool_arguments)
 
 
 def test_persistent_tool_errors_become_policy_error(tmp_path: Path) -> None:
