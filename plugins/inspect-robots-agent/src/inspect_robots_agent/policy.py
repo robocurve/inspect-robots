@@ -5,7 +5,8 @@ text + camera frames), one validated tool call out, synthesized into an
 open-loop ``ActionChunk`` by the motion layer. The LLM never sees raw
 actuation, and every emitted action still passes the rollout's approver
 chain — this module contains no safety-critical code path of its own
-(plan 0008 §4b).
+(plan 0008 §4b). Chat-format history stays canonical while the selected
+client translates it to the configured API wire format.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from inspect_robots.spaces import Box
 from inspect_robots.types import ActionChunk, Observation
 from inspect_robots_agent._llm import ENV_MODEL, ChatClient, ToolCall, resolve_provider
 from inspect_robots_agent._png import png_data_url
+from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import Toolset, build_toolset
 
 _MAX_CONSECUTIVE_FAILURES = 3
@@ -34,6 +36,7 @@ _MAX_CONSECUTIVE_FAILURES = 3
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+_WIRE_FORMATS = frozenset({"chat", "responses"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -77,6 +80,7 @@ class AgentPolicyConfig(PolicyConfig):
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
+    wire: str = "chat"
     max_llm_calls: int = 100
     effort: str | None = "low"
     max_speed_frac: float = 0.1
@@ -88,7 +92,8 @@ class LLMAgentPolicy(PolicyBase):
 
     Embodiment-adaptive: ``bind()`` (called by ``eval()`` before the
     compatibility check) adopts the embodiment's spaces and builds the tool
-    surface from them. Conversation state is per-trial (``reset``).
+    surface from them. Conversation state is per-trial (``reset``), and the
+    selected wire client translates that state without changing the loop.
     """
 
     def __init__(
@@ -96,6 +101,7 @@ class LLMAgentPolicy(PolicyBase):
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str | None = None,
+        wire: str = "chat",
         max_llm_calls: int = 100,
         temperature: float | None = None,
         effort: str | None = "low",
@@ -120,7 +126,14 @@ class LLMAgentPolicy(PolicyBase):
                 f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
                 f"the field, got {effort!r}"
             )
-        self._client = ChatClient(provider, transport=transport)
+        if wire not in _WIRE_FORMATS:
+            raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        if wire == "responses":
+            self._client: ChatClient | ResponsesClient = ResponsesClient(
+                provider, transport=transport
+            )
+        else:
+            self._client = ChatClient(provider, transport=transport)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
         # Robot control is latency-sensitive: default to low reasoning effort
@@ -134,6 +147,7 @@ class LLMAgentPolicy(PolicyBase):
             model=provider.model,
             base_url=provider.base_url,
             api_key_env=api_key_env,
+            wire=wire,
             max_llm_calls=max_llm_calls,
             effort=effort,
             max_speed_frac=max_speed_frac,

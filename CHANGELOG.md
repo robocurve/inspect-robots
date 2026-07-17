@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
+  so reasoning effort works together with function tools on recent OpenAI
+  models (Chat Completions rejects the combination, observed on
+  `gpt-5.6-sol`). The chat-wire rejection now names the fix in its error
+  message (#131).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
