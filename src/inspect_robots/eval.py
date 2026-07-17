@@ -378,9 +378,6 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
-                    trial_metadatas.append(record.metadata)
-                    termination_reasons.append(record.termination_reason)
-                    policy_transcripts.append(record.policy_transcript)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -394,9 +391,6 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
-                    termination_reasons.append(record.termination_reason)
-                    policy_transcripts.append(record.policy_transcript)
-                    trial_metadatas.append(record.metadata)
 
                 on_trial_end = getattr(policy, "on_trial_end", None)
                 if callable(on_trial_end):
@@ -410,6 +404,9 @@ def _run_eval(
                             status = "error"
                             error = note
 
+                trial_metadatas.append(record.metadata)
+                termination_reasons.append(record.termination_reason)
+                policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
             if halted:

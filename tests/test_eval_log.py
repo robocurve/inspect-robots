@@ -144,6 +144,7 @@ def test_eval_log_and_friends_are_frozen() -> None:
         log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].trial_metadata.append({})  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
         log.samples[0].termination_reasons.append("failure")  # type: ignore[attr-defined]
 
 

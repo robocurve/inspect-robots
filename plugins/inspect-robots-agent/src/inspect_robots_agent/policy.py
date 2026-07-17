@@ -189,7 +189,8 @@ class LLMAgentPolicy(PolicyBase):
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist the transcript at the end of the trial."""
-        if not self._messages:
+        messages = self.transcript()
+        if not messages:
             return
 
         transcript_dir = Path(log_dir) / "transcripts" / run_id
@@ -199,14 +200,8 @@ class LLMAgentPolicy(PolicyBase):
         path = transcript_dir / f"{trial_id}.jsonl"
 
         with path.open("w", encoding="utf-8") as f:
-            for msg in self._messages:
-                clean_msg = dict(msg)
-                if isinstance(clean_msg.get("content"), list):
-                    clean_content = [
-                        part for part in clean_msg["content"] if part.get("type") != "image_url"
-                    ]
-                    clean_msg["content"] = clean_content
-                f.write(json.dumps(clean_msg) + "\n")
+            for msg in messages:
+                f.write(json.dumps(msg) + "\n")
 
         # Make path relative to log_dir for portability
         record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
