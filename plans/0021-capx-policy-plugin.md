@@ -81,7 +81,12 @@ Facts established by reading `capgym/cap-x@main` (2026-07, 7 commits):
     same `.npy` encoding. Grasp poses are `(K, 4, 4)` in the camera frame.
   - Pyroki `/ik`: request `{target_pose_wxyz_xyz: [7 floats],
     prev_cfg: [floats] | null}`; response `{joint_positions: [floats]}`.
-    The server owns the robot model (launched with `--robot <urdf_name>`).
+    The server owns the robot model. Both `joint_positions` and `prev_cfg`
+    are the URDF's **full actuated-joint config**, gripper joints included
+    (CaP-X strips the gripper entry client-side:
+    `extract_arm_joints(cfg) = cfg[:-1]` in
+    `capx/integrations/franka/common.py`, and warm-starts with the full
+    stored config).
 - CaP-X's own clients retry POSTs with backoff (`post_with_retries`) because
   model servers cold-start slowly.
 
@@ -185,10 +190,18 @@ plugin's):
 **Depth convention.** Core `Observation.images` are uint8 RGB; depth has no
 core slot. The plugin defines (and its README documents) an `extra`-key
 convention: embodiments that want grasp planning expose float depth,
-intrinsics, and camera-to-world extrinsics under the keys above. Helpers
-that need a missing key raise inside the sandbox with a message naming the
-key and the convention, which the model sees as stderr and can route around
-(segmentation and IK still work without depth). Nothing in core changes.
+intrinsics, and camera-to-world extrinsics under the keys above, each as
+**either the array or a zero-arg callable returning it** (helpers call it
+if callable). The callable form is the documented recommendation for real
+embodiments: the rollout deep-retains each step's `observation.extra` in
+`TrialRecord` (only `images` get stripped to the frame store), so a raw
+per-step 480x640 float64 depth map would turn trial records into an
+in-memory depth video buffer at real control rates; a callable retains
+nothing. Helpers that need a missing key raise inside the sandbox with a
+message naming the key and the convention, which the model sees as stderr
+and can route around (segmentation and IK still work without depth).
+Nothing in core changes; a core follow-up (strip declared bulk `extra` keys
+in `_store_frames`) is noted in §11 but not required.
 
 **`bind(embodiment_info)`** adopts the embodiment spaces like the agent
 plugin. The v1 profile, enforced with an actionable error naming this plan:
@@ -207,10 +220,14 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
   `max_speed_frac`, both required. `_motion.py` reproduces the agent
   toolset's step-limit derivation exactly (the `min(max_speed_frac / hz,
   0.05)`-of-range backstop and the native-dtype range arithmetic of
-  `DeltaLimitApprover`), so the queue's per-step deltas can never exceed
+  `DeltaLimitApprover`), so *within a chunk* per-step deltas never exceed
   what the CLI's default approver allows — otherwise a low `control_hz`
   would get silently `delta_clamped` and the executed trajectory would
-  diverge from what the sandbox reported.
+  diverge from what the sandbox reported. At *turn boundaries* the cursor
+  re-seeds from observed state while `DeltaLimitApprover` clamps against
+  the last approved action, so a lagging arm can still get its first
+  next-turn action clamped; the agent plugin shares this edge, the README
+  notes it, and the claim is scoped to within-chunk deltas.
 
 **`reset(scene)`** starts the per-trial conversation:
 
@@ -226,9 +243,9 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
 **`act(observation)`** — the codegen loop:
 
 1. Append the observation message: labeled state text plus camera PNGs
-   (reused agent-plugin formatting) and, from turn 2 on, the CaP-X-style
-   execution report of the previous turn (executed code, stdout, stderr,
-   truncated to a documented cap so context stays bounded).
+   (reused agent-plugin formatting). The previous turn's execution report is
+   already in `_messages` (step 4), so the observation message carries only
+   the fresh observation.
 2. Ask the LLM. Accept raw Python or a single fenced block (strip fences —
    CaP-X asks for raw code, but its own multi-turn prompt then demands
    fenced code after `REGENERATE`; be liberal). Recognize the control words
@@ -238,12 +255,19 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
    this, and an `ActionChunk` cannot be empty).
 3. Execute the code in the sandbox: helpers bound, stdout/stderr captured
    (traceback printed to captured stderr on any exception, CaP-X-style).
-4. If the queue has actions: pop it and return
-   `ActionChunk(actions=queue, control_hz=embodiment control_hz,
-   inference_latency_s=<wall time of LLM call(s)>, meta={"code": <the code>,
-   "stdout": ..., "stderr": ...})`.
-5. If the queue is empty (pure-perception turn or exec error): feed the
-   execution report back as a user message and loop to 2 — bounded by
+4. Append the CaP-X-style execution report (executed code, stdout, stderr,
+   truncated tail-first to a documented cap so context stays bounded) to
+   `_messages` **eagerly, before returning** — chunk-level `meta` is a dead
+   channel (`DefaultController` buffers only `chunk.actions` and the JSON
+   `EvalLog` persists no chunk meta), so the transcript is the record; a
+   trial that terminates on this chunk still carries the final turn's
+   stdout/stderr in `transcript()`. The executed code (untruncated) also
+   rides the first queued action's `meta["code"]`, which survives into
+   `StepRecord` for step-level debugging. If the queue has actions: pop it
+   and return `ActionChunk(actions=queue, control_hz=embodiment control_hz,
+   inference_latency_s=<wall time of LLM call(s)>)`.
+5. If the queue is empty (pure-perception turn or exec error): the report
+   from step 4 is already the feedback message; loop to 2 — bounded by
    `max_code_failures` consecutive *error* turns (a clean perception-only
    turn resets the failure counter but still loops; the LLM-call budget is
    the global bound, exhaustion forces the give-up hold chunk exactly like
@@ -275,8 +299,14 @@ embodiment provides them).
   `(0, 4, 4)` / `(0,)` so `K == 0` is an ordinary, checkable result rather
   than a shape crash (golden wire test in §9).
 - `solve_ik(position: np.ndarray, quaternion_wxyz: np.ndarray) ->
-  np.ndarray` — Pyroki `/ik` with `prev_cfg` = the motion cursor's arm
-  joints. Returns arm joint positions.
+  np.ndarray` — Pyroki `/ik`. The wire speaks the URDF's full actuated
+  config (§2): the client keeps the last full server-returned config as the
+  warm-start `prev_cfg` (mirroring CaP-X's stored `self.cfg`; `None` on the
+  first call) and returns the response stripped to the bound arm dof
+  (leading `arm_dof` entries), raising an actionable in-sandbox error when
+  `len(joint_positions) < arm_dof` (server robot ≠ embodiment robot, the
+  §11 risk). The helper doc tells the model it gets arm joints, sized for
+  `move_to_joints`.
 - `move_to_joints(joints: np.ndarray) -> None` — queue speed-limited linear
   interpolation from the cursor to `joints` (gripper dim held); advances the
   cursor. The cursor starts each turn at the bound proprioceptive state
@@ -328,10 +358,14 @@ schemas (LLM stub reuses the agent plugin's canned-completion approach):
   including the empty-grasp flat-`[]` payload normalizing to
   `(0, 4, 4)` / `(0,)`.
 - servers: request bodies match the schemas exactly (recorded by the stub);
-  retries on 503-then-200; actionable ConnectionError text; timeout path.
+  retries on 503-then-200; actionable ConnectionError text; timeout path;
+  `/ik` golden test with an `arm_dof + 1`-long full-config response (strip
+  to arm dof, full config becomes the next `prev_cfg`, short response
+  raises the actionable error).
 - sandbox: namespace persists across turns within a trial and resets across
   trials; stdout/stderr capture; traceback lands in stderr; helper raising
-  (e.g. missing depth) surfaces as stderr not a crash.
+  (e.g. missing depth) surfaces as stderr not a crash; depth accepted as
+  both a raw array and a zero-arg callable.
 - motion: interpolation respects `max_speed_frac` and `control_hz`,
   including a low-`control_hz` case proving the per-step delta stays under
   the `DeltaLimitApprover` backstop; cursor chaining across move/gripper
@@ -340,8 +374,10 @@ schemas (LLM stub reuses the agent plugin's canned-completion approach):
   without gripper, missing control_hz); fence stripping and raw-code paths;
   FINISH/GIVE_UP → hold chunk with `request_stop` meta; perception-only
   turn loops then returns queued chunk; consecutive-failure and call-budget
-  bounds; execution report truncation; transcript sanitization; chunk meta
-  carries code/stdout/stderr.
+  bounds; execution report truncation; transcript sanitization; the
+  execution report (incl. a terminal turn's stdout/stderr) lands in
+  `transcript()` eagerly, and the first queued action's `meta["code"]`
+  carries the executed code.
 - e2e: `CapxPolicy` vs an in-test joint-space mock embodiment (arm dims +
   labeled gripper dim, `joint_pos` semantics, a matching single-field
   StateSpec, a small RGB camera — the pattern of the agent plugin's
@@ -384,6 +420,7 @@ aim for full-line coverage of `policy.py`, `_motion.py`, `_sandbox.py`.
 | Server schema drift (no version field) | Golden wire tests; upstream commit hash in `_codec.py`; schemas isolated in two small modules |
 | `exec()` of model output alarms users | Loud trust-model section in README + module docstring; approver chain still gates every action; containerize for untrusted models |
 | Embodiments lack depth (SO-101 webcam rigs) | Documented degradation: segmentation + IK still work; `plan_grasp` raises a routable in-sandbox error naming the extra-key convention |
+| Raw per-step depth arrays bloat `TrialRecord` memory | Callable form of the extra-key convention is the documented recommendation (§6); possible core follow-up: strip declared bulk `extra` keys in `_store_frames` |
 | 5-DOF arms can't reach 6-DOF grasp poses | Out of scope for the plugin (Pyroki returns best-effort IK); README notes the caveat and suggests top-down grasp filtering in the task prompt |
 | Model floods context with huge stdout | Execution report truncated to a documented cap, tail-first (errors are at the tail) |
 | Coupling to `inspect-robots-agent` internals | Only public re-exports imported (§5); workspace CI breaks loudly on drift |
