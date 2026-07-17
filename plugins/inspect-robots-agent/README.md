@@ -59,6 +59,11 @@ split-the-move error and issues it as two smaller motions; raise the fraction
 result reports the computed step count and, when the embodiment declares
 `control_hz`, the corresponding playout time. `duration_s` is not part of either motion tool.
 
+Every move tool call also requires a `note` with one or two plain sentences
+describing the current observation and why the agent chose that motion. The
+user reads these notes live and in the saved transcript to follow what the
+agent sees and decides.
+
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
 per-step speed statement, so `max_speed_frac` does not apply to displacement
@@ -94,6 +99,7 @@ Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
+Move notes appear inside the echoed tool-call arguments.
 The speed fraction defaults to `0.1` and applies only to absolute modes.
 
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.

@@ -39,6 +39,10 @@ _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r}
 through tool calls. Each observation message gives you the current \
 proprioceptive state and camera images. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
+Every move tool call must include a `note`: in one or two sentences, say what \
+you observe in the current observation and why you chose this motion. The user \
+is watching these notes to see what you see and what you decide, so write them \
+for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
 done; if it cannot be achieved call give_up. You have a budget of \

@@ -19,8 +19,16 @@ All notable changes to this project are documented here. The format is based on
   rationale). `compat`'s policy/embodiment rate-mismatch warning is
   unaffected.
 
-### Added
+### Changed
 
+- **Agent plugin:** move tool calls now require a note describing the current
+  observation and why the agent chose the motion, so users can follow its
+  perception and decisions live and in saved transcripts (#130). This tightens
+  the tool contract: a model that persistently omits the note errors the trial
+  (unscored) after three consecutive failures, and each correction turn spends
+  one `max_llm_calls` unit.
+
+### Added
 - **`inspect-robots eval-set TASK [TASK ...]`**: run several registered tasks
   against one resolved policy/embodiment pair in a single invocation, matching
   task names exactly or by shell-quoted `fnmatch` glob (e.g.
