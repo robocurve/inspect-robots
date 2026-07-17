@@ -123,7 +123,7 @@ plugins/inspect-robots-capx/
     ├── test_servers.py
     ├── test_sandbox.py
     ├── test_motion.py
-    └── test_policy.py                # incl. e2e vs the core CubePick mock world
+    └── test_policy.py                # incl. e2e vs an in-test joint-space mock embodiment (§9)
 plans/0021-capx-policy-plugin.md      # this file
 .github/workflows/ci.yml              # + plugin-capx job, wired into both needs lists
 .github/workflows/release.yml         # + publish-capx job (environment: pypi-capx)
@@ -146,11 +146,15 @@ already implement. Duplicating ~300 maintained lines is worse than a
 first-party dependency, so:
 
 - `inspect-robots-agent` bumps to 0.12.0 (it is at 0.11.0 today) and
-  re-exports `ChatClient`, `resolve_provider`, `Provider`, `ToolCall`
-  (part of the client surface), `ENV_MODEL` (capx mirrors the agent's
-  model-default env var), `png_data_url`, and `encode_png` (the raw PNG
-  writer; SAM3 requests need bare b64 PNG, not a data URL) from its package
-  `__init__`, extending its `__all__`; the modules stay where they are.
+  re-exports `ChatClient`, `ResponsesClient` (the agent's `wire="responses"`
+  client; a chat-only capx would inherit `effort="low"` defaults that 400 on
+  direct OpenAI endpoints with an error message telling users to switch
+  wires), `AssistantMessage` (the completion type capx must annotate under
+  mypy strict), `resolve_provider`, `Provider`, `ENV_MODEL` (capx mirrors
+  the agent's model-default env var), `png_data_url`, and `encode_png` (the
+  raw PNG writer; SAM3 requests need bare b64 PNG, not a data URL) from its
+  package `__init__`, extending its `__all__`; the modules stay where they
+  are.
 - `inspect-robots-capx` imports only those names from
   `inspect_robots_agent` (never from underscore modules).
 - Both packages live in this repo's uv workspace and release together, so
@@ -164,7 +168,7 @@ plugin's):
 
 | Arg | Default | Meaning |
 | --- | --- | --- |
-| `model` / `base_url` / `api_key_env` / `temperature` / `effort` | agent-plugin defaults | LLM provider routing, shared via §5 |
+| `model` / `base_url` / `api_key_env` / `temperature` / `effort` / `wire` | agent-plugin defaults | LLM provider routing incl. the chat/responses wire selector, shared via §5 |
 | `sam3_url` | `"http://127.0.0.1:8114"` | CaP-X SAM3 server |
 | `graspnet_url` | `"http://127.0.0.1:8115"` | CaP-X Contact-GraspNet server |
 | `pyroki_url` | `"http://127.0.0.1:8116"` | CaP-X Pyroki IK server |
@@ -200,7 +204,13 @@ plugin. The v1 profile, enforced with an actionable error naming this plan:
   cursor and the FINISH/GIVE_UP hold action read that one field from the
   turn's observation; there is no split joint_pos/gripper key convention.
 - per-step interpolation deltas derived from `control_hz` and
-  `max_speed_frac`, both required.
+  `max_speed_frac`, both required. `_motion.py` reproduces the agent
+  toolset's step-limit derivation exactly (the `min(max_speed_frac / hz,
+  0.05)`-of-range backstop and the native-dtype range arithmetic of
+  `DeltaLimitApprover`), so the queue's per-step deltas can never exceed
+  what the CLI's default approver allows — otherwise a low `control_hz`
+  would get silently `delta_clamped` and the executed trajectory would
+  diverge from what the sandbox reported.
 
 **`reset(scene)`** starts the per-trial conversation:
 
@@ -260,7 +270,10 @@ embodiment provides them).
   Contact-GraspNet on current depth + intrinsics with `mask` as the segmap.
   Returns `(K, 4, 4)` poses in the **camera frame** and `(K,)` scores; the
   prompt documents `extrinsics @ pose` for world frame, mirroring CaP-X's
-  docstring example.
+  docstring example. When the server finds no grasps its retry loop returns
+  flat `np.array([])` payloads; the client normalizes those to
+  `(0, 4, 4)` / `(0,)` so `K == 0` is an ordinary, checkable result rather
+  than a shape crash (golden wire test in §9).
 - `solve_ik(position: np.ndarray, quaternion_wxyz: np.ndarray) ->
   np.ndarray` — Pyroki `/ik` with `prev_cfg` = the motion cursor's arm
   joints. Returns arm joint positions.
@@ -311,15 +324,18 @@ schemas (LLM stub reuses the agent plugin's canned-completion approach):
 
 - codec: golden round-trips — a float32 depth map through `npy_b64`, a bool
   mask through `mask_decode`, structural equality against handcrafted wire
-  payloads shaped like CaP-X's (guards drift without importing capx).
+  payloads shaped like CaP-X's (guards drift without importing capx),
+  including the empty-grasp flat-`[]` payload normalizing to
+  `(0, 4, 4)` / `(0,)`.
 - servers: request bodies match the schemas exactly (recorded by the stub);
   retries on 503-then-200; actionable ConnectionError text; timeout path.
 - sandbox: namespace persists across turns within a trial and resets across
   trials; stdout/stderr capture; traceback lands in stderr; helper raising
   (e.g. missing depth) surfaces as stderr not a crash.
-- motion: interpolation respects `max_speed_frac` and `control_hz`; cursor
-  chaining across move/gripper calls; hold chunk shape; gripper values from
-  box bounds.
+- motion: interpolation respects `max_speed_frac` and `control_hz`,
+  including a low-`control_hz` case proving the per-step delta stays under
+  the `DeltaLimitApprover` backstop; cursor chaining across move/gripper
+  calls; hold chunk shape; gripper values from box bounds.
 - policy: bind profile enforcement (rejects ee mode, dual-arm-sized boxes
   without gripper, missing control_hz); fence stripping and raw-code paths;
   FINISH/GIVE_UP → hold chunk with `request_stop` meta; perception-only
@@ -381,7 +397,8 @@ aim for full-line coverage of `policy.py`, `_motion.py`, `_sandbox.py`.
 2. `_codec.py` + golden wire tests.
 3. `_servers.py` + MockTransport stubs + tests.
 4. `_sandbox.py` + `_motion.py` + tests.
-5. `policy.py` (bind/reset/act/transcript/close) + tests + CubePick e2e.
+5. `policy.py` (bind/reset/act/transcript/close) + tests + the joint-space
+   mock-embodiment e2e (§9).
 6. CI job into both needs lists; release job; root README + CLAUDE.md +
    plugin README.
 7. Gates: `ruff check`, `ruff format --check`, plugin mypy strict, plugin
