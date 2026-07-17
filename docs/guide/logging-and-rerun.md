@@ -122,8 +122,14 @@ hint whenever a log has stored frames.
 ## Policy transcripts
 
 Policies can persist a per-trial audit record in the eval log; read it with
-`inspect-robots inspect LOG.json --transcript`. The agent policy stores its
-conversation, with streamed image bytes replaced by
+`inspect-robots inspect LOG.json --transcript`, or render a self-contained
+conversation page with [`inspect-robots view`](cli.md#inspect-robots-view):
+
+```bash
+inspect-robots view LOG.json
+```
+
+The agent policy stores its conversation, with streamed image bytes replaced by
 `[image omitted: streamed camera frame]`. The preceding label, such as
 `camera 'top_cam' (step 480):`, is emitted whether or not frames are stored,
 and when they are (`store_frames=True`) it provides the step join key from a
