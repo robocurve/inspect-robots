@@ -379,6 +379,50 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
+@pytest.mark.parametrize("epochs_value", ["0", "-1", "-5"])
+def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
+    """--epochs 0 / negative must produce a guided SystemExit, not a raw traceback (#145)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                epochs_value,
+            ]
+        )
+    message = str(excinfo.value)
+    assert "--epochs" in message
+    assert epochs_value in message
+
+
+@pytest.mark.parametrize("epochs_value", ["0", "-1"])
+def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
+    """eval-set --epochs 0 / negative must produce a guided SystemExit naming the task (#145)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                epochs_value,
+            ]
+        )
+    message = str(excinfo.value)
+    assert "--epochs" in message
+    assert epochs_value in message
+    assert "cubepick-reach" in message  # the failing task name is named
+
+
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
     from inspect_robots.registry import task as task_decorator
     from inspect_robots.scene import Scene
