@@ -33,21 +33,6 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ---
 
-## One framework, two swappable inputs
-
-LLM evaluations have a single swappable input: the model. Robotics evaluations
-have two, and Inspect Robots makes both first-class and orthogonal:
-
-| | |
-|---|---|
-| **`Policy`**: the VLA | The "brain". Maps an observation + instruction to an action chunk (a horizon of actions executed open-loop, as π0 / ACT / diffusion policies do). |
-| **`Embodiment`**: the robot or sim | The "body + world". Produces observations, executes actions, owns the action/observation spaces and control rate. Real-robot-first; sims are a stricter special case. |
-
-A **`Task`**, a dataset of `Scene`s (initial conditions, instructions, success
-targets) plus scorers, is defined *independently* of both. Before any rollout,
-Inspect Robots checks the `(policy, embodiment)` pair is compatible (action/observation
-spaces, semantics, control rate, scene realizability) and fails fast if not.
-
 ## Install
 
 In a fresh directory (or your existing project), create a virtual environment
@@ -249,6 +234,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 - **Real-world first.** Interfaces assume real-robot reality: human-in-the-loop
   reset, no privileged success oracle, wall-clock control rate. Simulators just
   offer more (seeding, privileged success, rendering) via opt-in capabilities.
+- **Compatibility checked up front.** Before any rollout, the
+  `(policy, embodiment)` pair is validated — action/observation spaces,
+  semantics, control rate, scene realizability — and fails fast if not.
 - **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
   with the resolved config, git revision, and package versions. It is re-readable
   across releases and re-scorable offline.
