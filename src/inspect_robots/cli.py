@@ -1011,8 +1011,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     tasks = [_resolve_or_exit("task", name) for name in task_names]
     if args.epochs is not None:
         from inspect_robots.errors import ConfigError
+        from inspect_robots.task import Task
 
-        patched: list[Any] = []
+        patched: list[Task] = []
         for t in tasks:
             try:
                 patched.append(replace(t, epochs=args.epochs))
