@@ -4,9 +4,9 @@
 
 # Inspect Robots
 
-### An open-source evaluation framework for physical AI and VLA (vision-language-action) models
+### An open-source evaluation framework for evaluating AI and robots in the physical world
 
-Define a robotics benchmark once, then run *any* policy against *any* compatible
+Define a robotics benchmark once, then run any policy against any compatible
 embodiment (a real robot or a simulator) with reproducible logs and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
@@ -55,13 +55,11 @@ as shown below.
 > [!NOTE]
 > Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots` —
 > inside a uv project, `uv run` re-syncs to the lockfile and silently
-> uninstalls what `uv pip install` just added. To use `uv run` anyway,
-> pass `--no-sync`, or declare the packages with `uv add`.
+> uninstalls what `uv pip install` just added.
 
 ## Quickstart
 
-Install the plugin for your rig (the wizard suggests this one's components)
-and set your defaults once:
+Install the plugin for your rig and set your defaults once:
 
 ```bash
 source .venv/bin/activate
@@ -69,8 +67,7 @@ uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms r
 inspect-robots setup
 ```
 
-The wizard picks your defaults and finds your cameras (unplug one when asked
-and it identifies which is which), then writes
+The wizard picks your defaults and finds your cameras, then writes
 `~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
 instead and type its component names at the prompts; to write the config file
 by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
@@ -129,8 +126,8 @@ inspect-robots "place the fork on the plate" --policy agent \
 
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
-`inspect-robots view LOG.json`, including the camera frames the model saw (for
-`--store-frames` runs).
+`inspect-robots view LOG.json` — for `--store-frames` runs it includes the
+camera frames the model saw.
 
 ### Generate robot policy code with CaP-X
 
