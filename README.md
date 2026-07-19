@@ -4,7 +4,7 @@
 
 # Inspect Robots
 
-### An open-source evaluation framework for evaluating AI and robots in the physical world
+### An open-source evaluation framework for benchmarking AI and robots in the physical world
 
 Define a robotics benchmark once, then run any policy against any compatible
 embodiment (a real robot or a simulator) with reproducible logs and first-class
@@ -234,8 +234,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
   a slow viewer connection drops camera frames first (whole steps only under
   sustained stall) instead of delaying the robot control loop, and camera
   streams are JPEG-compressed by default.
-- **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
-  packages. Entry points make them appear in `inspect-robots list` automatically.
+- **Pluggable.** Backends ship as separate packages — the first-party plugins
+  below, and rig plugins like `inspect-robots-yam`. Entry points make them
+  appear in `inspect-robots list` automatically.
 - **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
   ensembling are built in, with action *semantics* (control mode, rotation
   representation, gripper, frame) that make compatibility and ensembling correct.
