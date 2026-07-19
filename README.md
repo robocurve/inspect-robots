@@ -36,8 +36,7 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 ## Install
 
 In a fresh directory (or your existing project), create a virtual environment
-and install (system Pythons on modern distros reject bare `pip install`,
-per PEP 668):
+and install:
 
 ```bash
 uv venv && uv pip install "inspect-robots[rerun]"
@@ -49,19 +48,15 @@ The `rerun` extra powers the live run viewer. For the numpy-only core:
 uv venv && uv pip install inspect-robots
 ```
 
-Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
-`pip` and console scripts). Either way, activate the venv once
-(`source .venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
-`inspect-robots` directly, as shown below.
+Any venv workflow works. Activate it once (`source .venv/bin/activate`;
+`.venv\Scripts\activate` on Windows) and call `inspect-robots` directly,
+as shown below.
 
 > [!NOTE]
-> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`.
-> Inside a uv project, `uv run` first re-syncs the environment to the
-> project's lockfile, downgrading whatever the `uv pip install` commands
-> above just added back to the locked versions; the only trace is an
-> easy-to-miss "Uninstalled N / Installed N packages" line. To use
-> `uv run` anyway, pass `--no-sync`, or declare everything as real
-> dependencies with `uv add inspect-robots` plus your plugins.
+> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots` —
+> inside a uv project, `uv run` re-syncs to the lockfile and silently
+> uninstalls what `uv pip install` just added. To use `uv run` anyway,
+> pass `--no-sync`, or declare the packages with `uv add`.
 
 ## Quickstart
 
@@ -102,9 +97,7 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. The viewer starts with a 2 GiB memory cap
-so long sessions stay responsive; after upgrading, kill any already-running
-Rerun viewer once so the cap applies. CLI flags override any default
+policy sees while the robot moves. CLI flags override any default
 (`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
@@ -114,10 +107,8 @@ The policy slot is not limited to VLAs. With the
 drives the same rig through tool calls, one approver-checked motion chunk
 per call.
 
-Put a `.env` with your API key in the working directory, reusing one you
-already have or copying the [.env.example](.env.example) template (the CLI
-loads it automatically; real environment variables take precedence over its
-values):
+Put a `.env` with your API key in the working directory (the CLI loads it
+automatically; [.env.example](.env.example) is a template):
 
 ```ini
 ANTHROPIC_API_KEY=sk-ant-...
@@ -141,13 +132,12 @@ Read the recorded agent conversation with
 `inspect-robots view LOG.json`, including the camera frames the model saw (for
 `--store-frames` runs).
 
-### Generate robot policy code with CaP-X:
+### Generate robot policy code with CaP-X
 
 The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a
 code-as-policy agent in the same policy slot. The LLM writes Python against
 SAM3 segmentation, Contact-GraspNet planning, Pyroki IK, and speed-limited
-joint-motion helpers. CaP-X model servers run separately, while the persistent
-code namespace and action queue run inside the evaluator.
+joint-motion helpers.
 
 ```bash
 uv pip install inspect-robots-capx
@@ -157,10 +147,8 @@ inspect-robots "place the fork on the plate" --policy capx \
     -P model=anthropic/claude-fable-5 -P sam3_url=http://gpu-box:8114
 ```
 
-The v1 adapter requires one `joint_pos` arm with a declared gripper, full
-joint-state proprioception, a control rate, and a camera. See the
-[plugin README](plugins/inspect-robots-capx/) for model-server bringup, depth
-metadata, gripper polarity, and the model-code trust boundary.
+See the [plugin README](plugins/inspect-robots-capx/) for embodiment
+requirements, model-server bringup, and the model-code trust boundary.
 
 ### Run in simulation
 
