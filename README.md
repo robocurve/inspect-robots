@@ -1,10 +1,12 @@
 <div align="center">
 
+<img src="https://raw.githubusercontent.com/robocurve/inspect-robots/main/docs/assets/inspect-robots-logo.svg" alt="Inspect Robots logo — a line-art robot inspecting a dot through a magnifying lens" width="160">
+
 # Inspect Robots
 
-### An open-source evaluation framework for physical AI and VLA (vision-language-action) models
+### An open-source evaluation framework for benchmarking AI and robots in the physical world
 
-Define a robotics benchmark once, then run *any* policy against *any* compatible
+Define a robotics benchmark once, then run any policy against any compatible
 embodiment (a real robot or a simulator) with reproducible logs and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
@@ -31,26 +33,10 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ---
 
-## One framework, two swappable inputs
-
-LLM evaluations have a single swappable input: the model. Robotics evaluations
-have two, and Inspect Robots makes both first-class and orthogonal:
-
-| | |
-|---|---|
-| **`Policy`**: the VLA | The "brain". Maps an observation + instruction to an action chunk (a horizon of actions executed open-loop, as π0 / ACT / diffusion policies do). |
-| **`Embodiment`**: the robot or sim | The "body + world". Produces observations, executes actions, owns the action/observation spaces and control rate. Real-robot-first; sims are a stricter special case. |
-
-A **`Task`**, a dataset of `Scene`s (initial conditions, instructions, success
-targets) plus scorers, is defined *independently* of both. Before any rollout,
-Inspect Robots checks the `(policy, embodiment)` pair is compatible (action/observation
-spaces, semantics, control rate, scene realizability) and fails fast if not.
-
 ## Install
 
 In a fresh directory (or your existing project), create a virtual environment
-and install (system Pythons on modern distros reject bare `pip install`,
-per PEP 668):
+and install:
 
 ```bash
 uv venv && uv pip install "inspect-robots[rerun]"
@@ -62,24 +48,18 @@ The `rerun` extra powers the live run viewer. For the numpy-only core:
 uv venv && uv pip install inspect-robots
 ```
 
-Any venv workflow works the same way (`python3 -m venv .venv` and that venv's
-`pip` and console scripts). Either way, activate the venv once
-(`source .venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
-`inspect-robots` directly, as shown below.
+Any venv workflow works. Activate it once (`source .venv/bin/activate`;
+`.venv\Scripts\activate` on Windows) and call `inspect-robots` directly,
+as shown below.
 
 > [!NOTE]
-> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`.
-> Inside a uv project, `uv run` first re-syncs the environment to the
-> project's lockfile, downgrading whatever the `uv pip install` commands
-> above just added back to the locked versions; the only trace is an
-> easy-to-miss "Uninstalled N / Installed N packages" line. To use
-> `uv run` anyway, pass `--no-sync`, or declare everything as real
-> dependencies with `uv add inspect-robots` plus your plugins.
+> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots` —
+> inside a uv project, `uv run` re-syncs to the lockfile and silently
+> uninstalls what `uv pip install` just added.
 
 ## Quickstart
 
-Install the plugin for your rig (the wizard suggests this one's components)
-and set your defaults once:
+Install the plugin for your rig and set your defaults once:
 
 ```bash
 source .venv/bin/activate
@@ -87,8 +67,7 @@ uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms r
 inspect-robots setup
 ```
 
-The wizard picks your defaults and finds your cameras (unplug one when asked
-and it identifies which is which), then writes
+The wizard picks your defaults and finds your cameras, then writes
 `~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
 instead and type its component names at the prompts; to write the config file
 by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
@@ -115,9 +94,7 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. The viewer starts with a 2 GiB memory cap
-so long sessions stay responsive; after upgrading, kill any already-running
-Rerun viewer once so the cap applies. CLI flags override any default
+policy sees while the robot moves. CLI flags override any default
 (`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
@@ -127,10 +104,8 @@ The policy slot is not limited to VLAs. With the
 drives the same rig through tool calls, one approver-checked motion chunk
 per call.
 
-Put a `.env` with your API key in the working directory, reusing one you
-already have or copying the [.env.example](.env.example) template (the CLI
-loads it automatically; real environment variables take precedence over its
-values):
+Put a `.env` with your API key in the working directory (the CLI loads it
+automatically; [.env.example](.env.example) is a template):
 
 ```ini
 ANTHROPIC_API_KEY=sk-ant-...
@@ -151,16 +126,15 @@ inspect-robots "place the fork on the plate" --policy agent \
 
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
-`inspect-robots view LOG.json`, including the camera frames the model saw (for
-`--store-frames` runs).
+`inspect-robots view LOG.json` — for `--store-frames` runs it includes the
+camera frames the model saw.
 
-### Generate robot policy code with CaP-X:
+### Generate robot policy code with CaP-X
 
 The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a
 code-as-policy agent in the same policy slot. The LLM writes Python against
 SAM3 segmentation, Contact-GraspNet planning, Pyroki IK, and speed-limited
-joint-motion helpers. CaP-X model servers run separately, while the persistent
-code namespace and action queue run inside the evaluator.
+joint-motion helpers.
 
 ```bash
 uv pip install inspect-robots-capx
@@ -170,10 +144,8 @@ inspect-robots "place the fork on the plate" --policy capx \
     -P model=anthropic/claude-fable-5 -P sam3_url=http://gpu-box:8114
 ```
 
-The v1 adapter requires one `joint_pos` arm with a declared gripper, full
-joint-state proprioception, a control rate, and a camera. See the
-[plugin README](plugins/inspect-robots-capx/) for model-server bringup, depth
-metadata, gripper polarity, and the model-code trust boundary.
+See the [plugin README](plugins/inspect-robots-capx/) for embodiment
+requirements, model-server bringup, and the model-code trust boundary.
 
 ### Run in simulation
 
@@ -247,6 +219,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 - **Real-world first.** Interfaces assume real-robot reality: human-in-the-loop
   reset, no privileged success oracle, wall-clock control rate. Simulators just
   offer more (seeding, privileged success, rendering) via opt-in capabilities.
+- **Compatibility checked up front.** Before any rollout, the
+  `(policy, embodiment)` pair is validated — action/observation spaces,
+  semantics, control rate, scene realizability — and fails fast if not.
 - **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
   with the resolved config, git revision, and package versions. It is re-readable
   across releases and re-scorable offline.
@@ -259,8 +234,9 @@ print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
   a slow viewer connection drops camera frames first (whole steps only under
   sustained stall) instead of delaying the robot control loop, and camera
   streams are JPEG-compressed by default.
-- **Pluggable.** Ship `inspect-robots-maniskill` or `inspect-robots-openvla` as separate
-  packages. Entry points make them appear in `inspect-robots list` automatically.
+- **Pluggable.** Backends ship as separate packages — the first-party plugins
+  below, and rig plugins like `inspect-robots-yam`. Entry points make them
+  appear in `inspect-robots list` automatically.
 - **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
   ensembling are built in, with action *semantics* (control mode, rotation
   representation, gripper, frame) that make compatibility and ensembling correct.
