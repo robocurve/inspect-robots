@@ -1012,13 +1012,13 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     if args.epochs is not None:
         from inspect_robots.errors import ConfigError
 
-        patched: list[object] = []
+        patched: list[Any] = []
         for t in tasks:
             try:
                 patched.append(replace(t, epochs=args.epochs))
             except ConfigError as exc:
                 raise SystemExit(f"--epochs (task {t.name!r}): {exc}") from exc
-        tasks = patched  # type: ignore[assignment]
+        tasks = patched
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment

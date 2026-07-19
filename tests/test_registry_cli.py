@@ -2508,8 +2508,11 @@ def test_cli_run_closes_embodiment_when_validation_raises(
 ) -> None:
     """A failure between resolving the embodiment and eval() (here: --epochs 0
     raising ConfigError) must still close the embodiment — otherwise a bad flag
-    leaves real arms energized."""
-    from inspect_robots.errors import ConfigError
+    leaves real arms energized.
+
+    The fix converts the raw ConfigError into a guided SystemExit; the
+    important invariant is that close() still fires via the outer try/finally.
+    """
     from inspect_robots.mock import CubePickEmbodiment
 
     closed: list[bool] = []
@@ -2522,7 +2525,7 @@ def test_cli_run_closes_embodiment_when_validation_raises(
     monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
     monkeypatch.setenv(ENV_POLICY, "scripted")
     monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
-    with pytest.raises(ConfigError):
+    with pytest.raises(SystemExit) as excinfo:
         main(
             [
                 "reach the cube",
@@ -2534,6 +2537,7 @@ def test_cli_run_closes_embodiment_when_validation_raises(
                 str(tmp_path / "logs"),
             ]
         )
+    assert "--epochs" in str(excinfo.value)
     assert closed == [True]
 
 
