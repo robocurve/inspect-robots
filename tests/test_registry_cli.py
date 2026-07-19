@@ -539,6 +539,29 @@ def test_cli_eval_set_sim_and_embodiment_conflict() -> None:
         main(["eval-set", "cubepick-reach", "--sim", "--embodiment", "cubepick"])
 
 
+def test_cli_eval_set_negative_epochs_is_a_guided_error(tmp_path: Path) -> None:
+    """--epochs -1 must not leak Task.__post_init__'s raw ConfigError (#145)."""
+    _register_task("kb/a")
+    try:
+        with pytest.raises(SystemExit, match="Epochs count must be >= 1, got -1"):
+            main(
+                [
+                    "eval-set",
+                    "kb/a",
+                    "--policy",
+                    "scripted",
+                    "--embodiment",
+                    "cubepick",
+                    "--epochs",
+                    "-1",
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+    finally:
+        reg._FACTORIES["task"].pop("kb/a", None)
+
+
 def test_cli_eval_set_guardrail_flags_conflict() -> None:
     with pytest.raises(SystemExit, match="drop one"):
         main(
@@ -2462,10 +2485,9 @@ def test_cli_run_closes_the_embodiment_it_resolved(
 def test_cli_run_closes_embodiment_when_validation_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A failure between resolving the embodiment and eval() (here: --epochs 0
-    raising ConfigError) must still close the embodiment — otherwise a bad flag
-    leaves real arms energized."""
-    from inspect_robots.errors import ConfigError
+    """A failure between resolving the embodiment and eval() (here: --epochs 0,
+    a guided SystemExit per #145) must still close the embodiment — otherwise a
+    bad flag leaves real arms energized."""
     from inspect_robots.mock import CubePickEmbodiment
 
     closed: list[bool] = []
@@ -2478,7 +2500,7 @@ def test_cli_run_closes_embodiment_when_validation_raises(
     monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
     monkeypatch.setenv(ENV_POLICY, "scripted")
     monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
-    with pytest.raises(ConfigError):
+    with pytest.raises(SystemExit, match="Epochs count must be >= 1"):
         main(
             [
                 "reach the cube",

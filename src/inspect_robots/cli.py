@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
     from inspect_robots.spaces import Box
+    from inspect_robots.task import Task
 
 
 def _styled(text: str, code: str) -> str:
@@ -478,6 +479,23 @@ def _resolve_or_exit(
         ) from exc
 
 
+def _apply_epochs_or_exit(task: Task, epochs: int) -> Task:
+    """Apply ``--epochs`` with a guided error instead of a raw traceback (#145).
+
+    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
+    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
+    already converts to ``SystemExit`` for registry resolution.
+    """
+    from dataclasses import replace
+
+    from inspect_robots.errors import ConfigError
+
+    try:
+        return replace(task, epochs=epochs)
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _build_guardrails(
     space: Box, max_action_delta: float | None
 ) -> tuple[Approver, list[str], list[str]]:
@@ -835,8 +853,6 @@ def _build_and_announce_guardrails(args: argparse.Namespace, action_space: Box) 
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from dataclasses import replace
-
     from inspect_robots import eval
     from inspect_robots.logging import JsonLogSink
     from inspect_robots.scene import Scene
@@ -885,7 +901,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     embodiment = resolved.embodiment
     try:
         if args.epochs is not None:
-            task = replace(task, epochs=args.epochs)
+            task = _apply_epochs_or_exit(task, args.epochs)
 
         _announce_components(resolved)
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
@@ -995,8 +1011,6 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     the embodiment once per task), the CLI resolves the embodiment exactly
     once for the whole set, so a real robot is not reconnected between tasks.
     """
-    from dataclasses import replace
-
     from inspect_robots import eval_set
 
     _check_shared_run_conflicts(args)
@@ -1005,7 +1019,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     defaults = load_defaults(os.environ)
     tasks = [_resolve_or_exit("task", name) for name in task_names]
     if args.epochs is not None:
-        tasks = [replace(t, epochs=args.epochs) for t in tasks]
+        tasks = [_apply_epochs_or_exit(t, args.epochs) for t in tasks]
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
