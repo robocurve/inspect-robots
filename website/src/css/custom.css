@@ -63,6 +63,9 @@ h4 {
   border-radius: 0.45rem;
 }
 
-.footer--dark {
-  --ifm-footer-background-color: #003f4d;
+/* The footer matches the navbar surface in both modes (cream in light,
+   Infima's dark surface in dark) instead of introducing a third color. */
+.footer {
+  --ifm-footer-background-color: var(--ifm-navbar-background-color);
+  border-top: 1px solid var(--ir-hairline);
 }
