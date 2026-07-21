@@ -1,0 +1,210 @@
+.hero {
+  background:
+    radial-gradient(circle at 15% 20%, rgb(255 250 237 / 90%) 0 8rem, transparent 8.1rem),
+    linear-gradient(135deg, #e2f1ef, #fff 65%);
+  border-bottom: 1px solid rgb(0 95 115 / 15%);
+  padding: 5.5rem 0;
+}
+
+.heroInner {
+  align-items: center;
+  display: grid;
+  gap: 4.5rem;
+  grid-template-columns: minmax(220px, 340px) minmax(0, 1fr);
+  max-width: 1100px;
+}
+
+.heroLogo {
+  filter: drop-shadow(0 18px 28px rgb(0 95 115 / 15%));
+  width: 100%;
+}
+
+.heroTitle {
+  color: #003f4d;
+  font-size: clamp(3rem, 7vw, 5.5rem);
+  letter-spacing: -0.055em;
+  line-height: 0.95;
+  margin-bottom: 1.25rem;
+}
+
+.tagline {
+  color: #005f73;
+  font-size: clamp(1.35rem, 2.4vw, 2rem);
+  font-weight: 650;
+  line-height: 1.25;
+  max-width: 780px;
+}
+
+.heroCopy {
+  color: #334e54;
+  font-size: 1.1rem;
+  max-width: 700px;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-top: 1.8rem;
+}
+
+/* The hero band keeps its light background in dark mode, so this button must
+   not inherit dark-mode button colors (white on white). */
+.heroActions .heroOutlineButton {
+  border-color: #005f73;
+  color: #005f73;
+}
+
+.heroActions .heroOutlineButton:hover {
+  background: rgb(0 95 115 / 8%);
+  color: #003f4d;
+}
+
+.section {
+  padding: 5rem 0;
+}
+
+.section h2 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  letter-spacing: -0.035em;
+}
+
+.sectionLead {
+  font-size: 1.1rem;
+  max-width: 760px;
+}
+
+.inputGrid {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 2rem;
+}
+
+.inputCard {
+  background: linear-gradient(145deg, #005f73, #003f4d);
+  border-radius: 1.25rem;
+  box-shadow: 0 18px 45px rgb(0 63 77 / 18%);
+  color: #f4fffd;
+  padding: 2rem;
+}
+
+.inputCard h3 {
+  color: #fff;
+  font-size: 2rem;
+  margin: 0.3rem 0 0.75rem;
+}
+
+.cardLabel {
+  color: #91e1da;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.afterCards {
+  margin-top: 1.5rem;
+  max-width: 900px;
+}
+
+.creamSection {
+  background: #fffaed;
+  color: #243d42;
+}
+
+.sectionHeadingRow {
+  align-items: end;
+  display: flex;
+  gap: 2rem;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.featureGrid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 2rem;
+}
+
+.featureCard {
+  border: 1px solid rgb(0 95 115 / 18%);
+  border-radius: 1rem;
+  padding: 1.5rem;
+}
+
+.featureCard h3 {
+  color: var(--ifm-color-primary-darkest);
+  font-size: 1.15rem;
+}
+
+.pluginStrip {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 2rem;
+}
+
+.pluginCard {
+  background: var(--ifm-background-surface-color);
+  border: 1px solid rgb(0 95 115 / 20%);
+  border-radius: 0.85rem;
+  color: var(--ifm-font-color-base);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1.1rem;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.pluginCard:hover {
+  border-color: var(--ifm-color-primary);
+  text-decoration: none;
+  transform: translateY(-3px);
+}
+
+.pluginCard code {
+  color: var(--ifm-color-primary-darkest);
+  font-size: 0.78rem;
+}
+
+.pluginCard span {
+  font-size: 0.9rem;
+}
+
+@media screen and (max-width: 996px) {
+  .hero {
+    padding: 3.5rem 0;
+  }
+
+  .heroInner {
+    gap: 2rem;
+    grid-template-columns: 180px 1fr;
+  }
+
+  .featureGrid,
+  .pluginStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media screen and (max-width: 650px) {
+  .heroInner,
+  .inputGrid,
+  .featureGrid,
+  .pluginStrip {
+    grid-template-columns: 1fr;
+  }
+
+  .heroLogo {
+    margin: 0 auto;
+    max-width: 180px;
+  }
+
+  .sectionHeadingRow {
+    align-items: start;
+    flex-direction: column;
+    gap: 0;
+  }
+}

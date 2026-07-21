@@ -1,6 +1,6 @@
 # Command-line interface
 
-The `inspect_robots` CLI wraps the registry and [`eval`][inspect_robots.eval.eval].
+The `inspect_robots` CLI wraps the registry and [`eval`](/api/#inspect_robots.eval.eval).
 The command is installed as `inspect-robots`, with `inspect-robot` as an alias
 for the common typo; both run the same CLI.
 
@@ -200,7 +200,7 @@ scene; a run in which every trial errored reports `run status: error` and exits 
 
 Run several registered tasks against one resolved policy/embodiment pair in a
 single invocation — the CLI counterpart of
-[`eval_set`][inspect_robots.eval.eval_set]. Task names are matched exactly, or
+[`eval_set`](/api/#inspect_robots.eval.eval_set). Task names are matched exactly, or
 by shell-quoted `fnmatch` glob (entry-point discovery namespaces tasks as
 `<benchmark>/<key>`, so a benchmark name is a ready-made prefix):
 
@@ -241,7 +241,7 @@ inspect-robots doctor --embodiment my_arms
 
 ## `inspect-robots inspect`
 
-Print a summary of a saved [`EvalLog`][inspect_robots.log.EvalLog]:
+Print a summary of a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog):
 
 ```bash
 inspect-robots inspect logs/cubepick-reach_xxxx.json
@@ -266,7 +266,7 @@ on-disk field and Python API keep `success`.
 
 ## `inspect-robots view`
 
-Render a saved [`EvalLog`][inspect_robots.log.EvalLog] as a self-contained HTML
+Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
 report:
 
 ```bash

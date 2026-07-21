@@ -5,9 +5,9 @@ inheritance required), or subclass the convenience base classes.
 
 ## A policy (VLA)
 
-A [`Policy`][inspect_robots.policy.Policy] maps an observation to an
-[`ActionChunk`][inspect_robots.types.ActionChunk]. It declares a
-[`PolicyInfo`][inspect_robots.policy.PolicyInfo] (the action space it emits and the
+A [`Policy`](/api/#inspect_robots.policy.Policy) maps an observation to an
+[`ActionChunk`](/api/#inspect_robots.types.ActionChunk). It declares a
+[`PolicyInfo`](/api/#inspect_robots.policy.PolicyInfo) (the action space it emits and the
 observations it requires) used for compatibility checking.
 
 ```python
@@ -50,8 +50,8 @@ frames. Temporal concerns (history, smoothing, ensembling) live in a
 
 ## An embodiment (robot or sim)
 
-An [`Embodiment`][inspect_robots.embodiment.Embodiment] produces observations and executes
-actions. It declares an [`EmbodimentInfo`][inspect_robots.embodiment.EmbodimentInfo] with its
+An [`Embodiment`](/api/#inspect_robots.embodiment.Embodiment) produces observations and executes
+actions. It declares an [`EmbodimentInfo`](/api/#inspect_robots.embodiment.EmbodimentInfo) with its
 spaces, native control rate, and opt-in capability flags.
 
 ```python
@@ -88,7 +88,7 @@ class MyArm:
         ...
 ```
 
-Lifecycle: [`eval`][inspect_robots.eval.eval] closes what it resolves. An
+Lifecycle: [`eval`](/api/#inspect_robots.eval.eval) closes what it resolves. An
 embodiment looked up by registry name is closed when the run finishes (even
 on a halt). If you construct the embodiment object yourself, you own it: call
 `close()` yourself when you are done.
@@ -100,13 +100,13 @@ human-in-the-loop reset, wall-clock control. Simulators opt into more via
 `capabilities` (`SEEDABLE`, `AUTO_RESET`, `PRIVILEGED_SUCCESS`, `RENDERABLE`, …).
 A sim may put privileged success into `StepResult.info` for a scorer to read; a
 real robot typically relies on an operator verdict
-([`operator_scorer`][inspect_robots.scorer.operator_scorer]) or a learned classifier.
+([`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer)) or a learned classifier.
 
 ## Compatibility
 
 If the policy's action dimension/semantics or required observations don't match
-the embodiment, [`eval`][inspect_robots.eval.eval] raises a
-[`CompatibilityError`][inspect_robots.errors.CompatibilityError] before any rollout. Use `remap=` to
+the embodiment, [`eval`](/api/#inspect_robots.eval.eval) raises a
+[`CompatibilityError`](/api/#inspect_robots.errors.CompatibilityError) before any rollout. Use `remap=` to
 alias differing camera/state key names:
 
 ```python

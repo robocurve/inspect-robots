@@ -43,16 +43,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.5",
+    "inspect-robots[docs]",
     # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.10)
     # rejects; pin the 2.4.x line for a deterministic dev/CI gate (runtime is free).
     "numpy<2.5",
 ]
-docs = [
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.26",
-    "mkdocs-llmstxt>=0.2",
-]
+docs = ["griffe>=1.0"]
 all = ["inspect-robots[rerun]"]
 
 [project.scripts]
@@ -110,7 +106,7 @@ python_version = "3.10"
 strict = true
 warn_unreachable = true
 disallow_untyped_defs = true
-files = ["src/inspect_robots", "tests"]
+files = ["src/inspect_robots", "tests", "scripts/gen_api_docs.py"]
 
 [[tool.mypy.overrides]]
 module = ["rerun.*"]

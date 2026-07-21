@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="420" viewBox="0 0 420 420" role="img" aria-label="Inspect Robots logo — a robot inspecting a dot through a magnifying lens">
+  <!-- Inspect Robots "Inspecting the dot": the bowed-head bot leans in with
+       the lens over a single tiny dot. Line art in the Robocurve brand teal
+       on the brand cream. Sourced from the robocurve/website product art;
+       this standalone copy adds the cream tile background so it reads on any
+       host background (GitHub light/dark, PyPI). The only motion is the
+       blinking eye; arm, lens, and specimen dot stay still. CSS animations
+       run even when the SVG is embedded via <img>; disabled under
+       prefers-reduced-motion. -->
+  <style>
+    .eye {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: ir-blink 5.3s ease-in-out infinite;
+    }
+    /* Three blink events per cycle at uneven spots (one is a double blink),
+       so the rhythm reads as organic rather than metronomic. */
+    @keyframes ir-blink {
+      0%, 10%, 14%, 46%, 50%, 54%, 78%, 82%, 100% { transform: scaleY(1); }
+      12%, 48%, 52%, 80%                          { transform: scaleY(0.08); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .eye { animation: none; }
+    }
+  </style>
+  <!-- cream tile: supplies the field the head fill below must match -->
+  <rect width="420" height="420" rx="84" fill="#FFFAED"/>
+  <g stroke="#005f73" stroke-width="11" stroke-linecap="round" fill="none">
+    <!-- ground -->
+    <line x1="96" y1="302" x2="330" y2="302"/>
+    <!-- bowed body: rises from the ground and leans right over the specimen -->
+    <path d="M138 302 C 132 240, 150 196, 208 182"/>
+    <!-- arm + lens, holding steady over the specimen -->
+    <path d="M186 226 C 208 238, 222 248, 236 256"/>
+    <ellipse cx="262" cy="248" rx="26" ry="16" transform="rotate(-18 262 248)"/>
+    <!-- head: big friendly circle, cream-filled so it reads above the back line -->
+    <circle cx="232" cy="170" r="40" fill="#FFFAED"/>
+  </g>
+  <!-- eye, looking down at the specimen -->
+  <circle class="eye" cx="243" cy="186" r="6" fill="#005f73"/>
+  <!-- the specimen: the brand dot, right under the lens (static by design) -->
+  <circle cx="276" cy="288" r="7" fill="#005f73"/>
+</svg>
