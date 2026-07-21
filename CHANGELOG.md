@@ -116,6 +116,17 @@ All notable changes to this project are documented here. The format is based on
   catch the `ConfigError` raised by `Task`'s epoch validation and surface it
   through the existing `_resolve_or_exit` pattern, matching how invalid
   constructor kwargs are handled for config-file components (#47).
+- **`DeltaLimitApprover` no longer rejects displacement pose modes whose
+  rotation deltas are safe to clamp per dimension** (#143). The per-dimension
+  rotation-repr refusal now fires for absolute pose modes (`eef_abs_pose`,
+  where clamping an absolute orientation has wraparound and axis-coupling
+  problems) and, separately, for quaternion deltas in displacement pose modes
+  (`eef_delta_pose` + `quat_wxyz`/`quat_xyzw`, whose identity is not the zero
+  vector, so per-dimension clamping distorts the rotation instead of limiting
+  it). Euler and axis-angle deltas have no such problem and clamp fine, so an
+  euler-delta embodiment (e.g. BridgeData V2's 7-D xyz+euler deltas) is now
+  guardrail-ready: `doctor` reports it conformant, and CLI runs keep delta
+  limiting instead of silently degrading to clamp-only.
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the
