@@ -34,7 +34,12 @@ regressing is a blocker:
   (`docs/api/index.md` is a shell of `::: module` directives). The replacement
   must still derive the page from source docstrings at build time — a
   hand-maintained API page is not acceptable.
-- **Strict build in CI**: warnings/broken links fail the `build` job on PRs.
+- **Strict build blocks merges**: today the strict docs build runs in TWO
+  places — `docs.yml`'s `build` job (which feeds the Pages deploy but is NOT
+  merge-blocking) and a `uv run mkdocs build --strict` step inside `ci.yml`'s
+  `quality` job, which IS merge-blocking via `ci-ok`'s `needs` (the comment in
+  ci.yml explains this split). The migration must keep a strict site build in
+  the merge-blocking path, not just in docs.yml.
 - **Deploy**: GitHub Pages via `actions/deploy-pages`, custom domain
   `inspectrobots.org` (CNAME file must land in the built site output).
 - **Search** on the site.
@@ -73,10 +78,20 @@ scripts/
 Key config choices:
 
 - `docs: { path: '../docs', routeBasePath: '/' }` — docs mounted at the site
-  root so `/guide/...` slugs match MkDocs output exactly.
+  root so `/guide/...` slugs match MkDocs output exactly. `editUrl` points at
+  `https://github.com/robocurve/inspect-robots/edit/main/docs/` (parity with
+  MkDocs `content.action.edit`), passed as a function that returns `undefined`
+  for the generated `api/index.md` so the build-artifact page gets no
+  misleading edit link.
 - `trailingSlash: true` — preserves MkDocs directory-style URLs.
-- `onBrokenLinks: 'throw'` and `onBrokenMarkdownLinks: 'throw'` — the strict
-  build.
+- `markdown: { format: 'detect' }` — `.md` files parse as CommonMark, not
+  MDX, which removes most MDX `<...>`/`{...}` strictness risk for the guide
+  pages while Docusaurus admonitions (`:::note`) and `{#custom-id}` heading
+  IDs still work. Only `.mdx`/`.tsx` files opt into JSX.
+- Full strict triple: `onBrokenLinks: 'throw'`, `onBrokenAnchors: 'throw'`
+  (default is only `warn`; the guide has cross-page `#anchor` links that must
+  stay covered), and `markdown.hooks.onBrokenMarkdownLinks: 'throw'` (the
+  top-level option is deprecated since v3.6 — use the hooks location).
 - Landing page is a React page at `/` (`src/pages/index.tsx`);
   `docs/index.md` is deleted so the routes don't collide.
 - Explicit `sidebars.ts` mirroring the current `nav:` (Guide, Cookbooks,
@@ -92,57 +107,109 @@ Replace mkdocstrings with `scripts/gen_api_docs.py`, run before the site
 build:
 
 - Uses **griffe** (the same engine mkdocstrings uses) to load
-  `inspect_robots` and parse the sphinx-style docstrings
-  (`docstring_parser="sphinx"`).
+  `inspect_robots` and walk its public members (mkdocstrings filter parity:
+  exclude `^_` names).
+- The docstrings are NOT sphinx field lists — they are prose paragraphs with
+  inline code spans and mkdocstrings autorefs (verified: zero
+  `:param:`/`Args:` hits in `src/`). The generator therefore does not parse
+  fields; fidelity work is (a) signatures and (b) body markup + autoref
+  rewriting.
 - Renders a single markdown page to `docs/api/index.md` preserving the current
   section grouping (Core types & spaces, Policy & embodiment, ..., Mock world)
   and module order — take the module list from the current
   `docs/api/index.md` shell before replacing it.
-- Per object: heading, fenced signature (with annotations), docstring body,
-  parameters/returns/raises rendered from the parsed sphinx fields.
-- Docstrings use mkdocstrings autoref syntax
-  (`` [`Observation`][inspect_robots.types.Observation] ``): the renderer
-  rewrites these to intra-page anchor links (every documented object gets a
-  stable anchor), falling back to plain code text for targets that are not on
-  the page.
+- Per object: heading with an explicit stable ID
+  (`{#inspect_robots.types.Observation}` — Docusaurus heading-ID syntax,
+  works in CommonMark mode), fenced signature with annotations, then the
+  docstring body passed through with autorefs rewritten.
+- Autoref rewriting (`` [`X`][inspect_robots.mod.Y] `` →
+  `` [`X`](#inspect_robots.mod.Y) ``): applied to docstring bodies; targets
+  not documented on the page fall back to plain code text.
 - Output is **generated at build time and gitignored** (`docs/api/index.md`
   joins `.gitignore`); the committed source of truth is the script plus
   docstrings. The current handwritten preamble paragraph moves into the
   script's page template.
-- Escapes/wraps output so MDX v3 parses it (angle brackets and braces in
-  signatures are the classic failure mode; render signatures inside fenced
-  code blocks only).
-- pyproject `docs` extra becomes `["griffe>=1.0"]`; `uv lock` rerun.
+- Signatures render inside fenced code blocks only (with `format: 'detect'`
+  the page is CommonMark, so angle brackets/braces are safe regardless).
+- pyproject `docs` extra becomes `["griffe>=1.0"]`; the `dev` extra adds
+  `inspect-robots[docs]` (same self-reference pattern as `all`) so griffe is
+  present wherever mypy runs; `uv lock` rerun.
+- `scripts/` joins mypy's `files` list — a mypy-strict repo should not ship
+  its only unchecked Python there. Ruff (incl. D1 docstring rules) already
+  covers `scripts/` via `ruff check .`; the 100% coverage gate does not
+  (scoped to `inspect_robots`), which is fine for a build script exercised by
+  CI itself.
+- Fresh-clone ergonomics: the sidebar references `api/index`, which is
+  gitignored, so `npm run start`/`build` get a `pre` script that fails with an
+  instructive message ("run: uv run python scripts/gen_api_docs.py") when the
+  file is missing, instead of a cryptic sidebar error.
+
+### Guide-page autoref rewrite (one-time, committed)
+
+The guide pages are NOT plain markdown: 55 occurrences of
+`` [`X`][inspect_robots.mod.Y] `` autorefs across 7 guide files. In Docusaurus
+these are undefined reference-style links that render as literal bracketed
+text, and no broken-link check catches them (silent degradation).
+
+- One-time rewrite in the committed markdown to explicit links using the
+  generator's anchor scheme: `` [`X`](/api/#inspect_robots.mod.Y) ``. With
+  `onBrokenAnchors: 'throw'`, any anchor that drifts from the generated page
+  fails the build — the invariant becomes machine-checked.
+- CONTRIBUTING's autoref-syntax note is rewritten to document the explicit
+  form.
+- Guard: the docs build job greps `docs/` for `\]\[inspect_robots` and fails
+  if any autoref sneaks back in.
 
 ### llms.txt
 
 `website/scripts/gen-llms-txt.mjs` (no new npm deps) runs as part of
-`npm run build` (postbuild): emits `llms.txt` (site description + link list
-mirroring the current `plugins.llmstxt.sections` config) and `llms-full.txt`
-(concatenated markdown of the guide pages) into `website/build/`. The
-markdown_description text moves from `mkdocs.yml` into this script.
+`npm run build` (postbuild): emits `llms.txt` (site description + link list)
+and `llms-full.txt` (concatenated guide markdown) into `website/build/`. The
+markdown_description text moves from `mkdocs.yml` into this script. Two
+deltas from the mkdocs-llmstxt config it replaces:
 
-### CI (`.github/workflows/docs.yml`)
+- The current sections list starts with `index.md`, which this plan deletes
+  (React landing page). The description header carries the overview instead,
+  and the link list covers the guide pages (quickstart through cli).
+- Concatenation happens over the committed guide markdown, which is safe
+  because the autoref rewrite (above) is a one-time rewrite of the committed
+  files — no unrewritten autoref syntax can leak into `llms-full.txt`.
 
-`build` job becomes:
+### CI (`.github/workflows/docs.yml` AND `.github/workflows/ci.yml`)
+
+`docs.yml` `build` job becomes:
 
 1. checkout (keep `fetch-depth: 0` — hatch-vcs still needs tags for the
    package install used by the API generator)
 2. setup-uv + `uv sync --locked --python 3.12 --extra docs`
 3. `uv run python scripts/gen_api_docs.py`
-4. setup-node (Node 22, npm cache keyed on `website/package-lock.json`)
-5. `npm ci` + `npm run build` in `website/`
-6. upload `website/build` as the Pages artifact
+4. autoref-guard grep (fail on `\]\[inspect_robots` in `docs/`)
+5. setup-node (Node 22, npm cache keyed on `website/package-lock.json`)
+6. `npm ci` + `npm run build` in `website/`
+7. upload `website/build` as the Pages artifact
 
-`deploy` job unchanged. The workflow stays the single docs gate on PRs.
+`deploy` job unchanged.
+
+**ci.yml must change too** — this is the merge-blocking path. Its `quality`
+job currently installs `--extra docs` and runs `uv run mkdocs build --strict`
+precisely because docs.yml's build is not in `ci-ok`'s `needs` (see the
+comment in ci.yml). After the migration that step breaks (mkdocs is gone from
+the docs extra). Replacement, following the same pattern: a new `docs-build`
+job in ci.yml (ubuntu-only, single Python) that runs steps 1–6 above, added
+to `ci-ok`'s `needs` list per the repo rule. The mkdocs step is removed from
+`quality`; `quality` keeps `--extra docs` so mypy can check
+`scripts/gen_api_docs.py` against installed griffe. No branch-ruleset change
+needed (`ci-ok` remains the single required check).
 
 ### Branding
 
 - Navbar: real logo SVG + "Inspect Robots" wordmark.
 - Favicon: derived from the logo (SVG favicon, plus PNG fallback generated
   once and committed — no build-time image tooling).
-- Palette in `custom.css`: keep the indigo family (matches the current site
-  and the logo's line-art style), light + dark mode.
+- Palette in `custom.css`: move off the current indigo to the logo's actual
+  brand colors — Robocurve teal `#005f73` line art on cream `#FFFAED`
+  (see the SVG source). Primary color teal, with a lightened teal variant for
+  dark mode (raw `#005f73` fails contrast on dark backgrounds).
 - Social card: static image in `static/img/` used via `themeConfig.image`.
 - The canonical logo file stays at `docs/assets/inspect-robots-logo.svg`
   (README hotlink); `website/static/img/` gets a copy for the site.
@@ -159,11 +226,11 @@ markdown_description text moves from `mkdocs.yml` into this script.
   flow, the "plain `inspect-robots`, not `uv run inspect-robots`" warning).
 - **`guide/plugins.md`**: verify it lists all five first-party plugins with
   the same one-line descriptions as the README; add any missing.
-- **Syntax conversion**: Material-specific markup exists only in
-  `docs/index.md` (being replaced) and `docs/cookbooks/gr00t-on-yam.md` —
-  convert the cookbook's admonitions/attr_list to Docusaurus admonitions
-  (`:::note` etc.). Guide pages are plain markdown and move as-is; `.md`
-  relative links are supported by Docusaurus.
+- **Syntax conversion**: Material-specific block markup exists only in
+  `docs/index.md` (being replaced) and `docs/cookbooks/gr00t-on-yam.md`
+  (one `!!! warning` admonition → `:::warning`). Guide pages additionally
+  need the autoref rewrite pass described above (they are otherwise plain
+  markdown); `.md` relative links are supported by Docusaurus.
 - Public-facing text follows the repo writing-style rules (no em dashes in
   prose, restrained bold, no decorative emoji).
 
@@ -192,14 +259,15 @@ markdown_description text moves from `mkdocs.yml` into this script.
 
 ## Risks
 
-- **MDX strictness**: MDX v3 treats `<...>` and `{...}` in markdown as JSX.
-  Guide pages are plain but contain shell/Python snippets — anything outside
-  fenced code blocks that trips MDX will fail the strict build, which is the
-  desired failure mode (caught in CI, fixed in the PR).
-- **API generator fidelity**: griffe parses the same docstrings mkdocstrings
-  did, but the renderer is ours. Acceptance: every module in the current
+- **MDX strictness**: largely defused by `markdown.format: 'detect'` (`.md`
+  parses as CommonMark). Residual risk lives only in `.mdx`/`.tsx` files we
+  author ourselves; the strict build catches the rest.
+- **API generator fidelity**: griffe loads the same code mkdocstrings did,
+  but the renderer is ours. Acceptance: every module in the current
   `::: module` list appears with all public members (mkdocstrings filter was
-  `!^_`), and the build fails if a listed module imports nothing.
+  `!^_`), every anchor targeted by a guide-page link exists
+  (machine-checked by `onBrokenAnchors: 'throw'`), and the generator fails
+  loudly if a listed module yields no members.
 - **Local search quality** is below Algolia's but matches the current
   lunr-based MkDocs search in kind.
 - **Pages deploy**: `actions/deploy-pages` flow is unchanged; only the
@@ -209,18 +277,21 @@ markdown_description text moves from `mkdocs.yml` into this script.
 ## Execution order
 
 1. Scaffold `website/` (create-docusaurus, TypeScript, classic preset); wire
-   config (routeBasePath, trailingSlash, strict links, search plugin, CNAME,
-   logo/favicon/palette).
-2. Port content: move-in-place guide/cookbook pages (convert cookbook
-   admonitions), build the landing page, sidebars.
-3. `scripts/gen_api_docs.py` + pyproject/uv.lock change; verify `/api/`
-   output against the mkdocstrings page for member coverage.
+   config (routeBasePath, trailingSlash, `format: 'detect'`, the strict
+   triple, editUrl, search plugin, CNAME, logo/favicon/palette).
+2. `scripts/gen_api_docs.py` + pyproject (docs/dev extras, mypy files) +
+   uv.lock; verify `/api/` output against the mkdocstrings page for member
+   coverage.
+3. Port content: guide pages (autoref rewrite to `/api/#...` anchors),
+   cookbook admonition, landing page, sidebars.
 4. `gen-llms-txt.mjs` + hook into the build.
-5. Rewrite `.github/workflows/docs.yml`.
+5. Rewrite `.github/workflows/docs.yml` AND the ci.yml `quality`/`docs-build`
+   change (docs-build added to `ci-ok.needs`).
 6. Cleanup pass (mkdocs.yml, pre-commit, .gitignore, CONTRIBUTING, CLAUDE.md,
    README).
 7. Local `npm run build` + `python scripts/gen_api_docs.py` green; spot-check
-   the built site (URLs above, llms.txt, search index, dark mode) via
-   `npm run serve`.
+   the built site (URLs above, llms.txt, guide→API anchor links, search,
+   dark mode) via `npm run serve`.
 
-Steps 1–2 and 3–4 are independent; 5–7 depend on both.
+Step 3's anchor targets depend on step 2's anchor scheme; steps 1 and 2 are
+independent; 5–7 depend on everything prior.
