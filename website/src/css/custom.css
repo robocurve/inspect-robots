@@ -1,3 +1,10 @@
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/500.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/space-grotesk/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
 :root {
   --ifm-color-primary: #005f73;
   --ifm-color-primary-dark: #005568;
@@ -7,9 +14,27 @@
   --ifm-color-primary-lighter: #006e86;
   --ifm-color-primary-lightest: #007c97;
   --ifm-code-font-size: 95%;
-  --ifm-heading-font-weight: 700;
-  --ifm-navbar-shadow: 0 1px 0 rgb(0 95 115 / 14%);
+  --ifm-font-family-base: 'Space Grotesk', ui-sans-serif, system-ui,
+    -apple-system, sans-serif;
+  --ifm-heading-font-weight: 600;
+  --ir-font-mono-label: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo,
+    monospace;
   --docusaurus-highlighted-code-line-bg: rgb(0 95 115 / 10%);
+}
+
+/* Light mode only. Infima defines these on :root and swaps *other* variables
+   for dark mode, so a bare :root override here would leak into dark mode. */
+[data-theme='light'] {
+  --ifm-background-color: #fffaed;
+  --ifm-background-surface-color: #fff;
+  --ifm-font-color-base: #403830;
+  --ifm-heading-color: #1a1511;
+  --ifm-navbar-background-color: #fffaed;
+  --ifm-navbar-shadow: 0 1px 0 #e6ddcd;
+  --ifm-toc-border-color: #e6ddcd;
+  --ir-hairline: #e6ddcd;
+  --ir-hairline-strong: #d2c6b2;
+  --ir-text-muted: #736853;
 }
 
 [data-theme='dark'] {
@@ -20,7 +45,18 @@
   --ifm-color-primary-light: #89dcd3;
   --ifm-color-primary-lighter: #96e0d8;
   --ifm-color-primary-lightest: #c3eee9;
+  --ifm-navbar-shadow: 0 1px 0 rgb(255 255 255 / 12%);
+  --ir-hairline: rgb(255 255 255 / 14%);
+  --ir-hairline-strong: rgb(255 255 255 / 25%);
+  --ir-text-muted: rgb(255 255 255 / 62%);
   --docusaurus-highlighted-code-line-bg: rgb(111 211 200 / 18%);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  letter-spacing: -0.02em;
 }
 
 .navbar__logo img {

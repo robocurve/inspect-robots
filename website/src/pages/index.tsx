@@ -86,11 +86,6 @@ function Hero(): ReactNode {
   return (
     <header className={styles.hero}>
       <div className={`container ${styles.heroInner}`}>
-        <img
-          className={styles.heroLogo}
-          src="/img/inspect-robots-logo.svg"
-          alt="Inspect Robots logo, a robot inspecting a dot through a magnifying lens"
-        />
         <div>
           <Heading as="h1" className={styles.heroTitle}>
             Inspect Robots
@@ -105,16 +100,19 @@ function Hero(): ReactNode {
             reproducible logs and first-class Rerun visualization.
           </p>
           <div className={styles.heroActions}>
-            <Link className="button button--primary button--lg" to="/guide/quickstart/">
+            <Link className={styles.ctaPrimary} to="/guide/quickstart/">
               Get started
             </Link>
-            <Link
-              className={`button button--outline button--lg ${styles.heroOutlineButton}`}
-              to="/guide/concepts/">
+            <Link className={styles.ctaOutline} to="/guide/concepts/">
               Concepts
             </Link>
           </div>
         </div>
+        <img
+          className={styles.heroLogo}
+          src="/img/inspect-robots-logo.svg"
+          alt="Inspect Robots logo, a robot inspecting a dot through a magnifying lens"
+        />
       </div>
     </header>
   );
@@ -126,9 +124,10 @@ export default function Home(): ReactNode {
       title="Inspect Robots"
       description="An open-source evaluation framework for benchmarking AI and robots in the physical world">
       <Hero />
-      <main>
+      <main className={styles.landing}>
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>The framework</p>
             <Heading as="h2">One framework, two swappable inputs</Heading>
             <p className={styles.sectionLead}>
               LLM evals have a single swappable input: the model. Robotics evals
@@ -162,10 +161,11 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.creamSection}`}>
+        <section className={styles.section}>
           <div className="container">
             <div className={styles.sectionHeadingRow}>
               <div>
+                <p className={styles.eyebrow}>Try it</p>
                 <Heading as="h2">Quickstart</Heading>
                 <p>No hardware or simulator required. The CubePick mock world exercises the whole stack.</p>
               </div>
@@ -177,6 +177,7 @@ export default function Home(): ReactNode {
 
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>Design</p>
             <Heading as="h2">Why Inspect Robots</Heading>
             <div className={styles.featureGrid}>
               {features.map((feature) => (
@@ -189,8 +190,9 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.creamSection}`}>
+        <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>For Inspect AI users</p>
             <Heading as="h2">How it maps to Inspect AI</Heading>
             <p>
               If you know{' '}
@@ -220,6 +222,7 @@ export default function Home(): ReactNode {
 
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>Ecosystem</p>
             <Heading as="h2">First-party plugins</Heading>
             <p className={styles.sectionLead}>
               Both halves of an eval, the body and the brain, have ready-made
