@@ -86,19 +86,25 @@ prefer fixing the issue.
 
 ## Documentation
 
-The docs site is built with [MkDocs](https://www.mkdocs.org/) +
-[Material](https://squidfunk.github.io/mkdocs-material/) +
-[mkdocstrings](https://mkdocstrings.github.io/) — the API reference is generated
-from docstrings, so keep them accurate. Cross-reference other symbols with
-mkdocstrings autorefs: `` [`Observation`][inspect_robots.types.Observation] ``.
+The docs site uses [Docusaurus](https://docusaurus.io/) from `website/`, while
+the Markdown source stays in `docs/`. The API reference is generated from
+docstrings with Griffe, so keep public docstrings accurate. In guide pages,
+cross-reference generated API symbols with explicit links such as
+`` [`Observation`](/api/#inspect_robots.types.Observation) ``. The strict build
+checks that the target anchor exists.
 
 ```bash
 uv pip install -e ".[docs]"
-uv run mkdocs serve            # live preview at http://127.0.0.1:8000
-uv run mkdocs build --strict   # what CI runs (warnings fail the build)
+uv run python scripts/gen_api_docs.py
+cd website
+npm ci
+npm run start                  # live preview at http://localhost:3000
+npm run build                  # strict CI-equivalent site build
 ```
 
-`llms.txt` / `llms-full.txt` are generated automatically by the `llmstxt` plugin.
+Run API generation before either Docusaurus command. The generated
+`docs/api/index.md` file is ignored by Git. `npm run build` also writes
+`llms.txt` and `llms-full.txt` into `website/build/`.
 
 ## Adding a plugin (out-of-tree)
 

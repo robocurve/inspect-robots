@@ -27,19 +27,48 @@ jobs:
           cache-dependency-glob: |
             **/pyproject.toml
             **/uv.lock
-      - name: Install from uv.lock (dev + docs extras)
-        run: uv sync --locked --python 3.11 --extra dev --extra docs
+      - name: Install from uv.lock (dev extras)
+        run: uv sync --locked --python 3.11 --extra dev
       - name: Ruff (lint)
         run: uv run ruff check .
       - name: Ruff (format check)
         run: uv run ruff format --check .
       - name: Mypy (strict)
         run: uv run mypy
-      # Gated here because docs.yml's build job is in a different workflow and
-      # can't join ci-ok's needs list: a dead link that fails the strict docs
-      # build must not be mergeable.
-      - name: Docs build (strict)
-        run: uv run mkdocs build --strict
+
+  # Strict documentation build on one supported Python version.
+  docs-build:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs needs full history/tags for versioning
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Install docs dependencies from uv.lock
+        run: uv sync --locked --python 3.12 --extra docs
+      - name: Generate API reference
+        run: uv run python scripts/gen_api_docs.py
+      - name: Reject stale mkdocstrings autorefs
+        run: '! grep -RIn "\]\[inspect_robots" docs/'
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install website dependencies
+        working-directory: website
+        run: npm ci
+      - name: Build site
+        working-directory: website
+        run: npm run build
 
   # Blocking test gate across the supported OS x Python matrix.
   test:
@@ -342,7 +371,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -355,7 +384,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
     runs-on: ubuntu-latest
     permissions:
       issues: write
