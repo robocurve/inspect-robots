@@ -2,17 +2,28 @@
 
 ## Install
 
-```bash
-pip install inspect-robots            # core (numpy only)
-pip install "inspect-robots[rerun]"   # + Rerun visualization
-```
-
-For development, use [uv](https://github.com/astral-sh/uv):
+In a fresh directory (or your existing project), create a virtual environment
+and install Inspect Robots with Rerun visualization:
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
-uv run pytest
+uv venv && uv pip install "inspect-robots[rerun]"
 ```
+
+For the NumPy-only core:
+
+```bash
+uv venv && uv pip install inspect-robots
+```
+
+Any virtual environment workflow works. Activate it once (`source
+.venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
+`inspect-robots` directly.
+
+:::note
+Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`. Inside a
+uv project, `uv run` re-syncs to the lockfile and can uninstall what `uv pip
+install` just added.
+:::
 
 ## Run your first evaluation
 
@@ -38,7 +49,7 @@ print(log.status)                    # "success"
 print(log.results.metrics)           # {"success_at_end": 1.0}
 ```
 
-`eval()` returns a list of [`EvalLog`][inspect_robots.log.EvalLog] (one per task, mirroring
+`eval()` returns a list of [`EvalLog`](/api/#inspect_robots.log.EvalLog) (one per task, mirroring
 Inspect AI). Each log is immutable, schema-versioned, and written to `log_dir`.
 
 ## Use registry names
@@ -69,5 +80,5 @@ inspect-robots inspect logs/cubepick-reach_*.json            # print a saved log
 ## Next steps
 
 - [Concepts](concepts.md): the core abstractions.
-- [Writing A Benchmark](writing-a-benchmark.md): define your own `Task`.
-- [Policies And Embodiments](policies-and-embodiments.md): plug in a real VLA or robot/sim.
+- [Writing a benchmark](writing-a-benchmark.md): define your own `Task`.
+- [Policies and embodiments](policies-and-embodiments.md): plug in a real VLA or robot/sim.

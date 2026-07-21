@@ -143,11 +143,11 @@ inspect-robots-yam-preflight --policy gr00t --dry-run   # affirms no motion will
 
 ## 5. First motion, human at the e-stop
 
-!!! warning
-    First runs with a new checkpoint family are hardware-verification runs,
-    not evals. Keep a hand on the e-stop, leave guardrails on (they are on by
-    default; disabling requires an explicit `--disable-guardrails`), and clear
-    the workspace.
+:::warning
+First runs with a new checkpoint family are hardware-verification runs, not
+evals. Keep a hand on the e-stop, leave guardrails on (they are on by default;
+disabling requires an explicit `--disable-guardrails`), and clear the workspace.
+:::
 
 Verify the arms hold position while the policy computes (seconds can pass
 between action chunks):

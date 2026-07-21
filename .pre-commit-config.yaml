@@ -19,10 +19,10 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: [--unsafe] # mkdocs.yml uses !!python/name: tags
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
+        exclude: ^website/package-lock\.json$ # npm lockfile, legitimately large
 
   # Local hooks run through `uv run` so they use this project's dev environment
   # (matching CI) regardless of whether a virtualenv is activated. Requires uv.

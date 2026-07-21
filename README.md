@@ -347,6 +347,14 @@ uv run pytest --cov                 # 100% coverage required
 uv run ruff check . && uv run mypy
 ```
 
+To build the Docusaurus documentation site, generate its ignored API page and
+then build from `website/`:
+
+```bash
+uv run python scripts/gen_api_docs.py
+cd website && npm ci && npm run build
+```
+
 Pre-commit hooks and a blocking CI coverage gate keep `main` green. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and the design docs in [`plans/`](plans/).
 

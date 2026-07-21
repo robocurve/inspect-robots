@@ -21,6 +21,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Docs site migrated from MkDocs Material to Docusaurus.** The site at
+  inspectrobots.org now builds from `website/` (Docusaurus 3) while the
+  Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
+  `llms-full.txt` are preserved. The API reference is generated at build
+  time by `scripts/gen_api_docs.py` (griffe) into a gitignored
+  `docs/api/index.md`, guide pages link to it with anchor-checked
+  `/api/#...` links, and the site now carries the project logo, favicon,
+  and teal-on-cream branding. PR validation moved to a merge-blocking
+  `docs-build` job in `ci.yml`; `docs.yml` deploys on pushes to main.
 - **Agent plugin:** move tool calls now require a note describing the current
   observation and why the agent chose the motion, so users can follow its
   perception and decisions live and in saved transcripts (#130). This tightens

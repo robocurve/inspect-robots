@@ -3,7 +3,6 @@ name: Docs
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 # Allow the deploy job to publish to GitHub Pages.
@@ -31,14 +30,28 @@ jobs:
           cache-dependency-glob: |
             **/pyproject.toml
             **/uv.lock
-      - name: Install from uv.lock (docs extras)
+      - name: Install docs dependencies from uv.lock
         run: uv sync --locked --python 3.12 --extra docs
-      - name: Build site (strict)
-        run: uv run mkdocs build --strict
+      - name: Generate API reference
+        run: uv run python scripts/gen_api_docs.py
+      - name: Reject stale mkdocstrings autorefs
+        run: '! grep -RIn "\]\[inspect_robots" docs/'
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install website dependencies
+        working-directory: website
+        run: npm ci
+      - name: Build site
+        working-directory: website
+        run: npm run build
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: website/build
 
   deploy:
     name: deploy to GitHub Pages

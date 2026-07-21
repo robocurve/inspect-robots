@@ -36,7 +36,8 @@ print each remediation command verbatim when a module is missing.
 ## Declare device slots
 
 Declare device-shaped constructor arguments on the registered embodiment
-factory. Import `DeviceSlot` from the `inspect_robots.conformance` submodule:
+factory. Import [`DeviceSlot`](/api/#inspect_robots.conformance.DeviceSlot)
+from the `inspect_robots.conformance` submodule:
 
 ```python
 from inspect_robots.conformance import DeviceSlot
@@ -83,7 +84,9 @@ non-`None` `group` are all-or-none. Ungrouped slots remain independent.
 
 ## The conformance kit
 
-Add one test to your adapter repo:
+Add one test built on
+[`assert_embodiment_conformant`](/api/#inspect_robots.conformance.assert_embodiment_conformant)
+to your adapter repo:
 
 ```python
 from inspect_robots.conformance import assert_embodiment_conformant
