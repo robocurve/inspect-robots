@@ -68,6 +68,8 @@ class SceneResult:
     # trial, ``None`` when the trial errored or no judgement was captured.
     # Defaults keep logs written before these fields existed readable.
     operator_judgements: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: trial-specific metadata from the policy.
+    trial_metadata: tuple[dict[str, Any], ...] = ()
     # Strictly parallel to ``epochs``: why each recorded trial ended, or
     # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
     termination_reasons: tuple[str | None, ...] = ()
@@ -124,6 +126,7 @@ class EvalLog:
             # written before ``operator_judgements`` existed (newer reads older).
             sample["epochs"] = tuple(sample.get("epochs", ()))
             sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
+            sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
             samples.append(SceneResult(**sample))

@@ -24,6 +24,7 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.embodiment import EmbodimentInfo
+    from inspect_robots.rollout import TrialRecord
 
 
 @dataclass(frozen=True)
@@ -54,10 +55,14 @@ class PolicyInfo:
 class Policy(Protocol):
     """The VLA contract.
 
-    Policies may additionally define three optional hooks, none part of this
+    Policies may additionally define four optional hooks, none part of this
     Protocol so existing policies stay conformant. ``bind(embodiment_info)``
     lets embodiment-adaptive policies adopt the embodiment's spaces; ``eval()``
     calls it after resolving both components and before compatibility checking.
+    ``on_trial_end(record, log_dir, run_id)`` runs when a trial finishes (including
+    errored and cancelled trials), before sinks see the record. Mutations to
+    ``record.metadata`` land in the log, and exceptions degrade the run to
+    status="error" rather than crashing the overall evaluation.
     ``transcript()`` returns a small JSON-serializable audit record for the
     current trial, such as an LLM conversation. The framework calls it once per
     trial at trial end after a successful ``reset()``, including errored trials.
@@ -96,6 +101,14 @@ class PolicyBase(ABC):
 
     def bind(self, embodiment_info: EmbodimentInfo) -> None:  # noqa: B027 - no-op default
         """Default: fixed-space policies ignore the embodiment they run on."""
+
+    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:  # noqa: B027
+        """Optional: Hook called by eval() when a trial completes.
+
+        Called for errored and cancelled trials too, before sinks see the record.
+        Mutations to record.metadata land in the log, and exceptions degrade the
+        run to status="error" rather than crashing the overall evaluation.
+        """
 
     def reset(self, scene: Scene) -> None:  # noqa: B027 - intentional no-op default
         """Default: stateless policies need no per-scene reset."""
