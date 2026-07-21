@@ -241,7 +241,12 @@ required check).
   brand colors — Robocurve teal `#005f73` line art on cream `#FFFAED`
   (see the SVG source). Primary color teal, with a lightened teal variant for
   dark mode (raw `#005f73` fails contrast on dark backgrounds).
-- Social card: static image in `static/img/` used via `themeConfig.image`.
+- Social card: static PNG in `static/img/` used via `themeConfig.image`,
+  produced once from the logo SVG (logo on the cream tile, site name set in
+  the site font) and committed — no build-time image tooling.
+- Footer/chrome parity with mkdocs.yml: copyright line ("Copyright ©
+  Inspect Robots contributors"), a GitHub link in the navbar (right side,
+  replacing Material's repo widget + `extra.social`).
 - The canonical logo file stays at `docs/assets/inspect-robots-logo.svg`
   (README hotlink); `website/static/img/` gets a copy for the site.
 
@@ -317,7 +322,10 @@ required check).
    cookbook admonition, landing page, sidebars.
 4. `gen-llms-txt.mjs` + hook into the build.
 5. Rewrite `.github/workflows/docs.yml` AND the ci.yml `quality`/`docs-build`
-   change (docs-build added to `ci-ok.needs`).
+   change (docs-build added to BOTH `ci-ok.needs` and `alert-red-main.needs`;
+   `quality` also loses its now-stale step name "Install from uv.lock (dev +
+   docs extras)" and the obsolete "can't join ci-ok" comment above the mkdocs
+   step).
 6. Cleanup pass (mkdocs.yml, pre-commit, .gitignore, CONTRIBUTING, CLAUDE.md,
    README).
 7. Local `npm run build` + `python scripts/gen_api_docs.py` green; spot-check
