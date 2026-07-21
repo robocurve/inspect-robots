@@ -30,7 +30,13 @@ const features = [
   },
   {
     title: 'Reproducible',
-    body: 'Every run yields an immutable, schema-versioned EvalLog with the resolved config, git revision, and package versions. It is re-readable across releases and re-scorable offline.',
+    body: (
+      <>
+        Every run yields an immutable, schema-versioned <code>EvalLog</code>{' '}
+        with the resolved config, git revision, and package versions. It is
+        re-readable across releases and re-scorable offline.
+      </>
+    ),
   },
   {
     title: 'Light core',
@@ -42,42 +48,81 @@ const features = [
   },
   {
     title: 'Rerun visualization',
-    body: 'Stream camera images, 3D poses, joint and action time-series, and success markers to a .rrd recording. Logging is non-blocking: a slow viewer connection drops camera frames first instead of delaying the robot control loop.',
+    body: (
+      <>
+        Stream camera images, 3D poses, joint and action time-series, and
+        success markers to a <code>.rrd</code> recording. Logging is
+        non-blocking: a slow viewer connection drops camera frames first
+        instead of delaying the robot control loop.
+      </>
+    ),
   },
   {
     title: 'Pluggable',
-    body: 'Backends ship as separate packages: the first-party plugins below, and rig plugins like inspect-robots-yam. Entry points make them appear in inspect-robots list automatically.',
+    body: (
+      <>
+        Backends ship as separate packages: the first-party plugins below, and
+        rig plugins like <code>inspect-robots-yam</code>. Entry points make
+        them appear in <code>inspect-robots list</code> automatically.
+      </>
+    ),
   },
 ];
 
 const plugins = [
   {
     name: 'ros',
-    description:
-      'Run evals on ROS 1 or ROS 2 arms through rosbridge, with no ROS installation on the eval machine (--embodiment ros).',
+    description: (
+      <>
+        Run evals on ROS 1 or ROS 2 arms through rosbridge, with no ROS
+        installation on the eval machine (<code>--embodiment ros</code>).
+      </>
+    ),
     href: 'https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-ros',
   },
   {
     name: 'isaacsim',
-    description: 'Run evals against an Isaac Lab simulation (--embodiment isaacsim).',
+    description: (
+      <>
+        Run evals against an Isaac Lab simulation (
+        <code>--embodiment isaacsim</code>).
+      </>
+    ),
     href: 'https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-isaacsim',
   },
   {
     name: 'xpolicylab',
-    description:
-      'Drive any XPolicyLab-served policy. One adapter puts its zoo of 40+ VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B, SmolVLA, ACT, …) behind --policy xpolicylab -P url=ws://gpu-box:19000.',
+    description: (
+      <>
+        Drive any XPolicyLab-served policy. One adapter puts its zoo of 40+
+        VLAs (π0/π0.5, GR00T, OpenVLA-OFT, RDT-1B, SmolVLA, ACT, …) behind{' '}
+        <code>--policy xpolicylab -P url=ws://gpu-box:19000</code>.
+      </>
+    ),
     href: 'https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-xpolicylab',
   },
   {
     name: 'agent',
-    description:
-      'Let a frontier LLM (Claude, GPT, anything behind an OpenAI-compatible API) drive any embodiment through tool calls, as a first-class policy. The same --policy agent runs ad-hoc instructions and scores on registered tasks next to fine-tuned VLAs.',
+    description: (
+      <>
+        Let a frontier LLM (Claude, GPT, anything behind an OpenAI-compatible
+        API) drive any embodiment through tool calls, as a first-class policy.
+        The same <code>--policy agent</code> runs ad-hoc instructions and
+        scores on registered tasks next to fine-tuned VLAs.
+      </>
+    ),
     href: 'https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-agent',
   },
   {
     name: 'capx',
-    description:
-      'Evaluate CaP-X-style code-as-policy agents against a joint-space embodiment. Model-generated Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers, then queues approver-checked joint targets behind --policy capx.',
+    description: (
+      <>
+        Evaluate CaP-X-style code-as-policy agents against a joint-space
+        embodiment. Model-generated Python calls separately served SAM3,
+        Contact-GraspNet, and Pyroki helpers, then queues approver-checked
+        joint targets behind <code>--policy capx</code>.
+      </>
+    ),
     href: 'https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-capx',
   },
 ];
@@ -86,11 +131,6 @@ function Hero(): ReactNode {
   return (
     <header className={styles.hero}>
       <div className={`container ${styles.heroInner}`}>
-        <img
-          className={styles.heroLogo}
-          src="/img/inspect-robots-logo.svg"
-          alt="Inspect Robots logo, a robot inspecting a dot through a magnifying lens"
-        />
         <div>
           <Heading as="h1" className={styles.heroTitle}>
             Inspect Robots
@@ -105,16 +145,19 @@ function Hero(): ReactNode {
             reproducible logs and first-class Rerun visualization.
           </p>
           <div className={styles.heroActions}>
-            <Link className="button button--primary button--lg" to="/guide/quickstart/">
+            <Link className={styles.ctaPrimary} to="/guide/quickstart/">
               Get started
             </Link>
-            <Link
-              className={`button button--outline button--lg ${styles.heroOutlineButton}`}
-              to="/guide/concepts/">
+            <Link className={styles.ctaOutline} to="/guide/concepts/">
               Concepts
             </Link>
           </div>
         </div>
+        <img
+          className={styles.heroLogo}
+          src="/img/inspect-robots-logo.svg"
+          alt="Inspect Robots logo, a robot inspecting a dot through a magnifying lens"
+        />
       </div>
     </header>
   );
@@ -126,9 +169,10 @@ export default function Home(): ReactNode {
       title="Inspect Robots"
       description="An open-source evaluation framework for benchmarking AI and robots in the physical world">
       <Hero />
-      <main>
+      <main className={styles.landing}>
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>The framework</p>
             <Heading as="h2">One framework, two swappable inputs</Heading>
             <p className={styles.sectionLead}>
               LLM evals have a single swappable input: the model. Robotics evals
@@ -162,10 +206,11 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.creamSection}`}>
+        <section className={styles.section}>
           <div className="container">
             <div className={styles.sectionHeadingRow}>
               <div>
+                <p className={styles.eyebrow}>Try it</p>
                 <Heading as="h2">Quickstart</Heading>
                 <p>No hardware or simulator required. The CubePick mock world exercises the whole stack.</p>
               </div>
@@ -177,6 +222,7 @@ export default function Home(): ReactNode {
 
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>Design</p>
             <Heading as="h2">Why Inspect Robots</Heading>
             <div className={styles.featureGrid}>
               {features.map((feature) => (
@@ -189,8 +235,9 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.creamSection}`}>
+        <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>For Inspect AI users</p>
             <Heading as="h2">How it maps to Inspect AI</Heading>
             <p>
               If you know{' '}
@@ -220,6 +267,7 @@ export default function Home(): ReactNode {
 
         <section className={styles.section}>
           <div className="container">
+            <p className={styles.eyebrow}>Ecosystem</p>
             <Heading as="h2">First-party plugins</Heading>
             <p className={styles.sectionLead}>
               Both halves of an eval, the body and the brain, have ready-made
