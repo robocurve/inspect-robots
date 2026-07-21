@@ -112,7 +112,7 @@ constructor hardware-free; connect in `reset()`).
 | `bounds` | Finite `low`/`high` on every dim. Without them the bounds clamp is skipped and no default delta limit can be derived. |
 | `dim_labels` | Every dim is named (`("left_j0", ..., "right_gripper")`), uniquely. The agent moves joints by these names. |
 | `state_alignment` | Absolute-target modes (`joint_pos`, `eef_abs_pose`) declare exactly one `StateSpec` field with `shape == (action_dim,)`: the proprioceptive reference the agent interpolates from. |
-| `guardrails` | `DeltaLimitApprover(action_space)` constructs. This catches **absolute** pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`). Displacement pose modes (`eef_delta_pose`) carry rotation deltas and accept any representation. |
+| `guardrails` | `DeltaLimitApprover(action_space)` constructs. This catches absolute pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`), and displacement pose modes (`eef_delta_pose`) carrying a quaternion delta (`quat_wxyz`, `quat_xyzw`; use `none`, `rot6d`, `axis_angle`, or `euler_xyz`). |
 
 ### Warnings
 
