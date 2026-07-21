@@ -83,12 +83,22 @@ _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 # Absolute pose modes only: clamping an absolute euler/quat orientation per
 # dimension has wraparound and axis-coupling problems, so those reps are
 # refused. Displacement pose modes (eef_delta_pose) carry small rotation
-# *deltas*, which clamp per dimension like any other bounded displacement.
+# *deltas*, which mostly clamp per dimension like any other bounded
+# displacement — except quaternions (see _DISPLACEMENT_POSE_UNSAFE_ROT below).
 _ABSOLUTE_POSE_MODES = _ABSOLUTE_MODES & _POSE_MODES
+_DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # Rotation reps that survive independent per-dimension clamping of an absolute
 # orientation (same set the EnsemblingController accepts for per-dimension
 # averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
+# Displacement pose modes carry rotation *deltas*, whose no-op is not the zero
+# vector for these reps (a quaternion identity is (1, 0, 0, 0)). Clamping such
+# a delta per dimension toward a symmetric ±max_delta box drags it away from
+# identity, and downstream re-normalization can amplify the rotation instead
+# of limiting it — the same failure class as clamping an absolute quaternion.
+# euler_xyz/axis_angle deltas have no such problem (their no-op is the zero
+# vector) and clamp fine.
+_DISPLACEMENT_POSE_UNSAFE_ROT = frozenset({"quat_wxyz", "quat_xyzw"})
 _LAST_APPROVED_KEY = "delta_limit:last"
 
 
@@ -109,9 +119,10 @@ class DeltaLimitApprover:
     explicit ``max_delta`` the limiter adds nothing beyond ``ClampApprover``.
 
     Construction never guesses: missing semantics, a needed missing/non-finite
-    bound without an explicit ``max_delta``, or an **absolute** pose mode whose
-    rotation representation cannot be clamped per-dimension all raise
-    ``ValueError`` (a displacement pose mode's rotation deltas clamp fine).
+    bound without an explicit ``max_delta``, an absolute pose mode whose
+    rotation representation cannot be clamped per-dimension, or a displacement
+    pose mode carrying a quaternion delta (whose identity is not the zero
+    vector, so per-dimension clamping distorts it) all raise ``ValueError``.
     ``NaN`` anywhere in a reviewed action raises
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A modified action is
     flagged ``meta["delta_clamped"]``; an unmodified one is returned as the
@@ -130,7 +141,17 @@ class DeltaLimitApprover:
             raise ValueError(
                 f"DeltaLimitApprover: cannot clamp absolute rotation_repr "
                 f"{sem.rotation_repr!r} per dimension; only {sorted(_LIMITABLE_ROT)} "
-                f"are safe (displacement pose modes carry rotation deltas and are fine)"
+                f"are safe"
+            )
+        if (
+            sem.control_mode in _DISPLACEMENT_POSE_MODES
+            and sem.rotation_repr in _DISPLACEMENT_POSE_UNSAFE_ROT
+        ):
+            raise ValueError(
+                f"DeltaLimitApprover: cannot clamp displacement rotation_repr "
+                f"{sem.rotation_repr!r} per dimension; its identity is not at the "
+                f"origin, so per-dimension clamping distorts it instead of "
+                f"limiting it (euler_xyz and axis_angle are safe here)"
             )
         self._absolute = sem.control_mode in _ABSOLUTE_MODES
         dim = action_space.dim

@@ -57,10 +57,12 @@ def test_refuses_absolute_pose_mode_with_unaverageable_rotation() -> None:
         DeltaLimitApprover(space)
 
 
-@pytest.mark.parametrize("rotation_repr", ["euler_xyz", "quat_wxyz", "axis_angle"])
+@pytest.mark.parametrize("rotation_repr", ["euler_xyz", "axis_angle"])
 def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -> None:
-    # eef_delta_pose carries small rotation *deltas*, not absolute orientations,
-    # so any rotation_repr clamps per dimension like a bounded displacement (#143).
+    # eef_delta_pose carries small rotation *deltas*, not absolute orientations.
+    # euler_xyz/axis_angle deltas have a zero-vector no-op, so they clamp per
+    # dimension like a bounded displacement (#143). Quaternion deltas are the
+    # exception — see test_refuses_displacement_pose_mode_with_quat_rotation.
     # BridgeData V2 shape: 3 xyz + 3 euler deltas + 1 gripper.
     space = Box(
         shape=(7,),
@@ -73,6 +75,23 @@ def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -
     out = approver.review(Action(data=np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])), {})
     assert np.isclose(out.data[4], 0.05)
     assert out.meta.get("delta_clamped") is True
+
+
+@pytest.mark.parametrize("rotation_repr", ["quat_wxyz", "quat_xyzw"])
+def test_refuses_displacement_pose_mode_with_quat_rotation(rotation_repr: RotationRepr) -> None:
+    # A quaternion delta's identity is (1, 0, 0, 0), not the zero vector:
+    # clamping it per dimension toward a symmetric ±max_delta box drags it away
+    # from identity, and downstream re-normalization can amplify the rotation
+    # instead of limiting it — same failure class as an absolute quat.
+    # 3 xyz + 4 quat + 1 gripper = 8 dims.
+    space = Box(
+        shape=(8,),
+        low=np.full(8, -1.0),
+        high=np.full(8, 1.0),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
+    )
+    with pytest.raises(ValueError, match="rotation_repr"):
+        DeltaLimitApprover(space)
 
 
 def test_refuses_derived_default_without_bounds() -> None:
