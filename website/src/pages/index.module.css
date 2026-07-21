@@ -74,11 +74,13 @@
 }
 
 .ctaOutline {
+  align-items: center;
   background: transparent;
   border: 1px solid var(--ir-hairline-strong);
   border-radius: 6px;
   color: var(--ifm-heading-color);
   display: inline-flex;
+  gap: 0.55rem;
   font-size: 1rem;
   font-weight: 600;
   letter-spacing: -0.01em;
