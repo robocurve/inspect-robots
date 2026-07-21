@@ -84,7 +84,8 @@ _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 # dimension has wraparound and axis-coupling problems, so those reps are
 # refused. Displacement pose modes (eef_delta_pose) carry small rotation
 # *deltas*, which mostly clamp per dimension like any other bounded
-# displacement — except quaternions (see _DISPLACEMENT_POSE_UNSAFE_ROT below).
+# displacement — except reps whose no-op is not the origin (see
+# _DISPLACEMENT_POSE_UNSAFE_ROT below).
 _ABSOLUTE_POSE_MODES = _ABSOLUTE_MODES & _POSE_MODES
 _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # Rotation reps that survive independent per-dimension clamping of an absolute
@@ -92,13 +93,16 @@ _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
 # Displacement pose modes carry rotation *deltas*, whose no-op is not the zero
-# vector for these reps (a quaternion identity is (1, 0, 0, 0)). Clamping such
-# a delta per dimension toward a symmetric ±max_delta box drags it away from
-# identity, and downstream re-normalization can amplify the rotation instead
-# of limiting it — the same failure class as clamping an absolute quaternion.
-# euler_xyz/axis_angle deltas have no such problem (their no-op is the zero
-# vector) and clamp fine.
-_DISPLACEMENT_POSE_UNSAFE_ROT = frozenset({"quat_wxyz", "quat_xyzw"})
+# vector for these reps (a quaternion identity is (1, 0, 0, 0); a rot6d
+# identity is (1, 0, 0, 0, 1, 0)). Clamping such a delta per dimension toward
+# a symmetric ±max_delta box drags it away from identity, and downstream
+# re-normalization (Gram-Schmidt orthonormalization for rot6d) can then
+# amplify the rotation instead of limiting it — the same failure class as
+# clamping an absolute quaternion. euler_xyz/axis_angle deltas have no such
+# problem (their no-op is the zero vector) and clamp fine. Note rot6d is
+# limitable for *absolute* orientations (_LIMITABLE_ROT above) but not for
+# displacement deltas — the two sets are deliberately not related.
+_DISPLACEMENT_POSE_UNSAFE_ROT = frozenset({"quat_wxyz", "quat_xyzw", "rot6d"})
 _LAST_APPROVED_KEY = "delta_limit:last"
 
 

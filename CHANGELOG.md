@@ -79,6 +79,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`DeltaLimitApprover` refuses `rot6d` rotation deltas in displacement pose
+  modes** (#150, breaking for any embodiment currently declaring them). A
+  `rot6d` delta's identity is `(1, 0, 0, 0, 1, 0)`, not the zero vector, so
+  per-dimension clamping toward a symmetric `±max_delta` box drags it away
+  from identity; the Gram-Schmidt re-normalization every consumer applies can
+  then amplify the rotation instead of limiting it — the same failure class
+  as clamping an absolute quaternion, and pre-existing behavior rather than a
+  regression (`eef_delta_pose` + `rot6d` already reached the displacement
+  clamp path before #143/#144). `euler_xyz` and `axis_angle` deltas have no
+  such problem and remain guardrail-conformant.
 - **`DeltaLimitApprover` no longer rejects displacement pose modes whose
   rotation deltas are safe to clamp per dimension** (#143). The per-dimension
   rotation-repr refusal now fires for absolute pose modes (`eef_abs_pose`,

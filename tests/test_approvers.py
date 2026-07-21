@@ -77,17 +77,24 @@ def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -
     assert out.meta.get("delta_clamped") is True
 
 
-@pytest.mark.parametrize("rotation_repr", ["quat_wxyz", "quat_xyzw"])
-def test_refuses_displacement_pose_mode_with_quat_rotation(rotation_repr: RotationRepr) -> None:
-    # A quaternion delta's identity is (1, 0, 0, 0), not the zero vector:
-    # clamping it per dimension toward a symmetric ±max_delta box drags it away
-    # from identity, and downstream re-normalization can amplify the rotation
-    # instead of limiting it — same failure class as an absolute quat.
-    # 3 xyz + 4 quat + 1 gripper = 8 dims.
+@pytest.mark.parametrize(
+    ("rotation_repr", "rot_dim"),
+    [("quat_wxyz", 4), ("quat_xyzw", 4), ("rot6d", 6)],
+)
+def test_refuses_displacement_pose_mode_with_off_origin_rotation(
+    rotation_repr: RotationRepr, rot_dim: int
+) -> None:
+    # These reps' identity/no-op is not the zero vector (quaternion identity is
+    # (1, 0, 0, 0); rot6d identity is (1, 0, 0, 0, 1, 0)): clamping a delta per
+    # dimension toward a symmetric ±max_delta box drags it away from identity,
+    # and downstream re-normalization can amplify the rotation instead of
+    # limiting it — same failure class as clamping an absolute quat (#150).
+    # 3 xyz + rot_dim + 1 gripper.
+    dim = 3 + rot_dim + 1
     space = Box(
-        shape=(8,),
-        low=np.full(8, -1.0),
-        high=np.full(8, 1.0),
+        shape=(dim,),
+        low=np.full(dim, -1.0),
+        high=np.full(dim, 1.0),
         semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
     )
     with pytest.raises(ValueError, match="rotation_repr"):
