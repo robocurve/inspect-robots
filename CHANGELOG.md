@@ -92,6 +92,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`--epochs 0` or a negative value now exits with a guided error instead of a
+  raw traceback** (#145). Both `inspect-robots run` and `inspect-robots eval-set`
+  catch the `ConfigError` raised by `Task`'s epoch validation and surface it
+  through the existing `_resolve_or_exit` pattern, matching how invalid
+  constructor kwargs are handled for config-file components (#47).
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the

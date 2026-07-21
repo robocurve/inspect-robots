@@ -379,6 +379,50 @@ def test_cli_run_epochs_fail_on_error_store_frames(
     assert list((tmp_path / "frames").rglob("*.npy"))  # --store-frames streamed (per-run subdir)
 
 
+@pytest.mark.parametrize("epochs_value", ["0", "-1", "-5"])
+def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
+    """--epochs 0 / negative must produce a guided SystemExit, not a raw traceback (#145)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                epochs_value,
+            ]
+        )
+    message = str(excinfo.value)
+    assert "--epochs" in message
+    assert epochs_value in message
+
+
+@pytest.mark.parametrize("epochs_value", ["0", "-1"])
+def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
+    """eval-set --epochs 0 / negative must produce a guided SystemExit naming the task (#145)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--epochs",
+                epochs_value,
+            ]
+        )
+    message = str(excinfo.value)
+    assert "--epochs" in message
+    assert epochs_value in message
+    assert "cubepick-reach" in message  # the failing task name is named
+
+
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
     from inspect_robots.registry import task as task_decorator
     from inspect_robots.scene import Scene
@@ -2464,8 +2508,11 @@ def test_cli_run_closes_embodiment_when_validation_raises(
 ) -> None:
     """A failure between resolving the embodiment and eval() (here: --epochs 0
     raising ConfigError) must still close the embodiment — otherwise a bad flag
-    leaves real arms energized."""
-    from inspect_robots.errors import ConfigError
+    leaves real arms energized.
+
+    The fix converts the raw ConfigError into a guided SystemExit; the
+    important invariant is that close() still fires via the outer try/finally.
+    """
     from inspect_robots.mock import CubePickEmbodiment
 
     closed: list[bool] = []
@@ -2478,7 +2525,7 @@ def test_cli_run_closes_embodiment_when_validation_raises(
     monkeypatch.setitem(reg._FACTORIES["embodiment"], "tracked-cubepick", _Tracked)
     monkeypatch.setenv(ENV_POLICY, "scripted")
     monkeypatch.setenv(ENV_EMBODIMENT, "tracked-cubepick")
-    with pytest.raises(ConfigError):
+    with pytest.raises(SystemExit) as excinfo:
         main(
             [
                 "reach the cube",
@@ -2490,6 +2537,7 @@ def test_cli_run_closes_embodiment_when_validation_raises(
                 str(tmp_path / "logs"),
             ]
         )
+    assert "--epochs" in str(excinfo.value)
     assert closed == [True]
 
 

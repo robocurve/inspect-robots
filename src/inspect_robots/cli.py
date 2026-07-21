@@ -885,7 +885,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     embodiment = resolved.embodiment
     try:
         if args.epochs is not None:
-            task = replace(task, epochs=args.epochs)
+            from inspect_robots.errors import ConfigError
+
+            try:
+                task = replace(task, epochs=args.epochs)
+            except ConfigError as exc:
+                raise SystemExit(f"--epochs: {exc}") from exc
 
         _announce_components(resolved)
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
@@ -1005,7 +1010,16 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     defaults = load_defaults(os.environ)
     tasks = [_resolve_or_exit("task", name) for name in task_names]
     if args.epochs is not None:
-        tasks = [replace(t, epochs=args.epochs) for t in tasks]
+        from inspect_robots.errors import ConfigError
+        from inspect_robots.task import Task
+
+        patched: list[Task] = []
+        for t in tasks:
+            try:
+                patched.append(replace(t, epochs=args.epochs))
+            except ConfigError as exc:
+                raise SystemExit(f"--epochs (task {t.name!r}): {exc}") from exc
+        tasks = patched
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
