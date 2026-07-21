@@ -7,18 +7,6 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-### Changed
-
-- **Docs site migrated from MkDocs Material to Docusaurus.** The site at
-  inspectrobots.org now builds from `website/` (Docusaurus 3) while the
-  Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
-  `llms-full.txt` are preserved. The API reference is generated at build
-  time by `scripts/gen_api_docs.py` (griffe) into a gitignored
-  `docs/api/index.md`, guide pages link to it with anchor-checked
-  `/api/#...` links, and the site now carries the project logo, favicon,
-  and teal-on-cream branding. PR validation moved to a merge-blocking
-  `docs-build` job in `ci.yml`; `docs.yml` deploys on pushes to main.
-
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
@@ -33,6 +21,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Docs site migrated from MkDocs Material to Docusaurus.** The site at
+  inspectrobots.org now builds from `website/` (Docusaurus 3) while the
+  Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
+  `llms-full.txt` are preserved. The API reference is generated at build
+  time by `scripts/gen_api_docs.py` (griffe) into a gitignored
+  `docs/api/index.md`, guide pages link to it with anchor-checked
+  `/api/#...` links, and the site now carries the project logo, favicon,
+  and teal-on-cream branding. PR validation moved to a merge-blocking
+  `docs-build` job in `ci.yml`; `docs.yml` deploys on pushes to main.
 - **Agent plugin:** move tool calls now require a note describing the current
   observation and why the agent chose the motion, so users can follow its
   perception and decisions live and in saved transcripts (#130). This tightens
@@ -42,6 +39,19 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
+  the end of a trial to persist state or artifacts. The orchestrator calls
+  `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy
+  attaches to `record.metadata` is persisted in the final `EvalLog`. Hook
+  failures are caught and logged as trial errors, preventing them from
+  crashing the overall evaluation (#40).
+- **Agent plugin transcript persistence** — `LLMAgentPolicy` now implements
+  `on_trial_end` to persist its full conversation transcript (tool calls,
+  observations, system prompts) to a JSONL file per trial under
+  `<log-dir>/transcripts/<run_id>/<scene_id>-e<epoch>.jsonl`. Camera images
+  are stripped from the transcript to save space, as they are already
+  recorded in the frame store. The relative path to the transcript is
+  stored in the trial's metadata for easy post-hoc analysis (#40).
 - **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
   so reasoning effort works together with function tools on recent OpenAI
   models (Chat Completions rejects the combination, observed on
@@ -91,6 +101,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`--epochs 0` or a negative value now exits with a guided error instead of a
+  raw traceback** (#145). Both `inspect-robots run` and `inspect-robots eval-set`
+  catch the `ConfigError` raised by `Task`'s epoch validation and surface it
+  through the existing `_resolve_or_exit` pattern, matching how invalid
+  constructor kwargs are handled for config-file components (#47).
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the

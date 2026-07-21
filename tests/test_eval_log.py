@@ -52,6 +52,7 @@ def _golden_log() -> EvalLog:
                 epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
                 operator_judgements=("yes",),
+                trial_metadata=({"foo": "bar"},),
                 termination_reasons=("success",),
                 policy_transcripts=(
                     [
@@ -89,6 +90,7 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
     assert restored.samples[0].operator_judgements == ("yes",)
+    assert restored.samples[0].trial_metadata == ({"foo": "bar"},)
     assert restored.samples[0].termination_reasons == ("success",)
     assert restored.samples[0].policy_transcripts == (
         [
@@ -106,6 +108,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["operator_judgements"]
+        del sample["trial_metadata"]
         del sample["termination_reasons"]
         del sample["policy_transcripts"]
     path = tmp_path / "old.json"
@@ -114,6 +117,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
+    assert restored.samples[0].trial_metadata == ()
     assert restored.samples[0].termination_reasons == ()
     assert restored.samples[0].policy_transcripts == ()
     assert restored.eval.max_steps is None
@@ -138,6 +142,8 @@ def test_eval_log_and_friends_are_frozen() -> None:
         log.samples.clear()  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        log.samples[0].trial_metadata.append({})  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].termination_reasons.append("failure")  # type: ignore[attr-defined]
 

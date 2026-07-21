@@ -16,7 +16,8 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import numpy as np
@@ -26,6 +27,9 @@ from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
 from inspect_robots.types import ActionChunk, Observation
+
+if TYPE_CHECKING:
+    from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._llm import ENV_MODEL, ChatClient, ToolCall, resolve_provider
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
@@ -200,6 +204,25 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] goal: {scene.instruction}")
         self._delta_cursor = 0
         self._calls_used = 0
+
+    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        """Persist the transcript at the end of the trial."""
+        messages = self.transcript()
+        if not messages:
+            return
+
+        transcript_dir = Path(log_dir) / "transcripts" / run_id
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+
+        trial_id = f"{record.scene_id}-e{record.epoch}"
+        path = transcript_dir / f"{trial_id}.jsonl"
+
+        with path.open("w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(json.dumps(msg) + "\n")
+
+        # Make path relative to log_dir for portability
+        record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""

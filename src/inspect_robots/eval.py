@@ -268,14 +268,13 @@ def _run_eval(
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 
+    # One subdirectory per run: trial ids repeat across runs (scene-epoch),
+    # so a shared directory would silently overwrite the previous run's
+    # frames or transcripts.
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+
     frame_store: FrameStore | None = None
     if store_frames:
-        # One subdirectory per run: trial ids repeat across runs (scene-epoch),
-        # so a shared directory would silently overwrite the previous run's
-        # frames. The log's stats.frames_dir records the exact directory.
-        run_stamp = (
-            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
-        )
         frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
 
     spec = EvalSpec(
@@ -315,6 +314,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
         policy_transcripts: list[Any] = []
         scene_status = "success"
@@ -378,8 +378,6 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
-                    termination_reasons.append(record.termination_reason)
-                    policy_transcripts.append(record.policy_transcript)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -393,8 +391,22 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     judgements.append(record.operator_judgement)
-                    termination_reasons.append(record.termination_reason)
-                    policy_transcripts.append(record.policy_transcript)
+
+                on_trial_end = getattr(policy, "on_trial_end", None)
+                if callable(on_trial_end):
+                    try:
+                        on_trial_end(record, log_dir, run_stamp)
+                    except Exception as exc:
+                        note = f"policy.on_trial_end failed: {exc}"
+                        scene_status = "error"
+                        scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                        if status == "success":
+                            status = "error"
+                            error = note
+
+                trial_metadatas.append(record.metadata)
+                termination_reasons.append(record.termination_reason)
+                policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
             if halted:
@@ -436,6 +448,7 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
                 policy_transcripts=tuple(policy_transcripts),
             )
