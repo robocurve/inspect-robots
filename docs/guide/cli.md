@@ -37,18 +37,18 @@ Resolved in order (first hit wins):
 
 ```ini
 [defaults]
-policy = molmoact2-yam
-embodiment = yam-bimanual            ; the default: real hardware
-sim_embodiment = yam-bimanual-isaac  ; what --sim swaps in
-scorer = operator      ; optional, ad-hoc runs only
-max_steps = 300        ; optional, ad-hoc runs only
-store_frames = true    ; optional, capture frames on every run
+policy = molmoact2
+embodiment = yam_arms     ; the default: real hardware
+sim_embodiment = my-sim   ; what --sim swaps in (any registered sim embodiment)
+scorer = operator         ; optional, ad-hoc runs only
+max_steps = 300           ; optional, ad-hoc runs only
+store_frames = true       ; optional, capture frames on every run
 
 [policy.args]          ; default -P key=value pairs
-checkpoint = ~/ckpts/molmoact2-yam.pt
+server_url = http://gpu-box:8202
 
 [embodiment.args]      ; default -E key=value pairs
-cameras = wrist,front
+top_cam_device = /dev/v4l/by-id/usb-CAM123-video-index0
 
 [sim_embodiment.args]  ; -E pairs used only under --sim
 headless = true
@@ -71,7 +71,7 @@ Real hardware is the default (it is whatever you configured as `embodiment`).
 
 ```bash
 inspect-robots "place the spoon on the plate" --sim
-inspect-robots run --task my-benchmark --policy molmoact2-yam --sim
+inspect-robots run --task my-benchmark --policy molmoact2 --sim
 ```
 
 The sim embodiment resolves as `$INSPECT_ROBOTS_SIM_EMBODIMENT` > config
@@ -263,6 +263,13 @@ scenes:
 
 `completed` is the display form of the log's `success` status value; the
 on-disk field and Python API keep `success`.
+
+For runs whose policy recorded conversations (such as `--policy agent`),
+`--transcript` appends each trial's recorded transcript after the summary:
+
+```bash
+inspect-robots inspect logs/cubepick-reach_xxxx.json --transcript
+```
 
 ## `inspect-robots view`
 

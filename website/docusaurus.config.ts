@@ -98,8 +98,38 @@ const config: Config = {
       ],
     },
     footer: {
-      style: 'dark',
-      copyright: 'Copyright © Inspect Robots contributors',
+      style: 'light',
+      links: [
+        {
+          title: 'Docs',
+          items: [
+            {label: 'Quickstart', to: '/guide/quickstart/'},
+            {label: 'Concepts', to: '/guide/concepts/'},
+            {label: 'API reference', to: '/api/'},
+          ],
+        },
+        {
+          title: 'Community',
+          items: [
+            {
+              label: 'GitHub',
+              href: 'https://github.com/robocurve/inspect-robots',
+            },
+            {
+              label: 'Issues',
+              href: 'https://github.com/robocurve/inspect-robots/issues',
+            },
+          ],
+        },
+        {
+          title: 'More',
+          items: [
+            {label: 'Robocurve', href: 'https://robocurve.org/'},
+            {label: 'For LLMs: llms.txt', href: 'pathname:///llms.txt'},
+          ],
+        },
+      ],
+      copyright: `Copyright © ${new Date().getFullYear()} Robocurve. Released under the <a href="https://github.com/robocurve/inspect-robots/blob/main/LICENSE">MIT License</a>.`,
     },
     prism: {
       theme: prismThemes.github,
