@@ -2835,6 +2835,36 @@ def test_cli_max_action_delta_conflicts_with_disable(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("value", ["-1", "0", "inf", "nan"])
+def test_cli_run_rejects_invalid_max_action_delta(value: str, tmp_path: Path) -> None:
+    """An explicit malformed --max-action-delta fails fast (#154), not a soft warning:
+    it is a CLI input error, distinct from a derived limit an embodiment's space
+    cannot support (test_cli_degraded_guardrails_warn_but_run stays a warning)."""
+    with pytest.raises(SystemExit, match="finite and > 0"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+                "--max-action-delta",
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize("value", ["-1", "0", "inf", "nan"])
+def test_cli_eval_set_rejects_invalid_max_action_delta(value: str) -> None:
+    """Same guard as run, exercised through eval-set's shared conflict check (#154)."""
+    with pytest.raises(SystemExit, match="finite and > 0"):
+        main(["eval-set", "cubepick-reach", "--max-action-delta", value])
+
+
 def test_cli_degraded_guardrails_warn_but_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

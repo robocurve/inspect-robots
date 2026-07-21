@@ -101,6 +101,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **An explicit invalid `--max-action-delta` now fails fast instead of silently
+  running with weaker guardrails** (#154). Non-finite or non-positive values
+  were previously caught by `_build_guardrails`'s degrade-per-component path
+  (meant for derived limits an embodiment's space can't support) and
+  downgraded to a stderr warning, so the run proceeded with clamp-only
+  guardrails despite the operator explicitly asking for a tighter limit. Both
+  `run` and `eval-set` now reject a malformed explicit value in the shared
+  conflict check, before anything resolves or energizes. Derived-limit
+  degradation (no explicit flag, an embodiment declaring no bounds) is
+  unaffected — it still warns and continues.
 - **`--epochs 0` or a negative value now exits with a guided error instead of a
   raw traceback** (#145). Both `inspect-robots run` and `inspect-robots eval-set`
   catch the `ConfigError` raised by `Task`'s epoch validation and surface it

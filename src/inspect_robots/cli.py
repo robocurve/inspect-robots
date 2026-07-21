@@ -745,7 +745,7 @@ class _ResolvedComponents(NamedTuple):
 
 
 def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
-    """Reject flag combinations invalid for both ``run`` and ``eval-set``."""
+    """Reject flag combinations and malformed values invalid for both ``run`` and ``eval-set``."""
     if args.sim and args.embodiment:
         raise SystemExit(
             "--sim selects your configured sim_embodiment; "
@@ -755,6 +755,15 @@ def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--max-action-delta tunes the guardrails that --disable-guardrails turns off — drop one"
         )
+    if args.max_action_delta is not None and not (
+        math.isfinite(args.max_action_delta) and args.max_action_delta > 0
+    ):
+        # A malformed *explicit* value is a CLI input error, not an embodiment
+        # limitation: fail fast here rather than let _build_guardrails's
+        # degrade-per-component path (meant for derived limits an embodiment's
+        # space can't support) downgrade it to a warning and run with weaker
+        # guardrails than the operator explicitly asked for.
+        raise SystemExit(f"--max-action-delta must be finite and > 0, got {args.max_action_delta}")
 
 
 def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _ResolvedComponents:
