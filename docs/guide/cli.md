@@ -38,11 +38,11 @@ Resolved in order (first hit wins):
 ```ini
 [defaults]
 policy = molmoact2
-embodiment = yam_arms  ; the default: real hardware
-sim_embodiment = my-sim  ; what --sim swaps in (any registered sim embodiment)
-scorer = operator      ; optional, ad-hoc runs only
-max_steps = 300        ; optional, ad-hoc runs only
-store_frames = true    ; optional, capture frames on every run
+embodiment = yam_arms     ; the default: real hardware
+sim_embodiment = my-sim   ; what --sim swaps in (any registered sim embodiment)
+scorer = operator         ; optional, ad-hoc runs only
+max_steps = 300           ; optional, ad-hoc runs only
+store_frames = true       ; optional, capture frames on every run
 
 [policy.args]          ; default -P key=value pairs
 server_url = http://gpu-box:8202
