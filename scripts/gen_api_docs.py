@@ -156,6 +156,7 @@ def main() -> int:
     except Exception as error:
         print(f"API documentation generation failed: {error}", file=sys.stderr)
         return 1
+    _OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     _OUTPUT.write_text(output, encoding="utf-8")
     print(f"Generated {_OUTPUT.relative_to(_ROOT)}")
     return 0
