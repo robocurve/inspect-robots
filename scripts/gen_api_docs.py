@@ -34,6 +34,7 @@ _SECTIONS = (
         "Compatibility & errors",
         ("inspect_robots.compat", "inspect_robots.errors"),
     ),
+    ("Adapter conformance", ("inspect_robots.conformance",)),
     ("Evaluation & logs", ("inspect_robots.eval", "inspect_robots.log")),
     (
         "Logging sinks",

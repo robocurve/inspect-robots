@@ -80,5 +80,5 @@ inspect-robots inspect logs/cubepick-reach_*.json            # print a saved log
 ## Next steps
 
 - [Concepts](concepts.md): the core abstractions.
-- [Writing A Benchmark](writing-a-benchmark.md): define your own `Task`.
-- [Policies And Embodiments](policies-and-embodiments.md): plug in a real VLA or robot/sim.
+- [Writing a benchmark](writing-a-benchmark.md): define your own `Task`.
+- [Policies and embodiments](policies-and-embodiments.md): plug in a real VLA or robot/sim.
