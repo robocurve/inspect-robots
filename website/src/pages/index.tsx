@@ -164,7 +164,7 @@ function Hero(): ReactNode {
             <Link
               className={styles.ctaOutline}
               href="https://github.com/robocurve/inspect-robots">
-              <GitHubMark /> GitHub
+              <GitHubMark /> Star on GitHub
             </Link>
           </div>
         </div>
