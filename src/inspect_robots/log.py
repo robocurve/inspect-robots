@@ -38,6 +38,7 @@ class EvalSpec:
     embodiment_info: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     max_steps: int | None = None
+    max_seconds: float | None = None
 
 
 @dataclass(frozen=True)

@@ -169,6 +169,17 @@ def check_compatibility(
         )
 
     if task is not None:
+        if task.max_seconds is not None and (
+            embodiment.info.control_hz is None or embodiment.info.control_hz <= 0
+        ):
+            issues.append(
+                CompatIssue(
+                    "error",
+                    "control_hz_missing",
+                    f"task {task.name!r} specifies max_seconds ({task.max_seconds}s) but "
+                    f"embodiment {embodiment.info.name!r} has no valid control_hz declared",
+                )
+            )
         _check_scenes_realizable(task, embodiment, issues)
 
     return report

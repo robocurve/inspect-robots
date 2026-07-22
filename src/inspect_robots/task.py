@@ -54,19 +54,41 @@ class Task:
     """A benchmark: scenes + scorer(s) + horizon, independent of any embodiment.
 
     ``scorer`` accepts scorer objects or **registry names** (e.g.
-    ``scorer="success_at_end"``), or a sequence mixing both.
+    ``scorer="success_at_end"``), or a sequence mixing both. Specify the horizon
+    as an integer step budget (``max_steps``) or a physical duration in seconds
+    (``max_seconds``), resolved against the paired embodiment's control rate at
+    ``eval()`` time.
     """
 
     name: str
     scenes: Sequence[Scene]
     scorer: Scorer | str | Sequence[Scorer | str]
-    max_steps: int
+    max_steps: int | None = None
+    max_seconds: float | None = None
     epochs: int | Epochs = 1
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.max_steps < 1:
-            raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps}")
+        if (self.max_steps is None) == (self.max_seconds is None):
+            raise ConfigError(
+                f"Task {self.name!r}: specify exactly one of max_steps or max_seconds"
+            )
+        if self.max_steps is not None and (
+            isinstance(self.max_steps, bool)
+            or not isinstance(self.max_steps, int)
+            or self.max_steps < 1
+        ):
+            raise ConfigError(
+                f"Task {self.name!r}: max_steps must be an integer >= 1, got {self.max_steps}"
+            )
+        if self.max_seconds is not None and (
+            isinstance(self.max_seconds, bool)
+            or not isinstance(self.max_seconds, (int, float))
+            or self.max_seconds <= 0
+        ):
+            raise ConfigError(
+                f"Task {self.name!r}: max_seconds must be a number > 0, got {self.max_seconds}"
+            )
         _ = self.epoch_spec  # validates an int epochs count via Epochs
 
     @property
@@ -96,4 +118,9 @@ class Task:
     @property
     def envelope(self) -> TaskEnvelope:
         """The adapter-safe view of this task handed to ``bind_task`` hooks."""
+        if self.max_steps is None:
+            raise ConfigError(
+                f"Task {self.name!r} has max_seconds set ({self.max_seconds}s); "
+                "step envelope must be resolved at eval() time with an embodiment"
+            )
         return TaskEnvelope(name=self.name, max_steps=self.max_steps)
