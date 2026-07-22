@@ -239,16 +239,19 @@ def _run_eval(
     if callable(bind):
         bind(embodiment.info)
 
+    # Fail fast on incompatible pairings before touching any hardware/sim.
+    # This also validates the embodiment rate needed by a seconds-based task
+    # before the resolved horizon is exposed to an adapter (plan 0026).
+    assert_compatible(policy, embodiment, task, remap=remap)
+    task_envelope = task.resolve_envelope(embodiment.info.control_hz)
+
     # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs
-    # here too, so the adapter can learn the rollout envelope (e.g. for an
-    # operator countdown) before any hardware is touched. Duck-typed —
-    # bind_task is not part of the Embodiment Protocol.
+    # after compatibility so the adapter receives the resolved rollout
+    # envelope (e.g. for an operator countdown) before any hardware is
+    # touched. Duck-typed — bind_task is not part of the Embodiment Protocol.
     bind_task = getattr(embodiment, "bind_task", None)
     if callable(bind_task):
-        bind_task(task.envelope)
-
-    # Fail fast on incompatible pairings before touching any hardware/sim.
-    assert_compatible(policy, embodiment, task, remap=remap)
+        bind_task(task_envelope)
 
     epoch_spec = task.epoch_spec
     scorers = task.scorers
@@ -291,7 +294,8 @@ def _run_eval(
             "capabilities": sorted(embodiment.info.capabilities),
         },
         seed=seed,
-        max_steps=task.max_steps,
+        max_steps=task_envelope.max_steps,
+        max_seconds=task.max_seconds,
     )
     bus.on_eval_start(spec)
 
@@ -329,7 +333,7 @@ def _run_eval(
                     policy,
                     embodiment,
                     scene,
-                    max_steps=task.max_steps,
+                    max_steps=task_envelope.max_steps,
                     seed=trial_seed,
                     epoch=epoch,
                     controller=controller,

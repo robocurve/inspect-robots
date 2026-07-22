@@ -26,7 +26,12 @@ SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class EvalSpec:
-    """Top-level identity and configured horizon of a reproducible eval."""
+    """Top-level identity and configured horizon of a reproducible eval.
+
+    ``max_steps`` is always the resolved integer budget used by the rollout.
+    ``max_seconds`` preserves a benchmark's declared physical-time budget when
+    that integer was derived from the embodiment's control rate.
+    """
 
     task: str
     policy: str
@@ -38,6 +43,7 @@ class EvalSpec:
     embodiment_info: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     max_steps: int | None = None
+    max_seconds: float | None = None
 
 
 @dataclass(frozen=True)

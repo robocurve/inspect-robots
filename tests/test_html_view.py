@@ -179,6 +179,27 @@ def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     assert "Operator judgements" not in document
 
 
+def test_seconds_horizon_shows_declared_and_resolved_limits() -> None:
+    log = _log()
+    spec = dataclasses.replace(log.eval, max_seconds=12.5, max_steps=188)
+    document = render_html(dataclasses.replace(log, eval=spec), title="timed")
+
+    assert "<dt>max seconds</dt>" in document
+    assert "<dd>12.5</dd>" in document
+    assert "<dt>resolved max steps</dt>" in document
+    assert "<dd>188</dd>" in document
+    assert "<dt>max steps</dt>" not in document
+
+
+def test_seconds_horizon_without_resolved_steps_omits_step_limit() -> None:
+    log = _log()
+    spec = dataclasses.replace(log.eval, max_seconds=12.5, max_steps=None)
+    document = render_html(dataclasses.replace(log, eval=spec), title="incomplete")
+
+    assert "<dt>max seconds</dt>" in document
+    assert "<dt>resolved max steps</dt>" not in document
+
+
 def test_every_foreign_text_surface_is_escaped_exactly_once() -> None:
     attack = "<script>alert(1)</script>"
     transcript = _chat(

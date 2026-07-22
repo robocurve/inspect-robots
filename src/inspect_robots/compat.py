@@ -11,6 +11,7 @@ Hard mismatches are ``error`` issues that fail fast; soft ones are warnings.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from inspect_robots.embodiment import Embodiment
@@ -169,9 +170,44 @@ def check_compatibility(
         )
 
     if task is not None:
+        _check_task_horizon(task, embodiment, issues)
         _check_scenes_realizable(task, embodiment, issues)
 
     return report
+
+
+def _check_task_horizon(task: Task, embodiment: Embodiment, issues: list[CompatIssue]) -> None:
+    """Require a usable embodiment rate when a task declares physical seconds."""
+    if task.max_seconds is None:
+        return
+
+    control_hz = embodiment.info.control_hz
+    if (
+        control_hz is None
+        or isinstance(control_hz, bool)
+        or not math.isfinite(control_hz)
+        or control_hz <= 0
+    ):
+        issues.append(
+            CompatIssue(
+                "error",
+                "task_horizon_control_rate",
+                f"task {task.name!r} declares max_seconds={task.max_seconds:g}, but "
+                f"embodiment {embodiment.info.name!r} has control_hz={control_hz!r}; "
+                "seconds-based tasks require a finite positive embodiment rate",
+            )
+        )
+        return
+
+    if not math.isfinite(task.max_seconds * control_hz):
+        issues.append(
+            CompatIssue(
+                "error",
+                "task_horizon_control_rate",
+                f"task {task.name!r} max_seconds={task.max_seconds:g} at embodiment "
+                f"control_hz={control_hz:g} does not yield a finite step budget",
+            )
+        )
 
 
 def _check_scenes_realizable(task: Task, embodiment: Embodiment, issues: list[CompatIssue]) -> None:

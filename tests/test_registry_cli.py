@@ -794,6 +794,15 @@ def test_cli_eval_set_zero_scene_task_has_no_metric_or_error_detail(
     assert "[completed] kb/a\n" in out  # no trailing metric/error detail
 
 
+def test_eval_set_summary_surfaces_seconds_horizon(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="timed", max_seconds=120.0, control_hz=10.0)
+    cli._print_eval_set_summary(True, [log], "logs")
+    out = capsys.readouterr().out
+    assert "[completed] timed [120s -> 1200 steps at 10 Hz]" in out
+
+
 def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -888,6 +897,7 @@ def _step_limit_log(
     task: str = "adhoc",
     reasons: tuple[str | None, ...] = ("max_steps",),
     max_steps: int | None = 1200,
+    max_seconds: float | None = None,
     control_hz: object = 10.0,
 ) -> EvalLog:
     return EvalLog(
@@ -901,6 +911,7 @@ def _step_limit_log(
             inspect_robots_version="0",
             embodiment_info={"control_hz": control_hz},
             max_steps=max_steps,
+            max_seconds=max_seconds,
         ),
         results=EvalResults(
             total_scenes=1,
@@ -1725,6 +1736,35 @@ def test_run_summary_uses_registered_task_hint(capsys: pytest.CaptureFixture[str
     assert "--max-steps N" not in out
 
 
+def test_run_summary_surfaces_seconds_horizon_for_registered_task(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="timed-task", max_seconds=120.0, control_hz=10.0)
+    cli._print_run_summary(log, "run.json", is_adhoc=False)
+    out = capsys.readouterr().out
+    assert "(max_seconds=120, resolved max_steps=1200 at 10 Hz)" in out
+    assert "hint: task 'timed-task' defines its own max_seconds" in out
+
+
+def test_run_summary_surfaces_seconds_horizon_without_logged_control_rate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="timed-task", max_seconds=120.0, control_hz=None)
+    cli._print_run_summary(log, "run.json", is_adhoc=False)
+    out = capsys.readouterr().out
+    assert "(max_seconds=120, resolved max_steps=1200)" in out
+    assert "resolved max_steps=1200 at" not in out
+
+
+def test_seconds_horizon_text_tolerates_missing_rate_and_malformed_limits() -> None:
+    assert (
+        cli._seconds_horizon_text(_step_limit_log(max_seconds=120.0, control_hz=None))
+        == "120s -> 1200 steps"
+    )
+    assert cli._seconds_horizon_text(_step_limit_log(max_seconds=0.0)) is None
+    assert cli._seconds_horizon_text(_step_limit_log(max_seconds=120.0, max_steps=None)) is None
+
+
 def test_run_summary_omits_step_limit_note_without_truncation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1775,6 +1815,12 @@ def test_inspect_tolerates_non_numeric_max_steps_in_hand_edited_log(
     out = capsys.readouterr().out
     assert "note: 1/1 trials hit the step limit before terminating\n" in out
     assert "max_steps=1200" not in out
+
+
+def test_inspect_prints_seconds_horizon(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = _write_log(_step_limit_log(max_seconds=120.0, control_hz=10.0), tmp_path, "timed.json")
+    assert main(["inspect", str(path)]) == 0
+    assert "horizon:     120s -> 1200 steps at 10 Hz" in capsys.readouterr().out
 
 
 def test_bare_instruction_runs_adhoc_task_from_env_defaults(

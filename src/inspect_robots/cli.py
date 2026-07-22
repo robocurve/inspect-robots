@@ -565,6 +565,43 @@ def _step_limit_count(log: EvalLog) -> int:
     )
 
 
+def _seconds_horizon(log: EvalLog) -> tuple[float, int, float | None] | None:
+    """Return a validated declared/resolved seconds horizon from a saved log."""
+    max_seconds = log.eval.max_seconds
+    max_steps = log.eval.max_steps
+    if not (
+        isinstance(max_seconds, (int, float))
+        and not isinstance(max_seconds, bool)
+        and math.isfinite(max_seconds)
+        and max_seconds > 0
+        and isinstance(max_steps, int)
+        and not isinstance(max_steps, bool)
+        and max_steps > 0
+    ):
+        return None
+
+    rate = log.eval.embodiment_info.get("control_hz")
+    valid_rate = (
+        float(rate)
+        if isinstance(rate, (int, float))
+        and not isinstance(rate, bool)
+        and math.isfinite(rate)
+        and rate > 0
+        else None
+    )
+    return float(max_seconds), max_steps, valid_rate
+
+
+def _seconds_horizon_text(log: EvalLog) -> str | None:
+    """Format a seconds-based horizon for compact CLI metadata surfaces."""
+    horizon = _seconds_horizon(log)
+    if horizon is None:
+        return None
+    max_seconds, max_steps, rate = horizon
+    text = f"{max_seconds:g}s -> {max_steps} steps"
+    return f"{text} at {rate:g} Hz" if rate is not None else text
+
+
 def _outcome_line(log: EvalLog) -> tuple[str, bool] | None:
     """Return an outcome digest and unmapped flag, or ``None`` with no reasons."""
     reasons: list[object] = [
@@ -599,17 +636,31 @@ def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
 
     note = f"note: {count}/{log.results.total_trials} trials hit the step limit before terminating"
     max_steps = log.eval.max_steps
+    seconds_horizon = _seconds_horizon(log)
+    if seconds_horizon is not None:
+        max_seconds, resolved_steps, rate = seconds_horizon
+        parenthetical = f"max_seconds={max_seconds:g}, resolved max_steps={resolved_steps}"
+        if rate is not None:
+            parenthetical += f" at {rate:g} Hz"
+        note += f" ({parenthetical})"
     # Guards below reject bool/str values a hand-edited log can smuggle past
     # from_dict (bool is an int subclass, so isinstance alone lets True in).
-    if isinstance(max_steps, int) and not isinstance(max_steps, bool):
+    elif isinstance(max_steps, int) and not isinstance(max_steps, bool):
         parenthetical = f"max_steps={max_steps}"
         rate = log.eval.embodiment_info.get("control_hz")
-        if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+        if (
+            isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and math.isfinite(rate)
+            and rate > 0
+        ):
             parenthetical += f", ~{max_steps / rate:g}s at {rate:g} Hz"
         note += f" ({parenthetical})"
     print(_styled(note, _YELLOW))
     if is_adhoc:
         hint = "hint: raise it with --max-steps N or: inspect-robots config set max_steps N"
+    elif seconds_horizon is not None:
+        hint = f"hint: task {log.eval.task!r} defines its own max_seconds"
     else:
         hint = f"hint: task {log.eval.task!r} defines its own max_steps"
     print(_styled(hint, _DIM))
@@ -984,6 +1035,9 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
         )
         detail = metrics or (log.error or "")
         row = f"  [{_styled(_display_status(log.status), _GREEN if ok else _RED)}] {log.eval.task}"
+        horizon = _seconds_horizon_text(log)
+        if horizon is not None:
+            row += f" [{horizon}]"
         print(f"{row}  {detail}" if detail else row)
     print(f"{_styled('log dir:', _CYAN)} {_styled(log_dir, _DIM)}")
     if not success:
@@ -1105,6 +1159,9 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
             print(line)
     print(f"created:     {log.eval.created}")
     print(f"git:         {log.eval.git_commit}")
+    horizon = _seconds_horizon_text(log)
+    if horizon is not None:
+        print(f"horizon:     {horizon}")
     trials = f"trials: {log.results.total_trials}"
     if log.results.errored_trials:
         trials += f" ({log.results.errored_trials} errored)"

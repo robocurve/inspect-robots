@@ -63,6 +63,31 @@ task = Task(
 )
 ```
 
+## Horizons
+
+A task declares exactly one rollout horizon. Use `max_steps` when the protocol
+is inherently discrete, as in the examples above. Use `max_seconds` when every
+embodiment should receive the same physical-time budget:
+
+```python
+task = Task(
+    name="two-minute-reach",
+    scenes=[...],
+    scorer=success_at_end(),
+    max_seconds=120.0,
+)
+```
+
+At evaluation time, Inspect Robots resolves the budget as
+`ceil(max_seconds * embodiment.info.control_hz)`. A 120-second task therefore
+runs for 1,200 steps at 10 Hz and 1,800 steps at 15 Hz. The eval log records
+both the declared seconds and the resolved integer step limit.
+
+A seconds-based task is incompatible with an embodiment whose `control_hz` is
+missing, non-finite, zero, or negative. Event-driven embodiments should use
+`max_steps`. Resolution changes the step budget only: `rollout()` does not add
+wall-clock pacing, so real-time cadence remains the embodiment's responsibility.
+
 ## Registering for discovery
 
 Wrap a task factory with [`task`](/api/#inspect_robots.registry.task) so it resolves by name in

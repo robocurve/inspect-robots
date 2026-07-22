@@ -105,6 +105,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     # Older schema-v1 logs missing additive fields must remain readable.
     data = _golden_log().to_dict()
     del data["eval"]["max_steps"]
+    del data["eval"]["max_seconds"]
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["operator_judgements"]
@@ -121,6 +122,31 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].termination_reasons == ()
     assert restored.samples[0].policy_transcripts == ()
     assert restored.eval.max_steps is None
+    assert restored.eval.max_seconds is None
+
+
+def test_seconds_horizon_round_trips_declared_and_resolved_values() -> None:
+    spec = EvalSpec(
+        task="timed",
+        policy="scripted",
+        embodiment="cubepick",
+        created="2026-07-21T00:00:00+00:00",
+        inspect_robots_version="0.0.0",
+        embodiment_info={"control_hz": 15.0},
+        max_steps=1800,
+        max_seconds=120.0,
+    )
+    restored = EvalLog.from_dict(
+        EvalLog(
+            version=SCHEMA_VERSION,
+            status="success",
+            eval=spec,
+            results=EvalResults(total_scenes=0, total_trials=0),
+            stats=EvalStats(started_at="a", completed_at="b", duration_s=0.0, total_steps=0),
+        ).to_dict()
+    )
+    assert restored.eval.max_seconds == 120.0
+    assert restored.eval.max_steps == 1800
 
 
 def test_eval_log_and_friends_are_frozen() -> None:
