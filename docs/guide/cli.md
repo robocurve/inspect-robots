@@ -210,6 +210,10 @@ inspect-robots eval-set 'kitchenbench/*' --policy xpolicylab -P url=ws://host:19
 inspect-robots eval-set cubepick-reach my-other-task --policy scripted --embodiment cubepick
 ```
 
+For a task declared with `max_seconds`, its summary row includes both the
+physical-time budget and the integer step limit resolved from the selected
+embodiment, for example `[120s -> 1200 steps at 10 Hz]`.
+
 Multiple patterns may match the same task; it still runs once. A pattern that
 matches nothing is an error listing every registered task. `--policy` and
 `--embodiment` (and `-P`/`-E`, `--sim`, `--epochs`, `--fail-on-error`,
@@ -253,6 +257,7 @@ policy:      scripted
 embodiment:  cubepick
 run status:  completed
 outcome:     5 succeeded
+horizon:     120s -> 1200 steps at 10 Hz
 scenes:      5   trials: 5
 metrics:
   success_at_end: 1
@@ -260,6 +265,10 @@ scenes:
   [success] scene-0: success_at_end=1
   ...
 ```
+
+The `horizon` line appears for seconds-based tasks; step-only logs retain the
+existing output. The HTML viewer likewise separates declared seconds from the
+resolved step limit.
 
 `completed` is the display form of the log's `success` status value; the
 on-disk field and Python API keep `success`.

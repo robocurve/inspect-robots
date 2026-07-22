@@ -70,15 +70,16 @@ class Embodiment(Protocol):
 
     Embodiments may additionally define an **optional** ``bind_task(envelope)``
     hook (not part of this Protocol, so existing embodiments stay conformant):
-    ``eval()`` calls it with the task's
+    after compatibility checking, ``eval()`` calls it with the task's resolved
     [`TaskEnvelope`][inspect_robots.task.TaskEnvelope] before the
-    compatibility check, letting adapters learn the rollout horizon — e.g. an
-    operator countdown showing elapsed/total. The hook is optional *input*,
-    not a guarantee: it never fires on direct ``rollout()`` calls or on older
-    cores, so adapters must keep a graceful fallback. It fires once per
-    ``eval()``, which can be several times over an embodiment's lifetime;
-    each call replaces the previous envelope. ``EmbodimentBase`` ships a
-    no-op default.
+    first reset, letting adapters learn the rollout horizon — e.g. an operator
+    countdown showing elapsed/total. A seconds-based task is converted to
+    integer steps using ``info.control_hz`` before the hook fires. The hook is
+    optional *input*, not a guarantee: it never fires on direct ``rollout()``
+    calls or on older cores, so adapters must keep a graceful fallback. It
+    fires once per ``eval()``, which can be several times over an embodiment's
+    lifetime; each call replaces the previous envelope. ``EmbodimentBase``
+    ships a no-op default.
     """
 
     info: EmbodimentInfo

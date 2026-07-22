@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -111,6 +113,48 @@ def test_scene_target_realizability() -> None:
     )
     report = check_compatibility(ScriptedPolicy(), embodiment, task)
     assert any(i.code == "scene_target" for i in report.errors)
+
+
+def test_seconds_task_with_valid_control_rate_is_compatible() -> None:
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer=success_at_end(),
+        max_seconds=120.0,
+    )
+    report = check_compatibility(ScriptedPolicy(), CubePickEmbodiment(), task)
+    assert not any(i.code == "task_horizon_control_rate" for i in report.errors)
+
+
+@pytest.mark.parametrize("control_hz", [None, True, 0.0, -1.0, float("nan"), float("inf")])
+def test_seconds_task_requires_positive_finite_control_rate(
+    control_hz: float | None,
+) -> None:
+    embodiment = CubePickEmbodiment()
+    embodiment.info = replace(embodiment.info, control_hz=control_hz)
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer=success_at_end(),
+        max_seconds=120.0,
+    )
+    report = check_compatibility(ScriptedPolicy(), embodiment, task)
+    issue = next(i for i in report.errors if i.code == "task_horizon_control_rate")
+    assert "finite positive embodiment rate" in issue.message
+
+
+def test_seconds_task_rejects_nonfinite_resolved_step_budget() -> None:
+    embodiment = CubePickEmbodiment()
+    embodiment.info = replace(embodiment.info, control_hz=1e308)
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer=success_at_end(),
+        max_seconds=1e308,
+    )
+    report = check_compatibility(ScriptedPolicy(), embodiment, task)
+    issue = next(i for i in report.errors if i.code == "task_horizon_control_rate")
+    assert "finite step budget" in issue.message
 
 
 def test_assert_compatible_raises() -> None:

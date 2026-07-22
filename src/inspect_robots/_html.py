@@ -556,7 +556,11 @@ def render_html(
     )
     if log.eval.seed is not None:
         definitions.append(_definition("seed", log.eval.seed))
-    if log.eval.max_steps is not None:
+    if log.eval.max_seconds is not None:
+        definitions.append(_definition("max seconds", log.eval.max_seconds))
+        if log.eval.max_steps is not None:
+            definitions.append(_definition("resolved max steps", log.eval.max_steps))
+    elif log.eval.max_steps is not None:
         definitions.append(_definition("max steps", log.eval.max_steps))
     if log.stats.mean_inference_latency_s is not None:
         definitions.append(

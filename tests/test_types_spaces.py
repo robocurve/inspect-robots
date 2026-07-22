@@ -127,14 +127,80 @@ def test_observation_space_rejects_inconsistent_state_keys() -> None:
 
 
 def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
+    from inspect_robots.errors import ConfigError
     from inspect_robots.scene import Scene
     from inspect_robots.task import Task, TaskEnvelope
 
     scene = Scene(id="s", instruction="x")
     task = Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=80)
     assert task.envelope == TaskEnvelope(name="t", max_steps=80)
+    assert task.resolve_envelope(None) == task.envelope
     with pytest.raises(AttributeError):
         task.envelope.max_steps = 81  # type: ignore[misc]
+
+    seconds_task = Task(name="timed", scenes=[scene], scorer="success_at_end", max_seconds=1.01)
+    assert seconds_task.resolve_envelope(10.0) == TaskEnvelope(name="timed", max_steps=11)
+    with pytest.raises(ConfigError, match="requires an embodiment control_hz"):
+        _ = seconds_task.envelope
+
+
+@pytest.mark.parametrize("max_seconds", [True, 0.0, -1.0, float("nan"), float("inf")])
+def test_task_rejects_invalid_seconds_horizon(max_seconds: float) -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    with pytest.raises(ConfigError, match="max_seconds must be finite and > 0"):
+        Task(
+            name="timed",
+            scenes=[Scene(id="s", instruction="x")],
+            scorer="success_at_end",
+            max_seconds=max_seconds,
+        )
+
+
+@pytest.mark.parametrize("control_hz", [None, True, 0.0, -1.0, float("nan"), float("inf")])
+def test_seconds_horizon_rejects_invalid_control_rate(control_hz: float | None) -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer="success_at_end",
+        max_seconds=120.0,
+    )
+    with pytest.raises(ConfigError, match="control_hz"):
+        task.resolve_envelope(control_hz)
+
+
+def test_seconds_horizon_rejects_nonfinite_resolved_budget() -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer="success_at_end",
+        max_seconds=1e308,
+    )
+    with pytest.raises(ConfigError, match="finite step budget"):
+        task.resolve_envelope(1e308)
+
+
+def test_seconds_horizon_underflow_still_resolves_to_one_step() -> None:
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task, TaskEnvelope
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer="success_at_end",
+        max_seconds=5e-324,
+    )
+    assert task.resolve_envelope(0.5) == TaskEnvelope(name="timed", max_steps=1)
 
 
 def test_task_validation_and_scorer_names() -> None:
@@ -143,6 +209,16 @@ def test_task_validation_and_scorer_names() -> None:
     from inspect_robots.task import Epochs, Task
 
     scene = Scene(id="s", instruction="x")
+    with pytest.raises(ConfigError, match="exactly one"):
+        Task(name="t", scenes=[scene], scorer="success_at_end")
+    with pytest.raises(ConfigError, match="exactly one"):
+        Task(
+            name="t",
+            scenes=[scene],
+            scorer="success_at_end",
+            max_steps=5,
+            max_seconds=1.0,
+        )
     with pytest.raises(ConfigError, match="max_steps"):
         Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=0)
     with pytest.raises(ConfigError, match="Epochs count"):

@@ -7,6 +7,7 @@ conditions and the rollout horizon (``max_steps``) lives here.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -55,18 +56,35 @@ class Task:
 
     ``scorer`` accepts scorer objects or **registry names** (e.g.
     ``scorer="success_at_end"``), or a sequence mixing both.
+
+    Declare exactly one rollout horizon. ``max_steps`` is already resolved;
+    ``max_seconds`` is keyword-only and is resolved against the paired
+    embodiment's positive finite ``control_hz`` by ``eval()``.
     """
 
     name: str
     scenes: Sequence[Scene]
     scorer: Scorer | str | Sequence[Scorer | str]
-    max_steps: int
+    max_steps: int | None = None
     epochs: int | Epochs = 1
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    max_seconds: float | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.max_steps < 1:
+        if (self.max_steps is None) == (self.max_seconds is None):
+            raise ConfigError(
+                f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
+            )
+        if self.max_steps is not None and self.max_steps < 1:
             raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps}")
+        if self.max_seconds is not None and (
+            isinstance(self.max_seconds, bool)
+            or not math.isfinite(self.max_seconds)
+            or self.max_seconds <= 0
+        ):
+            raise ConfigError(
+                f"Task {self.name!r}: max_seconds must be finite and > 0, got {self.max_seconds!r}"
+            )
         _ = self.epoch_spec  # validates an int epochs count via Epochs
 
     @property
@@ -95,5 +113,41 @@ class Task:
 
     @property
     def envelope(self) -> TaskEnvelope:
-        """The adapter-safe view of this task handed to ``bind_task`` hooks."""
-        return TaskEnvelope(name=self.name, max_steps=self.max_steps)
+        """Return the already-resolved adapter view of a step-based task.
+
+        Seconds-based tasks require an embodiment rate and must use
+        [`resolve_envelope`][inspect_robots.task.Task.resolve_envelope].
+        """
+        return self.resolve_envelope(None)
+
+    def resolve_envelope(self, control_hz: float | None) -> TaskEnvelope:
+        """Resolve the adapter-safe task view against an embodiment rate.
+
+        Compatibility checking normally rejects an invalid rate before this
+        method is called. The validation here is a defensive public-API guard
+        for callers resolving envelopes directly.
+        """
+        if self.max_steps is not None:
+            return TaskEnvelope(name=self.name, max_steps=self.max_steps)
+
+        if (
+            control_hz is None
+            or isinstance(control_hz, bool)
+            or not math.isfinite(control_hz)
+            or control_hz <= 0
+        ):
+            raise ConfigError(
+                f"Task {self.name!r}: max_seconds requires an embodiment control_hz "
+                f"that is finite and > 0, got {control_hz!r}"
+            )
+
+        assert self.max_seconds is not None  # exactly-one invariant from __post_init__
+        raw_steps = self.max_seconds * control_hz
+        if not math.isfinite(raw_steps):
+            raise ConfigError(
+                f"Task {self.name!r}: max_seconds={self.max_seconds!r} at "
+                f"control_hz={control_hz!r} does not yield a finite step budget"
+            )
+        # Both factors are positive, so the mathematical ceiling is at least
+        # one even if their binary-float product underflows to 0.0.
+        return TaskEnvelope(name=self.name, max_steps=max(1, math.ceil(raw_steps)))
