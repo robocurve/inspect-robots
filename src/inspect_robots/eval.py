@@ -9,6 +9,7 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import time
@@ -239,16 +240,28 @@ def _run_eval(
     if callable(bind):
         bind(embodiment.info)
 
+    # Resolve step horizon from explicit max_steps or max_seconds x control_hz.
+    if task.max_steps is not None:
+        max_steps: int | None = task.max_steps
+    elif embodiment.info.control_hz is not None and embodiment.info.control_hz > 0:
+        assert task.max_seconds is not None
+        max_steps = math.ceil(task.max_seconds * embodiment.info.control_hz)
+    else:
+        max_steps = None
+
     # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs
     # here too, so the adapter can learn the rollout envelope (e.g. for an
     # operator countdown) before any hardware is touched. Duck-typed —
     # bind_task is not part of the Embodiment Protocol.
     bind_task = getattr(embodiment, "bind_task", None)
-    if callable(bind_task):
-        bind_task(task.envelope)
+    if callable(bind_task) and max_steps is not None:
+        from inspect_robots.task import TaskEnvelope
+
+        bind_task(TaskEnvelope(name=task.name, max_steps=max_steps))
 
     # Fail fast on incompatible pairings before touching any hardware/sim.
     assert_compatible(policy, embodiment, task, remap=remap)
+    assert max_steps is not None
 
     epoch_spec = task.epoch_spec
     scorers = task.scorers
@@ -291,7 +304,8 @@ def _run_eval(
             "capabilities": sorted(embodiment.info.capabilities),
         },
         seed=seed,
-        max_steps=task.max_steps,
+        max_steps=max_steps,
+        max_seconds=task.max_seconds,
     )
     bus.on_eval_start(spec)
 
@@ -329,7 +343,7 @@ def _run_eval(
                     policy,
                     embodiment,
                     scene,
-                    max_steps=task.max_steps,
+                    max_steps=max_steps,
                     seed=trial_seed,
                     epoch=epoch,
                     controller=controller,
