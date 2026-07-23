@@ -80,10 +80,13 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - **`--epochs 0` or a negative value now exits with a guided error instead of a
-  raw traceback** (#145). Both `inspect-robots run` and `inspect-robots eval-set`
-  catch the `ConfigError` raised by `Task`'s epoch validation and surface it
-  through the existing `_resolve_or_exit` pattern, matching how invalid
-  constructor kwargs are handled for config-file components (#47).
+  raw traceback** (#145, #152). Both `inspect-robots run` and `inspect-robots
+  eval-set` share a single `_apply_epochs_or_exit` helper (next to
+  `_resolve_or_exit`) that catches the `ConfigError` from `Task`'s epoch
+  validation. The message is `--epochs must be >= 1, got N`; the `eval-set`
+  path appends `(task 'NAME')` to name the failing task. The duplicate
+  `ConfigError` import that previously appeared mid-function in both commands is
+  gone (#47).
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the

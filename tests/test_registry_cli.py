@@ -382,7 +382,10 @@ def test_cli_run_epochs_fail_on_error_store_frames(
 @pytest.mark.parametrize("epochs_value", ["0", "-1", "-5"])
 def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
     """--epochs 0 / negative must produce a guided SystemExit, not a raw traceback (#145)."""
-    with pytest.raises(SystemExit) as excinfo:
+    import re
+
+    expected = f"--epochs must be >= 1, got {epochs_value}"
+    with pytest.raises(SystemExit, match=re.escape(expected)):
         main(
             [
                 "run",
@@ -396,15 +399,15 @@ def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
 
 
 @pytest.mark.parametrize("epochs_value", ["0", "-1"])
 def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
     """eval-set --epochs 0 / negative must produce a guided SystemExit naming the task (#145)."""
-    with pytest.raises(SystemExit) as excinfo:
+    import re
+
+    expected = f"--epochs must be >= 1, got {epochs_value} (task 'cubepick-reach')"
+    with pytest.raises(SystemExit, match=re.escape(expected)):
         main(
             [
                 "eval-set",
@@ -417,10 +420,6 @@ def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> 
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
-    assert "cubepick-reach" in message  # the failing task name is named
 
 
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
