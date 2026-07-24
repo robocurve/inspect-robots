@@ -321,9 +321,12 @@ def _translate_messages(
             # text included: emitting both would show the model its own text
             # twice and drop the thinking block that must be replayed verbatim.
             # A miss synthesizes text + tool_use with no thinking block, which
-            # is lossy for a tool-use turn. Unreachable within a trial (the
-            # cache is populated on every 200 and the rollout is serial); it
-            # exists for foreign histories and non-thinking models.
+            # is lossy for a tool-use turn. No tool-use turn misses within a
+            # trial (the cache is populated on every 200 that carries a tool
+            # call, and the rollout is serial). A text-only turn does miss,
+            # via the nudge path, but carries no tool_use and so no signature
+            # or ordering constraint. The miss path also serves foreign
+            # histories and non-thinking models.
             blocks = cached if cached is not None else _assistant_blocks(message)
             if not blocks:
                 # The nudge retry path appends exactly this; an assistant

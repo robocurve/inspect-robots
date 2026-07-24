@@ -787,6 +787,30 @@ def test_non_anthropic_prefix_is_not_told_to_set_the_anthropic_key() -> None:
         )
 
 
+def test_variant_suffix_is_told_to_drop_it_not_to_set_the_key() -> None:
+    # ':free' routes to OpenRouter whatever keys are set, so the key advice
+    # would point at something the user already did right.
+    with pytest.raises(
+        ConfigError,
+        match=r"fix: drop the OpenRouter variant suffix \(-P model=anthropic/claude-opus-5\)",
+    ):
+        LLMAgentPolicy(
+            model="anthropic/claude-opus-5:free",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_anthropic_prefix_without_a_key_is_still_told_to_set_it() -> None:
+    # The variant branch must not swallow the plain missing-key case.
+    with pytest.raises(ConfigError, match=r"fix: set \$ANTHROPIC_API_KEY"):
+        LLMAgentPolicy(
+            model="anthropic/claude-opus-5",
+            wire="anthropic",
+            env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
 def test_gateway_defaults_the_key_env_to_anthropic() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(

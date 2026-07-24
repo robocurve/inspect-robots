@@ -159,6 +159,8 @@ The Messages API requires an output cap, so `-P max_output_tokens=` defaults to
 the limit is an error naming the knob rather than a silently missing tool call.
 Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
 of 64000 or more, which needs streaming this client does not implement yet.
+The read timeout scales with the cap and tops out at 600 s per attempt, so a
+large cap plus retries can sit for several minutes before failing.
 
 ## Reasoning effort on OpenAI models
 

@@ -37,6 +37,7 @@ from inspect_robots_agent._llm import (
     ENV_MODEL,
     ChatClient,
     ToolCall,
+    _has_openrouter_variant,
     resolve_provider,
 )
 from inspect_robots_agent._png import png_data_url
@@ -190,13 +191,18 @@ class LLMAgentPolicy(PolicyBase):
             # The likeliest cause is a missing model prefix, not a missing
             # key: a bare id misses the direct-provider table and falls
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
-            if "/" not in provider.model:
+            if _has_openrouter_variant(provider.model):
+                # A :variant id routes here whatever keys are set, so naming
+                # the key would send the user to fix something already right.
+                bare = provider.model.rpartition(":")[0]
+                fix = f"fix: drop the OpenRouter variant suffix (-P model={bare})"
+            elif "/" not in provider.model:
                 fix = f"fix: prefix the model id (-P model=anthropic/{provider.model})"
             elif provider.model.startswith("anthropic/"):
                 fix = "fix: set $ANTHROPIC_API_KEY"
             else:
-                # A non-Anthropic prefix (or an OpenRouter :variant suffix) can
-                # never resolve to the Messages API; no key helps.
+                # A non-Anthropic prefix can never resolve to the Messages
+                # API; no key helps.
                 fix = "fix: use an anthropic/ model id"
             raise ConfigError(
                 "wire='anthropic' needs a Messages API endpoint, but the model "
