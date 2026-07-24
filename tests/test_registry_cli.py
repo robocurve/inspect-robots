@@ -72,6 +72,59 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "plugin_policy" in registered("policy")
 
 
+def test_autoload_opt_out_skips_entrypoints_but_keeps_builtins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = "optout-skip-probe-policy"
+
+    class _FakeEP:
+        name = probe
+
+        def load(self) -> object:  # pragma: no cover - must never run when opted out
+            raise AssertionError("entry point loaded despite the autoload opt-out")
+
+    def fake_entry_points(*, group: str) -> list[object]:
+        return [_FakeEP()] if group == "inspect_robots.policies" else []
+
+    monkeypatch.setattr(reg, "entry_points", fake_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+    monkeypatch.setenv(reg.DISABLE_AUTOLOAD_ENV, "1")
+
+    try:
+        policies = registered("policy")
+    finally:
+        reg._FACTORIES["policy"].pop(probe, None)  # keep the shared registry clean
+    assert probe not in policies  # discovery skipped, load() never called
+    assert "scripted" in policies  # in-tree builtins still resolve
+
+
+def test_autoload_opt_out_is_not_latched(monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = "optout-latch-probe-policy"
+
+    class _FakeEP:
+        name = probe
+
+        def load(self) -> object:
+            return ScriptedPolicy
+
+    def fake_entry_points(*, group: str) -> list[object]:
+        return [_FakeEP()] if group == "inspect_robots.policies" else []
+
+    monkeypatch.setattr(reg, "entry_points", fake_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+
+    try:
+        monkeypatch.setenv(reg.DISABLE_AUTOLOAD_ENV, "1")
+        assert probe not in registered("policy")
+
+        # Clearing the opt-out re-enables discovery in the same process: the
+        # skip must not have marked entry points as already loaded.
+        monkeypatch.delenv(reg.DISABLE_AUTOLOAD_ENV)
+        assert probe in registered("policy")
+    finally:
+        reg._FACTORIES["policy"].pop(probe, None)  # keep the shared registry clean
+
+
 def test_cli_list_runs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "policies"]) == 0
     out = capsys.readouterr().out

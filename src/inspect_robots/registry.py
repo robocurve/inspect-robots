@@ -9,10 +9,19 @@ being imported first.
 Entry-point groups:
 ``inspect_robots.tasks``, ``inspect_robots.policies``, ``inspect_robots.embodiments``,
 ``inspect_robots.scorers``, ``inspect_robots.sinks``.
+
+Set ``INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD`` to any non-empty value to skip
+entry-point discovery: only in-tree builtins and components registered by hand
+are then resolvable. This is a defense-in-depth and reproducibility switch for
+locked-down eval environments, mirroring pytest's
+``PYTEST_DISABLE_PLUGIN_AUTOLOAD``. It is not a security boundary: an installed
+package can still run code when imported. The switch only stops this framework
+from importing plugins on your behalf during discovery.
 """
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from importlib.metadata import entry_points
@@ -20,6 +29,10 @@ from typing import Any, TypeVar
 
 Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink"
 KINDS: tuple[Kind, ...] = ("task", "policy", "embodiment", "scorer", "sink")
+
+# Any non-empty value opts out of entry-point plugin autoloading (see module
+# docstring). Read at discovery time, not import time, so it stays togglable.
+DISABLE_AUTOLOAD_ENV = "INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD"
 
 _GROUPS: dict[Kind, str] = {
     "task": "inspect_robots.tasks",
@@ -76,28 +89,36 @@ def sink(name: str | None = None) -> Callable[[F], F]:
     return register("sink", name)
 
 
+def _autoload_disabled() -> bool:
+    """Whether entry-point plugin autoloading is turned off via the environment."""
+    return bool(os.environ.get(DISABLE_AUTOLOAD_ENV))
+
+
 def _ensure_loaded() -> None:
     global _loaded_builtins, _loaded_entrypoints
     if not _loaded_builtins:
         _loaded_builtins = True
         import inspect_robots._builtins  # noqa: F401  (registers builtin components)
-    if not _loaded_entrypoints:
-        _loaded_entrypoints = True
-        for kind, group in _GROUPS.items():
-            for ep in entry_points(group=group):
-                try:
-                    factory = ep.load()
-                except Exception as exc:
-                    # A broken plugin must not crash discovery, but it must not
-                    # vanish silently either — that is undebuggable.
-                    warnings.warn(
-                        f"failed to load inspect_robots plugin {ep.name!r} from "
-                        f"entry-point group {group!r}: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    continue
-                _FACTORIES[kind].setdefault(ep.name, factory)
+    # The opt-out is deliberately not latched: it skips discovery without
+    # marking it done, so clearing the env var later still loads plugins.
+    if _loaded_entrypoints or _autoload_disabled():
+        return
+    _loaded_entrypoints = True
+    for kind, group in _GROUPS.items():
+        for ep in entry_points(group=group):
+            try:
+                factory = ep.load()
+            except Exception as exc:
+                # A broken plugin must not crash discovery, but it must not
+                # vanish silently either — that is undebuggable.
+                warnings.warn(
+                    f"failed to load inspect_robots plugin {ep.name!r} from "
+                    f"entry-point group {group!r}: {exc!r}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            _FACTORIES[kind].setdefault(ep.name, factory)
 
 
 def registered(kind: Kind) -> dict[str, Callable[..., Any]]:
