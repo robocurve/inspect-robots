@@ -829,16 +829,20 @@ def test_variant_strip_keeps_fine_tune_colons() -> None:
         )
 
 
-def test_empty_api_key_env_does_not_send_the_openrouter_key_to_a_gateway() -> None:
-    # '-P api_key_env=' parses to '', which resolve_provider treats as unset
-    # and falls back to $OPENROUTER_API_KEY. An `is None` test here would hand
-    # a third-party gateway the OpenRouter secret.
+@pytest.mark.parametrize("api_key_env", [None, "", False, 0, 0.0])
+def test_falsy_api_key_env_does_not_send_the_openrouter_key_to_a_gateway(
+    api_key_env: object,
+) -> None:
+    # '-P api_key_env=' parses to '', and 'false'/'0' to other falsy values,
+    # all of which resolve_provider treats as unset and answers with
+    # $OPENROUTER_API_KEY. An `is None` test would hand a third-party gateway
+    # the OpenRouter secret.
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(
         model="claude-opus-5",
         wire="anthropic",
         base_url="https://gw.example/v1",
-        api_key_env="",
+        api_key_env=api_key_env,  # type: ignore[arg-type]
         transport=httpx.MockTransport(handler),
         env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
     )
@@ -848,11 +852,52 @@ def test_empty_api_key_env_does_not_send_the_openrouter_key_to_a_gateway() -> No
     assert seen[0].headers["x-api-key"] == "sk-ant"
 
 
+def test_chat_wire_gateway_keeps_the_openrouter_default() -> None:
+    # The ANTHROPIC_API_KEY default is gated on wire='anthropic'. Dropping
+    # that clause would ship the Anthropic key to every chat-wire gateway,
+    # where OpenRouter is the documented default.
+    seen, handler = _capture({"choices": [{"message": {"content": "ok"}}]})
+    policy = LLMAgentPolicy(
+        model="claude-opus-5",
+        wire="chat",
+        base_url="https://gw.example/v1",
+        transport=httpx.MockTransport(handler),
+        env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+    )
+
+    policy._client.complete([_USER], [])
+
+    assert seen[0].headers["authorization"] == "Bearer sk-or"
+
+
+def test_foreign_prefix_with_a_variant_is_terminal_in_one_step() -> None:
+    # Dropping the suffix would leave 'openai/gpt-5.6', still refused. The
+    # prefix is the real problem, so say so first.
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+        LLMAgentPolicy(
+            model="openai/gpt-5.6:free",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_foreign_prefix_with_an_empty_body_does_not_name_an_empty_id() -> None:
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+        LLMAgentPolicy(
+            model="openai/:free",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
 @pytest.mark.parametrize("model", ["anthropic/", ":free", "anthropic/:free"])
 def test_ids_with_nothing_usable_left_get_a_whole_command(model: str) -> None:
     # Each of these strips to an empty id, where echoing the remainder would
     # send the user in a circle (or name $ANTHROPIC_API_KEY, already set).
-    with pytest.raises(ConfigError, match=r"fix: pass a full model id"):
+    # The suggested command is the whole value of this branch, so pin it.
+    with pytest.raises(
+        ConfigError, match=r"fix: pass a full model id \(-P model=anthropic/claude-opus-5\)"
+    ):
         LLMAgentPolicy(
             model=model,
             wire="anthropic",

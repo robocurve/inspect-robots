@@ -147,6 +147,13 @@ bare `-P model=claude-opus-5`, another provider's prefix such as `openai/`, or
 an OpenRouter `:variant` suffix. Pass `-P base_url=...` to point at a gateway
 that serves the endpoint yourself.
 
+> [!NOTE]
+> With `-P base_url=...` and no `-P api_key_env=`, this wire sends
+> `$ANTHROPIC_API_KEY` to that host. The other wires default to
+> `$OPENROUTER_API_KEY` instead. Name the variable explicitly
+> (`-P api_key_env=MYGW_KEY`) when the gateway takes its own credential, and
+> point it at an unset variable to send no key at all.
+
 Fast mode costs roughly double the standard price on both input and output
 (see [Anthropic's pricing](https://www.anthropic.com/pricing)), and it draws on
 a rate limit separate from standard capacity, so a fast-mode run can hit a 429

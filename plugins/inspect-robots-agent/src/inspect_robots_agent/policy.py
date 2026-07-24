@@ -182,10 +182,12 @@ class LLMAgentPolicy(PolicyBase):
         # resolve_provider reads api_key_env only when base_url is set, where
         # it otherwise defaults to OPENROUTER_API_KEY and would send an
         # OpenRouter key as x-api-key to a third-party gateway.
-        # Every test here matches resolve_provider's own truthiness checks
-        # (`if base_url:`, `api_key_env or _OPENROUTER_KEY`), because `-P x=`
-        # parses to "": an `is None` spelling would let the empty form slip
-        # past and hand that gateway the wrong secret.
+        # `not api_key_env` matches resolve_provider's own `api_key_env or
+        # _OPENROUTER_KEY`, because `-P api_key_env=` parses to "": an
+        # `is None` spelling here would let the empty form slip past and hand
+        # that gateway the wrong secret. The base_url test is truthy for
+        # consistency only, since resolve_provider ignores api_key_env when
+        # base_url is falsy; it is load-bearing in the guard below.
         effective_key_env = api_key_env
         if wire == "anthropic" and base_url and not api_key_env:
             effective_key_env = "ANTHROPIC_API_KEY"
@@ -214,6 +216,12 @@ class LLMAgentPolicy(PolicyBase):
                 # left once the suffix comes off, so echoing the remainder
                 # would name an empty id. Give a whole command instead.
                 fix = "fix: pass a full model id (-P model=anthropic/claude-opus-5)"
+            elif "/" in stripped and not stripped.startswith("anthropic/"):
+                # A foreign prefix can never resolve to the Messages API, so
+                # this is terminal whatever the suffix says. Decided before
+                # the variant branch, which would otherwise spend a refusal
+                # removing a suffix that was never the real problem.
+                fix = "fix: use an anthropic/ model id"
             elif stripped != asked:
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
@@ -227,12 +235,11 @@ class LLMAgentPolicy(PolicyBase):
                     )
             elif "/" not in asked:
                 fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
-            elif asked.startswith("anthropic/"):
-                fix = "fix: set $ANTHROPIC_API_KEY"
             else:
-                # A non-Anthropic prefix can never resolve to the Messages
-                # API; no key helps.
-                fix = "fix: use an anthropic/ model id"
+                # Anthropic-prefixed with a usable body: only the key is left.
+                # Unreachable with the key set, since such an id resolves to
+                # Anthropic's own endpoint and never reaches this guard.
+                fix = "fix: set $ANTHROPIC_API_KEY"
             where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
             raise ConfigError(
                 "wire='anthropic' needs a Messages API endpoint, but the model "
