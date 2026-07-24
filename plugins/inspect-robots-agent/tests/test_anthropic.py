@@ -811,6 +811,24 @@ def test_anthropic_prefix_without_a_key_is_still_told_to_set_it() -> None:
         )
 
 
+def test_another_direct_provider_is_refused_not_sent_to_its_endpoint() -> None:
+    # With $OPENAI_API_KEY set this resolves straight to api.openai.com, which
+    # would have taken a /v1/messages POST and 404ed at the first LLM call.
+    with pytest.raises(ConfigError, match=r"resolved to https://api\.openai\.com/v1"):
+        LLMAgentPolicy(
+            model="openai/gpt-5.6",
+            wire="anthropic",
+            env={"OPENAI_API_KEY": "sk-oai", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_direct_provider_guidance_uses_the_requested_id_not_the_stripped_one() -> None:
+    # resolve_provider strips 'groq/', so branching on the resolved id would
+    # read it as bare and suggest the nonsense 'anthropic/llama-3'.
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+        LLMAgentPolicy(model="groq/llama-3", wire="anthropic", env={"GROQ_API_KEY": "sk-groq"})
+
+
 def test_gateway_defaults_the_key_env_to_anthropic() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(

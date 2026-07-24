@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._llm import (
+    _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
     ENV_MODEL,
     ChatClient,
@@ -45,6 +46,9 @@ from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import Toolset, build_toolset
 
 _MAX_CONSECUTIVE_FAILURES = 3
+
+#: The only endpoint that serves /v1/messages without an explicit base_url.
+_ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
@@ -181,32 +185,43 @@ class LLMAgentPolicy(PolicyBase):
         effective_key_env = api_key_env
         if wire == "anthropic" and base_url is not None and api_key_env is None:
             effective_key_env = "ANTHROPIC_API_KEY"
+        requested_model = model or environ.get(ENV_MODEL)
         provider = resolve_provider(
-            model=model or environ.get(ENV_MODEL),
+            model=requested_model,
             base_url=base_url,
             api_key_env=effective_key_env,
             env=environ,
         )
-        if wire == "anthropic" and provider.base_url == _OPENROUTER_BASE:
+        if wire == "anthropic" and base_url is None and provider.base_url != _ANTHROPIC_BASE:
+            # Only Anthropic's own endpoint serves /v1/messages. Resolution can
+            # land elsewhere two ways: the OpenRouter fallback, or another
+            # direct provider whose key happens to be set (openai/* with
+            # $OPENAI_API_KEY). An explicit -P base_url= is the user's call.
+            # Branch on the requested id, not provider.model: a direct
+            # provider strips its own prefix, so the resolved id would read
+            # as bare and draw a nonsense 'anthropic/gpt-5.6' suggestion.
             # The likeliest cause is a missing model prefix, not a missing
             # key: a bare id misses the direct-provider table and falls
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
-            if _has_openrouter_variant(provider.model):
+            asked = requested_model or ""
+            if _has_openrouter_variant(asked):
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
-                bare = provider.model.rpartition(":")[0]
-                fix = f"fix: drop the OpenRouter variant suffix (-P model={bare})"
-            elif "/" not in provider.model:
-                fix = f"fix: prefix the model id (-P model=anthropic/{provider.model})"
-            elif provider.model.startswith("anthropic/"):
+                fix = (
+                    f"fix: drop the OpenRouter variant suffix (-P model={asked.rpartition(':')[0]})"
+                )
+            elif "/" not in asked:
+                fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
+            elif asked.startswith("anthropic/"):
                 fix = "fix: set $ANTHROPIC_API_KEY"
             else:
                 # A non-Anthropic prefix can never resolve to the Messages
                 # API; no key helps.
                 fix = "fix: use an anthropic/ model id"
+            where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
             raise ConfigError(
                 "wire='anthropic' needs a Messages API endpoint, but the model "
-                f"{provider.model!r} resolved to OpenRouter, which does not serve one.\n"
+                f"{asked!r} resolved to {where}, which does not serve one.\n"
                 f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
             )
 
