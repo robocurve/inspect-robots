@@ -477,6 +477,67 @@ def test_unrelated_4xx_gets_no_fast_mode_guidance() -> None:
     assert "fix:" not in str(excinfo.value)
 
 
+def test_effort_4xx_names_the_accepted_values() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="output_config.effort: invalid value 'minimal'")
+
+    with pytest.raises(RuntimeError, match=r"fix: this wire accepts -P effort="):
+        _client(handler).complete([_USER], [], reasoning_effort="minimal")
+
+
+def test_temperature_guidance_only_when_temperature_was_sent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="temperature is not supported")
+
+    # The word appears in the body, but this request never sent the parameter.
+    with pytest.raises(RuntimeError) as excinfo:
+        _client(handler).complete([_USER], [])
+
+    assert "drop -P temperature=" not in str(excinfo.value)
+
+
+def test_system_content_must_be_a_string() -> None:
+    _, handler = _capture(_anthropic_response(_text("ok")))
+    history = [{"role": "system", "content": [{"type": "text", "text": "x"}]}, _USER]
+
+    with pytest.raises(RuntimeError, match="system message content must be a string"):
+        _client(handler).complete(history, [])
+
+
+def test_unsupported_role_raises() -> None:
+    _, handler = _capture(_anthropic_response(_text("ok")))
+
+    with pytest.raises(RuntimeError, match="unsupported message role 'developer'"):
+        _client(handler).complete([{"role": "developer", "content": "x"}], [])
+
+
+@pytest.mark.parametrize("status", [408, 409])
+def test_408_and_409_are_retried(status: int) -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return httpx.Response(status, text="retry me")
+        return httpx.Response(200, json=_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    assert _client(handler).complete([_USER], []).content == "ok"
+    assert calls["n"] == 2
+
+
+def test_timeout_scales_with_a_large_output_cap() -> None:
+    _, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    small_cap = _client(handler, max_output_tokens=1000)
+    large_cap = _client(handler, max_output_tokens=64000)
+    explicit = _client(handler, max_output_tokens=64000, timeout_s=30.0)
+
+    # Floored at the 120s the other clients use, then scaled above it.
+    assert small_cap._http.timeout.read == 120.0
+    assert large_cap._http.timeout.read == pytest.approx(512.0)
+    assert explicit._http.timeout.read == 30.0
+
+
 def test_temperature_4xx_names_the_fix() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="temperature: unsupported parameter")
@@ -576,6 +637,41 @@ def test_policy_records_wire_speed_and_resolved_max_output_tokens() -> None:
     assert policy.config.max_output_tokens == _DEFAULT_MAX_OUTPUT_TOKENS
 
 
+def test_policy_passes_speed_and_cap_through_to_the_request() -> None:
+    """Guards the policy -> client wiring, which config assertions cannot see.
+
+    Config recording and request building are separate code paths: a dropped
+    ``speed`` still records ``speed="fast"`` in the eval log while billing at
+    standard rates, and no coverage metric catches it.
+    """
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    policy = _policy(
+        wire="anthropic",
+        speed="fast",
+        max_output_tokens=2000,
+        transport=httpx.MockTransport(handler),
+    )
+
+    policy._client.complete([_USER], [])
+
+    body = json.loads(seen[0].content)
+    assert body["speed"] == "fast"
+    assert body["max_tokens"] == 2000
+    assert seen[0].headers["anthropic-beta"] == "fast-mode-2026-02-01"
+
+
+def test_policy_passes_the_default_cap_when_unset() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+
+    policy._client.complete([_USER], [])
+
+    body = json.loads(seen[0].content)
+    assert body["max_tokens"] == _DEFAULT_MAX_OUTPUT_TOKENS
+    assert "speed" not in body
+    assert "anthropic-beta" not in seen[0].headers
+
+
 def test_policy_sends_the_prefix_stripped_model_id() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
@@ -595,15 +691,25 @@ def test_chat_wire_records_no_max_output_tokens() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"wire": "chat", "speed": "fast"}, "only supported on wire='anthropic'"),
-        ({"wire": "chat", "max_output_tokens": 2000}, "only supported on wire='anthropic'"),
         ({"wire": "anthropic", "speed": "turbo"}, "speed must be one of"),
-        ({"wire": "anthropic", "max_output_tokens": 0}, "must be >= 1"),
+        ({"wire": "anthropic", "max_output_tokens": 0}, "must be an int >= 1"),
+        ({"wire": "anthropic", "max_output_tokens": 1e5}, "must be an int >= 1"),
         ({"wire": "antropic"}, "wire must be one of"),
     ],
 )
 def test_invalid_configurations_raise(kwargs: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
+        _policy(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"wire": "chat", "speed": "fast"}, {"wire": "chat", "max_output_tokens": 2000}],
+)
+def test_wire_gated_params_raise_config_error_so_the_cli_renders_them(
+    kwargs: dict[str, Any],
+) -> None:
+    with pytest.raises(ConfigError, match=r"only supported on wire='anthropic'"):
         _policy(**kwargs)
 
 
@@ -619,6 +725,16 @@ def test_openrouter_fallback_is_refused_with_guidance() -> None:
             model="anthropic/claude-opus-5",
             wire="anthropic",
             env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_bare_model_id_is_told_to_add_the_prefix_not_to_set_the_key() -> None:
+    # The key is already set; the actual mistake is the missing prefix.
+    with pytest.raises(ConfigError, match=r"-P model=anthropic/claude-opus-5"):
+        LLMAgentPolicy(
+            model="claude-opus-5",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
 
@@ -661,7 +777,7 @@ def test_act_drives_a_multi_turn_trial_and_replays_thinking() -> None:
         _anthropic_response(_thinking(), stop_reason="end_turn"),
         _anthropic_response(
             _thinking("now I move"),
-            _tool_use("toolu_1", "done", {"summary": "ok"}),
+            _tool_use("toolu_turn2", "done", {"summary": "ok"}),
         ),
     ]
 

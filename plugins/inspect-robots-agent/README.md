@@ -141,14 +141,15 @@ inspect-robots "pick up the cube" --policy agent \
 ```
 
 The model id keeps the `anthropic/` prefix on this wire, the same as every
-other model string here. A bare `-P model=claude-opus-5` does not resolve.
+other model string here. A bare `-P model=claude-opus-5` does not resolve
+without `-P base_url=`, and the error says so.
 
 Fast mode costs roughly double the standard price on both input and output
 (see [Anthropic's pricing](https://www.anthropic.com/pricing)), and it draws on
 a rate limit separate from standard capacity, so a fast-mode run can hit a 429
 while standard quota sits idle. It is available on Claude Opus 5 and Opus 4.8,
 on the Claude API only: not Bedrock, Vertex, Foundry, or Claude Platform on
-AWS. Errors from any of those cases name the fix.
+AWS. A rejection that names fast mode is turned into an error naming the fix.
 
 This wire always requests adaptive thinking, which pre-4.6 models such as
 Sonnet 4.5 and Haiku 4.5 do not support. Use `-P wire=chat` for those.

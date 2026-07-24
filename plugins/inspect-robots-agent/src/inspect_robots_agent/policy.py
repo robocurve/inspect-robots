@@ -47,6 +47,9 @@ _MAX_CONSECUTIVE_FAILURES = 3
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
+# The native wire reuses the set as output_config.effort, where "none" and
+# "minimal" are rejected and xhigh/max need a cap this client cannot stream;
+# both surface as a guided 400 rather than a per-wire allowlist (plan 0026).
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 _WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
 _SPEEDS = frozenset({"fast"})
@@ -150,13 +153,20 @@ class LLMAgentPolicy(PolicyBase):
             # believes fast mode is on; a dropped cap is a limit that never
             # applied. Both fail loudly rather than silently.
             if speed is not None:
-                raise ValueError(f"speed is only supported on wire='anthropic', got wire={wire!r}")
-            if max_output_tokens is not None:
-                raise ValueError(
-                    f"max_output_tokens is only supported on wire='anthropic', got wire={wire!r}"
+                raise ConfigError(
+                    f"speed is only supported on wire='anthropic', got wire={wire!r}.\n"
+                    "fix: pass -P wire=anthropic, or drop -P speed="
                 )
-        if max_output_tokens is not None and max_output_tokens < 1:
-            raise ValueError("max_output_tokens must be >= 1")
+            if max_output_tokens is not None:
+                raise ConfigError(
+                    "max_output_tokens is only supported on wire='anthropic', got "
+                    f"wire={wire!r}.\nfix: pass -P wire=anthropic, or drop "
+                    "-P max_output_tokens="
+                )
+        if max_output_tokens is not None and (
+            not isinstance(max_output_tokens, int) or max_output_tokens < 1
+        ):
+            raise ValueError("max_output_tokens must be an int >= 1")
 
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
@@ -172,11 +182,18 @@ class LLMAgentPolicy(PolicyBase):
             env=environ,
         )
         if wire == "anthropic" and provider.base_url == _OPENROUTER_BASE:
+            # The likeliest cause is a missing model prefix, not a missing
+            # key: a bare id misses the direct-provider table and falls
+            # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
+            fix = (
+                f"fix: prefix the model id (-P model=anthropic/{provider.model})"
+                if "/" not in provider.model
+                else "fix: set $ANTHROPIC_API_KEY"
+            )
             raise ConfigError(
                 "wire='anthropic' needs a Messages API endpoint, but the model "
                 f"{provider.model!r} resolved to OpenRouter, which does not serve one.\n"
-                "fix: set $ANTHROPIC_API_KEY, or pass -P base_url=... for a gateway "
-                "that serves /v1/messages"
+                f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
             )
 
         resolved_max_output_tokens = (

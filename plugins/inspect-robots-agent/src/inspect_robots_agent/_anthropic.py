@@ -32,6 +32,9 @@ _PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 # added after this was written (model_context_window_exceeded is already one).
 _CONTINUING_STOP_REASONS = frozenset({"end_turn", "tool_use", "stop_sequence"})
 
+# Retried alongside 5xx and transport errors, matching the Anthropic SDKs.
+_RETRYABLE_STATUSES = frozenset({408, 409, 429})
+
 
 class AnthropicClient:
     """Blocking Messages-API client with thinking-block replay and bounded retry.
@@ -46,19 +49,27 @@ class AnthropicClient:
         self,
         provider: Provider,
         *,
-        max_output_tokens: int,
+        max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         speed: str | None = None,
-        timeout_s: float = 120.0,
+        timeout_s: float | None = None,
         max_retries: int = 3,
         backoff_s: float = 1.0,
         transport: httpx.BaseTransport | None = None,
     ):
         self._provider = provider
         self._max_output_tokens = max_output_tokens
+        # ~8s per 1k output tokens, floored at the 120s the other clients
+        # use. A raised cap must not turn truncation into a silent stall.
+        resolved_timeout = (
+            timeout_s if timeout_s is not None else max(120.0, max_output_tokens / 125.0)
+        )
         self._speed = speed
         self._max_retries = max_retries
         self._backoff_s = backoff_s
         # tool_use id -> the verbatim content array of the response it came in.
+        # Keyed on id alone because the API guarantees tool_use ids are unique
+        # within a conversation; a gateway that recycles them would replay the
+        # later turn's blocks for both turns.
         self._raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]] = {}
         headers = {"anthropic-version": _ANTHROPIC_VERSION}
         if provider.api_key:
@@ -70,7 +81,7 @@ class AnthropicClient:
         self._http = httpx.Client(
             base_url=provider.base_url,
             headers=headers,
-            timeout=timeout_s,
+            timeout=resolved_timeout,
             transport=transport,
         )
 
@@ -134,16 +145,16 @@ class AnthropicClient:
                             )
                     return message
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
-                if response.status_code not in (429,) and response.status_code < 500:
+                if response.status_code not in _RETRYABLE_STATUSES and response.status_code < 500:
                     raise RuntimeError(
                         f"LLM request rejected — {last_error}"
-                        f"{self._rejection_guidance(response.text)}"
+                        f"{self._rejection_guidance(response.text, temperature)}"
                     )
             if attempt + 1 < self._max_retries:
                 time.sleep(self._backoff_s * 2**attempt)
 
         guidance = ""
-        if last_status == 429 and self._speed == "fast":
+        if last_status in _RETRYABLE_STATUSES and self._speed == "fast":
             guidance = (
                 "\nfix: fast mode has its own rate limit; retry later or drop "
                 "-P speed=fast to fall back to standard speed"
@@ -156,19 +167,25 @@ class AnthropicClient:
         """Release the underlying HTTP connection pool."""
         self._http.close()
 
-    def _rejection_guidance(self, body: str) -> str:
+    def _rejection_guidance(self, body: str, temperature: float | None) -> str:
         """Name the fix for the 4xx bodies this wire provokes, else say nothing."""
         lowered = body.lower()
-        if self._speed == "fast" and "speed" in lowered and "fast" in lowered:
+        if self._speed == "fast" and "speed" in lowered:
             return (
                 "\nfix: fast mode needs Claude Opus 5 or Opus 4.8 on the Claude API "
                 "(not Bedrock, Vertex, Foundry, or Claude Platform on AWS), or drop "
                 "-P speed=fast"
             )
-        if "temperature" in lowered:
+        if temperature is not None and "temperature" in lowered:
             return (
                 "\nfix: this model rejects temperature (Opus 5, 4.8, 4.7, Sonnet 5, and "
                 "Fable 5 all do; Opus 4.6 and Sonnet 4.6 accept it); drop -P temperature="
+            )
+        if "effort" in lowered:
+            return (
+                "\nfix: this wire accepts -P effort= low, medium, or high "
+                "(not none or minimal; xhigh and max need a larger "
+                "-P max_output_tokens= than this client can stream)"
             )
         return ""
 
@@ -268,13 +285,22 @@ def _translate_messages(
                     f"system message at index {index}; the Messages API takes a single "
                     "top-level system prompt"
                 )
-            system = message["content"]
+            content = message["content"]
+            if not isinstance(content, str):
+                raise RuntimeError(
+                    "system message content must be a string; the Messages API takes "
+                    "a single top-level system prompt"
+                )
+            system = content
             continue
         if role == "tool":
             pending_results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": message["tool_call_id"],
+                    # No is_error flag: act() folds tool failures into the
+                    # content string, and the shared chat history has nowhere
+                    # to carry the distinction (plan 0026).
                     "content": message["content"],
                 }
             )
@@ -286,6 +312,10 @@ def _translate_messages(
             # A cache hit replaces every synthesized block for this message,
             # text included: emitting both would show the model its own text
             # twice and drop the thinking block that must be replayed verbatim.
+            # A miss synthesizes text + tool_use with no thinking block, which
+            # is lossy for a tool-use turn. Unreachable within a trial (the
+            # cache is populated on every 200 and the rollout is serial); it
+            # exists for foreign histories and non-thinking models.
             blocks = cached if cached is not None else _assistant_blocks(message)
             if not blocks:
                 # The nudge retry path appends exactly this; an assistant
@@ -293,6 +323,8 @@ def _translate_messages(
                 continue
             translated.append({"role": "assistant", "content": blocks})
             continue
+        if role not in ("user", "assistant"):
+            raise RuntimeError(f"unsupported message role {role!r}")
         translated.append({"role": role, "content": _translate_content(message["content"])})
 
     flush_results()
