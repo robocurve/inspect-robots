@@ -1,15 +1,15 @@
 # 0026 — `-P wire=anthropic`: native Messages API unlocks fast mode
 
-Issue: #165. Status: draft.
+Issue: #165. Status: draft (revised after critique round 1).
 
 ## Problem
 
 The agent plugin reaches Anthropic models only through the OpenAI-compat shim
-at `https://api.anthropic.com/v1/chat/completions` (`_llm.py` `_DIRECT_PROVIDERS`).
-The compat shim cannot express the Claude-native request surface, so the knob
-that matters most for this plugin is unreachable:
+at `https://api.anthropic.com/v1/chat/completions` (`_llm.py:37`). The compat
+shim cannot express the Claude-native request surface, so the knob that matters
+most for this plugin is unreachable:
 
-**Fast mode** runs Claude Opus 5 and Opus 4.8 at up to 2.5x higher output
+Fast mode runs Claude Opus 5 and Opus 4.8 at up to 2.5x higher output
 tokens/sec. It needs three things simultaneously: native `POST /v1/messages`,
 the `anthropic-beta: fast-mode-2026-02-01` header, and `speed: "fast"` as a
 top-level body field. `ChatClient` posts to `/chat/completions`, sets only
@@ -23,9 +23,13 @@ model thinks, which is exactly why `effort` already defaults to `low`
 is the one lever that buys latency without trading reasoning depth.
 
 The native wire also unlocks `output_config.effort` in its own spelling
-(`low` through `max`, where the compat shim's `reasoning_effort` mapping is
-undocumented) and correct `stop_reason: "refusal"` surfacing, which the compat
-shim flattens into an ordinary empty completion.
+(`low` through `max`) and correct `stop_reason: "refusal"` surfacing, which the
+compat shim flattens into an ordinary empty completion.
+
+Scope note: fast mode is Claude API only. Not Bedrock, Vertex, Foundry, or
+Claude Platform on AWS, and not usable with the Batch API or Priority Tier.
+Opus 4.7 fast mode was removed and now errors, so this wire does not resurrect
+it.
 
 ## Design
 
@@ -34,6 +38,11 @@ is deliberately the same shape as plan 0022 (`wire=responses`): the
 chat-completions message format stays the single source of truth for
 `_messages`, the transcript, sanitization, and echo; the new client translates
 at the wire boundary only. Same no-SDK doctrine: httpx, raw JSON.
+
+The one place this plan is *not* a thin mirror of 0022 is opaque-block replay
+(see "The thinking-block constraint"). 0022 needed a raw-item cache for
+OpenAI reasoning items; this wire needs the same mechanism for Claude thinking
+blocks, for the same underlying reason.
 
 ### `wire` param gains `"anthropic"`
 
@@ -51,131 +60,236 @@ proxy or gateway that serves the Messages API works unchanged.
 
 `LLMAgentPolicy(speed=None)`, values `None | "fast"`. Anything else is a
 `ValueError` at construction, mirroring the `effort` validation. `-P speed=fast`
-forwards for free. Recorded in `AgentPolicyConfig` so the eval log distinguishes
-a fast-mode run from a standard one — they are the same model at different
-prices ($10/$50 vs $5/$25 per MTok), so a cost reconciliation that cannot see
-this field is wrong by 2x.
+forwards for free.
 
 `speed="fast"` with `wire != "anthropic"` is a construction-time `ValueError`,
 not a silent no-op. The compat shim accepts unknown body fields by ignoring
 them, so a silently-dropped `speed` would bill at standard rates while the
-user believes fast mode is on. This is the failure mode most worth failing
-loudly on.
+user believes fast mode is on.
 
-No model-id gating. Fast mode is Opus 5 and Opus 4.8 today, but the supported
-set moves and a hardcoded allowlist would reject a model the API accepts.
+No model-id gating. Fast mode's supported set moves (4.7 was removed, 5 was
+added) and a hardcoded allowlist would reject a model the API accepts.
 Unsupported models get the API's own 400, wrapped by the guided error below.
 
-### `max_tokens` param (forced by the wire)
+### `max_output_tokens` param (forced by the wire)
 
-`max_tokens` is **required** on `/v1/messages` and has no default — unlike
-both OpenAI wires, where omitting it is legal. `LLMAgentPolicy(max_tokens=4096)`,
-validated `>= 1`, recorded in the config, sent on every `wire=anthropic`
-request and ignored by the other two wires.
+`max_tokens` is **required** on `/v1/messages` and has no server default,
+unlike both OpenAI wires where omitting it is legal.
 
-4096 is chosen against this plugin's output shape, not the model's ceiling: a
-turn is one tool call plus a one-or-two-sentence `note`. It also has to clear
-adaptive thinking, which is on by default on Opus 5 and bills against the same
-`max_tokens` ceiling — a tight limit would truncate mid-thought and burn a
-turn on the no-tool-call retry path.
+Named `max_output_tokens`, not `max_tokens`: sitting next to `max_llm_calls`
+(a per-trial budget) and `max_speed_frac`, a bare `max_tokens` reads as a
+trial-wide token budget. It is a per-response cap. The name also matches the
+Responses spelling, so forwarding it on the other two wires later is an
+extension rather than a rename.
+
+`LLMAgentPolicy(max_output_tokens: int | None = None)`, validated `>= 1` when
+set. `None` means "use the wire's default": `AnthropicClient` applies
+`_DEFAULT_MAX_OUTPUT_TOKENS = 16000` internally, and the other two wires ignore
+the field entirely.
+
+Recorded in `AgentPolicyConfig` as the **effective** value — the resolved
+number on `wire=anthropic`, and `None` on the other two wires, where nothing
+constrained the output. Logging `16000` for a `wire=chat` run would assert a
+limit that did not exist.
+
+Why 16000 and not 4096: the visible output of a turn is one tool call plus a
+one-or-two-sentence `note`, on the order of 100-200 tokens. Everything above
+that is headroom for adaptive thinking, which is on by default on Opus 5 and
+bills against this same ceiling. There is no published number for how much
+adaptive thinking will spend, and this wire permits effort up to `max`, so the
+default is set by the repo-wide guidance for non-streaming requests (~16000)
+rather than by the visible-output estimate. Truncation is then a hard error
+rather than a silent degradation (below), so a too-small value is loud.
 
 ### `AnthropicClient` (new module `_anthropic.py`)
 
-Same constructor (including `transport=` injection), same
+```python
+AnthropicClient(
+    provider: Provider,
+    *,
+    speed: str | None = None,
+    max_output_tokens: int | None = None,
+    timeout_s: float = 120.0,
+    max_retries: int = 3,
+    backoff_s: float = 1.0,
+    transport: httpx.BaseTransport | None = None,
+)
+```
+
+`speed` and `max_output_tokens` are **constructor**-injected. `complete()`
+keeps the exact existing signature —
 `complete(messages, tools, temperature, reasoning_effort) -> AssistantMessage`
-and `close()` surface as `ChatClient` and `ResponsesClient`, same bounded retry
-policy (429/5xx/transport retried with exponential backoff, other 4xx fail
-fast). `policy.py`'s changes stay confined to `__init__` (the new param
-validation and client selection) and the config dataclass.
+— so `act()` (`policy.py:268-273`) is untouched and the
+`ChatClient | ResponsesClient | AnthropicClient` union at `policy.py:136`
+stays structurally compatible under mypy strict. `close()` is unchanged.
+`policy.py`'s changes stay confined to `__init__` and the config dataclass.
 
 `Provider`, `ToolCall`, and `AssistantMessage` are shared vocabulary from
-`_llm.py`. As in 0022, the retry loop is small enough to keep duplicated rather
-than extracting a base class across three clients.
+`_llm.py`.
 
 Headers: `x-api-key` (not `Authorization: Bearer` — the native API's own
 scheme), `anthropic-version: 2023-06-01`, and `anthropic-beta:
 fast-mode-2026-02-01` only when `speed="fast"`. The beta header is what makes
 `POST /v1/messages` the beta endpoint over raw HTTP; there is no separate URL.
+An empty `provider.api_key` omits the `x-api-key` header entirely, matching
+`ChatClient` (`_llm.py:182-184`) so keyless local proxies still work.
 
-Request body: `model`, `max_tokens`, `messages` (translated), `system`
-(hoisted, see below), and when set `tools` (flattened), `temperature`,
-`output_config: {"effort": ...}`, `speed`.
+Request body: `model`, `max_tokens`, `messages` (translated), and when
+applicable `system` (hoisted), `tools` (flattened), `output_config:
+{"effort": ...}`, `speed`.
 
-### Effort mapping, and why `thinking` is never disabled
+`temperature` is **never sent**. Claude Opus 5, Opus 4.8, and Opus 4.7 reject
+`temperature`, `top_p`, and `top_k` with a 400, and those are exactly the
+models this wire exists to reach. `temperature is not None` with
+`wire="anthropic"` is a construction-time `ValueError` naming the affected
+models, matching the `speed`-on-wrong-wire precedent. The policy still accepts
+`-P temperature=` for the other two wires.
 
-`_EFFORT_LEVELS` is `{none, minimal, low, medium, high, xhigh, max}`; the
-Messages API accepts `low | medium | high | xhigh | max`. The two extras are
-rejected at construction for `wire=anthropic` with a guided `ValueError`
-naming the accepted set.
+### Effort: a per-wire accepted set
 
-This departs from 0022, which let `effort=max` on `wire=responses` fail with
-OpenAI's own 400 and kept validation wire-agnostic. The difference is the
-failure mode. `max` on Responses is a hard 400: loud, self-describing,
-unmissable. The natural native translation of `effort="none"` is
-`thinking: {"type": "disabled"}`, which the API **accepts** — and on Opus 5
-disabled thinking has a documented failure mode where the model writes a tool
-call into its visible text instead of emitting a `tool_use` block. The turn
-succeeds, the call never runs, no error is raised. For a policy that is tool
-calls or nothing, that is three silent no-tool-call turns and then a generic
-`RuntimeError` pointing nowhere near the cause. A guard is justified where the
-alternative is silent degradation, not where it is a 400.
+Replace the wire-agnostic check at `policy.py:128-134` with a table:
 
-`effort=None` (the Python `None`, distinct from the wire string `"none"` —
-see the README's existing note) omits `output_config` entirely and lets the
-model default apply. `thinking` is never sent in any configuration: adaptive
-is the Opus 5 default and the right one here.
+```python
+_ACCEPTED_EFFORTS = {
+    "chat": _EFFORT_LEVELS,
+    "responses": _EFFORT_LEVELS - {"max"},
+    "anthropic": _EFFORT_LEVELS - {"none", "minimal"},
+}
+```
+
+Four lines, no special case, and it closes 0022's own known-ugly hole in the
+same PR: 0022 §"One effort caveat" documented that `wire=responses` +
+`effort=max` fails with OpenAI's 400 and accepted it rather than guarding.
+Leaving two inconsistent validation policies side by side is worse than fixing
+both.
+
+The honest justification for guarding at all — the earlier draft's reasoning
+was wrong and is retracted. Since this client never sends `thinking`, an
+out-of-set effort would produce a plain 400, not the silent tool-call-as-text
+degradation that disabled thinking causes on Opus 5. So the "guard silent
+degradation, not 400s" principle does not apply here. What does apply: a 400
+surfaces only after `bind()` and the first observation, so it burns a trial and
+costs a round trip, and `-P effort=none` is the documented GPT-5.x workaround
+sitting in this plugin's own README (line 117) that users will paste into a
+Claude run. Failing at construction is worth four lines.
+
+`effort=None` (the Python `None`, distinct from the wire string `"none"`)
+omits `output_config` entirely. `thinking` is never sent in any configuration:
+adaptive is the Opus 5 default and the right one here.
+
+### The thinking-block constraint
+
+Adaptive thinking is on by default on Opus 5, so a typical assistant turn
+returns `[thinking, text?, tool_use]`. Thinking blocks must be echoed back
+**unchanged** when the conversation continues on the same model; replaying a
+history with them stripped triggers ordering and signature 400s from the
+second turn onward. `AssistantMessage` (`_llm.py:140-159`) carries only
+`content` and `tool_calls`, so it is structurally lossy for opaque blocks.
+
+This is the same problem 0022 solved for OpenAI reasoning items, and it gets
+the same mechanism. `AnthropicClient` keeps
+`_raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]]`:
+
+- After each successfully *parsed* response (never a failed or raising one),
+  the response's verbatim `content` array is stored keyed by the `id` of each
+  `tool_use` block in it.
+- During translation, an assistant message whose first `tool_call.id` hits the
+  cache emits the cached raw blocks in place of **all** synthesized blocks for
+  that message, text and tool calls alike. Emitting both would show the model
+  its own text twice.
+- A miss falls back to synthesis — correct for histories this client instance
+  did not produce, and for non-thinking models.
+- Entries whose `tool_use_id` no longer appears in the submitted history are
+  pruned at the top of `complete()`, **before** the new response is cached
+  (prune-after-store would evict every fresh entry and make the cache always
+  miss). Ids are harvested from both places history carries them: assistant
+  `tool_calls[i].id` and tool-message `tool_call_id`.
+- A `reset()` (fresh `_messages`) empties the cache without the client needing
+  a reset hook.
+
+Accepted loss, inherited from 0022: text-only assistant turns (the nudge retry
+path) cache nothing, so their thinking blocks are dropped from replay. Those
+turns carry no `tool_use`, which is what the pairing constraint attaches to.
 
 ### Translation: chat messages → Messages API
 
 | Chat form | Messages API |
 | --- | --- |
-| `{"role": "system", "content": "<str>"}` | hoisted to the top-level `system` string, not a message. Only `_messages[0]` is ever a system message in this loop; a system message anywhere else raises `RuntimeError` rather than being silently dropped |
+| `{"role": "system", "content": "<str>"}` at index 0 | hoisted to the top-level `system` string, not a message. Omitted entirely when `_messages[0]` is not a system message (`act()` is reachable without `reset()`; the only guard is `bind()`) |
+| a system message at index >= 1 | `RuntimeError` rather than a silent drop |
 | `{"role": "user"/"assistant", "content": "<str>"}` | same role, `content` kept as the plain string |
 | user content part `{"type": "text", ...}` | `{"type": "text", "text": ...}` unchanged |
-| user content part `{"type": "image_url", "image_url": {"url": "data:image/png;base64,B"}}` | `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "B"}}` — the `data:` prefix is stripped; `_png.png_data_url` always emits PNG, so the media type is not parsed out of the URL, but a URL that does not match the expected prefix raises rather than shipping a malformed block |
+| user content part `{"type": "image_url", "image_url": {"url": "data:image/png;base64,B"}}` | `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "B"}}`. `_png.png_data_url` always emits PNG, so the media type is fixed rather than parsed; a URL not matching the expected prefix raises rather than shipping a malformed block |
 | assistant msg `content` (non-empty) | `{"type": "text", "text": ...}` block first |
-| assistant msg `tool_calls[i]` | `{"type": "tool_use", "id": id, "name": ..., "input": json.loads(arguments)}`, after the text block if any. Non-object or unparseable `arguments` raises `RuntimeError` naming the tool — a `tool_use` block with a non-object `input` is a 400 whose message does not identify which call was malformed |
-| `{"role": "tool", "tool_call_id": id, "content": c}` | `{"type": "tool_result", "tool_use_id": id, "content": c}` inside a **user** message; **consecutive tool messages merge into one user message** (see below) |
-| assistant msg, no tool calls, content `None` or `""` | **no message** — same accepted loss as 0022. The `incomplete`/nudge retry path appends exactly this, and an assistant message with an empty `content` array is a 400 |
+| assistant msg `tool_calls[i]` | `{"type": "tool_use", "id": id, "name": ..., "input": json.loads(arguments)}` after the text block. Unparseable JSON and parseable-but-non-object both raise `RuntimeError` naming the tool: a `tool_use` with a non-object `input` 400s with a message that does not identify the offending call |
+| assistant msg with a cache hit on `tool_calls[0].id` | the cached raw block list verbatim, replacing every synthesized block for that message |
+| `{"role": "tool", "tool_call_id": id, "content": c}` | `{"type": "tool_result", "tool_use_id": id, "content": c}` inside a **user** message; consecutive tool messages merge into one (below) |
+| assistant msg, no tool calls, content `None` or `""` | no message. The nudge retry path appends exactly this, and an assistant message with an empty content array is a 400 |
 
-The merge rule is load-bearing, not tidiness. `act()` appends one `role: "tool"`
-message per ignored extra tool call and then one for the executed call
-(`policy.py:269-280`), so a multi-tool-call turn produces several consecutive
-tool messages. The Messages API requires every `tool_result` answering one
-assistant turn to sit in a single user message; emitting one user message per
-result makes the second one an unanswered-`tool_use` 400. Runs of consecutive
-`role: "tool"` messages therefore collapse into one user message with one
-`tool_result` block each, in order.
+Merging consecutive tool messages: `act()` appends one `role: "tool"` message
+per ignored extra tool call (`policy.py:292-303`) and then one for the executed
+call (`policy.py:304-307`), so a multi-tool-call turn produces a run of
+consecutive tool messages. Splitting `tool_result` blocks across several user
+messages does not 400 (the API coalesces consecutive same-role messages), but
+it does silently train the model to stop making parallel calls, so the run
+collapses into one user message carrying one `tool_result` block each.
+
+Block order within the merged message is **history order**, which for a
+multi-call turn is `[extra_1..extra_n, executed]` while the assistant's
+`tool_use` order was `[executed, extra_1..extra_n]`. Blocks are matched by
+`tool_use_id`, not position, so this is legal; it is called out here only
+because the mismatch looks like a bug to a reader diffing the two arrays.
+
+Two consecutive-user-message sequences fall out of the loop and are legal
+under same-role coalescing, but are easy to miss and both get goldens:
+
+- **Dropped assistant turn then nudge.** An assistant turn with no tool calls
+  and empty content emits no message, so the wire sees the observation user
+  message immediately followed by the nudge user message.
+- **Tool results then next observation.** After a successful call `act()`
+  returns; the next `act()` appends an observation, so a user message of
+  `tool_result` blocks is immediately followed by a user message of text and
+  images.
 
 Tool schemas flatten from the chat nesting:
 `{"type": "function", "function": {name, description, parameters}}` →
 `{"name": ..., "description": ..., "input_schema": ...}`. `Toolset.schemas()`
 stays chat-shaped; the client owns the translation both ways. No strict-mode
-concern here — the Messages API does not auto-normalize schemas the way the
-Responses API does, so the move tool's free-form `targets`/`deltas` object
-survives unchanged.
+concern: the Messages API does not auto-normalize schemas the way the Responses
+API does, so the move tool's free-form `targets`/`deltas` object survives.
+`tools=[]` omits the `tools` key entirely, matching `ResponsesClient`.
 
 ### Response parsing → `AssistantMessage`
 
-From `response["content"]`: concatenate the `text` of every `text` block (None
-if there are none), and one `ToolCall(id=block["id"], name=block["name"],
+From `response["content"]`: concatenate the `text` of every `text` block, and
+emit one `ToolCall(id=block["id"], name=block["name"],
 arguments=json.dumps(block["input"]))` per `tool_use` block, in order.
-`thinking` blocks are ignored — the plugin does not replay them, and with
-`display` left at its `"omitted"` default they carry no text anyway.
+`thinking` blocks contribute nothing here — they matter only to the cache.
+
+Empty concatenated text normalizes to `None`, never `""`. A `""` would
+round-trip through `raw()` (`_llm.py:149`) into the next request as an empty
+`text` block, which is a 400.
 
 Re-serializing `input` back to JSON text keeps `ToolCall.arguments` a string
-across all three wires, so `_tools.py` validation and the transcript format
-stay identical and the echo path is untouched.
+across all three wires, so `_tools.py` validation, the transcript format, and
+the echo path are untouched.
 
-`stop_reason: "refusal"` raises `RuntimeError` carrying
-`stop_details.category` when present. This is an HTTP 200 whose `content` is
-empty or partial; parsing it as an empty `AssistantMessage` would burn three
-"Respond with exactly one tool call." nudges and then die with a generic
-no-tool-call error while the real cause sits discarded in the body. Same
-fail-fast-no-retry decision as 0022's `status: "failed"`: the server
-deliberately answered. `stop_details` is informational and may be `null` even
-on a refusal, so the branch keys on `stop_reason` alone and treats the
-category as optional.
+Two terminal stop reasons raise `RuntimeError` and are never retried, matching
+0022's `status: "failed"` decision — the server deliberately answered:
+
+- `stop_reason: "refusal"`, carrying `stop_details.category` when present.
+  `stop_details` is informational and may be `null` even on a refusal, so the
+  branch keys on `stop_reason` alone.
+- `stop_reason: "max_tokens"`, carrying `fix: raise -P max_output_tokens=`.
+  A truncated turn is an HTTP 200 with partial content, and it is the one
+  silent-degradation risk this PR newly creates: either there is no `tool_use`
+  block (three nudge turns, then a generic `RuntimeError` at `policy.py:286`
+  with the cause discarded), or there is a partial `tool_use` whose `input`
+  still re-serializes to valid JSON and gets executed as a motion by
+  `toolset.execute()` (`policy.py:304`). Truncated responses never yield tool
+  calls.
+
+Neither terminal response populates the cache.
 
 ### Guided errors
 
@@ -183,86 +297,191 @@ House style: the error names the fix, never just the failure.
 
 **OpenRouter fallback.** `resolve_provider`'s ladder falls through to
 OpenRouter whenever `ANTHROPIC_API_KEY` is unset, and
-`openrouter.ai/api/v1/messages` does not exist. Construction raises
-`ConfigError` when `wire="anthropic"` resolved to the OpenRouter base URL,
-naming the two fixes (set `$ANTHROPIC_API_KEY`, or pass `-P base_url=` for a
-gateway that serves the Messages API). Only the OpenRouter base is rejected;
-an explicit `base_url` is always honored, since proxies serving `/v1/messages`
-are a legitimate deployment.
+`openrouter.ai/api/v1/messages` does not exist. `Provider` gains a public
+`from_openrouter_fallback: bool` field set by `resolve_provider`, so `policy.py`
+does not reach into `_llm`'s privates to compare base URLs. Construction raises
+`ConfigError` when `wire="anthropic"` and that flag is set, naming the two
+fixes (set `$ANTHROPIC_API_KEY`, or pass `-P base_url=` for a gateway serving
+the Messages API).
 
-**Fast mode unsupported.** A 4xx whose body mentions `speed` or `fast` while
-`speed="fast"` appends: `fix: fast mode needs Claude Opus 5 or Opus 4.8 on the
-Claude API (not Bedrock/Vertex/Foundry), or drop -P speed=fast`.
+This guard covers the fallback case only, deliberately. `-P model=openai/gpt-5
+-P wire=anthropic` with `$OPENAI_API_KEY` set resolves to `api.openai.com/v1`
+and dead-ends at a 404 — enumerating every wrong-endpoint combination is not
+worth it, and the 404 names the URL.
+
+**Key resolution with an explicit `base_url`.** `resolve_provider` defaults
+`api_key_env` to `OPENROUTER_API_KEY` (`_llm.py:109-111`), so
+`-P base_url=https://gateway/v1 -P wire=anthropic` would send an OpenRouter key
+as `x-api-key` and 401 with no hint. For `wire="anthropic"`, `policy.py`
+defaults `api_key_env` to `ANTHROPIC_API_KEY` before calling
+`resolve_provider`. An explicit `-P api_key_env=` still wins.
+
+**Fast mode unsupported.** A 4xx while `speed="fast"` whose body contains both
+`"speed"` and `"fast"` appends: `fix: fast mode needs Claude Opus 5 or Opus 4.8
+on the Claude API (not Bedrock/Vertex/Foundry), or drop -P speed=fast`. The
+two-token AND mirrors 0022's matcher shape (`_llm.py:220`); a bare `fast`
+substring is too weak a signal.
 
 **Fast-mode rate limit.** Fast mode draws on a rate-limit pool separate from
-standard Opus, so a fast-mode run can 429 while standard capacity is idle.
-After retries are exhausted on a 429 with `speed="fast"`, the terminal error
-appends: `fix: fast mode has its own rate limit; retry later or drop
--P speed=fast to fall back to standard speed`.
+standard Opus, so a fast-mode run can 429 while standard capacity is idle. The
+retry loop tracks `last_status: int | None` alongside `last_error`; when
+retries are exhausted with `last_status == 429` and `speed="fast"`, the
+terminal error appends: `fix: fast mode has its own rate limit; retry later or
+drop -P speed=fast to fall back to standard speed`. One extra variable, and it
+saves a user staring at a 429 while their standard-speed quota sits unused.
+
+**429 backoff honors `retry-after`.** When the response carries a parseable
+`retry-after`, sleep that instead of `backoff_s * 2**attempt`, capped at
+`timeout_s`. Inherited fixed backoff ignores the server's own answer.
 
 No automatic fallback to standard speed on 429. Silently downgrading changes
-the billing rate and the latency profile mid-eval, and it invalidates the
-prompt cache (switching `speed` is a cache-invalidating change), so the
-"recovery" costs a full cache re-write and produces an eval log whose `speed`
-field no longer describes what ran. The user chose fast mode; the fix belongs
-in their hands.
+the billing rate and the latency profile mid-eval and produces an eval log
+whose `speed` field no longer describes what ran.
+
+### What the eval log records
+
+`AgentPolicyConfig` gains `speed: str | None`, `max_output_tokens: int | None`
+(effective value, see above), and the existing `wire` field carries the new
+value. The config is frozen with all-defaulted fields (`policy.py:75-91`), so
+appending is safe; `_html.py:555` renders `sorted(policy_config.items())`, so
+new keys render with no viewer change.
+
+Requested `speed` records intent, not what was served. The response's
+`usage.speed` reports which speed actually ran, and a fast-mode request that
+silently served at standard speed is a 2x billing difference the log should
+not hide. `AnthropicClient` exposes the last response's `usage` (including
+`speed`, `input_tokens`, `output_tokens`) as a plain attribute; wiring it into
+the trial record is left to a follow-up, but the fast-mode test asserts
+`usage.speed` is surfaced.
+
+## Version
+
+Plugin `0.12.0` → `0.13.0` (`plugins/inspect-robots-agent/pyproject.toml:7`).
+`AnthropicClient` joins the package's `__all__` for parity with
+`ResponsesClient` (`__init__.py:34,44`). Both changes break
+`tests/test_package.py` (the version pin at line 9 and the exact `__all__` pin
+at lines 11-23), which is updated in the same PR — that pin exists because a
+stale hardcoded version shipped twice.
 
 ## Tests (`tests/test_anthropic.py` + small additions)
 
 All against `httpx.MockTransport`, mirroring `test_llm.py` and
-`test_responses.py` conventions.
+`test_responses.py` conventions. Plugin coverage is report-only
+(`ci.yml:326-331` runs with `--cov-fail-under=0`), so this list is the gate,
+not a safety net under one.
 
-- Translation goldens: each row of the table above, including multi-part
-  observation content with a PNG data URL (asserting the `data:` prefix is
-  stripped and `media_type` is set), and a malformed image URL raising.
-- The merge rule: a turn with three tool calls produces exactly one user
-  message carrying three `tool_result` blocks in order, not three messages.
-  Plus the interleaved case (tool messages, then a user observation) to show
-  only *consecutive* runs merge.
-- System hoisting: `_messages[0]` becomes top-level `system` and no message
-  carries `role: "system"`; a system message at a later index raises.
-- Request body: `max_tokens` always present, `system` present, tools flattened
-  to `input_schema`, `output_config.effort` present only when effort is set,
-  `temperature` only when set, `speed` only when set, and the request path is
-  `{base_url}/messages`.
-- Headers: `x-api-key` and `anthropic-version` on every request; the
-  `anthropic-beta: fast-mode-2026-02-01` header present with `speed="fast"`
-  and **absent** without it.
-- Parsing: text-only, tool-use-only, text + tool-use, text spread across
-  multiple blocks, `thinking` blocks ignored, `input` round-tripping to JSON
-  text. `stop_reason: "refusal"` raises with the category in the message and
-  puts exactly one request on the wire; a refusal with `stop_details: null`
-  raises without an AttributeError.
-- Assistant turn with `content: None` and no tool calls emits no message.
-- Guided errors: the OpenRouter-fallback `ConfigError` (and that an explicit
-  `base_url` suppresses it), the fast-mode 4xx guidance, and the fast-mode 429
-  guidance after retries are exhausted.
+Translation:
+
+- Each row of the table above, including multi-part observation content with a
+  PNG data URL (asserting the `data:` prefix is stripped and `media_type` is
+  set), and a malformed image URL raising.
+- System hoisting: index-0 system message becomes top-level `system` with no
+  `role: "system"` message on the wire; a history with **no** system message
+  omits the `system` key; a system message at index >= 1 raises.
+- The merge rule: three tool calls produce exactly one user message with three
+  `tool_result` blocks; the interleaved case (only consecutive runs merge); and
+  a history **ending** in a tool run, which is the shape on the wire every time
+  `act()` retries after a tool error (`policy.py:305-313`).
+- Both consecutive-user-message sequences, asserted on the full `messages`
+  array across a multi-turn trial, not per-message.
+- `json.loads(arguments)` unparseable and parseable-but-non-object as two
+  separate cases.
+- Assistant turn with `content: None` and no tool calls emits no message;
+  assistant turn with `content: ""` **and** tool calls emits no empty text
+  block.
+
+Thinking replay:
+
+- Turn 1 returns `[thinking, text, tool_use]`; the turn-2 request contains all
+  three verbatim, with the text appearing exactly once.
+- Two `tool_use` blocks in one turn: each cached block appears exactly once in
+  turn 2 (the hit is per assistant message, keyed on the first call id).
+- Cache prune on a fresh history, and cache-miss synthesis.
+- Neither a `refusal` nor a `max_tokens` response populates the cache.
+
+Request shape:
+
+- `max_tokens` always present; `tools=[]` omits the `tools` key;
+  `output_config.effort` only when effort is set; `speed` only when set;
+  `temperature` never present; path is `{base_url}/messages`.
+- Headers: `x-api-key` and `anthropic-version` on every request;
+  `anthropic-beta: fast-mode-2026-02-01` present with `speed="fast"` and absent
+  without it; empty api_key omits `x-api-key`.
+
+Parsing and terminal states:
+
+- Text-only, tool-use-only, text + tool-use, text across multiple blocks,
+  `thinking` blocks ignored, `input` round-tripping to JSON text.
+- `refusal` raises with the category, one request on the wire; `refusal` with
+  `stop_details: null` raises without an AttributeError.
+- `max_tokens` raises naming `-P max_output_tokens=`, and a truncated response
+  containing a partial `tool_use` raises rather than returning that call.
+- `usage.speed` surfaced on a fast-mode response.
+
+Errors and retries:
+
+- OpenRouter-fallback `ConfigError`; an explicit `base_url` suppresses it.
+- `api_key_env` defaulting to `ANTHROPIC_API_KEY` for this wire, and an
+  explicit `-P api_key_env=` overriding it.
+- Fast-mode 4xx guidance; and the negative case — a 4xx unrelated to speed
+  while `speed="fast"` gets no guidance.
+- 429 terminal message with `speed="fast"` (guided) and without it (unguided).
+- `retry-after` honored when present, fixed backoff when absent.
 - Retry/fail-fast parity with `ChatClient`, plus `close()`.
-- Policy wiring: `wire="anthropic"` end-to-end through `LLMAgentPolicy.act()`
-  (mock embodiment); `speed="fast"` with `wire="chat"` raises; invalid `speed`
-  raises; `effort="none"`/`"minimal"` with `wire="anthropic"` raises;
-  `max_tokens=0` raises; `wire`, `speed`, and `max_tokens` recorded in config.
+
+Policy wiring:
+
+- `wire="anthropic"` end-to-end through `LLMAgentPolicy.act()` (mock
+  embodiment).
+- Raises: `speed="fast"` with `wire="chat"`; invalid `speed`;
+  `effort="none"`/`"minimal"` with `wire="anthropic"`; `effort="max"` with
+  `wire="responses"` (the newly closed 0022 hole); `temperature` set with
+  `wire="anthropic"`; `max_output_tokens=0`.
+- `wire`, `speed`, and the effective `max_output_tokens` recorded in the
+  config, including `None` on a `wire=chat` run.
 
 ## Docs
 
-- `plugins/inspect-robots-agent/README.md`: add `speed` and `max_tokens` to
-  the knobs list (line 101), extend the wire-format paragraph (line 48), and
-  add a short "Fast mode on Claude" section next to the existing "Reasoning
-  effort on OpenAI models" section, including the price delta and the
-  Claude-API-only caveat. Repo writing style applies: no em dashes in prose.
-- No `docs/` guide change. The quickstart and cookbook mention `-P model=` and
-  `-P effort=`; wire selection stays plugin-README territory, as it did for
-  `wire=responses`.
+`plugins/inspect-robots-agent/README.md`:
+
+- Add `speed` and `max_output_tokens` to the knobs list (line 101).
+- Replace the two-sentence wire paragraph (lines 48-50) with a small wire
+  table, matching the provider table already at lines 38-46.
+- Add a "Fast mode on Claude" section next to the existing "Reasoning effort on
+  OpenAI models" section, with the Claude-API-only caveat and the supported
+  models. Describe the cost as roughly double the standard output price and
+  link Anthropic's pricing page rather than printing figures: no README here
+  carries a price, and a stale one would ship to PyPI on every release.
+
+Repo writing style applies to all of it (CLAUDE.md "Writing style"): no em
+dashes in prose, bold only for `**term:**` lead-ins, no decorative emoji.
+
+No `docs/` guide change. Wire selection stays plugin-README territory, as it
+did for `wire=responses`.
+
+## Retry-loop duplication
+
+Three clients will each carry a near-identical retry loop. 0022 justified the
+duplication at two as "small enough"; that premise is already false, since
+`_llm.py:207-228` and `_responses.py:70-88` differ in their guided-error block,
+and this client adds two more guidance branches plus `last_status`.
+
+Keep it duplicated anyway, for a better reason: extraction would need at least
+two injection points (4xx guidance, terminal message), so a base class buys
+template-method indirection rather than deduplication. The only genuinely
+shared logic is "is this status retryable" plus the backoff sleep, which is
+three lines. Revisit at a fourth wire, and do not inherit the "small enough"
+claim, which will not survive it.
 
 ## Non-goals
 
 - Prompt caching (`cache_control` breakpoints on the system block and tool
   schemas). The stable prefix here is large and reused every turn, so this is
   the obvious follow-up, but it is a cost optimization with its own placement
-  and invalidation design, not part of unlocking fast mode.
+  and invalidation design.
+- Wiring `usage` into the trial record beyond exposing it on the client.
 - Adaptive-thinking display (`thinking: {"display": "summarized"}`) and
   surfacing thinking summaries into the transcript.
-- Task budgets (`output_config.task_budget`), extended context, and the
-  Batches API.
-- `AnthropicBedrock`/Vertex/Foundry variants. Fast mode is Claude API only, so
-  they would inherit the wire without its motivating feature.
+- Task budgets (`output_config.task_budget`) and the Batches API.
+- Bedrock/Vertex/Foundry variants: fast mode is Claude API only, so they would
+  inherit the wire without its motivating feature.
