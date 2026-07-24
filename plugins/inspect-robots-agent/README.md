@@ -37,7 +37,7 @@ Providers resolved directly by prefix:
 
 | Prefix | Key | Endpoint |
 |---|---|---|
-| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat) |
+| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat, or native with `-P wire=anthropic`) |
 | `openai/*` | `OPENAI_API_KEY` | OpenAI |
 | `google/*` | `GEMINI_API_KEY` | Google Gemini (OpenAI-compat) |
 | `x-ai/*` or `xai/*` | `XAI_API_KEY` | xAI |
@@ -45,9 +45,14 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
-The wire format defaults to Chat Completions (`-P wire=chat`) for broad
-OpenAI-compatible endpoint support. Switch to `-P wire=responses` when a
-direct OpenAI or compatible endpoint requires the Responses API.
+The wire format defaults to Chat Completions for broad OpenAI-compatible
+endpoint support:
+
+| `-P wire=` | Endpoint | Use it when |
+|---|---|---|
+| `chat` (default) | `/chat/completions` | Anything OpenAI-compatible: OpenRouter, vLLM, Ollama, the Anthropic and Gemini compat endpoints |
+| `responses` | `/responses` | A direct OpenAI or compatible endpoint requires the Responses API |
+| `anthropic` | `/messages` | Driving Claude natively, which is what fast mode needs |
 
 ## How it works
 
@@ -98,8 +103,10 @@ motion fall short of the tool's requested total.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`wire`, `max_llm_calls` (default `100`), `temperature`, `effort`,
-`max_speed_frac`, `transcript_echo`.
+`wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
+`temperature`, `effort`, `max_speed_frac`, `transcript_echo`.
+`speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
+either on another wire is an error rather than a silent no-op.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
@@ -120,6 +127,37 @@ pass `-P effort=none` to omit the parameter for endpoints that reject it
 chat completions requires the literal `none` when function tools are in
 play (any other value, or omitting the field, is a 400). In Python,
 `effort=None` omits the field and `effort="none"` sends the wire value.
+
+## Fast mode on Claude
+
+`-P wire=anthropic` drives Claude through the native Messages API instead of
+the OpenAI-compat endpoint. That is the only way to reach fast mode, which
+serves the same model at up to 2.5x higher output tokens per second:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    --embodiment cubepick
+```
+
+The model id keeps the `anthropic/` prefix on this wire, the same as every
+other model string here. A bare `-P model=claude-opus-5` does not resolve.
+
+Fast mode costs roughly double the standard price on both input and output
+(see [Anthropic's pricing](https://www.anthropic.com/pricing)), and it draws on
+a rate limit separate from standard capacity, so a fast-mode run can hit a 429
+while standard quota sits idle. It is available on Claude Opus 5 and Opus 4.8,
+on the Claude API only: not Bedrock, Vertex, Foundry, or Claude Platform on
+AWS. Errors from any of those cases name the fix.
+
+This wire always requests adaptive thinking, which pre-4.6 models such as
+Sonnet 4.5 and Haiku 4.5 do not support. Use `-P wire=chat` for those.
+
+The Messages API requires an output cap, so `-P max_output_tokens=` defaults to
+`16000` here. Thinking bills against that same cap, and a response truncated at
+the limit is an error naming the knob rather than a silently missing tool call.
+Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
+of 64000 or more, which needs streaming this client does not implement yet.
 
 ## Reasoning effort on OpenAI models
 

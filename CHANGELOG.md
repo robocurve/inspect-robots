@@ -52,6 +52,15 @@ All notable changes to this project are documented here. The format is based on
   are stripped from the transcript to save space, as they are already
   recorded in the frame store. The relative path to the transcript is
   stored in the trial's metadata for easy post-hoc analysis (#40).
+- **Agent plugin:** `-P wire=anthropic` selects Anthropic's native Messages
+  API instead of its OpenAI-compat endpoint, which is the only way to reach
+  fast mode: `-P speed=fast` runs Claude Opus 5 and Opus 4.8 at up to 2.5x
+  higher output tokens per second, at roughly double the standard price. Robot
+  control is latency-sensitive, so the arm spends less time waiting on the
+  model. The wire also carries `-P max_output_tokens=` (the Messages API
+  requires an output cap), replays thinking blocks so multi-turn trials hold
+  together, and turns refusals and truncated responses into errors that name
+  their own cause instead of looking like a missing tool call (#165).
 - **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
   so reasoning effort works together with function tools on recent OpenAI
   models (Chat Completions rejects the combination, observed on

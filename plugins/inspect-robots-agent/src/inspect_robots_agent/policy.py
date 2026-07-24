@@ -23,6 +23,7 @@ import httpx
 import numpy as np
 
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
@@ -30,7 +31,14 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
-from inspect_robots_agent._llm import ENV_MODEL, ChatClient, ToolCall, resolve_provider
+from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
+from inspect_robots_agent._llm import (
+    _OPENROUTER_BASE,
+    ENV_MODEL,
+    ChatClient,
+    ToolCall,
+    resolve_provider,
+)
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import Toolset, build_toolset
@@ -40,7 +48,8 @@ _MAX_CONSECUTIVE_FAILURES = 3
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
+_SPEEDS = frozenset({"fast"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -85,6 +94,10 @@ class AgentPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     wire: str = "chat"
+    speed: str | None = None
+    #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
+    #: wires, where nothing constrained the output.
+    max_output_tokens: int | None = None
     max_llm_calls: int = 100
     effort: str | None = "low"
     max_speed_frac: float = 0.1
@@ -106,6 +119,8 @@ class LLMAgentPolicy(PolicyBase):
         base_url: str | None = None,
         api_key_env: str | None = None,
         wire: str = "chat",
+        speed: str | None = None,
+        max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
         effort: str | None = "low",
@@ -116,13 +131,6 @@ class LLMAgentPolicy(PolicyBase):
     ):
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ValueError("max_speed_frac must be finite and > 0")
-        environ = dict(os.environ) if env is None else env
-        provider = resolve_provider(
-            model=model or environ.get(ENV_MODEL),
-            base_url=base_url,
-            api_key_env=api_key_env,
-            env=environ,
-        )
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be >= 1")
         if effort is not None and effort not in _EFFORT_LEVELS:
@@ -130,12 +138,63 @@ class LLMAgentPolicy(PolicyBase):
                 f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
                 f"the field, got {effort!r}"
             )
+        # Order matters from here down (plan 0026): wire is validated before
+        # the params that are only legal on one wire, the api_key_env default
+        # is applied before resolution, and the OpenRouter check after it.
         if wire not in _WIRE_FORMATS:
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
-        if wire == "responses":
-            self._client: ChatClient | ResponsesClient = ResponsesClient(
-                provider, transport=transport
+        if speed is not None and speed not in _SPEEDS:
+            raise ValueError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+        if wire != "anthropic":
+            # A dropped speed would bill at standard rates while the user
+            # believes fast mode is on; a dropped cap is a limit that never
+            # applied. Both fail loudly rather than silently.
+            if speed is not None:
+                raise ValueError(f"speed is only supported on wire='anthropic', got wire={wire!r}")
+            if max_output_tokens is not None:
+                raise ValueError(
+                    f"max_output_tokens is only supported on wire='anthropic', got wire={wire!r}"
+                )
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be >= 1")
+
+        environ = dict(os.environ) if env is None else env
+        # resolve_provider reads api_key_env only when base_url is set, where
+        # it otherwise defaults to OPENROUTER_API_KEY and would send an
+        # OpenRouter key as x-api-key.
+        effective_key_env = api_key_env
+        if wire == "anthropic" and base_url is not None and api_key_env is None:
+            effective_key_env = "ANTHROPIC_API_KEY"
+        provider = resolve_provider(
+            model=model or environ.get(ENV_MODEL),
+            base_url=base_url,
+            api_key_env=effective_key_env,
+            env=environ,
+        )
+        if wire == "anthropic" and provider.base_url == _OPENROUTER_BASE:
+            raise ConfigError(
+                "wire='anthropic' needs a Messages API endpoint, but the model "
+                f"{provider.model!r} resolved to OpenRouter, which does not serve one.\n"
+                "fix: set $ANTHROPIC_API_KEY, or pass -P base_url=... for a gateway "
+                "that serves /v1/messages"
             )
+
+        resolved_max_output_tokens = (
+            (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
+            if wire == "anthropic"
+            else None
+        )
+        self._client: ChatClient | ResponsesClient | AnthropicClient
+        if wire == "anthropic":
+            assert resolved_max_output_tokens is not None
+            self._client = AnthropicClient(
+                provider,
+                max_output_tokens=resolved_max_output_tokens,
+                speed=speed,
+                transport=transport,
+            )
+        elif wire == "responses":
+            self._client = ResponsesClient(provider, transport=transport)
         else:
             self._client = ChatClient(provider, transport=transport)
         self._max_llm_calls = max_llm_calls
@@ -152,6 +211,8 @@ class LLMAgentPolicy(PolicyBase):
             base_url=provider.base_url,
             api_key_env=api_key_env,
             wire=wire,
+            speed=speed,
+            max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
             effort=effort,
             max_speed_frac=max_speed_frac,
