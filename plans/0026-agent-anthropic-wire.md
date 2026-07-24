@@ -56,7 +56,7 @@ cut, for three reasons that only surfaced under review:
 - It is the only part of the PR that changes behavior for an existing wire,
   which is the argument for a separate PR, not for bundling.
 
-So `effort` validation stays exactly as it is today (`policy.py:128-134`), and
+So `effort` validation stays exactly as it is today (`policy.py:128-132`), and
 out-of-set values fail with the API's own 400 — the same disposition 0022 chose
 for `effort=max`. `effort="none"`/`"minimal"` on this wire will 400; that is
 consistent, loud, and self-describing.
@@ -115,12 +115,40 @@ rather than a rename.
 ```python
 _DEFAULT_MAX_OUTPUT_TOKENS = 16000   # in _anthropic.py, imported by policy.py
 
-resolved = max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS
+resolved = (
+    (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
+    if wire == "anthropic"
+    else None
+)
 ```
+
+The `wire` gate is load-bearing: an ungated resolution would record `16000` in
+the config for a `wire=chat` run, where nothing capped the output.
 
 `AnthropicClient` therefore takes `max_output_tokens: int` (no default, no
 second source of truth for a number that lands in an eval log). The resolved
 value is what `AgentPolicyConfig` records.
+
+### `__init__` validation order
+
+The new checks are order-dependent, so spell the sequence out rather than
+leaving it to be rediscovered. Today `resolve_provider` runs at
+`policy.py:120`, before the `wire` check at `policy.py:133-134`; that has to
+change, because the `api_key_env` substitution must precede resolution and the
+OpenRouter check must follow it.
+
+1. `max_speed_frac`, `max_llm_calls`, `effort` (unchanged)
+2. `wire` membership in `_WIRE_FORMATS` — **first** among the new checks, so
+   `-P wire=antropic -P speed=fast` reports the misspelled wire rather than the
+   speed error
+3. `speed` value, and `speed`/`max_output_tokens` against `wire`
+4. resolve the effective `api_key_env` (see the guided-errors section)
+5. `resolve_provider(...)`
+6. the OpenRouter-fallback `ConfigError`
+7. resolve `max_output_tokens`, build the client
+
+Step 6 needs `from inspect_robots.errors import ConfigError` in `policy.py`,
+which has no such import today (only `_llm.py:18` imports it).
 
 Validation: `>= 1` when set, checked on every wire. `max_output_tokens` set
 with `wire != "anthropic"` is a construction-time `ValueError`, mirroring
@@ -186,9 +214,13 @@ equivalent to adaptive on Opus 5; on Opus 4.8 and 4.7 an omitted `thinking`
 runs with thinking **off**. Since fast mode covers Opus 5 and 4.8, omitting it
 would silently disable thinking on half the target set and make the replay
 cache below dead code there. The cost of sending it explicitly: pre-4.6 models
-(Sonnet 4.5, Haiku 4.5) reject `{"type": "adaptive"}`, so this wire does not
-reach them. That is the right trade for a wire whose reason to exist is an
-Opus-5-and-4.8 feature; the compat wire still serves those models.
+(Sonnet 4.5, Haiku 4.5) do not support `{"type": "adaptive"}`, so this wire
+does not reach them. Per-model support is readable at
+`GET /v1/models/<id>` → `capabilities.thinking.types.adaptive.supported`; the
+exact failure shape has not been observed, so the README says "not supported"
+rather than naming a status code. That is the right trade for a wire whose
+reason to exist is an Opus-5-and-4.8 feature; the compat wire still serves
+those models.
 
 `temperature` is forwarded when set, not rejected. Opus 5, 4.8, and 4.7 reject
 it with a 400, but Opus 4.6 and Sonnet 4.6 accept it over this same wire, so a
@@ -228,8 +260,10 @@ mechanism. `AnthropicClient` keeps
 
 Accepted loss, inherited from 0022: a text-only assistant turn (the nudge retry
 path, `policy.py:283-290`) carries no `tool_use`, so it caches nothing and its
-thinking block is dropped from replay. That is safe precisely because the
-constraint attaches to tool-use continuation, and such a turn is terminal.
+thinking block is dropped from replay. That is safe because the constraint
+attaches to tool-use continuation. Note such a turn is not terminal:
+`_MAX_CONSECUTIVE_FAILURES = 3` (`policy.py:38`) means it stays in the history
+for up to two further `complete()` calls.
 
 ### Translation: chat messages → Messages API
 
@@ -284,7 +318,9 @@ Tool schemas flatten from the chat nesting:
 stays chat-shaped; the client owns translation both ways. No strict-mode
 concern: the Messages API does not auto-normalize schemas the way the Responses
 API does, so the move tool's free-form `targets`/`deltas` object survives.
-`tools=[]` omits the `tools` key, matching `ResponsesClient`.
+`tools=[]` omits the `tools` key, matching `ChatClient` (`_llm.py:200-201`).
+Not `ResponsesClient`, which sends `tools: []` unconditionally
+(`_responses.py:58-64`).
 
 ### Response parsing → `AssistantMessage`
 
@@ -325,6 +361,13 @@ Two get specific guidance:
 Anything else outside the permissive set gets a generic message naming the
 `stop_reason` verbatim. No terminal response populates the cache.
 
+`pause_turn` is deliberately in the deny set. It arises only from the
+server-side sampling loop hitting its iteration limit (web search, web fetch,
+code execution), and this wire declares client-side custom tools only, so it is
+unreachable today. It is also the one denied reason that is *resumable* rather
+than fatal, so a future PR adding a server tool must revisit this branch
+instead of inheriting it.
+
 ### Guided errors
 
 House style: the error names the fix, never just the failure.
@@ -357,13 +400,15 @@ the substituted one.
 **Fast mode unsupported.** A 4xx while `speed="fast"` whose body contains both
 `"speed"` and `"fast"` (case-insensitive, matched against the full
 `response.text`, as `_llm.py:220` does) appends: `fix: fast mode needs Claude
-Opus 5 or Opus 4.8 on the Claude API (not Bedrock/Vertex/Foundry), or drop
--P speed=fast`. The two-token AND mirrors 0022's matcher shape; a bare `fast`
-substring is too weak.
+Opus 5 or Opus 4.8 on the Claude API (not Bedrock, Vertex, Foundry, or Claude
+Platform on AWS), or drop -P speed=fast`. The two-token AND mirrors 0022's
+matcher shape; a bare `fast` substring is too weak.
 
 **Sampling parameter rejected.** A 4xx whose body mentions `temperature`
-appends: `fix: Claude Opus 5, 4.8, and 4.7 reject temperature; drop
--P temperature=`.
+appends: `fix: this model rejects temperature (Opus 5, 4.8, 4.7, Sonnet 5, and
+Fable 5 all do; Opus 4.6 and Sonnet 4.6 accept it); drop -P temperature=`.
+Model-agnostic phrasing on purpose: an Opus-only list reads as inapplicable to
+a Sonnet 5 user who just hit the 400.
 
 **Fast-mode rate limit.** Fast mode draws on a rate-limit pool separate from
 standard Opus, so a fast-mode run can 429 while standard capacity sits idle.
@@ -421,11 +466,12 @@ the gate rather than a safety net under one.
 
 New fixtures, since nothing existing emits Anthropic-shaped payloads
 (`test_policy_e2e.py`'s `_Script` and response builders are chat-shaped):
-`_anthropic_response(*blocks, stop_reason="tool_use", usage=None)` building a
-`content` array, and `_AnthropicScript` mirroring `_Script`
+`_anthropic_response(*blocks, stop_reason="tool_use")` building a `content`
+array, and `_AnthropicScript` mirroring `_Script`
 (`test_policy_e2e.py:130-140`) for multi-turn policy tests. A `_client(...)`
-helper taking a `Provider` override, following `test_llm.py:273`, so the
-empty-api-key case is constructible.
+helper that does what `test_llm.py:225` does plus accepts a `Provider`
+override, as `test_llm.py:273` constructs by hand, so the empty-api-key case is
+constructible.
 
 Translation:
 
@@ -436,10 +482,10 @@ Translation:
   `role: "system"` message on the wire; a history with no system message omits
   the `system` key; a system message at index >= 1 raises.
 - Merge rule: three tool calls produce exactly one user message with three
-  `tool_result` blocks **in history order**; the interleaved case (only
-  consecutive runs merge); and a history *ending* in a tool run, the shape on
-  the wire every time `act()` retries after a tool error
-  (`policy.py:305-313`).
+  `tool_result` blocks **in history order**, none of them carrying `is_error`;
+  the interleaved case (only consecutive runs merge); and a history *ending* in
+  a tool run, the shape on the wire every time `act()` retries after a tool
+  error (`policy.py:305-313`).
 - Both consecutive-user-message sequences, asserted on the full `messages`
   array across a multi-turn trial via `_AnthropicScript`, not per-message.
 - `json.loads(arguments)` unparseable and parseable-but-non-object as separate
@@ -478,7 +524,10 @@ Parsing and terminal states:
   `stop_details: null` raises cleanly.
 - `max_tokens` raises naming `-P max_output_tokens=`, and a truncated response
   containing a partial `tool_use` raises rather than returning that call.
-- An unrecognized `stop_reason` raises naming it verbatim.
+- An unrecognized `stop_reason` raises naming it verbatim, with
+  `model_context_window_exceeded` and `pause_turn` as the two named cases (the
+  first is the live one motivating default-deny; the second is the resumable
+  reason a future server-tool PR must revisit).
 
 Errors and retries:
 
@@ -490,7 +539,9 @@ Errors and retries:
   `speed="fast"` gets no guidance.
 - `temperature` 4xx guidance.
 - 429 terminal message with `speed="fast"` (guided) and without it (unguided);
-  and 429-then-transport-error emitting no rate-limit guidance.
+  429-then-transport-error emitting no rate-limit guidance; and 429-then-5xx
+  likewise, which catches a `last_status` set only on 429 rather than on every
+  response.
 - Retry/fail-fast parity with `ChatClient`, plus `close()`.
 
 Policy wiring:
@@ -514,9 +565,10 @@ Policy wiring:
 - Add a "Fast mode on Claude" section beside "Reasoning effort on OpenAI
   models" (starts line 124): the `anthropic/<id>` model form, the
   Claude-API-only caveat, supported models, the keep-effort-at-`high`-or-below
-  note, and cost described as roughly double the standard output price with a
-  link to Anthropic's pricing page. No figures: no README here carries a price,
-  and a stale one would ship to PyPI on every release.
+  note, and cost described as roughly double the standard price (it is double
+  on both input and output) with a link to Anthropic's pricing page. No
+  figures: no README here carries a price, and a stale one would ship to PyPI
+  on every release.
 
 Repo writing style applies (CLAUDE.md "Writing style"): no em dashes in prose,
 bold only for `**term:**` lead-ins, no decorative emoji.
@@ -550,6 +602,12 @@ will not survive it.
 - `retry-after`-aware backoff. Correct, but it needs a parse rule (delta-seconds
   vs HTTP-date), a status scope, and a sleep-duration assertion pattern this
   suite does not have.
+- Adding a field to `Provider`. The wire is expressible with the three it
+  already has, and provenance does not belong on a value object.
+- Server-side refusal `fallbacks`. This wire's target set carries elevated
+  safety classifiers, so the question will come up, but the answer is the same
+  one that rules out 429 auto-downgrade: silently serving from a different
+  model produces an eval log that no longer describes what ran.
 - Per-wire `effort` validation, and with it 0022's `effort=max` hole. Separate
   concern, separate PR.
 - Adaptive-thinking display (`thinking: {"display": "summarized"}`) and thinking
