@@ -144,8 +144,8 @@ The model id keeps the `anthropic/` prefix on this wire, the same as every
 other model string here. Only Anthropic's own endpoint serves `/v1/messages`,
 so anything that resolves elsewhere is refused up front with the fix named: a
 bare `-P model=claude-opus-5`, another provider's prefix such as `openai/`, or
-an OpenRouter `:variant` suffix. Pass `-P base_url=` to point at a gateway that
-serves the endpoint yourself.
+an OpenRouter `:variant` suffix. Pass `-P base_url=...` to point at a gateway
+that serves the endpoint yourself.
 
 Fast mode costs roughly double the standard price on both input and output
 (see [Anthropic's pricing](https://www.anthropic.com/pricing)), and it draws on

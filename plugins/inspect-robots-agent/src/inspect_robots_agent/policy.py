@@ -181,14 +181,13 @@ class LLMAgentPolicy(PolicyBase):
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
         # it otherwise defaults to OPENROUTER_API_KEY and would send an
-        # OpenRouter key as x-api-key.
-        # Both base_url tests here match resolve_provider's own truthiness
-        # check, because `-P base_url=` parses to "" and it ignores that.
-        # Only the guard below depends on it behaviorally; here the spelling
-        # is for consistency, since resolve_provider reads api_key_env only
-        # when base_url is truthy anyway.
+        # OpenRouter key as x-api-key to a third-party gateway.
+        # Every test here matches resolve_provider's own truthiness checks
+        # (`if base_url:`, `api_key_env or _OPENROUTER_KEY`), because `-P x=`
+        # parses to "": an `is None` spelling would let the empty form slip
+        # past and hand that gateway the wrong secret.
         effective_key_env = api_key_env
-        if wire == "anthropic" and base_url and api_key_env is None:
+        if wire == "anthropic" and base_url and not api_key_env:
             effective_key_env = "ANTHROPIC_API_KEY"
         requested_model = model or environ.get(ENV_MODEL)
         provider = resolve_provider(
@@ -209,12 +208,17 @@ class LLMAgentPolicy(PolicyBase):
             # key: a bare id misses the direct-provider table and falls
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
             asked = requested_model or ""
-            if _has_openrouter_variant(asked):
+            stripped = asked.rpartition(":")[0] if _has_openrouter_variant(asked) else asked
+            if not stripped.removeprefix("anthropic/"):
+                # ':free', 'anthropic/', 'anthropic/:free': nothing usable is
+                # left once the suffix comes off, so echoing the remainder
+                # would name an empty id. Give a whole command instead.
+                fix = "fix: pass a full model id (-P model=anthropic/claude-opus-5)"
+            elif stripped != asked:
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
                 # Repair the prefix in the same breath when both are wrong;
                 # advice that earns a second refusal is worse than none.
-                stripped = asked.rpartition(":")[0]
                 fix = f"fix: drop the OpenRouter variant suffix (-P model={stripped})"
                 if "/" not in stripped:
                     fix = (
@@ -223,9 +227,7 @@ class LLMAgentPolicy(PolicyBase):
                     )
             elif "/" not in asked:
                 fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
-            elif asked.removeprefix("anthropic/") not in ("", asked):
-                # Guarded against a bare 'anthropic/': naming the key there
-                # would again point at something the user already set.
+            elif asked.startswith("anthropic/"):
                 fix = "fix: set $ANTHROPIC_API_KEY"
             else:
                 # A non-Anthropic prefix can never resolve to the Messages

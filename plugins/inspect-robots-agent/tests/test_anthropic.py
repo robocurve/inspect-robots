@@ -804,7 +804,13 @@ def test_variant_suffix_is_told_to_drop_it_not_to_set_the_key() -> None:
 def test_bare_variant_id_is_fixed_in_one_step() -> None:
     # Both the prefix and the suffix are wrong; advice that fixes only one
     # earns a second refusal on the retry.
-    with pytest.raises(ConfigError, match=r"fix: use -P model=anthropic/claude-opus-5 "):
+    with pytest.raises(
+        ConfigError,
+        match=(
+            r"fix: use -P model=anthropic/claude-opus-5 "
+            r"\(the :variant suffix routes to OpenRouter\)"
+        ),
+    ):
         LLMAgentPolicy(
             model="claude-opus-5:free",
             wire="anthropic",
@@ -812,10 +818,43 @@ def test_bare_variant_id_is_fixed_in_one_step() -> None:
         )
 
 
-def test_empty_prefix_is_not_told_to_set_a_key_it_already_has() -> None:
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+def test_variant_strip_keeps_fine_tune_colons() -> None:
+    # Only the last segment is the variant; rpartition, not partition, or the
+    # advice would truncate the fine-tune id to 'anthropic/ft'.
+    with pytest.raises(ConfigError, match=r"-P model=anthropic/ft:gpt-4o-mini\b"):
         LLMAgentPolicy(
-            model="anthropic/",
+            model="ft:gpt-4o-mini:free",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_empty_api_key_env_does_not_send_the_openrouter_key_to_a_gateway() -> None:
+    # '-P api_key_env=' parses to '', which resolve_provider treats as unset
+    # and falls back to $OPENROUTER_API_KEY. An `is None` test here would hand
+    # a third-party gateway the OpenRouter secret.
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    policy = LLMAgentPolicy(
+        model="claude-opus-5",
+        wire="anthropic",
+        base_url="https://gw.example/v1",
+        api_key_env="",
+        transport=httpx.MockTransport(handler),
+        env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+    )
+
+    policy._client.complete([_USER], [])
+
+    assert seen[0].headers["x-api-key"] == "sk-ant"
+
+
+@pytest.mark.parametrize("model", ["anthropic/", ":free", "anthropic/:free"])
+def test_ids_with_nothing_usable_left_get_a_whole_command(model: str) -> None:
+    # Each of these strips to an empty id, where echoing the remainder would
+    # send the user in a circle (or name $ANTHROPIC_API_KEY, already set).
+    with pytest.raises(ConfigError, match=r"fix: pass a full model id"):
+        LLMAgentPolicy(
+            model=model,
             wire="anthropic",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
