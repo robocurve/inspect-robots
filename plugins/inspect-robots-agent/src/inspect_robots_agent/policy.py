@@ -144,6 +144,9 @@ class LLMAgentPolicy(PolicyBase):
         # Order matters from here down (plan 0026): wire is validated before
         # the params that are only legal on one wire, the api_key_env default
         # is applied before resolution, and the OpenRouter check after it.
+        # The new wire-gated checks raise ConfigError so the CLI renders them;
+        # the older ValueErrors above are inconsistent with that and tracked
+        # separately in #168, since converting them changes existing behavior.
         if wire not in _WIRE_FORMATS:
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
         if speed is not None and speed not in _SPEEDS:
@@ -164,7 +167,9 @@ class LLMAgentPolicy(PolicyBase):
                     "-P max_output_tokens="
                 )
         if max_output_tokens is not None and (
-            not isinstance(max_output_tokens, int) or max_output_tokens < 1
+            isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or max_output_tokens < 1
         ):
             raise ValueError("max_output_tokens must be an int >= 1")
 
@@ -185,11 +190,14 @@ class LLMAgentPolicy(PolicyBase):
             # The likeliest cause is a missing model prefix, not a missing
             # key: a bare id misses the direct-provider table and falls
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
-            fix = (
-                f"fix: prefix the model id (-P model=anthropic/{provider.model})"
-                if "/" not in provider.model
-                else "fix: set $ANTHROPIC_API_KEY"
-            )
+            if "/" not in provider.model:
+                fix = f"fix: prefix the model id (-P model=anthropic/{provider.model})"
+            elif provider.model.startswith("anthropic/"):
+                fix = "fix: set $ANTHROPIC_API_KEY"
+            else:
+                # A non-Anthropic prefix (or an OpenRouter :variant suffix) can
+                # never resolve to the Messages API; no key helps.
+                fix = "fix: use an anthropic/ model id"
             raise ConfigError(
                 "wire='anthropic' needs a Messages API endpoint, but the model "
                 f"{provider.model!r} resolved to OpenRouter, which does not serve one.\n"

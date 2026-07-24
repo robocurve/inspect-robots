@@ -35,6 +35,9 @@ _CONTINUING_STOP_REASONS = frozenset({"end_turn", "tool_use", "stop_sequence"})
 # Retried alongside 5xx and transport errors, matching the Anthropic SDKs.
 _RETRYABLE_STATUSES = frozenset({408, 409, 429})
 
+_CONNECT_TIMEOUT_S = 10.0
+_MAX_READ_TIMEOUT_S = 600.0
+
 
 class AnthropicClient:
     """Blocking Messages-API client with thinking-block replay and bounded retry.
@@ -58,10 +61,14 @@ class AnthropicClient:
     ):
         self._provider = provider
         self._max_output_tokens = max_output_tokens
-        # ~8s per 1k output tokens, floored at the 120s the other clients
-        # use. A raised cap must not turn truncation into a silent stall.
+        # ~8s per 1k output tokens, floored at the 120s the other clients use
+        # and capped at 600s (the SDKs' own ceiling; past that, streaming is
+        # the real answer). A raised cap must not turn truncation into a
+        # silent stall, but it must not stretch connect timeouts either.
         resolved_timeout = (
-            timeout_s if timeout_s is not None else max(120.0, max_output_tokens / 125.0)
+            timeout_s
+            if timeout_s is not None
+            else min(_MAX_READ_TIMEOUT_S, max(120.0, max_output_tokens / 125.0))
         )
         self._speed = speed
         self._max_retries = max_retries
@@ -81,7 +88,7 @@ class AnthropicClient:
         self._http = httpx.Client(
             base_url=provider.base_url,
             headers=headers,
-            timeout=resolved_timeout,
+            timeout=httpx.Timeout(resolved_timeout, connect=_CONNECT_TIMEOUT_S),
             transport=transport,
         )
 
@@ -154,7 +161,9 @@ class AnthropicClient:
                 time.sleep(self._backoff_s * 2**attempt)
 
         guidance = ""
-        if last_status in _RETRYABLE_STATUSES and self._speed == "fast":
+        # 429 only: _RETRYABLE_STATUSES also covers 408/409, which are not
+        # rate limits and must not be told to drop fast mode.
+        if last_status == 429 and self._speed == "fast":
             guidance = (
                 "\nfix: fast mode has its own rate limit; retry later or drop "
                 "-P speed=fast to fall back to standard speed"
@@ -183,9 +192,8 @@ class AnthropicClient:
             )
         if "effort" in lowered:
             return (
-                "\nfix: this wire accepts -P effort= low, medium, or high "
-                "(not none or minimal; xhigh and max need a larger "
-                "-P max_output_tokens= than this client can stream)"
+                "\nfix: the Messages API accepts -P effort= low, medium, high, "
+                "xhigh, or max; none and minimal are OpenAI-only values"
             )
         return ""
 
@@ -323,7 +331,7 @@ def _translate_messages(
                 continue
             translated.append({"role": "assistant", "content": blocks})
             continue
-        if role not in ("user", "assistant"):
+        if role != "user":
             raise RuntimeError(f"unsupported message role {role!r}")
         translated.append({"role": role, "content": _translate_content(message["content"])})
 

@@ -481,7 +481,7 @@ def test_effort_4xx_names_the_accepted_values() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="output_config.effort: invalid value 'minimal'")
 
-    with pytest.raises(RuntimeError, match=r"fix: this wire accepts -P effort="):
+    with pytest.raises(RuntimeError, match=r"none and minimal are OpenAI-only values"):
         _client(handler).complete([_USER], [], reasoning_effort="minimal")
 
 
@@ -504,11 +504,23 @@ def test_system_content_must_be_a_string() -> None:
         _client(handler).complete(history, [])
 
 
-def test_unsupported_role_raises() -> None:
+@pytest.mark.parametrize("role", ["developer", "function"])
+def test_unsupported_role_raises(role: str) -> None:
     _, handler = _capture(_anthropic_response(_text("ok")))
 
-    with pytest.raises(RuntimeError, match="unsupported message role 'developer'"):
-        _client(handler).complete([{"role": "developer", "content": "x"}], [])
+    with pytest.raises(RuntimeError, match=f"unsupported message role {role!r}"):
+        _client(handler).complete([{"role": role, "content": "x"}], [])
+
+
+def test_assistant_role_is_not_rejected_by_the_role_guard() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    _client(handler).complete([_USER, {"role": "assistant", "content": "hi"}], [])
+
+    assert [m["role"] for m in json.loads(seen[0].content)["messages"]] == [
+        "user",
+        "assistant",
+    ]
 
 
 @pytest.mark.parametrize("status", [408, 409])
@@ -536,6 +548,11 @@ def test_timeout_scales_with_a_large_output_cap() -> None:
     assert small_cap._http.timeout.read == 120.0
     assert large_cap._http.timeout.read == pytest.approx(512.0)
     assert explicit._http.timeout.read == 30.0
+    # A big read budget must not stretch connect: an unroutable base_url
+    # should fail fast, not hold the whole read timeout on every retry.
+    assert large_cap._http.timeout.connect == 10.0
+    # And the read budget itself is capped rather than unbounded.
+    assert _client(handler, max_output_tokens=1_000_000)._http.timeout.read == 600.0
 
 
 def test_temperature_4xx_names_the_fix() -> None:
@@ -562,6 +579,17 @@ def test_exhausted_429_without_fast_mode_is_unguided() -> None:
         _client(handler).complete([_USER], [])
 
     assert "fix:" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("status", [408, 409])
+def test_exhausted_retryable_non_429_gets_no_rate_limit_guidance(status: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="request timeout")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _client(handler, speed="fast").complete([_USER], [])
+
+    assert "its own rate limit" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize("tail", ["transport", "server"])
@@ -694,6 +722,7 @@ def test_chat_wire_records_no_max_output_tokens() -> None:
         ({"wire": "anthropic", "speed": "turbo"}, "speed must be one of"),
         ({"wire": "anthropic", "max_output_tokens": 0}, "must be an int >= 1"),
         ({"wire": "anthropic", "max_output_tokens": 1e5}, "must be an int >= 1"),
+        ({"wire": "anthropic", "max_output_tokens": True}, "must be an int >= 1"),
         ({"wire": "antropic"}, "wire must be one of"),
     ],
 )
@@ -747,6 +776,15 @@ def test_explicit_base_url_suppresses_the_openrouter_guard() -> None:
     )
 
     assert policy.config.base_url == "http://gateway.test/v1"
+
+
+def test_non_anthropic_prefix_is_not_told_to_set_the_anthropic_key() -> None:
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+        LLMAgentPolicy(
+            model="meta-llama/llama-3",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
 
 
 def test_gateway_defaults_the_key_env_to_anthropic() -> None:
