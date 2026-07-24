@@ -60,7 +60,9 @@ All notable changes to this project are documented here. The format is based on
   model. The wire also carries `-P max_output_tokens=` (the Messages API
   requires an output cap), replays thinking blocks so multi-turn trials hold
   together, and turns refusals and truncated responses into errors that name
-  their own cause instead of looking like a missing tool call (#165).
+  their own cause instead of looking like a missing tool call. A model that
+  resolves to any endpoint other than Anthropic's own is refused up front
+  with the fix named, rather than 404ing on the first call (#165).
 - **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
   so reasoning effort works together with function tools on recent OpenAI
   models (Chat Completions rejects the combination, observed on

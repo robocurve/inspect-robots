@@ -801,20 +801,57 @@ def test_variant_suffix_is_told_to_drop_it_not_to_set_the_key() -> None:
         )
 
 
-def test_anthropic_prefix_without_a_key_is_still_told_to_set_it() -> None:
-    # The variant branch must not swallow the plain missing-key case.
-    with pytest.raises(ConfigError, match=r"fix: set \$ANTHROPIC_API_KEY"):
+def test_bare_variant_id_is_fixed_in_one_step() -> None:
+    # Both the prefix and the suffix are wrong; advice that fixes only one
+    # earns a second refusal on the retry.
+    with pytest.raises(ConfigError, match=r"fix: use -P model=anthropic/claude-opus-5 "):
+        LLMAgentPolicy(
+            model="claude-opus-5:free",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_empty_prefix_is_not_told_to_set_a_key_it_already_has() -> None:
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+        LLMAgentPolicy(
+            model="anthropic/",
+            wire="anthropic",
+            env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_empty_base_url_still_hits_the_guard() -> None:
+    # '-P base_url=' parses to '', which resolve_provider ignores. An `is None`
+    # test here would wave it through and POST /v1/messages to OpenRouter.
+    with pytest.raises(ConfigError, match=r"resolved to OpenRouter"):
         LLMAgentPolicy(
             model="anthropic/claude-opus-5",
             wire="anthropic",
+            base_url="",
             env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+
+def test_model_from_the_environment_resolves_like_the_argument() -> None:
+    with pytest.raises(ConfigError, match=r"fix: prefix the model id"):
+        LLMAgentPolicy(
+            wire="anthropic",
+            env={
+                "INSPECT_ROBOTS_MODEL": "claude-opus-5",
+                "ANTHROPIC_API_KEY": "sk-ant",
+                "OPENROUTER_API_KEY": "sk-or",
+            },
         )
 
 
 def test_another_direct_provider_is_refused_not_sent_to_its_endpoint() -> None:
     # With $OPENAI_API_KEY set this resolves straight to api.openai.com, which
     # would have taken a /v1/messages POST and 404ed at the first LLM call.
-    with pytest.raises(ConfigError, match=r"resolved to https://api\.openai\.com/v1"):
+    # The message names the id the user typed, not the prefix-stripped one.
+    with pytest.raises(
+        ConfigError, match=r"'openai/gpt-5\.6' resolved to https://api\.openai\.com/v1"
+    ):
         LLMAgentPolicy(
             model="openai/gpt-5.6",
             wire="anthropic",

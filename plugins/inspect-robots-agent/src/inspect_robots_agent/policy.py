@@ -182,8 +182,13 @@ class LLMAgentPolicy(PolicyBase):
         # resolve_provider reads api_key_env only when base_url is set, where
         # it otherwise defaults to OPENROUTER_API_KEY and would send an
         # OpenRouter key as x-api-key.
+        # Both base_url tests here match resolve_provider's own truthiness
+        # check, because `-P base_url=` parses to "" and it ignores that.
+        # Only the guard below depends on it behaviorally; here the spelling
+        # is for consistency, since resolve_provider reads api_key_env only
+        # when base_url is truthy anyway.
         effective_key_env = api_key_env
-        if wire == "anthropic" and base_url is not None and api_key_env is None:
+        if wire == "anthropic" and base_url and api_key_env is None:
             effective_key_env = "ANTHROPIC_API_KEY"
         requested_model = model or environ.get(ENV_MODEL)
         provider = resolve_provider(
@@ -192,7 +197,7 @@ class LLMAgentPolicy(PolicyBase):
             api_key_env=effective_key_env,
             env=environ,
         )
-        if wire == "anthropic" and base_url is None and provider.base_url != _ANTHROPIC_BASE:
+        if wire == "anthropic" and not base_url and provider.base_url != _ANTHROPIC_BASE:
             # Only Anthropic's own endpoint serves /v1/messages. Resolution can
             # land elsewhere two ways: the OpenRouter fallback, or another
             # direct provider whose key happens to be set (openai/* with
@@ -207,12 +212,20 @@ class LLMAgentPolicy(PolicyBase):
             if _has_openrouter_variant(asked):
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
-                fix = (
-                    f"fix: drop the OpenRouter variant suffix (-P model={asked.rpartition(':')[0]})"
-                )
+                # Repair the prefix in the same breath when both are wrong;
+                # advice that earns a second refusal is worse than none.
+                stripped = asked.rpartition(":")[0]
+                fix = f"fix: drop the OpenRouter variant suffix (-P model={stripped})"
+                if "/" not in stripped:
+                    fix = (
+                        f"fix: use -P model=anthropic/{stripped} "
+                        "(the :variant suffix routes to OpenRouter)"
+                    )
             elif "/" not in asked:
                 fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
-            elif asked.startswith("anthropic/"):
+            elif asked.removeprefix("anthropic/") not in ("", asked):
+                # Guarded against a bare 'anthropic/': naming the key there
+                # would again point at something the user already set.
                 fix = "fix: set $ANTHROPIC_API_KEY"
             else:
                 # A non-Anthropic prefix can never resolve to the Messages
