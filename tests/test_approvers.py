@@ -13,7 +13,7 @@ import pytest
 
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
 from inspect_robots.errors import SafetyAbort
-from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.spaces import ActionSemantics, Box, RotationRepr
 from inspect_robots.types import Action
 
 
@@ -44,12 +44,51 @@ def test_refuses_missing_semantics() -> None:
         DeltaLimitApprover(Box(shape=(2,), low=np.zeros(2), high=np.ones(2)))
 
 
-def test_refuses_pose_mode_with_unaverageable_rotation() -> None:
+def test_refuses_absolute_pose_mode_with_unaverageable_rotation() -> None:
+    # Absolute euler/quat orientations have wraparound + axis coupling, so
+    # per-dim clamping is unsound and refused.
     space = Box(
         shape=(7,),
         low=np.full(7, -1.0),
         high=np.full(7, 1.0),
         semantics=ActionSemantics("eef_abs_pose", rotation_repr="quat_wxyz"),
+    )
+    with pytest.raises(ValueError, match="rotation_repr"):
+        DeltaLimitApprover(space)
+
+
+@pytest.mark.parametrize("rotation_repr", ["euler_xyz", "axis_angle"])
+def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -> None:
+    # eef_delta_pose carries small rotation *deltas*, not absolute orientations.
+    # euler_xyz/axis_angle deltas have a zero-vector no-op, so they clamp per
+    # dimension like a bounded displacement (#143). Quaternion deltas are the
+    # exception — see test_refuses_displacement_pose_mode_with_quat_rotation.
+    # BridgeData V2 shape: 3 xyz + 3 euler deltas + 1 gripper.
+    space = Box(
+        shape=(7,),
+        low=np.full(7, -0.1),
+        high=np.full(7, 0.1),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
+    )
+    approver = DeltaLimitApprover(space, max_delta=0.05)
+    # A large rotation-delta dim (dpitch, index 4) clamps to the ±max_delta box.
+    out = approver.review(Action(data=np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])), {})
+    assert np.isclose(out.data[4], 0.05)
+    assert out.meta.get("delta_clamped") is True
+
+
+@pytest.mark.parametrize("rotation_repr", ["quat_wxyz", "quat_xyzw"])
+def test_refuses_displacement_pose_mode_with_quat_rotation(rotation_repr: RotationRepr) -> None:
+    # A quaternion delta's identity is (1, 0, 0, 0), not the zero vector:
+    # clamping it per dimension toward a symmetric ±max_delta box drags it away
+    # from identity, and downstream re-normalization can amplify the rotation
+    # instead of limiting it — same failure class as an absolute quat.
+    # 3 xyz + 4 quat + 1 gripper = 8 dims.
+    space = Box(
+        shape=(8,),
+        low=np.full(8, -1.0),
+        high=np.full(8, 1.0),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
     )
     with pytest.raises(ValueError, match="rotation_repr"):
         DeltaLimitApprover(space)

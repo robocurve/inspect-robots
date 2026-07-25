@@ -277,6 +277,7 @@ def test_absolute_mode_needs_exactly_one_aligned_state_field() -> None:
 
 
 def test_unlimitable_rotation_repr_is_an_error() -> None:
+    # Absolute pose modes still reject unclampable rotation reps.
     info = _info(
         space=Box(
             shape=(7,),
@@ -292,6 +293,25 @@ def test_unlimitable_rotation_repr_is_an_error() -> None:
     )
     codes = _codes(info)
     assert codes["guardrails"] == "error"
+
+
+def test_delta_pose_euler_rotation_deltas_are_guardrail_conformant() -> None:
+    # eef_delta_pose carries rotation deltas, which clamp per dimension, so a
+    # euler-delta embodiment (e.g. BridgeData V2's 7-D xyz+euler deltas) is
+    # guardrail-conformant, not rejected (#143).
+    info = _info(
+        space=Box(
+            shape=(7,),
+            low=np.full(7, -0.1),
+            high=np.full(7, 0.1),
+            semantics=ActionSemantics(
+                "eef_delta_pose",
+                rotation_repr="euler_xyz",
+                dim_labels=("dx", "dy", "dz", "droll", "dpitch", "dyaw", "dgrip"),
+            ),
+        ),
+    )
+    assert "guardrails" not in _codes(info)
 
 
 def test_missing_control_hz_is_a_warning() -> None:
