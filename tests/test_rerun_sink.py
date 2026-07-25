@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import socket
 import subprocess
 import sys
@@ -32,7 +31,12 @@ from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 
-_RERUN_INSTALLED = importlib.util.find_spec("rerun") is not None
+try:
+    import rerun  # noqa: F401
+
+    _RERUN_INSTALLED = True
+except ImportError:
+    _RERUN_INSTALLED = False
 
 
 def _task() -> Task:
@@ -1032,7 +1036,10 @@ def test_real_rerun_accepts_the_transcript_document_call() -> None:
 
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     """The real SDK atexit path is bounded after a connected peer stops reading."""
-    rr = pytest.importorskip("rerun")
+    if not _RERUN_INSTALLED:
+        pytest.skip("requires rerun-sdk")
+    import rerun as rr
+
     if not hasattr(rr, "connect_grpc"):
         pytest.skip("pre-gRPC rerun-sdk cannot run the connect-mode wedge scenario")
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

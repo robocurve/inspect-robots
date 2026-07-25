@@ -2519,3 +2519,20 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     )
 
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
+
+
+def test_non_string_param_coercion() -> None:
+    policy = LLMAgentPolicy(
+        model=42,  # type: ignore[arg-type]
+        base_url=True,  # type: ignore[arg-type]
+        api_key_env=False,  # type: ignore[arg-type]
+        effort="minimal",
+        speed="fast",
+        wire="anthropic",
+        env={"False": "test-key"},
+    )
+    assert policy.config.model == "42"
+    assert policy.config.base_url == "True"
+    assert policy.config.api_key_env == ""
+    assert policy.config.effort == "minimal"
+    assert policy.config.speed == "fast"

@@ -256,6 +256,17 @@ class LLMAgentPolicy(PolicyBase):
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
     ) -> None:
+        if model is not None:
+            model = str(model) if model else ""
+        if base_url is not None:
+            base_url = str(base_url) if base_url else ""
+        if api_key_env is not None:
+            api_key_env = str(api_key_env) if api_key_env else ""
+        if effort is not None:
+            effort = str(effort) if effort else ""
+        if speed is not None:
+            speed = str(speed) if speed else ""
+
         prior_learnings_path: str | None = None
         prior_learnings_text: str | None = None
         prior_learnings_sha256: str | None = None
