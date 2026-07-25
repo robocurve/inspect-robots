@@ -23,6 +23,7 @@ import httpx
 import numpy as np
 
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
@@ -30,17 +31,33 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
-from inspect_robots_agent._llm import ENV_MODEL, ChatClient, ToolCall, resolve_provider
+from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
+from inspect_robots_agent._llm import (
+    _DIRECT_PROVIDERS,
+    _OPENROUTER_BASE,
+    ENV_MODEL,
+    ChatClient,
+    ToolCall,
+    _has_openrouter_variant,
+    resolve_provider,
+)
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import Toolset, build_toolset
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
+#: The only endpoint that serves /v1/messages without an explicit base_url.
+_ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
+
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
+# The native wire reuses the set as output_config.effort, where "none" and
+# "minimal" are rejected and xhigh/max need a cap this client cannot stream;
+# both surface as a guided 400 rather than a per-wire allowlist (plan 0026).
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
+_SPEEDS = frozenset({"fast"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -85,6 +102,10 @@ class AgentPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     wire: str = "chat"
+    speed: str | None = None
+    #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
+    #: wires, where nothing constrained the output.
+    max_output_tokens: int | None = None
     max_llm_calls: int = 100
     effort: str | None = "low"
     max_speed_frac: float = 0.1
@@ -106,6 +127,8 @@ class LLMAgentPolicy(PolicyBase):
         base_url: str | None = None,
         api_key_env: str | None = None,
         wire: str = "chat",
+        speed: str | None = None,
+        max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
         effort: str | None = "low",
@@ -116,13 +139,6 @@ class LLMAgentPolicy(PolicyBase):
     ):
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ValueError("max_speed_frac must be finite and > 0")
-        environ = dict(os.environ) if env is None else env
-        provider = resolve_provider(
-            model=model or environ.get(ENV_MODEL),
-            base_url=base_url,
-            api_key_env=api_key_env,
-            env=environ,
-        )
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be >= 1")
         if effort is not None and effort not in _EFFORT_LEVELS:
@@ -130,12 +146,123 @@ class LLMAgentPolicy(PolicyBase):
                 f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
                 f"the field, got {effort!r}"
             )
+        # Order matters from here down (plan 0026): wire is validated before
+        # the params that are only legal on one wire, the api_key_env default
+        # is applied before resolution, and the OpenRouter check after it.
+        # The new wire-gated checks raise ConfigError so the CLI renders them;
+        # the older ValueErrors above are inconsistent with that and tracked
+        # separately in #168, since converting them changes existing behavior.
         if wire not in _WIRE_FORMATS:
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
-        if wire == "responses":
-            self._client: ChatClient | ResponsesClient = ResponsesClient(
-                provider, transport=transport
+        if speed is not None and speed not in _SPEEDS:
+            raise ValueError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+        if wire != "anthropic":
+            # A dropped speed would bill at standard rates while the user
+            # believes fast mode is on; a dropped cap is a limit that never
+            # applied. Both fail loudly rather than silently.
+            if speed is not None:
+                raise ConfigError(
+                    f"speed is only supported on wire='anthropic', got wire={wire!r}.\n"
+                    "fix: pass -P wire=anthropic, or drop -P speed="
+                )
+            if max_output_tokens is not None:
+                raise ConfigError(
+                    "max_output_tokens is only supported on wire='anthropic', got "
+                    f"wire={wire!r}.\nfix: pass -P wire=anthropic, or drop "
+                    "-P max_output_tokens="
+                )
+        if max_output_tokens is not None and (
+            isinstance(max_output_tokens, bool)
+            or not isinstance(max_output_tokens, int)
+            or max_output_tokens < 1
+        ):
+            raise ValueError("max_output_tokens must be an int >= 1")
+
+        environ = dict(os.environ) if env is None else env
+        # resolve_provider reads api_key_env only when base_url is set, where
+        # it otherwise defaults to OPENROUTER_API_KEY and would send an
+        # OpenRouter key as x-api-key to a third-party gateway.
+        # `not api_key_env` matches resolve_provider's own `api_key_env or
+        # _OPENROUTER_KEY`, because `-P api_key_env=` parses to "": an
+        # `is None` spelling here would let the empty form slip past and hand
+        # that gateway the wrong secret. The base_url test is truthy for
+        # consistency only, since resolve_provider ignores api_key_env when
+        # base_url is falsy; it is load-bearing in the guard below.
+        effective_key_env = api_key_env
+        if wire == "anthropic" and base_url and not api_key_env:
+            effective_key_env = "ANTHROPIC_API_KEY"
+        requested_model = model or environ.get(ENV_MODEL)
+        provider = resolve_provider(
+            model=requested_model,
+            base_url=base_url,
+            api_key_env=effective_key_env,
+            env=environ,
+        )
+        if wire == "anthropic" and not base_url and provider.base_url != _ANTHROPIC_BASE:
+            # Only Anthropic's own endpoint serves /v1/messages. Resolution can
+            # land elsewhere two ways: the OpenRouter fallback, or another
+            # direct provider whose key happens to be set (openai/* with
+            # $OPENAI_API_KEY). An explicit -P base_url= is the user's call.
+            # Branch on the requested id, not provider.model: a direct
+            # provider strips its own prefix, so the resolved id would read
+            # as bare and draw a nonsense 'anthropic/gpt-5.6' suggestion.
+            # The likeliest cause is a missing model prefix, not a missing
+            # key: a bare id misses the direct-provider table and falls
+            # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
+            asked = requested_model or ""
+            stripped = asked.rpartition(":")[0] if _has_openrouter_variant(asked) else asked
+            if not stripped.removeprefix("anthropic/"):
+                # ':free', 'anthropic/', 'anthropic/:free': nothing usable is
+                # left once the suffix comes off, so echoing the remainder
+                # would name an empty id. Give a whole command instead.
+                fix = "fix: pass a full model id (-P model=anthropic/claude-opus-5)"
+            elif "/" in stripped and not stripped.startswith("anthropic/"):
+                # A foreign prefix can never resolve to the Messages API, so
+                # this is terminal whatever the suffix says. Decided before
+                # the variant branch, which would otherwise spend a refusal
+                # removing a suffix that was never the real problem.
+                fix = "fix: use an anthropic/ model id"
+            elif stripped != asked:
+                # A :variant id routes here whatever keys are set, so naming
+                # the key would send the user to fix something already right.
+                # Repair the prefix in the same breath when both are wrong;
+                # advice that earns a second refusal is worse than none.
+                fix = f"fix: drop the OpenRouter variant suffix (-P model={stripped})"
+                if "/" not in stripped:
+                    fix = (
+                        f"fix: use -P model=anthropic/{stripped} "
+                        "(the :variant suffix routes to OpenRouter)"
+                    )
+            elif "/" not in asked:
+                fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
+            else:
+                # Anthropic-prefixed with a usable body: only the key is left.
+                # Unreachable with the key set, since such an id resolves to
+                # Anthropic's own endpoint and never reaches this guard.
+                fix = "fix: set $ANTHROPIC_API_KEY"
+            where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
+            raise ConfigError(
+                "wire='anthropic' needs a Messages API endpoint, but the model "
+                f"{asked!r} resolved to {where}, which does not serve one.\n"
+                f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
             )
+
+        resolved_max_output_tokens = (
+            (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
+            if wire == "anthropic"
+            else None
+        )
+        self._client: ChatClient | ResponsesClient | AnthropicClient
+        if wire == "anthropic":
+            assert resolved_max_output_tokens is not None
+            self._client = AnthropicClient(
+                provider,
+                max_output_tokens=resolved_max_output_tokens,
+                speed=speed,
+                transport=transport,
+            )
+        elif wire == "responses":
+            self._client = ResponsesClient(provider, transport=transport)
         else:
             self._client = ChatClient(provider, transport=transport)
         self._max_llm_calls = max_llm_calls
@@ -152,6 +279,8 @@ class LLMAgentPolicy(PolicyBase):
             base_url=provider.base_url,
             api_key_env=api_key_env,
             wire=wire,
+            speed=speed,
+            max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
             effort=effort,
             max_speed_frac=max_speed_frac,

@@ -3,7 +3,9 @@
 An LLM behind any OpenAI-compatible API (OpenRouter, OpenAI, local
 vLLM/Ollama, Anthropic's compat endpoint) drives whatever embodiment it is
 paired with: each tool call becomes one smooth, approver-checked action
-chunk. Registered as the policy ``agent``::
+chunk. ``-P wire=anthropic`` swaps the OpenAI-compat shim for Anthropic's
+native Messages API, which is what fast mode needs. Registered as the policy
+``agent``::
 
     inspect-robots "pick up the cube" --policy agent \
         -P model=anthropic/claude-fable-5 --embodiment cubepick
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 from importlib.metadata import version
 
+from inspect_robots_agent._anthropic import AnthropicClient
 from inspect_robots_agent._llm import (
     ENV_MODEL,
     AssistantMessage,
@@ -37,6 +40,7 @@ from inspect_robots_agent.policy import AgentPolicyConfig, LLMAgentPolicy, agent
 __all__ = [
     "ENV_MODEL",
     "AgentPolicyConfig",
+    "AnthropicClient",
     "AssistantMessage",
     "ChatClient",
     "LLMAgentPolicy",

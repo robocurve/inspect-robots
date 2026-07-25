@@ -214,6 +214,49 @@ task = Task(
 print(log.status, log.results.metrics)   # success {'success_at_end': 1.0}
 ```
 
+## Supported embodiments
+
+An embodiment is registered through an entry point, so installing its package is
+all it takes to make it appear in `inspect-robots list` and resolve under
+`--embodiment`. Each rig package ships both halves of the eval: the embodiment
+and the policy clients that speak the same action contract, so the pair passes
+the compatibility check without extra configuration.
+
+### Real robots
+
+| Robot | `--embodiment` | Package | Action contract | Policies in the same package |
+|---|---|---|---|---|
+| [I2RT YAM](https://i2rt.com/products/yam-6-dof-arm) bimanual arms | `yam_arms` | [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam) | 14-D `joint_pos` (2 × [6 joints + gripper]) | `molmoact2`, `gr00t` |
+| [Franka](https://franka.de/) FR3 and Panda | `franka` | [inspect-robots-franka](https://github.com/robocurve/inspect-robots-franka) | 8-D `joint_pos` (7 joints + gripper) | `openpi` |
+| [AgiBot](https://www.agibot.com/) A2 Ultra dual arms | `a2_arms` | [inspect-robots-agibot-a2](https://github.com/robocurve/inspect-robots-agibot-a2) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `go1`, `openpi` |
+| [Unitree G1](https://www.unitree.com/g1) arms, standing | `g1_arms` | [inspect-robots-unitree-g1](https://github.com/robocurve/inspect-robots-unitree-g1) | 16-D `joint_pos` (2 × [7 joints + gripper]) | `gr00t` |
+| [SO-ARM](https://github.com/TheRobotStudio/SO-ARM100) followers (SO-100 / SO-101) | `so_arm` | [inspect-robots-so101](https://github.com/robocurve/inspect-robots-so101) | 6-D `joint_pos` | `lerobot` |
+| WidowX 250S | `widowx` | [inspect-robots-widowx](https://github.com/robocurve/inspect-robots-widowx) | 7-D `eef_delta_pose` | `openvla`, `openpi` |
+| Any ROS 1 or ROS 2 arm through rosbridge | `ros` | [inspect-robots-ros](plugins/inspect-robots-ros/) | `joint_pos`, width set by the joints you list | — |
+
+Trossen discontinued the WidowX 250S in July 2025. That adapter supports
+existing 250S rigs; the successor WidowX AI uses a different stack.
+
+### Simulation and mock
+
+| World | `--embodiment` | Package | Action contract |
+|---|---|---|---|
+| [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) | `isaacsim` | [inspect-robots-isaacsim](plugins/inspect-robots-isaacsim/) | `joint_pos`, arm joints of the loaded task plus a gripper |
+| `CubePick`, no hardware or GPU | `cubepick` | built into `inspect-robots` | 2-D `eef_delta_pos` |
+
+The `ros` embodiment is the general escape hatch: any arm that publishes
+standard joint and compressed-image topics works without a dedicated package.
+The rig packages exist for robots whose SDKs are not ROS, or where the safety
+envelope, camera wiring, and reset behavior are worth encoding once.
+
+Policies are swappable independently of all of this. `agent` (a frontier LLM)
+and `xpolicylab` (40+ served VLAs) adapt to whichever embodiment they are paired
+with; `capx` (code-as-policy) needs a joint-space one. A mismatch is caught by
+the compatibility check before anything moves, not mid-rollout.
+
+To write an adapter for a robot that is not listed, see
+[Authoring an embodiment adapter](https://inspectrobots.org/guide/adapters/).
+
 ## Why Inspect Robots
 
 - **Real-world first.** Interfaces assume real-robot reality: human-in-the-loop
