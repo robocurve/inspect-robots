@@ -65,6 +65,18 @@ All notable changes to this project are documented here. The format is based on
   are stripped from the transcript to save space, as they are already
   recorded in the frame store. The relative path to the transcript is
   stored in the trial's metadata for easy post-hoc analysis (#40).
+- **Agent plugin:** `-P wire=anthropic` selects Anthropic's native Messages
+  API instead of its OpenAI-compat endpoint, which is the only way to reach
+  fast mode: `-P speed=fast` runs Claude Opus 5 and Opus 4.8 at up to 2.5x
+  higher output tokens per second, at roughly double the standard price. Robot
+  control is latency-sensitive, so the arm spends less time waiting on the
+  model. The wire also carries `-P max_output_tokens=` (the Messages API
+  requires an output cap), replays thinking blocks so multi-turn trials hold
+  together, and turns refusals and truncated responses into errors that name
+  their own cause instead of looking like a missing tool call. Absent an
+  explicit `-P base_url=...`, a model that resolves to any endpoint other than
+  Anthropic's own is refused up front with the fix named, rather than 404ing
+  on the first call (#165).
 - **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
   so reasoning effort works together with function tools on recent OpenAI
   models (Chat Completions rejects the combination, observed on
@@ -129,6 +141,17 @@ All notable changes to this project are documented here. The format is based on
   catch the `ConfigError` raised by `Task`'s epoch validation and surface it
   through the existing `_resolve_or_exit` pattern, matching how invalid
   constructor kwargs are handled for config-file components (#47).
+- **`DeltaLimitApprover` no longer rejects displacement pose modes whose
+  rotation deltas are safe to clamp per dimension** (#143). The per-dimension
+  rotation-repr refusal now fires for absolute pose modes (`eef_abs_pose`,
+  where clamping an absolute orientation has wraparound and axis-coupling
+  problems) and, separately, for quaternion deltas in displacement pose modes
+  (`eef_delta_pose` + `quat_wxyz`/`quat_xyzw`, whose identity is not the zero
+  vector, so per-dimension clamping distorts the rotation instead of limiting
+  it). Euler and axis-angle deltas have no such problem and clamp fine, so an
+  euler-delta embodiment (e.g. BridgeData V2's 7-D xyz+euler deltas) is now
+  guardrail-ready: `doctor` reports it conformant, and CLI runs keep delta
+  limiting instead of silently degrading to clamp-only.
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the
