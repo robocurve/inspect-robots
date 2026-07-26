@@ -94,8 +94,14 @@ unknown-name error listing the names actually present:
 - `note` missing or blank → structured error, worded like the move tools'
 - the observation carries no images at all → error saying so
 
-An omitted `cameras` is resolved by the **policy**, not the toolset, to the
-cameras of the current observation that have not been revealed yet (§3d).
+An omitted `cameras` is resolved by the **policy**, not the toolset. On the
+immediate path it resolves against the current observation's revealed set
+(§3d). On the queued path it is stored verbatim — `None` for the omitted form,
+the named tuple otherwise — with **no subtraction at queue time**, and is
+resolved at delivery against the arriving observation, whose revealed set is
+empty (§3e). Subtracting at queue time would reject exactly the flow this
+feature exists for: look at observation *N*, then chain a capture onto a motion
+in the same observation, whose frames belong to *N+1*.
 
 `build_toolset` refuses `on_demand` at bind time when
 `observation_space.cameras` is empty, with a message naming the fix (drop
@@ -103,13 +109,19 @@ cameras of the current observation that have not been revealed yet (§3d).
 other unsupported configuration in this module, and an embodiment that serves
 frames without declaring them is already outside the compatibility contract.
 
-`take_pic` yields neither a chunk nor an error. `ToolResult` gains two fields:
+`take_pic` yields neither a chunk nor an error. `ToolResult` becomes
+`@dataclass(frozen=True, eq=False)` and gains two fields:
 
 - `capture: tuple[str, ...] | None` — resolved camera names, or `None` when
   `cameras` was omitted, which the policy then resolves itself
 - `target: npt.NDArray[np.float64] | None` — the clipped absolute target vector
   a successful `_move_absolute` computed (§3e). `None` for displacement modes,
   stops, and captures.
+
+`eq=False` is not optional: the default `eq=True` on a frozen dataclass
+generates `__eq__` and `__hash__` over the field tuple, and a NumPy field makes
+both raise. `types.py:7-9` documents the same convention for the core's
+array-carrying dataclasses.
 
 `ToolResult`'s class docstring must stop claiming that exactly one of
 `chunk`/`error` is set. The two `assert result.chunk is not None` sites
@@ -118,10 +130,20 @@ that produced a chunk, so `mypy --strict` still follows the invariant where it
 holds.
 
 `Toolset` also gains `residual(target, observation) -> tuple[str, float] | None`
-returning the dimension label and magnitude of the largest absolute difference
-between `target` and the observation's proprioceptive state. It lives on the
-toolset because the toolset owns `_state_key` and `_labels`; it returns `None`
-when there is no state key or the shape does not match.
+(with a `D102` docstring) returning the dimension label and magnitude of the
+largest absolute difference between `target` and the observation's
+proprioceptive state. It lives on the toolset because the toolset owns
+`_state_key` and `_labels`.
+
+It must never raise, because it runs on the delivery path where §3e forbids
+killing a trial over a degraded observation. It returns `None` when any of
+these hold: `self._state_key is None`; the key is absent from
+`observation.state`; the value does not coerce to a float array; its shape does
+not match `len(self._labels)`; or any element of `target - state` is
+non-finite. `_current_state` is not reusable here — it indexes
+`observation.state[...]` directly and would raise `KeyError` on a dropped
+field, which `rollout.py:225` turns into a `PolicyError`. A NaN state would
+otherwise print `nan on <first label>` as if it were a measurement.
 
 ### 3c. The call walk
 
@@ -134,30 +156,46 @@ results the moment any non-tool message arrives. Slipping an image message
 between two tool results is a 400, not a style question.
 
 The walk collects results for every call and only then decides what `act()`
-does. Let *chunked* mean "some earlier call in this turn produced a chunk".
+does. It is a two-state machine, not a list of cases. The state is *open* until
+some call produces a chunk or an immediate capture, and *closed* after.
 
-1. Not chunked, `take_pic` → *immediate* capture (§3d). It short-circuits: every
-   remaining call is answered `ignored: one tool call per turn` and no motion
-   executes. The model asked to look before acting, so it re-decides with the
-   frames in hand rather than executing a motion it chose blind.
-2. Not chunked, a move / `done` / `give_up` → executed as today; the walk
-   continues so the remaining ids get answered.
-3. Chunked, `take_pic` → *queued* (§3e), answered `queued: frames arrive with
-   the next observation, once the motion has finished playing`. Only one capture
-   is queued per turn; a second is answered `ignored: one tool call per turn`.
-   After `done` or `give_up` there is no next observation, so a queued capture
-   there is answered `ignored: the trial ends with this call`.
-4. Anything else, chunked or not, is answered `ignored: one tool call per turn`
-   — the string used today.
-5. An error is answered with the error text. **If a chunk was already produced,
-   the error is reported in its own tool result and nothing else happens: the
-   motion is not cancelled, no capture is queued, `failures` is untouched, and
-   `act()` still returns the chunk.** Discarding the chunk there would leave the
-   move's own tool result (`executing move_joints over 12 steps`) in the
-   transcript describing a motion that never reached the embodiment. If no
-   chunk has been produced, the error ends the walk as today: remaining calls
-   are answered `ignored: one tool call per turn`, `failures` increments, and
-   the loop asks for a new turn.
+**While open**, each call is dispatched normally:
+
+- an on-demand `take_pic` becomes an *immediate* capture (§3d) and closes the
+  walk. The model asked to look before acting, so it re-decides with the frames
+  in hand rather than executing a motion it chose blind.
+- every other call — including an unknown tool name, and including `take_pic`
+  in `always` mode — goes to `toolset.execute` exactly as today. A chunk closes
+  the walk. An error is answered with its text, increments `failures`, and
+  closes the walk with no chunk.
+
+**Once closed**, no further call executes:
+
+- an on-demand `take_pic` is *queued* (§3e), answered `queued: frames arrive
+  with the next observation, once the motion has finished playing`. Only one
+  capture is queued per turn; a second is answered `ignored: one tool call per
+  turn`. When the chunk that closed the walk was a stop there is no next
+  observation, so the capture is answered `ignored: the trial ends with this
+  call` instead. The policy recognises a stop by reading
+  `chunk.actions[0].meta.get("request_stop")`, which `_stop` already sets
+  (`_tools.py:216-219`), rather than forking the `("done", "give_up")` literal
+  out of `_tools.py:200`.
+- everything else is answered `ignored: one tool call per turn`, the string
+  used today.
+
+Nothing after a chunk can cancel it. An error would have had to come from a
+call that never ran, and discarding the chunk would leave the move's own tool
+result (`executing move_joints over 12 steps`) in the transcript describing a
+motion that never reached the embodiment.
+
+**After the walk**, `act()` returns the chunk if one was produced. Otherwise it
+continues the `while True` loop for another LLM turn — the same path a
+no-tool-call turn already takes. That covers an immediate capture, a
+revealed-set rejection, an errored call, and a turn of nothing but `ignored`.
+Only an error increments `failures`; an immediate capture resets it to `0`; a
+revealed-set rejection leaves it untouched (§3d). `max_llm_calls` bounds every
+one of these paths, since each loop iteration calls `complete()` and increments
+`_calls_used`.
 
 **This changes `always` mode too, in one respect: ordering.** Today every
 extra's `ignored` result is appended *before* the executed call's result
@@ -185,22 +223,28 @@ The loop then asks for another LLM call. The capture spends one
 Two consecutive `user` messages (tool results, then frames) is the shape the
 Anthropic wire already produces between turns today, so no wire client changes.
 
-**Revealed-set resolution.** Frames cannot change without stepping the robot,
-so within one `act()` each camera is revealed at most once. The policy keeps
-the revealed set for the current observation and resolves the request against
-it:
+**Revealed-set resolution (immediate path only).** Frames cannot change without
+stepping the robot, so each camera is revealed at most once per observation.
+The policy keeps a revealed set **scoped to the current observation**, cleared
+every time `act()` appends a new observation message — not just in `__init__`
+and `reset()`, or every camera would be one-shot for the whole trial. It
+resolves the request against that set:
 
 - `cameras` omitted → the observation's cameras minus the revealed set
 - `cameras` named → the named cameras minus the revealed set
 
-If the remainder is non-empty, those frames are revealed and the tool result
-names any request members that were skipped as already shown. If the remainder
-is empty, the result is a rejection naming them and saying the view cannot
-change until the robot moves — and **that rejection does not increment
-`failures`**. It is a refusal of a well-formed call, not a malformed call, and
-counting it would let three bare `take_pic()` calls error a trial that is
-otherwise healthy. The on-demand system prompt states the rule so the model can
-avoid it in the first place.
+If the remainder is non-empty, those frames are revealed and the tool result is
+`captured 1 frame(s): 'wrist' (already shown: 'top')`, with the parenthetical
+omitted when nothing was skipped. If the remainder is empty, the result is
+`already shown for this observation: 'top'; the view cannot change until the
+robot moves` — and **that rejection does not increment `failures`**. It is a
+refusal of a well-formed call, not a malformed call, and counting it would let
+three bare `take_pic()` calls error a trial that is otherwise healthy. The
+on-demand system prompt states the rule so the model can avoid it in the first
+place.
+
+This subtraction applies only here. The queued path (§3e) stores the request
+unresolved.
 
 **Failure counter.** A successful immediate capture resets `failures` to `0`.
 Without that, the counter initialised once per `act()` (`policy.py:393`) stops
@@ -222,7 +266,11 @@ dropped frame between the request and the arrival must not kill the trial via
 revealed set so the model cannot immediately re-request them.
 
 The image parts go **into the observation message itself**, via
-`_observation_content(observation, state_labels, reveal=cameras)`. That holds
+`_observation_content(observation, state_labels, reveal=cameras)`. `reveal` is
+keyword-only and defaults to `None` meaning "every camera", so the six existing
+call sites that pass one or two positional arguments
+(`test_policy_e2e.py:321-372`) keep rendering every frame; on-demand mode
+passes an explicit empty tuple for an unrevealed observation. That holds
 the message count and delta-stream shape identical to `always` mode, and is
 semantically right: the frames *are* that observation's.
 
@@ -238,8 +286,11 @@ The leading text part gains one narration line. With
   pattern the existing suite uses (`test_policy_e2e.py:436`), where every call
   passes `env_step=0`.
 
-When `target` is set, `Toolset.residual` appends a second sentence:
-`largest remaining offset from the requested target is 0.004 on j3.` This is
+When `target` is set **and** `Toolset.residual` returns a value, a second
+sentence follows: `largest remaining offset from the requested target is 0.004
+on j3.` The magnitude is formatted `:.4g`, matching `bounds_text`
+(`_tools.py:493-497`). When residual returns `None` the sentence is omitted
+entirely and the playout line stands alone. This is
 what actually answers the user's requirement, and it is a measurement rather
 than a promise. The policy cannot make the rollout wait for arrival — the
 rollout owns the loop — but it can tell the model how far off the arm ended up.
@@ -296,7 +347,8 @@ sent.
 `_pending` and the revealed set are initialised in `__init__` next to
 `self._calls_used = 0` as well as in `reset()`: `act()` is reachable without
 `reset()` (`policy.py:373` guards only `bind()`), and `mypy --strict` requires
-the attributes to exist.
+the attributes to exist. The revealed set is additionally cleared on every new
+observation message (§3d); `_pending` is cleared when consumed.
 
 `_sanitize` and `transcript_delta` need no change: the new image parts are
 `image_url` dicts inside list content, which `_sanitize` already replaces with
@@ -349,6 +401,14 @@ Unit (`test_tools_motion.py`):
 Multi-camera cases need a two-camera fixture: `CubePickEmbodiment` declares one
 camera (`mock/cubepick.py:57`), so these build a custom `EmbodimentInfo` and
 `Observation` the way `test_policy_e2e.py` already does elsewhere.
+
+**The e2e suite needs a new embodiment fixture, and neither existing one
+works.** `CubePickEmbodiment` is `eef_delta_pos`, so `state_key` stays `None`
+and `residual` can never fire. `_AbsoluteEmbodiment` (`test_policy_e2e.py:185`)
+is `joint_pos` but declares no `CameraSpec` and emits no images, so
+`build_toolset` refuses on-demand at bind. Add one modelled on
+`_AbsoluteEmbodiment`: `joint_pos` semantics, two `CameraSpec`s, and matching
+`images` on `reset()`/`step()`. Every on-demand e2e test below runs against it.
 
 End-to-end (`test_policy_e2e.py`, scripted `httpx.MockTransport` as today):
 
