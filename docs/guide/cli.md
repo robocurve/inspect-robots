@@ -100,7 +100,9 @@ grader notes (Enter for none): gripper closed early, cube still in frame
 ```
 
 Prompted verdicts are recorded in the log. The CLI then asks for one optional
-line of grader notes. Bare Enter or whitespace-only input records no note.
+line of grader notes. Bare Enter or whitespace-only input records no note. An
+adopted embodiment verdict is not followed by a notes prompt, so a self-scoring
+embodiment still costs no keypresses per trial.
 `skip` records no judgement, but a grader note entered for that trial is still
 recorded. Notes never affect the score. Piped/CI stdin, `--no-prompt`, or a
 registered `--task` run never prompt or adopt an embodiment verdict: unattended

@@ -838,6 +838,23 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
     assert seen_ids[0] == seen_ids[1]
 
 
+def test_operator_fields_are_captured_before_the_on_trial_end_hook(tmp_path: Path) -> None:
+    # The verdict and the note are documented as strictly parallel, so they must
+    # be read off the record at the same instant. A hook that sets either one
+    # runs too late for both: if one append ever drifts past on_trial_end, this
+    # asserts one tuple populated and the other empty, which cannot both hold.
+    class _LateJudgePolicy(ScriptedPolicy):
+        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+            record.operator_judgement = "y"
+            record.operator_note = "written too late to be recorded"
+
+    (log,) = eval(_task(), _LateJudgePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    scene = log.samples[0]
+    assert scene.operator_judgements == (None,)
+    assert scene.operator_notes == (None,)
+
+
 def test_on_trial_end_hook_error_on_already_errored_trial(tmp_path: Path) -> None:
     # A test to cover the branch where status is ALREADY "error" when the hook throws.
     # This happens if a previous epoch's hook already failed, setting global status="error".

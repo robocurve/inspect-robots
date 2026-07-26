@@ -405,12 +405,14 @@ def _run_eval(
                     try:
                         on_trial_end(record, log_dir, run_stamp)
                     except Exception as exc:
-                        note = f"policy.on_trial_end failed: {exc}"
+                        # Named `detail`, not `note`: a grader's note is a
+                        # different thing entirely and is collected just above.
+                        detail = f"policy.on_trial_end failed: {exc}"
                         scene_status = "error"
-                        scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                        scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                         if status == "success":
                             status = "error"
-                            error = note
+                            error = detail
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)

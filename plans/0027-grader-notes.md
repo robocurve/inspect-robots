@@ -1,6 +1,7 @@
 # 0027 — grader notes: one optional free-text line after the operator verdict
 
-Issue: #174. Status: draft (revised after critique rounds 1 and 2).
+Issue: #174. Status: implemented (revised after four critique rounds and two
+rounds of code review; see "Reversals after code review").
 
 ## Problem
 
@@ -36,12 +37,12 @@ Notes ride the existing verdict plumbing, field for field.
 
 ```
 did the robot succeed? [y/n/partial/skip] (partial scores as failure) n
-grader notes (Enter to skip): gripper closed early, cube still in frame
+grader notes (Enter for none): gripper closed early, cube still in frame
 ```
 
 ### Prompt contract
 
-- `_NOTES_PROMPT = "grader notes (Enter to skip): "`, asked once, after the
+- `_NOTES_PROMPT = "grader notes (Enter for none): "`, asked once, after the
   verdict loop accepts an answer.
 - The answer is `.strip()`ed. Empty (bare Enter) or whitespace-only means no
   notes: the field stays `None`. Any other content is stored verbatim after
@@ -105,7 +106,7 @@ for two reasons:
 - Nobody would find it. A trailing free-text field on an existing line is
   invisible unless the prompt string advertises it, and the prompt is already
   carrying `[y/n/partial/skip] (partial scores as failure)`. `grader notes
-  (Enter to skip):` teaches the feature exists to every operator who runs one
+  (Enter for none):` teaches the feature exists to every operator who runs one
   trial, which for an opt-in habit like note-taking is the whole ballgame.
 
 ### EOF on the verdict prompt
