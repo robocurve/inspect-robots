@@ -313,16 +313,16 @@ The leading text part gains one narration line. With
 `advanced = new_env_step - issued_step`:
 
 - both steps are `int` and `advanced > 0`:
-  - `advanced >= chunk_len` → `the motion finished playing (12 of 12 steps).`
-  - otherwise → `the motion played 3 of 12 steps before this observation; it
+  - `advanced >= chunk_len` → `The motion finished playing (12 of 12 steps).`
+  - otherwise → `The motion played 3 of 12 steps before this observation; it
     did not run to the end.`
-- `env_step` missing, not an `int`, or `advanced <= 0` → `these frames follow
+- `env_step` missing, not an `int`, or `advanced <= 0` → `These frames follow
   the motion.` with no arithmetic. The `<= 0` case is the direct-`policy.act()`
   pattern the existing suite uses (`test_policy_e2e.py:436`), where every call
   passes `env_step=0`.
 
 When `target` is set **and** `Toolset.residual` returns a value, a second
-sentence follows: `largest remaining offset from the requested target is 0.004
+sentence follows: `Largest remaining offset from the requested target is 0.004
 on j3.` The magnitude is formatted `:.4g`, matching `bounds_text`
 (`_tools.py:493-497`). When residual returns `None` the sentence is omitted
 entirely and the playout line stands alone. This is

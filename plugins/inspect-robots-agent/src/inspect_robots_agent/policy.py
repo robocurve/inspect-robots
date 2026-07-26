@@ -628,16 +628,16 @@ class LLMAgentPolicy(PolicyBase):
         ):
             if advanced >= pending.chunk_len:
                 narration = (
-                    f"the motion finished playing ({pending.chunk_len} of "
+                    f"The motion finished playing ({pending.chunk_len} of "
                     f"{pending.chunk_len} steps)."
                 )
             else:
                 narration = (
-                    f"the motion played {advanced} of {pending.chunk_len} steps before "
+                    f"The motion played {advanced} of {pending.chunk_len} steps before "
                     "this observation; it did not run to the end."
                 )
         else:
-            narration = "these frames follow the motion."
+            narration = "These frames follow the motion."
 
         toolset = self._toolset
         if pending.target is not None and toolset is not None:
@@ -645,11 +645,11 @@ class LLMAgentPolicy(PolicyBase):
             if residual is not None:
                 label, magnitude = residual
                 narration += (
-                    " largest remaining offset from the requested target is "
+                    " Largest remaining offset from the requested target is "
                     f"{magnitude:.4g} on {label}."
                 )
         if missing:
-            narration += f" missing camera(s) in this observation: {_quoted_names(missing)}."
+            narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
 
     def _echo(self, text: str) -> None:

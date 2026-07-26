@@ -1220,7 +1220,7 @@ def test_chained_capture_arrives_on_next_observation_with_playout_and_residual()
     ]
     arrived = script.requests[1]["messages"][-1]
     assert (
-        "the motion finished playing (11 of 11 steps). largest remaining offset "
+        "The motion finished playing (11 of 11 steps). Largest remaining offset "
         "from the requested target is 0.004 on joint." in arrived["content"][0]["text"]
     )
     assert arrived["content"][1]["text"] == "camera 'top' (step 15):"
@@ -1249,7 +1249,7 @@ def test_chained_capture_reports_default_controller_partial_playout(tmp_path: Pa
 
     arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
     assert (
-        "the motion played 1 of 11 steps before this observation; it did not run to the end."
+        "The motion played 1 of 11 steps before this observation; it did not run to the end."
     ) in arrived
 
 
@@ -1273,7 +1273,7 @@ def test_chained_capture_uses_neutral_narration_when_step_does_not_advance() -> 
     policy.act(_vision_observation(q=0.2, env_step=0))
 
     arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
-    assert "these frames follow the motion." in arrived
+    assert "These frames follow the motion." in arrived
     assert "finished playing" not in arrived
     assert "motion played" not in arrived
 
@@ -1304,7 +1304,7 @@ def test_missing_queued_camera_is_narrated_without_raising() -> None:
     policy.act(_vision_observation(q=0.1, env_step=len(chunk), cameras=("top",)))
 
     arrived = script.requests[1]["messages"][-1]["content"]
-    assert "missing camera(s) in this observation: 'wrist'." in arrived[0]["text"]
+    assert "Missing camera(s) in this observation: 'wrist'." in arrived[0]["text"]
     assert [part["text"] for part in arrived if part["type"] == "text"][1:] == [
         f"camera 'top' (step {len(chunk)}):"
     ]
@@ -1338,7 +1338,7 @@ def test_queued_capture_is_dropped_when_trial_terminates_and_reset_clears_it(
     policy.act(_vision_observation())
     fresh_observation = script.requests[1]["messages"][-1]["content"]
     assert all(part["type"] != "image_url" for part in fresh_observation)
-    assert "these frames follow the motion." not in fresh_observation[0]["text"]
+    assert "These frames follow the motion." not in fresh_observation[0]["text"]
 
 
 def test_take_pic_after_done_is_ignored_because_the_trial_ends() -> None:

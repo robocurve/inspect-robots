@@ -107,8 +107,8 @@ the interpolation always reports partial playout; a chunk shorter than the
 interval reports finished. `EnsemblingController` re-queries every control
 step, so the observed advance is always one step. It also rebuilds actions
 from chunk metadata, which means `done` and `give_up` do not terminate under
-ensembling—an existing core limitation. A trial that terminates or reaches its
-step limit before the next policy call drops any queued capture.
+ensembling (an existing core limitation). A trial that terminates or reaches
+its step limit before the next policy call drops any queued capture.
 
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
