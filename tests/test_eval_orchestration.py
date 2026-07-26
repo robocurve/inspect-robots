@@ -842,7 +842,7 @@ def test_operator_fields_are_captured_before_the_on_trial_end_hook(tmp_path: Pat
     # The verdict and the note are documented as strictly parallel, so they must
     # be read off the record at the same instant. A hook that sets either one
     # runs too late for both: if one append ever drifts past on_trial_end, this
-    # asserts one tuple populated and the other empty, which cannot both hold.
+    # sees that tuple populated while the other is still (None,), and fails.
     class _LateJudgePolicy(ScriptedPolicy):
         def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
             record.operator_judgement = "y"

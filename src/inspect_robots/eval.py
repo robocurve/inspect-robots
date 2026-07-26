@@ -175,8 +175,8 @@ def eval(
     rollout returns and before the scorers run. It may mutate the record —
     e.g. capture ``TrialRecord.operator_judgement`` (R6) so the ``operator``
     scorer can read it, and ``TrialRecord.operator_note`` alongside it, which
-    is recorded but never scored. Exceptions it raises propagate to the caller. Note
-    this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
+    is recorded but never scored. Exceptions it raises propagate to the caller.
+    Note this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
@@ -442,12 +442,12 @@ def _run_eval(
                 # A reducer failure (e.g. pass_at_k over fewer epochs than k
                 # after a halt, or mean over categorical scores) degrades to an
                 # error log — it must never crash the eval and lose the log.
-                note = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
+                detail = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
                 scene_status = "error"
-                scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                 if status == "success":
                     status = "error"
-                    error = note
+                    error = detail
 
         scene_results.append(
             SceneResult(
