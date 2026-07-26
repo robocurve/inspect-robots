@@ -199,6 +199,20 @@ predicate is "has at least one non-`None` entry", and trials whose entry is
 `None` contribute no row at all — a missing note is not worth an `n/a` when
 most trials will not have one.
 
+Markup and style are specified here rather than left to taste, because
+`_html.py` carries one fixed inline stylesheet (`:140-188`) and an invented
+class renders unstyled. Emit `<h3>Grader notes</h3>` followed by one
+`<div class="grader-note"><span class="note-label">trial {index}</span>{note}</div>`
+per non-`None` entry, and add a `.grader-note` rule to that stylesheet beside
+`.agent-note`: neutral, using the existing `--line`/`--muted`/`--bg` custom
+properties, with `overflow-wrap: anywhere` so a long note cannot widen the
+card. The existing `.note-label` (`:179-183`) is reused for the trial index.
+
+Do not reuse `.agent-note` itself (`:175-178`, emitted at `:295`). It is the
+amber callout for an LLM policy's own tool-call notes; rendering a human
+grader's note in it, under a label reading "agent note", would attribute the
+sentence to the wrong author.
+
 Text goes through the module's `_escape` at interpolation, like every other
 foreign string on the page. No truncation: a note is one operator-typed line,
 and the page already carries a shared payload budget for the parts that can
@@ -263,7 +277,7 @@ CLI prompt (`tests/test_registry_cli.py`, next to the tests above):
 
 - verdict `y` plus a typed note: judgement `"y"`, `operator_note` set, one
   operator event carrying both.
-- bare Enter at the notes prompt: `operator_note is None`, event `notes` key
+- bare Enter at the notes prompt: `operator_note is None`, event `note` key
   present and `None`.
 - whitespace-only note: treated as empty.
 - note text is not lowercased and is stripped at both ends.
@@ -297,6 +311,14 @@ Log, orchestration, view:
   `operator_notes=(None, None)` rather than the empty tuple that
   `test_absent_optional_fields_and_empty_scene_sequences_are_omitted` uses at
   `:162`. An empty tuple would pass against the wrong implementation.
+- `tests/test_html_view.py:182-209`
+  (`test_every_foreign_text_surface_is_escaped_exactly_once`) is the repo's
+  guard for the escaping claim above, and its `dataclasses.replace` fixture
+  (`:194-200`) does not set `operator_notes` — so it stays green against an
+  implementation that interpolates a note raw, and the coverage gate does not
+  care because the unescaped line still runs. Add `operator_notes=(attack,
+  None)` to that fixture. The `>= 8` count at `:208` is a lower bound and needs
+  no edit.
 
 Docs and public text:
 
