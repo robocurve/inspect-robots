@@ -11,7 +11,14 @@ import pytest
 
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
+from inspect_robots.spaces import (
+    ActionSemantics,
+    Box,
+    CameraSpec,
+    ObservationSpace,
+    StateField,
+    StateSpec,
+)
 from inspect_robots.types import Observation
 from inspect_robots_agent._llm import ToolCall
 from inspect_robots_agent._tools import ToolResult, ToolsetError, build_toolset
@@ -53,6 +60,16 @@ def _absolute_space(
 
 def _absolute_obs_space(dim: int = 1, key: str = "q") -> ObservationSpace:
     return ObservationSpace(state=StateSpec(fields=(StateField(key=key, shape=(dim,)),)))
+
+
+def _camera_obs_space() -> ObservationSpace:
+    return ObservationSpace(
+        cameras=(
+            CameraSpec(name="top", height=2, width=2),
+            CameraSpec(name="wrist", height=2, width=2),
+        ),
+        state=StateSpec(fields=(StateField(key="q", shape=(1,)),)),
+    )
 
 
 def _delta_space(
@@ -417,6 +434,86 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
     assert displacement_parameters[0]["properties"]["note"]["type"] == "string"
 
 
+def test_take_pic_schema_is_exposed_only_on_demand() -> None:
+    always = build_toolset(_absolute_space(), _camera_obs_space(), control_hz=10.0)
+    on_demand = build_toolset(
+        _absolute_space(),
+        _camera_obs_space(),
+        control_hz=10.0,
+        images="on_demand",
+    )
+
+    assert [schema["function"]["name"] for schema in always.schemas()] == [
+        "move_joints",
+        "done",
+        "give_up",
+    ]
+    assert [schema["function"]["name"] for schema in on_demand.schemas()] == [
+        "move_joints",
+        "done",
+        "give_up",
+        "take_pic",
+    ]
+    capture = on_demand.schemas()[-1]["function"]
+    assert capture["parameters"]["required"] == ["note"]
+    assert capture["parameters"]["properties"]["cameras"]["items"] == {"type": "string"}
+    assert "top" in capture["description"] and "wrist" in capture["description"]
+
+    stray = always.execute(
+        _call("take_pic", note="I need to inspect the wrist camera."),
+        Observation(
+            state={"q": np.array([0.0])},
+            images={"top": np.zeros((2, 2, 3), dtype=np.uint8)},
+        ),
+    )
+    assert stray.error == "unknown tool 'take_pic'; available: move_joints, done, give_up"
+
+
+def test_on_demand_requires_a_declared_camera_at_bind_time() -> None:
+    with pytest.raises(ToolsetError, match=r"fix: drop -P images=on_demand"):
+        build_toolset(
+            _absolute_space(),
+            _absolute_obs_space(),
+            control_hz=10.0,
+            images="on_demand",
+        )
+
+
+def test_take_pic_validation_uses_images_present_now() -> None:
+    toolset = build_toolset(
+        _absolute_space(),
+        _camera_obs_space(),
+        control_hz=10.0,
+        images="on_demand",
+    )
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+    observation = Observation(state={"q": np.array([0.0])}, images={"top": image})
+    note = "I need a current image to verify the arm position."
+
+    unknown = toolset.execute(_call("take_pic", cameras=["side"], note=note), observation)
+    absent = toolset.execute(_call("take_pic", cameras=["wrist"], note=note), observation)
+    wrong_type = toolset.execute(_call("take_pic", cameras="top", note=note), observation)
+    empty = toolset.execute(_call("take_pic", cameras=[], note=note), observation)
+    blank_note = toolset.execute(_call("take_pic", cameras=["top"], note=" "), observation)
+    imageless = toolset.execute(
+        _call("take_pic", note=note),
+        Observation(state={"q": np.array([0.0])}),
+    )
+
+    assert unknown.error == "unknown or unavailable camera 'side'; available now: 'top'"
+    assert absent.error == "unknown or unavailable camera 'wrist'; available now: 'top'"
+    assert wrong_type.error == "cameras must be a non-empty list of strings when provided"
+    assert empty.error == "cameras must be a non-empty list of strings when provided"
+    assert blank_note.error is not None and blank_note.error.startswith("note is required:")
+    assert imageless.error == "no camera images are available in this observation"
+
+    all_cameras = toolset.execute(_call("take_pic", note=note), observation)
+    named = toolset.execute(_call("take_pic", cameras=["top"], note=note), observation)
+    assert all_cameras.error is None and all_cameras.capture is None
+    assert named.error is None and named.capture == ("top",)
+    assert named.chunk is None
+
+
 # --- absolute-mode synthesis ---------------------------------------------------
 
 
@@ -434,6 +531,33 @@ def test_move_joints_derives_steps_and_snaps_bit_exact_target() -> None:
     snapped = _execute_absolute(0.3, current=-0.1)
     assert snapped.chunk is not None
     assert snapped.chunk.actions[-1].data[0] == 0.3
+
+
+def test_absolute_result_carries_target_and_residual_is_best_effort() -> None:
+    toolset = build_toolset(
+        _absolute_space(labels=("joint",)),
+        _absolute_obs_space(),
+        control_hz=10.0,
+    )
+    result = toolset.execute(
+        _call("move_joints", targets={"joint": 0.5}),
+        _obs({"q": np.array([0.0])}),
+    )
+
+    assert result.target is not None
+    assert np.array_equal(result.target, np.array([0.5]))
+    assert toolset.residual(result.target, _obs({"q": np.array([0.496])})) == (
+        "joint",
+        pytest.approx(0.004),
+    )
+    assert toolset.residual(result.target, Observation()) is None
+    assert toolset.residual(result.target, _obs({"q": np.array([0.1, 0.2])})) is None
+    assert toolset.residual(result.target, _obs({"q": np.array([np.nan])})) is None
+
+    displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    moved = displacement.execute(_call("move_by", deltas={"0": 0.05}), Observation())
+    assert moved.target is None
+    assert displacement.residual(np.zeros(2), Observation()) is None
 
 
 def test_move_joints_clips_every_interpolant_into_box() -> None:
