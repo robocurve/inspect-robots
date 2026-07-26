@@ -259,7 +259,7 @@ class LLMAgentPolicy(PolicyBase):
         # Coerce non-None parameters to str. We use `str(x) if x else ""` so that falsy values
         # (like False or 0) coerce to the empty string "" instead of "False" or "0".
         # For example, if api_key_env is False, coercing to "False" would cause env lookup
-        # to search for an env var named literally "False" and bypass default key/openrouter fallbacks.
+        # to search for an env var named literally "False" and bypass default key fallbacks.
         if model is not None:
             model = str(model) if model else ""
         if base_url is not None:
