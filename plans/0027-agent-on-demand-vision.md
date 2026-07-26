@@ -62,7 +62,12 @@ comparable and no CLI invocation changes meaning.
 not in `schemas()`.
 
 `"on_demand"`: observation messages carry the state text plus one line naming
-the cameras that `take_pic` can reach. No image parts.
+the cameras that `take_pic` can reach. No image parts. That line names the
+cameras present in `observation.images`, **not** the declared ones, and when
+the observation carries no frames it says so. Advertising a declared camera
+that did not arrive would invite a call that can only return the "no images"
+error, and three of those inside one `act()` would kill a trial over a dropped
+frame — the condition §3e goes out of its way to survive on the delivery path.
 
 Every capture branch in the walk is gated on `images == "on_demand"`, not on
 the schema. Tool names come from the model, so a stray `take_pic` in `always`
@@ -163,8 +168,14 @@ The walk collects results for every call and only then decides what `act()`
 does. It is a two-state machine, not a list of cases. The state is *open* until
 some call produces a chunk or an immediate capture, and *closed* after.
 
-Every call reaches `toolset.execute` for validation, open or closed. What
-changes with the state is what is *done* with the result.
+Every call reaches `toolset.execute` **while the walk is open**. Once closed,
+the only call still dispatched is an on-demand `take_pic` behind a non-stop
+motion chunk, which needs argument and camera-name validation to queue.
+Anything answered `ignored` is never dispatched — `_move` raises on a
+non-finite proprioceptive reference (`_tools.py:232`) and both `_move` and
+`_stop` index `observation.state[...]` directly (`_tools.py:211`), so
+dispatching an extra on a degraded observation would turn today's correctable
+error loop into a fatal `PolicyError` (`rollout.py:225`).
 
 **While open**, each call is dispatched normally:
 
@@ -442,7 +453,12 @@ End-to-end (`test_policy_e2e.py`, scripted `httpx.MockTransport` as today):
 - `take_pic` before a move short-circuits: the move is answered `ignored`, no
   chunk is returned from that turn, and every `tool_call_id` is answered exactly
   once with the results contiguous
-- an erroring `take_pic` *after* a move leaves the chunk intact and returns it
+- an erroring `take_pic` *after* a move leaves the chunk intact and returns it,
+  queues nothing, and leaves the slot free: `[move, take_pic(invalid),
+  take_pic(valid)]` still queues the third call's capture
+- `[take_pic, take_pic]` captures once; the second is answered `ignored: one
+  tool call per turn` and no second image message is appended
+- the unknown-tool error's `available:` list names `take_pic` in on-demand mode
 - a bare repeat `take_pic()` is rejected without incrementing the failure
   counter: three in a row do not error the trial
 - with two cameras, a `take_pic` naming both after one was already shown reveals
