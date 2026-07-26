@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin:** runtime camera dropouts in `images=on_demand` now reject
+  `take_pic` without treating a well-formed call as a tool error, so a single
+  dropout no longer errors the trial. The first world-state rejection in one
+  `act()` is free and later rejections escalate to the three-strike guard,
+  bounding repeated capture refusals (#173).
 - **Agent plugin:** tool results in `images=always` mode now follow the model's
   tool-call order. Extra calls remain answered with
   `ignored: one tool call per turn` and are not executed; only their result

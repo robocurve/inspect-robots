@@ -86,12 +86,18 @@ inspect-robots "pick up the cube" --policy agent \
 `take_pic` requires a human-readable `note` and accepts an optional `cameras`
 list. Omitting the list requests every camera available in that observation.
 A camera can be revealed only once per observation because its view cannot
-change until the robot moves. A standalone `take_pic` shows the current frame
-and lets the model decide again before moving. A `take_pic` placed after one
-motion in the same assistant turn is queued: the motion chunk is returned
-immediately, and the requested frames are attached to the next observation,
-after the controller has played the available part of the chunk. Two motions
-still cannot be chained.
+change until the robot moves. If a runtime camera dropout leaves the
+observation with no images, the well-formed call is rejected with `no camera
+images are available in this observation` instead of counting as a malformed
+tool call. The first such world-state rejection in one policy decision is
+free; repeated rejections escalate to the normal three-strike guard.
+
+A standalone `take_pic` shows the current frame and lets the model decide
+again before moving. A `take_pic` placed after one motion in the same assistant
+turn is queued with `queued: frames arrive with the next observation, after
+the motion plays`: the motion chunk is returned immediately, and the requested
+frames are attached to the next observation after the controller has played
+the available part of the chunk. Two motions still cannot be chained.
 
 Queued-capture narration reports what the rollout actually observed. It says
 whether all requested chunk steps played or only a prefix did, names camera

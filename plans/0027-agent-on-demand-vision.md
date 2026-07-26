@@ -66,8 +66,9 @@ the cameras that `take_pic` can reach. No image parts. That line names the
 cameras present in `observation.images`, **not** the declared ones, and when
 the observation carries no frames it says so. Advertising a declared camera
 that did not arrive would invite a call that can only return the "no images"
-error, and three of those inside one `act()` would kill a trial over a dropped
-frame — the condition §3e goes out of its way to survive on the delivery path.
+rejection. That runtime dropout is not a model mistake: the first rejection in
+one `act()` is free, and only repeated rejections escalate toward the guard
+that bounds the loop (§3c-§3d).
 
 Every capture branch in the walk is gated on `images == "on_demand"`, not on
 the schema. Tool names come from the model, so a stray `take_pic` in `always`
@@ -99,16 +100,19 @@ unknown-name error listing the names actually present:
 - unknown or absent camera name → error naming the cameras present now
 - `cameras` present but not a list of strings, or empty → structured error
 - `note` missing or blank → structured error, worded like the move tools'
-- the observation carries no images at all → error saying so
+- the observation carries no images at all → rejection saying
+  `no camera images are available in this observation`
 
 An omitted `cameras` is resolved by the **policy**, not the toolset. On the
 immediate path it resolves against the current observation's revealed set
 (§3d). On the queued path it is stored verbatim — `None` for the omitted form,
 the named tuple otherwise — with **no subtraction at queue time**, and is
 resolved at delivery against the arriving observation, whose revealed set is
-empty (§3e). Subtracting at queue time would reject exactly the flow this
-feature exists for: look at observation *N*, then chain a capture onto a motion
-in the same observation, whose frames belong to *N+1*.
+empty (§3e). An empty tuple is reserved for an observation with no images and
+is rejected on either path rather than stored. Subtracting at queue time would
+reject exactly the flow this feature exists for: look at observation *N*, then
+chain a capture onto a motion in the same observation, whose frames belong to
+*N+1*.
 
 `build_toolset` refuses `on_demand` at bind time when
 `observation_space.cameras` is empty, with a message naming the fix (drop
@@ -116,13 +120,14 @@ in the same observation, whose frames belong to *N+1*.
 other unsupported configuration in this module, and an embodiment that serves
 frames without declaring them is already outside the compatibility contract.
 
-A *successful* `take_pic` yields neither a chunk nor an error; the validation
+A well-formed `take_pic` yields neither a chunk nor an error; the validation
 failures above still come back as `ToolResult.error` like any other tool's.
 `ToolResult` becomes
 `@dataclass(frozen=True, eq=False)` and gains two fields:
 
-- `capture: tuple[str, ...] | None` — resolved camera names, or `None` when
-  `cameras` was omitted, which the policy then resolves itself
+- `capture: tuple[str, ...] | None` — `None` when `cameras` was omitted and the
+  policy must resolve all available cameras, `()` when a well-formed request
+  found no images in the observation, or a non-empty tuple of named cameras
 - `target: npt.NDArray[np.float64] | None` — the clipped absolute target vector
   a successful `_move_absolute` computed (§3e). `None` for displacement modes,
   stops, and captures.
@@ -182,10 +187,13 @@ error loop into a fatal `PolicyError` (`rollout.py:225`).
 - an on-demand `take_pic` closes the walk **whatever its outcome**. On success
   it is an *immediate* capture (§3d): the model asked to look before acting, so
   it re-decides with the frames in hand rather than executing a motion it chose
-  blind. On a `toolset.execute` error it is answered with the error text and
-  increments `failures`. On a revealed-set rejection it is answered with the
-  rejection text and leaves `failures` alone (§3d). All three close, so a move
-  behind a rejected `take_pic` is answered `ignored`, not executed.
+  blind. A malformed-call error is answered with the error text and increments
+  `failures`. A well-formed call refused by world state — either an empty-images
+  dropout or a revealed-set rejection — is answered with the rejection text;
+  the first rejection within one `act()` is free, and every subsequent
+  rejection increments `failures` and becomes `last_error` (§3d). Frames,
+  rejection, and error all close, so a move behind a rejected `take_pic` is
+  answered `ignored`, not executed.
 - every other call — including an unknown tool name, and including `take_pic`
   in `always` mode — goes to `toolset.execute` exactly as today. A chunk closes
   the walk. An error is answered with its text, increments `failures`, and
@@ -199,9 +207,10 @@ guarantees a next observation and a `chunk_len` to count against:
 - on-demand `take_pic`, walk closed by a motion chunk: still passed to
   `toolset.execute` for argument and camera-name validation. On success it is
   *queued* (§3e) and answered `queued: frames arrive with the next observation,
-  once the motion has finished playing`. On error it is answered with the error
-  text, nothing is queued, the queue slot stays free for a later valid
-  `take_pic` in the same turn, and `failures` is untouched — `act()` is
+  after the motion plays`. On error it is answered with the error text. An
+  empty-images `capture=()` is answered with the dropout rejection text.
+  Neither outcome queues anything, so the queue slot stays free for a later
+  valid `take_pic` in the same turn, and neither touches `failures` — `act()` is
   returning the chunk regardless, so counting it would leak into the next
   observation's budget. Only one capture is queued per turn; once the slot is
   filled a second `take_pic` is answered `ignored: one tool call per turn`.
@@ -210,13 +219,15 @@ guarantees a next observation and a `chunk_len` to count against:
   policy recognises a stop by reading `chunk.actions[0].meta.get("request_stop")`,
   which `_stop` already sets (`_tools.py:216-219`), rather than forking the
   `("done", "give_up")` literal out of `_tools.py:200`.
-- on-demand `take_pic`, walk closed **without a chunk** (an immediate capture, a
-  revealed-set rejection, or an error): answered `ignored: one tool call per
-  turn`. No motion was emitted, so "once the motion has finished playing" would
-  be false and `chunk_len` would be undefined. `[take_pic, take_pic]` resolves
+- on-demand `take_pic`, walk closed by a successful **immediate capture**:
+  answered `ignored: one tool call per turn`. `[take_pic, take_pic]` resolves
   here.
-- everything else is answered `ignored: one tool call per turn`, the string
-  used today.
+- any call dropped after an error or rejection closed the walk without a chunk:
+  answered `ignored: an earlier call in this turn failed`. The second valid
+  call in `[take_pic(cameras=["nope"]), take_pic(cameras=["top"])]` is not
+  mislabelled as a surplus call.
+- every other call dropped after a chunk is answered `ignored: one tool call
+  per turn`, the string used today.
 
 Nothing after a chunk can cancel it. An error there comes from a call that
 never ran, and discarding the chunk would leave the move's own tool result
@@ -227,10 +238,12 @@ that never reached the embodiment.
 continues the `while True` loop for another LLM turn — the same path a
 no-tool-call turn already takes. That covers an immediate capture, a
 revealed-set rejection, an errored call, and a turn of nothing but `ignored`.
-Only an error increments `failures`; an immediate capture resets it to `0`; a
-revealed-set rejection leaves it untouched (§3d). `max_llm_calls` bounds every
-one of these paths, since each loop iteration calls `complete()` and increments
-`_calls_used`.
+An error increments `failures`; an immediate capture resets it to `0`; the
+first rejection in the `act()` is free, while every subsequent rejection
+increments `failures` and records its text as `last_error` (§3d). The rejection
+count is local beside `failures` and resets for each `act()`. This escalation
+lets the three-strike guard stop a model that repeats a world-state refusal
+before it can consume the whole `max_llm_calls` budget inside one `act()`.
 
 **This changes `always` mode too, in one respect: ordering.** Today every
 extra's `ignored` result is appended *before* the executed call's result
@@ -272,19 +285,25 @@ If the remainder is non-empty, those frames are revealed and the tool result is
 `captured 1 frame(s): 'wrist' (already shown: 'top')`, with the parenthetical
 omitted when nothing was skipped. If the remainder is empty, the result is
 `already shown for this observation: 'top'; the view cannot change until the
-robot moves` — and **that rejection does not increment `failures`**. It is a
-refusal of a well-formed call, not a malformed call, and counting it would let
-three bare `take_pic()` calls error a trial that is otherwise healthy. The
-on-demand system prompt states the rule so the model can avoid it in the first
-place.
+robot moves`. An empty-images `capture=()` is the other rejection and renders
+`no camera images are available in this observation`. Both are refusals of
+well-formed calls rather than malformed-call errors. The first rejection
+within an `act()` leaves `failures` alone; every subsequent rejection
+increments it and sets `last_error` to the rejection text. That one free
+correction preserves tolerance for a transient refusal while the existing
+three-strike guard bounds a model that repeats it. The on-demand system prompt
+states the revealed-set rule so the model can avoid that rejection in the
+first place.
 
 This subtraction applies only here. The queued path (§3e) stores the request
 unresolved.
 
-**Failure counter.** A successful immediate capture resets `failures` to `0`.
+**Failure counters.** A successful immediate capture resets `failures` to `0`.
 Without that, the counter initialised once per `act()` (`policy.py:393`) stops
 meaning "consecutive" the moment a success stops returning, and the two
-messages that call it consecutive (`policy.py:415`, `:441`) become wrong.
+messages that call it consecutive (`policy.py:415`, `:441`) become wrong. The
+separate rejection count does not reset after frames: its contract is first
+rejection per `act()`, not first consecutive rejection.
 
 ### 3e. Queued capture, playout, and measured residual
 
@@ -363,8 +382,9 @@ On-demand mode swaps two sentences of `_SYSTEM_TEMPLATE`:
   see them, and a camera already shown for the current observation cannot be
   re-taken until the robot moves
 - turn shape: exactly one motion per turn, and `take_pic` may be chained in the
-  same turn — placed after a motion it returns frames once the motion has
-  finished playing, placed alone it looks before deciding
+  same turn — placed after a motion its frames arrive with the next observation
+  after the controller has played the motion, and the narration reports how
+  much actually played; placed alone it looks before deciding
 
 The no-tool-call nudge (`policy.py:417-418`, `"Respond with exactly one tool
 call."`) becomes mode-dependent for the same reason; in on-demand mode it must
@@ -428,8 +448,8 @@ Unit (`test_tools_motion.py`):
 - `build_toolset(images="on_demand")` raises `ToolsetError` naming the fix when
   the observation space declares no cameras
 - unknown name, declared-but-absent name, non-list `cameras`, empty `cameras`,
-  blank `note`, and an imageless observation each return a structured error
-  rather than raising
+  and blank `note` return a structured error rather than raising; an imageless
+  observation returns `capture=()` as a rejection outcome
 - a successful `_move_absolute` carries the clipped `target`; `residual` returns
   the labelled largest offset, and `None` when there is no matching state field
 
@@ -456,11 +476,16 @@ End-to-end (`test_policy_e2e.py`, scripted `httpx.MockTransport` as today):
 - an erroring `take_pic` *after* a move leaves the chunk intact and returns it,
   queues nothing, and leaves the slot free: `[move, take_pic(invalid),
   take_pic(valid)]` still queues the third call's capture
+- an imageless `take_pic` is rejected rather than errored, does not end the
+  trial, and behind a move queues nothing while leaving the slot free
 - `[take_pic, take_pic]` captures once; the second is answered `ignored: one
   tool call per turn` and no second image message is appended
 - the unknown-tool error's `available:` list names `take_pic` in on-demand mode
-- a bare repeat `take_pic()` is rejected without incrementing the failure
-  counter: three in a row do not error the trial
+- three consecutive immediate-capture validation errors raise, while the first
+  rejection in one `act()` is free and subsequent rejections escalate; a model
+  repeating a rejected capture is stopped after a bounded number of LLM calls
+- a valid capture dropped after an earlier error is answered `ignored: an
+  earlier call in this turn failed`
 - with two cameras, a `take_pic` naming both after one was already shown reveals
   only the unshown one and says so
 - a move chained with `take_pic` returns the chunk, answers both calls in order,
