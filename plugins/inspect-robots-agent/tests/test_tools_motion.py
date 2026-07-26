@@ -505,13 +505,33 @@ def test_take_pic_validation_uses_images_present_now() -> None:
     assert wrong_type.error == "cameras must be a non-empty list of strings when provided"
     assert empty.error == "cameras must be a non-empty list of strings when provided"
     assert blank_note.error is not None and blank_note.error.startswith("note is required:")
-    assert imageless.error == "no camera images are available in this observation"
+    assert imageless.error is None and imageless.capture == ()
 
     all_cameras = toolset.execute(_call("take_pic", note=note), observation)
     named = toolset.execute(_call("take_pic", cameras=["top"], note=note), observation)
     assert all_cameras.error is None and all_cameras.capture is None
     assert named.error is None and named.capture == ("top",)
     assert named.chunk is None
+
+
+def test_explicit_take_pic_rejects_an_imageless_observation() -> None:
+    toolset = build_toolset(
+        _absolute_space(),
+        _camera_obs_space(),
+        control_hz=10.0,
+        images="on_demand",
+    )
+    result = toolset.execute(
+        _call(
+            "take_pic",
+            cameras=["top"],
+            note="I need the top view to verify the arm position.",
+        ),
+        Observation(state={"q": np.array([0.0])}),
+    )
+
+    assert result.error is None
+    assert result.capture == ()
 
 
 # --- absolute-mode synthesis ---------------------------------------------------

@@ -1,12 +1,12 @@
 """LLMAgentPolicy — a frontier LLM as a first-class Inspect Robots policy.
 
 The conversation loop lives inside ``act()``: observation in (labeled state
-text + camera frames), one validated tool call out, synthesized into an
-open-loop ``ActionChunk`` by the motion layer. The LLM never sees raw
-actuation, and every emitted action still passes the rollout's approver
-chain — this module contains no safety-critical code path of its own
-(plan 0008 §4b). Chat-format history stays canonical while the selected
-client translates it to the configured API wire format.
+text, plus camera frames unless ``images=on_demand``), one validated tool call
+out, synthesized into an open-loop ``ActionChunk`` by the motion layer. The
+LLM never sees raw actuation, and every emitted action still passes the
+rollout's approver chain — this module contains no safety-critical code path
+of its own (plan 0008 §4b). Chat-format history stays canonical while the
+selected client translates it to the configured API wire format.
 """
 
 from __future__ import annotations
@@ -86,10 +86,11 @@ is watching these notes to see what you see and what you decide, so write them \
 for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
 Respond with exactly one motion tool call per turn; `take_pic` may be chained \
-in the same turn. Placed after a motion, it returns frames once the motion has \
-finished playing; placed alone, it looks before you decide what motion to make. \
-When the goal is achieved call done; if it cannot be achieved call give_up. You \
-have a budget of {budget} LLM calls for the whole trial."""
+in the same turn. Placed after a motion, its frames arrive with the next \
+observation, after the controller has played the motion; the narration reports \
+how much actually played. Placed alone, it looks before you decide what motion \
+to make. When the goal is achieved call done; if it cannot be achieved call \
+give_up. You have a budget of {budget} LLM calls for the whole trial."""
 
 _ON_DEMAND_NUDGE = (
     "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
@@ -467,6 +468,7 @@ class LLMAgentPolicy(PolicyBase):
         else:
             self._echo(f"[agent] >> observation: {summary}")
         failures = 0
+        rejections = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
@@ -505,6 +507,7 @@ class LLMAgentPolicy(PolicyBase):
             target: npt.NDArray[np.float64] | None = None
             immediate_frames: tuple[str, ...] = ()
             closed = False
+            closed_after_failure = False
             stopped = False
             last_error: str | None = None
             for call in message.tool_calls:
@@ -519,6 +522,14 @@ class LLMAgentPolicy(PolicyBase):
                             result_text = result.error
                             failures += 1
                             last_error = result.error
+                            closed_after_failure = True
+                        elif result.capture == ():
+                            result_text = "no camera images are available in this observation"
+                            rejections += 1
+                            if rejections > 1:
+                                failures += 1
+                                last_error = result_text
+                            closed_after_failure = True
                         else:
                             requested = (
                                 tuple(observation.images)
@@ -545,12 +556,18 @@ class LLMAgentPolicy(PolicyBase):
                                     f"{_quoted_names(skipped)}; the view cannot change until "
                                     "the robot moves"
                                 )
+                                rejections += 1
+                                if rejections > 1:
+                                    failures += 1
+                                    last_error = result_text
+                                closed_after_failure = True
                     else:
                         if result.error is not None:
                             result_text = result.error
                             failures += 1
                             last_error = result.error
                             closed = True
+                            closed_after_failure = True
                         else:
                             result_text = result.note
                             if result.chunk is not None:
@@ -565,6 +582,8 @@ class LLMAgentPolicy(PolicyBase):
                     result = toolset.execute(call, observation)
                     if result.error is not None:
                         result_text = result.error
+                    elif result.capture == ():
+                        result_text = "no camera images are available in this observation"
                     else:
                         self._pending = _PendingCapture(
                             requested=result.capture,
@@ -574,7 +593,7 @@ class LLMAgentPolicy(PolicyBase):
                         )
                         result_text = (
                             "queued: frames arrive with the next observation, "
-                            "once the motion has finished playing"
+                            "after the motion plays"
                         )
                         requested = (
                             tuple(observation.images) if result.capture is None else result.capture
@@ -582,6 +601,8 @@ class LLMAgentPolicy(PolicyBase):
                         echo_text = f"queued capture: {_quoted_names(requested)}"
                 elif is_capture and chunk is not None and stopped:
                     result_text = "ignored: the trial ends with this call"
+                elif closed_after_failure:
+                    result_text = "ignored: an earlier call in this turn failed"
                 else:
                     result_text = "ignored: one tool call per turn"
 
@@ -600,8 +621,9 @@ class LLMAgentPolicy(PolicyBase):
             if chunk is not None:
                 return chunk
             if failures >= _MAX_CONSECUTIVE_FAILURES:
-                assert last_error is not None
-                raise RuntimeError(f"LLM tool calls kept failing; last error: {last_error}")
+                raise RuntimeError(
+                    f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
+                )
 
     def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not

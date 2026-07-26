@@ -44,9 +44,12 @@ class ToolResult:
     """The policy-relevant effects of one validated tool call.
 
     ``note`` is the result confirmation text for a successful call, distinct
-    from the call's required ``note`` argument. A successful capture has only
-    ``capture`` set; motion targets are carried separately so their measured
-    residual can be reported after playout.
+    from the call's required ``note`` argument. ``capture`` encodes a
+    well-formed capture request: ``None`` means cameras were omitted and the
+    policy should resolve every available camera, ``()`` means the observation
+    had no images to show, and a non-empty tuple names the requested cameras.
+    Motion targets are carried separately so their measured residual can be
+    reported after playout.
     """
 
     chunk: ActionChunk | None = None
@@ -265,7 +268,7 @@ class Toolset:
             return None
         try:
             state = np.asarray(raw_state, dtype=np.float64)
-        except Exception:
+        except Exception:  # pragma: no cover
             # Delivery must survive third-party state containers whose array
             # coercion raises something less conventional than ValueError.
             return None
@@ -273,7 +276,7 @@ class Toolset:
             return None
         try:
             difference = np.abs(np.subtract(target, state))
-        except Exception:
+        except Exception:  # pragma: no cover
             return None
         if difference.shape != state.shape or not bool(np.all(np.isfinite(difference))):
             return None
@@ -303,11 +306,11 @@ class Toolset:
             return ToolResult(
                 error="note is required: describe what you observe and why you chose this capture"
             )
-        if not observation.images:
-            return ToolResult(error="no camera images are available in this observation")
 
         requested = arguments.get("cameras")
         if "cameras" not in arguments:
+            if not observation.images:
+                return ToolResult(capture=())
             return ToolResult(capture=None)
         if (
             not isinstance(requested, list)
@@ -315,6 +318,8 @@ class Toolset:
             or any(not isinstance(name, str) for name in requested)
         ):
             return ToolResult(error="cameras must be a non-empty list of strings when provided")
+        if not observation.images:
+            return ToolResult(capture=())
         present = tuple(observation.images)
         unknown = [name for name in requested if name not in observation.images]
         if unknown:
