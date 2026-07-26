@@ -54,8 +54,10 @@ grader notes (Enter to skip): gripper closed early, cube still in frame
   the request's literal "any char aside from Enter". A lone space is a slip,
   not a note, and storing `" "` would put an empty chip in the HTML view for
   no one's benefit.
-- `EOFError` on the notes prompt yields `None` — the same defensive treatment
-  the verdict prompt already has, for a stdin that closes mid-run.
+- `EOFError` on the notes prompt yields `None`: the verdict already accepted is
+  still recorded, only the note is dropped. (This is deliberately *not* what
+  EOF on the verdict prompt does — see below — because by then there is a
+  verdict worth keeping.)
 - No re-prompting and no validation: every string is a legal note.
 
 ### When the prompt appears
@@ -128,7 +130,7 @@ error.
 | `rollout.TrialRecord` | new `operator_note: str | None = None`, next to `operator_judgement`, with its own comment stating it is qualitative and read by nothing that scores (the block at `rollout.py:91-93` is the model) |
 | `transcript.operator_event` | new trailing keyword `note: str | None = None` (after `source`, so the positional call at `tests/test_coverage_completion.py:309` still binds), always present in `data` |
 | `cli._prompt_operator` | docstring extended: it currently states the verdict contract only (`cli.py:529-533`) and must state the notes contract too |
-| `eval.py` trial loop | append `record.operator_note` to a `notes` list at `eval.py:407-409`, beside `termination_reasons` and `policy_transcripts`, not inside the two arms of the status split where `judgements` is appended. Both arms fall through to that point, and an errored trial's `operator_note` is already `None` because errored trials are never prompted, so one append is correct and reads as a smaller diff |
+| `eval.py` trial loop | three edits, all three required: declare `notes: list[str | None] = []` at `eval.py:316-319` beside `judgements`; append `record.operator_note` at `eval.py:407-409` beside `termination_reasons` and `policy_transcripts`, **not** inside the two arms of the status split where `judgements` is appended (both arms fall through to that point, and an errored trial's `operator_note` is already `None` because errored trials are never prompted, so one append is correct and reads as a smaller diff); pass `operator_notes=tuple(notes)` in the `SceneResult(...)` at `eval.py:443-455` |
 | `log.SceneResult` | new `operator_notes: tuple[str | None, ...] = ()`, strictly parallel to `epochs`, documented like its siblings |
 | `log.EvalLog.from_dict` | `sample["operator_notes"] = tuple(sample.get("operator_notes", ()))` — the `.get` is what keeps logs written before this field readable |
 | `_html.py` | render the notes for a scene under the existing judgement/reason blocks |
@@ -200,10 +202,15 @@ predicate is "has at least one non-`None` entry", and trials whose entry is
 most trials will not have one.
 
 Markup and style are specified here rather than left to taste, because
-`_html.py` carries one fixed inline stylesheet (`:140-188`) and an invented
-class renders unstyled. Emit `<h3>Grader notes</h3>` followed by one
+`_html.py` carries one fixed inline stylesheet (`_STYLES`, `:49-189`) and an
+invented class renders unstyled. Emit `<h3>Grader notes</h3>` followed by one
 `<div class="grader-note"><span class="note-label">trial {index}</span>{note}</div>`
-per non-`None` entry, and add a `.grader-note` rule to that stylesheet beside
+per non-`None` entry, split across two implicitly concatenated f-strings so the
+literal stays under ruff's 100-column limit at the indentation it lands at
+(`pyproject.toml:89`; `ruff format` will not split a long string for you). The
+`<h3>` says "Grader notes" rather than "Operator notes" even though the field
+is `operator_note`: the heading mirrors the wording the human actually saw at
+the prompt. Add a `.grader-note` rule to that stylesheet beside
 `.agent-note`: neutral, using the existing `--line`/`--muted`/`--bg` custom
 properties, with `overflow-wrap: anywhere` so a long note cannot widen the
 card. The existing `.note-label` (`:179-183`) is reused for the trial index.
@@ -242,7 +249,7 @@ deliberately rather than by making assertions looser:
 
 - `test_operator_prompt_records_verdict_and_reprompts_on_typos`
   (`tests/test_registry_cli.py:2047`) drives `answers = iter(["yse", "y"])` at
-  `:2054`. The notes prompt draws a third value and raises `StopIteration`,
+  `:2053`. The notes prompt draws a third value and raises `StopIteration`,
   which escapes through `before_scoring` (`eval.py:386`, outside the trial
   error handlers, and `main()` catches only `KeyboardInterrupt` around `eval()`
   at `cli.py:948`) and fails the run. Extend the iterator with the note answer.
@@ -269,7 +276,10 @@ deliberately rather than by making assertions looser:
   constant lambdas at `:2321` (`"Partial"`) and `:2331` (`"skip"`), so the
   notes prompt would return those strings as note text and the skip case's
   `assert record.events == []` (`:2334`) would fail for a reason that looks
-  like correct behavior. Convert each case to an explicit answer sequence.
+  like correct behavior. Convert those two cases to explicit answer sequences.
+  Its third case (`:2336-2344`) raises `EOFError` on every call and needs no
+  sequence; it is the natural home for the "notes prompt never reached" call
+  counter listed below.
 
 ### New tests
 
@@ -289,7 +299,9 @@ CLI prompt (`tests/test_registry_cli.py`, next to the tests above):
 - `EOFError` on the notes prompt: verdict recorded, `operator_note is None`.
 - adopted-verdict path: unchanged, and the fake input is never called.
 - end to end, mirroring `tests/test_registry_cli.py:2062`: run `main([...])`
-  through the ad-hoc path answering verdict and note, then read the log back
+  through the ad-hoc path answering verdict and note, reusing that test's
+  `--max-steps 3` shape so `cubepick` does not terminate with a definitive
+  verdict and get adopted without ever prompting, then read the log back
   and assert `log.samples[0].operator_notes == ("<the note>",)`. This is the
   only test that catches a `SceneResult(...)` constructed without the new
   tuple (`eval.py:443-455`), which is the single most likely implementation
