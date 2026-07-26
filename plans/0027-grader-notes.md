@@ -1,6 +1,6 @@
 # 0027 — grader notes: one optional free-text line after the operator verdict
 
-Issue: #174. Status: draft (revised after critique round 1).
+Issue: #174. Status: draft (revised after critique rounds 1 and 2).
 
 ## Problem
 
@@ -125,9 +125,10 @@ error.
 
 | Layer | Change |
 |---|---|
-| `rollout.TrialRecord` | new `operator_note: str | None = None`, documented as qualitative-only, next to `operator_judgement` |
-| `transcript.operator_event` | new keyword `notes: str | None = None`, always present in `data` |
-| `eval.py` trial loop | collect `record.operator_note` into a `notes` list beside `judgements`, `None` for errored trials (they are never scored and never prompted) |
+| `rollout.TrialRecord` | new `operator_note: str | None = None`, next to `operator_judgement`, with its own comment stating it is qualitative and read by nothing that scores (the block at `rollout.py:91-93` is the model) |
+| `transcript.operator_event` | new trailing keyword `note: str | None = None` (after `source`, so the positional call at `tests/test_coverage_completion.py:309` still binds), always present in `data` |
+| `cli._prompt_operator` | docstring extended: it currently states the verdict contract only (`cli.py:529-533`) and must state the notes contract too |
+| `eval.py` trial loop | append `record.operator_note` to a `notes` list at `eval.py:407-409`, beside `termination_reasons` and `policy_transcripts`, not inside the two arms of the status split where `judgements` is appended. Both arms fall through to that point, and an errored trial's `operator_note` is already `None` because errored trials are never prompted, so one append is correct and reads as a smaller diff |
 | `log.SceneResult` | new `operator_notes: tuple[str | None, ...] = ()`, strictly parallel to `epochs`, documented like its siblings |
 | `log.EvalLog.from_dict` | `sample["operator_notes"] = tuple(sample.get("operator_notes", ()))` — the `.get` is what keeps logs written before this field readable |
 | `_html.py` | render the notes for a scene under the existing judgement/reason blocks |
@@ -142,16 +143,24 @@ this schema's additive fields and is not a reason to bump the version.
 
 ### Event recording
 
-`operator_event` gains `notes` as a keyword that is always present in `data`,
-even when `None`. That is this module's existing convention:
+`operator_event` gains `note` as a keyword that is always present in `data`,
+even when `None`. Singular, because an event describes one trial, matching the
+`verdict` key it sits beside and `TrialRecord.operator_note`. Always present,
+because that is this module's existing convention:
 `approval_event(t, modified, detail=None)` writes `"detail": None` rather than
 varying the dict's keys (`transcript.py:47-49`). The cost is three exact-dict
 assertions in the CLI tests, listed under Testing.
 
+The event is kept rather than cut, even though nothing persists it (see below).
+An event stream that records "the operator said `y`" while the note the same
+human typed in the same breath is invisible to it would be a transcript that
+lies by omission, and the transcript is the thing custom sinks and any future
+event persistence read. The symmetry is worth three test edits.
+
 The event is appended when there is a verdict to record **or** a note to
 record:
 
-- `y`/`n`/`partial`: appended as today, now carrying `notes` (possibly `None`).
+- `y`/`n`/`partial`: appended as today, now carrying `note` (possibly `None`).
 - `skip` with a note: appended with `verdict="skip"` and the note.
   `operator_judgement` stays `None`.
 - `skip` with no note: nothing appended, exactly as today.
@@ -174,12 +183,21 @@ test below is the one that matters.
 ### HTML view
 
 `_scene_section` already emits chip rows for trial scores, termination reasons,
-and operator judgements (`_html.py:475`, judgement block at `:508-517`). Notes
-are free text, not tokens,
-so a chip row is the wrong shape: they get their own block under the judgement
-row, one entry per trial that has a note, labelled with its trial index so a
-note is readable against the parallel chip rows above it. Scenes with no notes
-at all emit nothing, the same way an empty judgement tuple emits nothing.
+and operator judgements (`_html.py:475`, judgement block at `:507-517`). Notes
+are free text, not tokens, so a chip row is the wrong shape: they get their own
+block under the judgement row, one entry per trial that has a note, labelled
+with its trial index so a note is readable against the parallel chip rows above
+it.
+
+The skip condition is where this block must **not** copy its neighbours. The
+judgement block skips only on an empty tuple (`if not judgements`), and an
+all-`None` tuple still renders a row of `n/a` chips. `operator_notes` is
+strictly parallel to `epochs`, so the ordinary no-notes run produces `(None,)`
+or `(None, None, ...)`, never `()`. A `if not scene.operator_notes` test would
+therefore emit an empty "Grader notes" heading on nearly every page. The
+predicate is "has at least one non-`None` entry", and trials whose entry is
+`None` contribute no row at all — a missing note is not worth an `n/a` when
+most trials will not have one.
 
 Text goes through the module's `_escape` at interpolation, like every other
 foreign string on the page. No truncation: a note is one operator-typed line,
@@ -209,21 +227,35 @@ for exactly one. These are updates, not new cases, and each must be made
 deliberately rather than by making assertions looser:
 
 - `test_operator_prompt_records_verdict_and_reprompts_on_typos`
-  (`tests/test_registry_cli.py:2047`) drives `answers = iter(["yse", "y"])`.
-  The notes prompt draws a third value and raises `StopIteration`, which
-  escapes through `before_scoring` (`eval.py:387`, outside the trial error
-  handlers) and fails the run. Extend the iterator with the note answer.
-- `test_prompt_operator_still_prompts_without_definitive_verdict`
-  (`tests/test_registry_cli.py:2202`) asserts `len(prompts) == 1`. It becomes
-  2, and asserting both prompt strings is the point of the test now.
-- Three exact-dict event assertions gain the `notes` key:
-  `tests/test_registry_cli.py:2188` (`source="embodiment"` — `notes` is `None`
-  there), `:2229`, and the parametrized adoption test's counterpart.
-- `test_prompt_operator_unit_semantics` (`tests/test_registry_cli.py:2318-2344`)
-  patches `input` to a constant lambda, so the notes prompt would return
-  `"Partial"` and `"skip"` as note text and the skip case's
-  `assert record.events == []` would fail for a reason that looks like correct
-  behavior. Convert each case to an explicit answer sequence.
+  (`tests/test_registry_cli.py:2047`) drives `answers = iter(["yse", "y"])` at
+  `:2054`. The notes prompt draws a third value and raises `StopIteration`,
+  which escapes through `before_scoring` (`eval.py:386`, outside the trial
+  error handlers, and `main()` catches only `KeyboardInterrupt` around `eval()`
+  at `cli.py:948`) and fails the run. Extend the iterator with the note answer.
+- `test_prompt_operator_still_prompts_without_definitive_verdict` (`:2200`)
+  asserts `len(prompts) == 1` (`:2225`) and the exact event dict (`:2228`). Its
+  `_answer` fake (`:2218-2222`) returns `"y"` unconditionally, so leaving it
+  alone would silently record `operator_note == "y"` and force the dict to
+  `{"verdict": "y", "source": "prompt", "note": "y"}` — fixture nonsense that
+  reads like intended behavior. Drive it from the sequence `["y", ""]`, assert
+  both prompt strings, and assert `note` is `None`.
+- `test_prompt_operator_prompts_for_truncated_success_reason` (`:2231`) patches
+  `input` to the constant `lambda _prompt: "n"` (`:2246`) and asserts the exact
+  event dict (`:2252`). Same failure: `"n"` becomes the note. Give it a
+  sequence.
+- `test_prompt_operator_warns_before_judging_step_limited_trial` (`:2255`,
+  fake at `:2269`) is the quiet one. It asserts only `operator_judgement`, so
+  it keeps passing while recording `operator_note == "n"` for a trial it never
+  meant to annotate. Convert it too: a fake that answers a prompt the test does
+  not know exists is a fake that will mislead the next reader.
+- The three exact-dict event assertions that gain the `note` key are therefore
+  `:2188` (the parametrized adoption test, where `note` is `None` and no prompt
+  fires), `:2228`, and `:2252`.
+- `test_prompt_operator_unit_semantics` (`:2307-2344`) patches `input` to
+  constant lambdas at `:2321` (`"Partial"`) and `:2331` (`"skip"`), so the
+  notes prompt would return those strings as note text and the skip case's
+  `assert record.events == []` (`:2334`) would fail for a reason that looks
+  like correct behavior. Convert each case to an explicit answer sequence.
 
 ### New tests
 
@@ -252,19 +284,34 @@ CLI prompt (`tests/test_registry_cli.py`, next to the tests above):
 Log, orchestration, view:
 
 - `tests/test_eval_log.py`: round-trip a log with notes; add `operator_notes`
-  to the field-deletion test at `:106-119` so a dict without the key still
-  reads back as `()`.
+  to the field-deletion test whose `del`s sit at `:107-113`, so a dict without
+  the key still reads back as `()`.
 - `tests/test_eval_orchestration.py`: `operator_notes` is parallel to `epochs`,
   with `None` for an errored trial.
 - `tests/test_strict_json.py`: the new key survives the strict JSON sink.
-- `tests/test_html_view.py`: a scene with notes renders them escaped; a scene
-  with only `None` entries renders no notes block.
+- `tests/test_html_view.py`, with the fixtures pinned deliberately, because the
+  100% gate cannot tell the two candidate skip conditions apart on its own: a
+  `"".join(...)` over all-`None` entries is `""` either way. The "renders
+  notes" case must mix one real note with one `None` so the per-entry filter is
+  exercised in both directions, and the "no notes block" case must use
+  `operator_notes=(None, None)` rather than the empty tuple that
+  `test_absent_optional_fields_and_empty_scene_sequences_are_omitted` uses at
+  `:162`. An empty tuple would pass against the wrong implementation.
 
-Docs: `docs/guide/cli.md` gains the notes line in the transcript sample and a
-sentence on the Enter-to-skip contract and the skip-plus-note case.
-`CHANGELOG.md` gets an `Added` entry under `[Unreleased]`. Both are
-public-facing text under the `CLAUDE.md` writing-style rule: no em dashes in
-prose, no mid-sentence bold. Do not copy this plan's voice into them.
+Docs and public text:
+
+- `docs/guide/cli.md` gains the notes line in the transcript sample and a
+  sentence on the Enter-to-skip contract. It also has a line to *correct*:
+  `:101` currently reads that `skip` records nothing, which stops being true
+  once a skipped trial can carry a note. An added sentence next to an
+  uncorrected one leaves the page contradicting itself.
+- `--no-prompt`'s help string (`cli.py:235`, "never ask the terminal operator
+  for a success verdict") no longer describes everything the flag suppresses.
+  Behavior is unchanged; the sentence is not.
+- `CHANGELOG.md` gets an `Added` entry under `[Unreleased]`.
+- All of the above is public-facing text under the `CLAUDE.md` writing-style
+  rule: no em dashes in prose, no mid-sentence bold. Do not copy this plan's
+  voice into them.
 
 ## Rollout
 
