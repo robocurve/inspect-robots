@@ -73,6 +73,43 @@ describing the current observation and why the agent chose that motion. The
 user reads these notes live and in the saved transcript to follow what the
 agent sees and decides.
 
+Camera images are attached to every observation by default
+(`-P images=always`). Set `-P images=on_demand` to send state without image
+payloads and give the model a `take_pic` tool instead:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-fable-5 -P images=on_demand \
+    --embodiment cubepick
+```
+
+`take_pic` requires a human-readable `note` and accepts an optional `cameras`
+list. Omitting the list requests every camera available in that observation.
+A camera can be revealed only once per observation because its view cannot
+change until the robot moves. A standalone `take_pic` shows the current frame
+and lets the model decide again before moving. A `take_pic` placed after one
+motion in the same assistant turn is queued: the motion chunk is returned
+immediately, and the requested frames are attached to the next observation,
+after the controller has played the available part of the chunk. Two motions
+still cannot be chained.
+
+Queued-capture narration reports what the rollout actually observed. It says
+whether all requested chunk steps played or only a prefix did, names camera
+frames missing on arrival, and, for absolute control modes with matching
+proprioception, reports the largest measured offset from the requested target.
+The residual is the arrival check: a full step count alone does not prove the
+arm reached its target when an approver rewrote actions or a smoothing
+controller blended them.
+
+Controller choice affects that report. `DefaultController` buffers
+`min(replan_interval, chunk_len)` actions, so a `replan_interval` shorter than
+the interpolation always reports partial playout; a chunk shorter than the
+interval reports finished. `EnsemblingController` re-queries every control
+step, so the observed advance is always one step. It also rebuilds actions
+from chunk metadata, which means `done` and `give_up` do not terminate under
+ensembling—an existing core limitation. A trial that terminates or reaches its
+step limit before the next policy call drops any queued capture.
+
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
 per-step speed statement, so `max_speed_frac` does not apply to displacement
@@ -104,7 +141,8 @@ motion fall short of the tool's requested total.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
-`temperature`, `effort`, `max_speed_frac`, `transcript_echo`.
+`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
+(default `always`; use `on_demand` for model-requested frames).
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
 either on another wire is an error rather than a silent no-op.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to

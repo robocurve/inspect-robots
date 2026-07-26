@@ -21,6 +21,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin:** tool results in `images=always` mode now follow the model's
+  tool-call order. Extra calls remain answered with
+  `ignored: one tool call per turn` and are not executed; only their result
+  ordering relative to the executed call changes (#173).
 - **Docs site migrated from MkDocs Material to Docusaurus.** The site at
   inspectrobots.org now builds from `website/` (Docusaurus 3) while the
   Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
@@ -44,6 +48,13 @@ All notable changes to this project are documented here. The format is based on
   pays a single keypress. Notes reach the JSON log and the HTML report, a note
   is kept even on a trial the grader answered `skip`, and no note ever moves a
   score (#174).
+- **Agent plugin:** `-P images=on_demand` lets the model request camera frames
+  with `take_pic` instead of attaching every frame to every observation. A
+  capture may follow one motion in the same assistant turn and is delivered
+  from the post-motion observation; its narration reports observed playout,
+  any missing cameras, and the measured remaining offset from absolute targets
+  when proprioception is available. `images=always` remains the default
+  (#173).
 - **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
   the end of a trial to persist state or artifacts. The orchestrator calls
   `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy
