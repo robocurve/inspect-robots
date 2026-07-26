@@ -2529,7 +2529,7 @@ def test_non_string_param_coercion() -> None:
         effort="minimal",
         speed="fast",
         wire="anthropic",
-        env={"False": "test-key"},
+        env={"DUMMY_KEY": "test-key"},
     )
     assert policy.config.model == "42"
     assert policy.config.base_url == "True"

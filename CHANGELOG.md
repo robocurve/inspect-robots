@@ -211,6 +211,7 @@ All notable changes to this project are documented here. The format is based on
   regression (`eef_delta_pose` + `rot6d` already reached the displacement
   clamp path before #143/#144). `euler_xyz` and `axis_angle` deltas have no
   such problem and remain guardrail-conformant.
+- **Coerce non-string agent policy config parameters to string** in `LLMAgentPolicy` constructor to prevent `AttributeError`s (e.g., when `model` is passed as an integer like 42) and ensure clean logging (#169). Falsy values are coerced to `""` to preserve API key and OpenRouter fallback logic.
 - **An explicit invalid `--max-action-delta` now fails fast instead of silently
   running with weaker guardrails** (#154). Non-finite or non-positive values
   were previously caught by `_build_guardrails`'s degrade-per-component path
