@@ -314,6 +314,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
         policy_transcripts: list[Any] = []
@@ -407,6 +408,7 @@ def _run_eval(
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
                 policy_transcripts.append(record.policy_transcript)
+                notes.append(record.operator_note)
                 bus.on_trial_end(record)
 
             if halted:
@@ -448,6 +450,7 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
                 policy_transcripts=tuple(policy_transcripts),

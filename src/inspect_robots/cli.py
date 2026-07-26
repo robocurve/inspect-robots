@@ -232,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--no-prompt",
         action="store_true",
-        help="never ask the terminal operator for a success verdict",
+        help="never ask the terminal operator for a success verdict or grader notes",
     )
     p_run.add_argument(
         "--rerun",
@@ -521,6 +521,7 @@ def _build_guardrails(
 
 
 _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
+_NOTES_PROMPT = "grader notes (Enter to skip): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
 
@@ -530,6 +531,7 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
 
     A terminated episode with a definitive embodiment verdict adopts and announces that
     verdict instead of asking the operator to confirm the same outcome a second time.
+    Prompted verdicts are followed by one optional, stripped, case-preserved grader note.
     """
     from inspect_robots.transcript import operator_event
 
@@ -548,14 +550,19 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
         try:
             answer = input(_PROMPT).strip().lower()
         except EOFError:
-            answer = "skip"
+            return
         if answer in _PROMPT_ANSWERS:
             break
         print(f"unrecognized answer {answer!r}; expected one of y/n/partial/skip")
-    if answer == "skip":
-        return
-    record.operator_judgement = answer
-    record.events.append(operator_event(t=len(record.steps), verdict=answer))
+    try:
+        note = input(_NOTES_PROMPT).strip() or None
+    except EOFError:
+        note = None
+    record.operator_note = note
+    if answer != "skip":
+        record.operator_judgement = answer
+    if answer != "skip" or note is not None:
+        record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
 
 
 def _step_limit_count(log: EvalLog) -> int:

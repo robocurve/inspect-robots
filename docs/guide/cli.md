@@ -95,13 +95,17 @@ and prints `operator verdict adopted from embodiment: success` (or `failure`) so
 the operator can catch a mistaken adoption live.
 
 ```text
-did the robot succeed? [y/n/partial/skip] (partial scores as failure)
+did the robot succeed? [y/n/partial/skip] (partial scores as failure) n
+grader notes (Enter to skip): gripper closed early, cube still in frame
 ```
 
-Prompted verdicts are recorded in the log (`skip` records nothing). Piped/CI
-stdin, `--no-prompt`, or a registered `--task` run never prompt or adopt an
-embodiment verdict: unattended runs stay non-blocking, and an unjudged trial
-honestly scores as failure with "no operator judgement recorded".
+Prompted verdicts are recorded in the log. The CLI then asks for one optional
+line of grader notes. Bare Enter or whitespace-only input records no note.
+`skip` records no judgement, but a grader note entered for that trial is still
+recorded. Notes never affect the score. Piped/CI stdin, `--no-prompt`, or a
+registered `--task` run never prompt or adopt an embodiment verdict: unattended
+runs stay non-blocking, and an unjudged trial honestly scores as failure with
+"no operator judgement recorded".
 
 ## `inspect-robots setup`
 

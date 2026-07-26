@@ -39,6 +39,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Grader notes:** a prompted operator verdict is now followed by one optional
+  line of free text. Bare Enter records nothing, so a grader with nothing to add
+  pays a single keypress. Notes reach the JSON log and the HTML report, a note
+  is kept even on a trial the grader answered `skip`, and no note ever moves a
+  score (#174).
 - **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
   the end of a trial to persist state or artifacts. The orchestrator calls
   `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy

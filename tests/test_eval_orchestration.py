@@ -756,6 +756,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     def judge(record: TrialRecord, scene: Scene) -> None:
         calls.append(record.epoch)
         record.operator_judgement = "yes"
+        record.operator_note = "clean pickup"
 
     (log,) = eval(
         task,
@@ -768,6 +769,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     scene = log.samples[0]
     assert scene.epochs == ({"operator": 1.0}, {})
     assert scene.operator_judgements == ("yes", None)
+    assert scene.operator_notes == ("clean pickup", None)
 
 
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:

@@ -2050,7 +2050,7 @@ def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     monkeypatch.setenv(ENV_POLICY, "scripted")
     monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
     _tty_stdin(monkeypatch)
-    answers = iter(["yse", "y"])
+    answers = iter(["yse", "y", ""])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     log_dir = tmp_path / "logs"
     rc = main(
@@ -2061,6 +2061,25 @@ def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     log = _read_only_log(log_dir)
     assert log.samples[0].operator_judgements == ("y",)
     assert log.results.metrics["operator"] == 1.0
+
+
+def test_operator_prompt_persists_grader_note_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(ENV_POLICY, "scripted")
+    monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
+    _tty_stdin(monkeypatch)
+    answers = iter(["n", "  Gripper Closed Early  "])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+
+    rc = main(["reach the cube", "--max-steps", "3", "--log-dir", str(log_dir)])
+
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("n",)
+    assert log.samples[0].operator_notes == ("Gripper Closed Early",)
+    capsys.readouterr()
 
 
 def test_operator_prompt_adopts_self_confirming_embodiment_verdict(
@@ -2182,10 +2201,15 @@ def test_prompt_operator_adopts_definitive_embodiment_verdict(
     _prompt_operator(record, Scene(id="s0", instruction="reach"))
 
     assert record.operator_judgement == expected_verdict
+    assert record.operator_note is None
     (event,) = record.events
     assert event.kind == "operator"
     assert event.t == 0
-    assert event.data == {"verdict": expected_verdict, "source": "embodiment"}
+    assert event.data == {
+        "verdict": expected_verdict,
+        "source": "embodiment",
+        "note": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -2202,7 +2226,7 @@ def test_prompt_operator_still_prompts_without_definitive_verdict(
     termination_reason: str | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
 
@@ -2214,18 +2238,19 @@ def test_prompt_operator_still_prompts_without_definitive_verdict(
         termination_reason=termination_reason,
     )
     prompts: list[str] = []
+    answers = iter(["y", ""])
 
     def _answer(prompt: str) -> str:
         prompts.append(prompt)
-        return "y"
+        return next(answers)
 
     monkeypatch.setattr("builtins.input", _answer)
     _prompt_operator(record, Scene(id="s0", instruction="reach"))
 
-    assert len(prompts) == 1
+    assert prompts == [_PROMPT, _NOTES_PROMPT]
     assert record.operator_judgement == "y"
     (event,) = record.events
-    assert event.data == {"verdict": "y", "source": "prompt"}
+    assert event.data == {"verdict": "y", "source": "prompt", "note": None}
 
 
 def test_prompt_operator_prompts_for_truncated_success_reason(
@@ -2243,13 +2268,14 @@ def test_prompt_operator_prompts_for_truncated_success_reason(
         truncated=True,
         termination_reason="success",
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    answers = iter(["n", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     _prompt_operator(record, Scene(id="s0", instruction="reach"))
 
     assert record.operator_judgement == "n"
     (event,) = record.events
-    assert event.data == {"verdict": "n", "source": "prompt"}
+    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
 
 
 def test_prompt_operator_warns_before_judging_step_limited_trial(
@@ -2266,7 +2292,8 @@ def test_prompt_operator_warns_before_judging_step_limited_trial(
         truncated=True,
         termination_reason="max_steps",
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    answers = iter(["n", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     _prompt_operator(record, Scene(id="s0", instruction="reach"))
 
@@ -2305,7 +2332,7 @@ def test_operator_scorer_reads_adopted_embodiment_verdict(
 
 
 def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
-    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.cli import _PROMPT, _prompt_operator
     from inspect_robots.rollout import TrialRecord
     from inspect_robots.scene import Scene
 
@@ -2318,7 +2345,8 @@ def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None
 
     # A verdict is recorded verbatim with an operator event at the final step.
     record = _record()
-    monkeypatch.setattr("builtins.input", lambda _prompt: "Partial")
+    answers = iter(["Partial", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     _prompt_operator(record, scene)
     assert record.operator_judgement == "partial"
     (event,) = record.events
@@ -2328,20 +2356,115 @@ def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None
 
     # skip: no judgement, no event.
     record = _record()
-    monkeypatch.setattr("builtins.input", lambda _prompt: "skip")
+    answers = iter(["skip", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     _prompt_operator(record, scene)
     assert record.operator_judgement is None
     assert record.events == []
 
     # EOF (operator hit Ctrl-D): treated as skip.
-    def _eof(_prompt: str) -> str:
+    prompts: list[str] = []
+
+    def _eof(prompt: str) -> str:
+        prompts.append(prompt)
         raise EOFError
 
     record = _record()
     monkeypatch.setattr("builtins.input", _eof)
     _prompt_operator(record, scene)
     assert record.operator_judgement is None
+    assert record.operator_note is None
     assert record.events == []
+    assert prompts == [_PROMPT]
+
+
+@pytest.mark.parametrize(
+    (
+        "verdict",
+        "note_input",
+        "expected_judgement",
+        "expected_note",
+        "expected_event",
+    ),
+    [
+        (
+            "y",
+            "gripper closed early",
+            "y",
+            "gripper closed early",
+            {"verdict": "y", "source": "prompt", "note": "gripper closed early"},
+        ),
+        ("y", "", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
+        ("y", " \t ", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
+        (
+            "y",
+            "  Mixed CASE  ",
+            "y",
+            "Mixed CASE",
+            {"verdict": "y", "source": "prompt", "note": "Mixed CASE"},
+        ),
+        (
+            "skip",
+            "  camera unplugged  ",
+            None,
+            "camera unplugged",
+            {"verdict": "skip", "source": "prompt", "note": "camera unplugged"},
+        ),
+        ("skip", "", None, None, None),
+    ],
+)
+def test_prompt_operator_records_optional_grader_notes(
+    verdict: str,
+    note_input: str,
+    expected_judgement: str | None,
+    expected_note: str | None,
+    expected_event: dict[str, str | None] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    answers = iter([verdict, note_input])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert record.operator_judgement == expected_judgement
+    assert record.operator_note == expected_note
+    if expected_event is None:
+        assert record.events == []
+    else:
+        (event,) = record.events
+        assert event.data == expected_event
+
+
+def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    prompts: list[str] = []
+
+    def _answer(prompt: str) -> str:
+        prompts.append(prompt)
+        if prompt == _PROMPT:
+            return "n"
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _answer)
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert prompts == [_PROMPT, _NOTES_PROMPT]
+    assert record.operator_judgement == "n"
+    assert record.operator_note is None
+    (event,) = record.events
+    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
 
 
 # --------------------------------------------------------------------------- #
