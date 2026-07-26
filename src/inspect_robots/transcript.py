@@ -50,7 +50,13 @@ def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
 
 
 def operator_event(t: int, verdict: str, source: str = "prompt", note: str | None = None) -> Event:
-    """Record the operator's verdict, optional note, and source after the rollout ends."""
+    """Record the operator's verdict, optional note, and source after the rollout ends.
+
+    ``verdict`` carries whatever the operator answered, which includes the
+    non-verdict ``"skip"`` when they declined to grade a trial but still left a
+    note. Consumers deriving an outcome from this event must treat ``"skip"``
+    as "no judgement", never as a result.
+    """
     return Event(
         kind="operator",
         t=t,

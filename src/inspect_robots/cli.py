@@ -521,7 +521,9 @@ def _build_guardrails(
 
 
 _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
-_NOTES_PROMPT = "grader notes (Enter to skip): "
+# "Enter for none", not "Enter to skip": `skip` is a literal verdict token one
+# prompt earlier, and typing it here would record the word, not skip anything.
+_NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
 
@@ -561,6 +563,11 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     record.operator_note = note
     if answer != "skip":
         record.operator_judgement = answer
+    # A skipped trial with a note still gets an event: the human said something
+    # about this trial, and an event stream that recorded the verdict but not
+    # the sentence typed in the same breath would be lying by omission. The
+    # event then carries verdict="skip" with no judgement, which is why
+    # operator_event documents "skip" as "no judgement" for its consumers.
     if answer != "skip" or note is not None:
         record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
 

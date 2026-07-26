@@ -96,7 +96,7 @@ the operator can catch a mistaken adoption live.
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure) n
-grader notes (Enter to skip): gripper closed early, cube still in frame
+grader notes (Enter for none): gripper closed early, cube still in frame
 ```
 
 Prompted verdicts are recorded in the log. The CLI then asks for one optional

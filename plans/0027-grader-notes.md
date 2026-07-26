@@ -130,7 +130,7 @@ error.
 | `rollout.TrialRecord` | new `operator_note: str | None = None`, next to `operator_judgement`, with its own comment stating it is qualitative and read by nothing that scores (the block at `rollout.py:91-93` is the model) |
 | `transcript.operator_event` | new trailing keyword `note: str | None = None` (after `source`, so the positional call at `tests/test_coverage_completion.py:309` still binds), always present in `data` |
 | `cli._prompt_operator` | docstring extended: it currently states the verdict contract only (`cli.py:529-533`) and must state the notes contract too |
-| `eval.py` trial loop | three edits, all three required: declare `notes: list[str | None] = []` at `eval.py:316-319` beside `judgements`; append `record.operator_note` at `eval.py:407-409` beside `termination_reasons` and `policy_transcripts`, **not** inside the two arms of the status split where `judgements` is appended (both arms fall through to that point, and an errored trial's `operator_note` is already `None` because errored trials are never prompted, so one append is correct and reads as a smaller diff); pass `operator_notes=tuple(notes)` in the `SceneResult(...)` at `eval.py:443-455` |
+| `eval.py` trial loop | three edits, all three required: declare `notes: list[str | None] = []` at `eval.py:316-319` beside `judgements`; append `record.operator_note` beside each `judgements.append(...)` inside both arms of the status split (`None` in the non-success arm); pass `operator_notes=tuple(notes)` in the `SceneResult(...)` at `eval.py:443-455` |
 | `log.SceneResult` | new `operator_notes: tuple[str | None, ...] = ()`, strictly parallel to `epochs`, documented like its siblings |
 | `log.EvalLog.from_dict` | `sample["operator_notes"] = tuple(sample.get("operator_notes", ()))` — the `.get` is what keeps logs written before this field readable |
 | `_html.py` | render the notes for a scene under the existing judgement/reason blocks |
@@ -346,6 +346,30 @@ Docs and public text:
 - All of the above is public-facing text under the `CLAUDE.md` writing-style
   rule: no em dashes in prose, no mid-sentence bold. Do not copy this plan's
   voice into them.
+
+## Reversals after code review
+
+Two decisions above were changed once the code existed, recorded here so the
+plan does not describe something the repo no longer does:
+
+- **`eval.py` collection point.** The draft put the `notes` append at the
+  fall-through point beside `termination_reasons`, arguing for the smaller
+  diff. Review pointed out that this captures the note *after*
+  `policy.on_trial_end` runs while the judgement is captured *before* it, so a
+  policy hook that set `operator_note` would be honoured while the same hook
+  setting `operator_judgement` would be silently dropped. Two fields documented
+  as strictly parallel must be captured by the same rule, so both appends now
+  sit together inside the status split.
+- **Notes prompt wording.** `grader notes (Enter to skip): ` became
+  `grader notes (Enter for none): `. "Skip" is a literal verdict token one
+  prompt earlier, and an operator who typed `skip` at the notes prompt would
+  have recorded the word rather than skipping anything.
+
+Kept unchanged under review, with the reasoning strengthened rather than the
+behavior: the `skip`-with-note event (`operator_event`'s docstring now states
+that `verdict` may be the non-verdict `"skip"`, which is what its consumers
+need), and no control-character filtering of the note (rewriting what a human
+typed is a worse failure than a stray glyph the browser already replaces).
 
 ## Rollout
 

@@ -174,7 +174,8 @@ def eval(
     (never for errored trials, which are recorded but not scored), after the
     rollout returns and before the scorers run. It may mutate the record —
     e.g. capture ``TrialRecord.operator_judgement`` (R6) so the ``operator``
-    scorer can read it. Exceptions it raises propagate to the caller. Note
+    scorer can read it, and ``TrialRecord.operator_note`` alongside it, which
+    is recorded but never scored. Exceptions it raises propagate to the caller. Note
     this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
@@ -379,6 +380,7 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
+                    notes.append(None)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -391,7 +393,12 @@ def _run_eval(
                         per_scorer_scores[scorer.name].append(score)
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
+                    # Captured at the same instant as the judgement, on purpose:
+                    # the two are documented as strictly parallel, so a later
+                    # mutation (e.g. from policy.on_trial_end) must not be able
+                    # to reach one of them and miss the other.
                     judgements.append(record.operator_judgement)
+                    notes.append(record.operator_note)
 
                 on_trial_end = getattr(policy, "on_trial_end", None)
                 if callable(on_trial_end):
@@ -408,7 +415,6 @@ def _run_eval(
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
                 policy_transcripts.append(record.policy_transcript)
-                notes.append(record.operator_note)
                 bus.on_trial_end(record)
 
             if halted:
