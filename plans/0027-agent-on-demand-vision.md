@@ -67,7 +67,9 @@ the cameras that `take_pic` can reach. No image parts.
 Every capture branch in the walk is gated on `images == "on_demand"`, not on
 the schema. Tool names come from the model, so a stray `take_pic` in `always`
 mode must still fall through to the existing structured unknown-tool error
-(`_tools.py:202-205`).
+(`_tools.py:202-205`). That error's `available:` list becomes mode-dependent so
+it names `take_pic` in on-demand mode and omits it in `always` mode — a stale
+list is worst precisely where the model is guessing tool names.
 
 ### 3b. `take_pic`
 
@@ -109,7 +111,9 @@ in the same observation, whose frames belong to *N+1*.
 other unsupported configuration in this module, and an embodiment that serves
 frames without declaring them is already outside the compatibility contract.
 
-`take_pic` yields neither a chunk nor an error. `ToolResult` becomes
+A *successful* `take_pic` yields neither a chunk nor an error; the validation
+failures above still come back as `ToolResult.error` like any other tool's.
+`ToolResult` becomes
 `@dataclass(frozen=True, eq=False)` and gains two fields:
 
 - `capture: tuple[str, ...] | None` — resolved camera names, or `None` when
@@ -159,34 +163,54 @@ The walk collects results for every call and only then decides what `act()`
 does. It is a two-state machine, not a list of cases. The state is *open* until
 some call produces a chunk or an immediate capture, and *closed* after.
 
+Every call reaches `toolset.execute` for validation, open or closed. What
+changes with the state is what is *done* with the result.
+
 **While open**, each call is dispatched normally:
 
-- an on-demand `take_pic` becomes an *immediate* capture (§3d) and closes the
-  walk. The model asked to look before acting, so it re-decides with the frames
-  in hand rather than executing a motion it chose blind.
+- an on-demand `take_pic` closes the walk **whatever its outcome**. On success
+  it is an *immediate* capture (§3d): the model asked to look before acting, so
+  it re-decides with the frames in hand rather than executing a motion it chose
+  blind. On a `toolset.execute` error it is answered with the error text and
+  increments `failures`. On a revealed-set rejection it is answered with the
+  rejection text and leaves `failures` alone (§3d). All three close, so a move
+  behind a rejected `take_pic` is answered `ignored`, not executed.
 - every other call — including an unknown tool name, and including `take_pic`
   in `always` mode — goes to `toolset.execute` exactly as today. A chunk closes
   the walk. An error is answered with its text, increments `failures`, and
   closes the walk with no chunk.
 
-**Once closed**, no further call executes:
+**Once closed**, nothing further reaches the embodiment and no further chunk is
+produced. The one remaining live path is queuing, and it exists only when the
+walk was closed by a **non-stop motion chunk** — that is the only close that
+guarantees a next observation and a `chunk_len` to count against:
 
-- an on-demand `take_pic` is *queued* (§3e), answered `queued: frames arrive
-  with the next observation, once the motion has finished playing`. Only one
-  capture is queued per turn; a second is answered `ignored: one tool call per
-  turn`. When the chunk that closed the walk was a stop there is no next
-  observation, so the capture is answered `ignored: the trial ends with this
-  call` instead. The policy recognises a stop by reading
-  `chunk.actions[0].meta.get("request_stop")`, which `_stop` already sets
-  (`_tools.py:216-219`), rather than forking the `("done", "give_up")` literal
-  out of `_tools.py:200`.
+- on-demand `take_pic`, walk closed by a motion chunk: still passed to
+  `toolset.execute` for argument and camera-name validation. On success it is
+  *queued* (§3e) and answered `queued: frames arrive with the next observation,
+  once the motion has finished playing`. On error it is answered with the error
+  text, nothing is queued, the queue slot stays free for a later valid
+  `take_pic` in the same turn, and `failures` is untouched — `act()` is
+  returning the chunk regardless, so counting it would leak into the next
+  observation's budget. Only one capture is queued per turn; once the slot is
+  filled a second `take_pic` is answered `ignored: one tool call per turn`.
+- on-demand `take_pic`, walk closed by a **stop** chunk: answered `ignored: the
+  trial ends with this call`. There is no next observation to deliver into. The
+  policy recognises a stop by reading `chunk.actions[0].meta.get("request_stop")`,
+  which `_stop` already sets (`_tools.py:216-219`), rather than forking the
+  `("done", "give_up")` literal out of `_tools.py:200`.
+- on-demand `take_pic`, walk closed **without a chunk** (an immediate capture, a
+  revealed-set rejection, or an error): answered `ignored: one tool call per
+  turn`. No motion was emitted, so "once the motion has finished playing" would
+  be false and `chunk_len` would be undefined. `[take_pic, take_pic]` resolves
+  here.
 - everything else is answered `ignored: one tool call per turn`, the string
   used today.
 
-Nothing after a chunk can cancel it. An error would have had to come from a
-call that never ran, and discarding the chunk would leave the move's own tool
-result (`executing move_joints over 12 steps`) in the transcript describing a
-motion that never reached the embodiment.
+Nothing after a chunk can cancel it. An error there comes from a call that
+never ran, and discarding the chunk would leave the move's own tool result
+(`executing move_joints over 12 steps`) in the transcript describing a motion
+that never reached the embodiment.
 
 **After the walk**, `act()` returns the chunk if one was produced. Otherwise it
 continues the `while True` loop for another LLM turn — the same path a
@@ -204,7 +228,7 @@ the correct mirror of the request and keeps a single dispatch path rather than
 two divergent ones. Two existing tests pin the old order and must be updated:
 `test_transcript_echo_marks_extra_tool_calls_before_executed_result` and
 `test_extra_tool_calls_are_answered_but_not_executed` (`test_policy_e2e.py:417`
-and `:836`). The `ignored: one tool call per turn` wording is deliberately
+and `:832`). The `ignored: one tool call per turn` wording is deliberately
 unchanged so only the order moves. CHANGELOG records it.
 
 ### 3d. Immediate capture
@@ -267,9 +291,9 @@ revealed set so the model cannot immediately re-request them.
 
 The image parts go **into the observation message itself**, via
 `_observation_content(observation, state_labels, reveal=cameras)`. `reveal` is
-keyword-only and defaults to `None` meaning "every camera", so the six existing
+keyword-only and defaults to `None` meaning "every camera", so the existing
 call sites that pass one or two positional arguments
-(`test_policy_e2e.py:321-372`) keep rendering every frame; on-demand mode
+(`test_policy_e2e.py:321-370`) keep rendering every frame; on-demand mode
 passes an explicit empty tuple for an unrevealed observation. That holds
 the message count and delta-stream shape identical to `always` mode, and is
 semantically right: the frames *are* that observation's.
