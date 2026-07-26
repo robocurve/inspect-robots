@@ -170,6 +170,72 @@ def test_translates_history_tools_and_request_options() -> None:
     assert all("type" not in item for item in history_messages)
 
 
+def test_capture_history_keeps_function_outputs_in_call_order_before_images() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    _client(handler).complete(
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tool_call("move", "move_joints", '{"targets":{"joint":0.2}}'),
+                    _tool_call("pic", "take_pic", '{"note":"inspect"}'),
+                ],
+            },
+            {"role": "tool", "tool_call_id": "move", "content": "executing move"},
+            {
+                "role": "tool",
+                "tool_call_id": "pic",
+                "content": "captured 1 frame(s): 'top'",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "camera 'top' (step 1):"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,cG5n"},
+                    },
+                ],
+            },
+        ],
+        tools=[],
+    )
+
+    assert bodies[0]["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "move",
+            "name": "move_joints",
+            "arguments": '{"targets":{"joint":0.2}}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "pic",
+            "name": "take_pic",
+            "arguments": '{"note":"inspect"}',
+        },
+        {"type": "function_call_output", "call_id": "move", "output": "executing move"},
+        {
+            "type": "function_call_output",
+            "call_id": "pic",
+            "output": "captured 1 frame(s): 'top'",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "camera 'top' (step 1):"},
+                {"type": "input_image", "image_url": "data:image/png;base64,cG5n"},
+            ],
+        },
+    ]
+
+
 def test_optional_request_fields_are_omitted_when_unset() -> None:
     bodies: list[dict[str, Any]] = []
 

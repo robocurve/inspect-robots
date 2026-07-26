@@ -1,12 +1,12 @@
 """LLMAgentPolicy — a frontier LLM as a first-class Inspect Robots policy.
 
 The conversation loop lives inside ``act()``: observation in (labeled state
-text + camera frames), one validated tool call out, synthesized into an
-open-loop ``ActionChunk`` by the motion layer. The LLM never sees raw
-actuation, and every emitted action still passes the rollout's approver
-chain — this module contains no safety-critical code path of its own
-(plan 0008 §4b). Chat-format history stays canonical while the selected
-client translates it to the configured API wire format.
+text, plus camera frames unless ``images=on_demand``), one validated tool call
+out, synthesized into an open-loop ``ActionChunk`` by the motion layer. The
+LLM never sees raw actuation, and every emitted action still passes the
+rollout's approver chain — this module contains no safety-critical code path
+of its own (plan 0008 §4b). Chat-format history stays canonical while the
+selected client translates it to the configured API wire format.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import numpy as np
+import numpy.typing as npt
 
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
@@ -58,6 +59,7 @@ _ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 _WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
 _SPEEDS = frozenset({"fast"})
+_IMAGE_MODES = frozenset({"always", "on_demand"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -71,6 +73,28 @@ Safety approvers clamp out-of-bounds and too-fast actions below you. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
 done; if it cannot be achieved call give_up. You have a budget of \
 {budget} LLM calls for the whole trial."""
+
+_ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
+through tool calls. Each observation message gives you the current \
+proprioceptive state. Camera images are not attached automatically; call \
+`take_pic` to see them. A camera already shown for the current observation \
+cannot be re-taken until the robot moves. Work toward the user's goal in \
+small, deliberate motions; re-check the observation after every motion. \
+Every move tool call must include a `note`: in one or two sentences, say what \
+you observe in the current observation and why you chose this motion. The user \
+is watching these notes to see what you see and what you decide, so write them \
+for a human reader. \
+Safety approvers clamp out-of-bounds and too-fast actions below you. \
+Respond with exactly one motion tool call per turn; `take_pic` may be chained \
+in the same turn. Placed after a motion, its frames arrive with the next \
+observation, after the controller has played the motion; the narration reports \
+how much actually played. Placed alone, it looks before you decide what motion \
+to make. When the goal is achieved call done; if it cannot be achieved call \
+give_up. You have a budget of {budget} LLM calls for the whole trial."""
+
+_ON_DEMAND_NUDGE = (
+    "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
+)
 
 
 def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -110,6 +134,17 @@ class AgentPolicyConfig(PolicyConfig):
     effort: str | None = "low"
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
+    images: str = "always"
+
+
+@dataclass(frozen=True, eq=False)
+class _PendingCapture:
+    """A capture request waiting for the observation produced after motion playout."""
+
+    requested: tuple[str, ...] | None
+    issued_step: object
+    chunk_len: int
+    target: npt.NDArray[np.float64] | None
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -134,6 +169,7 @@ class LLMAgentPolicy(PolicyBase):
         effort: str | None = "low",
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
+        images: str = "always",
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -156,6 +192,11 @@ class LLMAgentPolicy(PolicyBase):
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
         if speed is not None and speed not in _SPEEDS:
             raise ValueError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+        if images not in _IMAGE_MODES:
+            raise ConfigError(
+                f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
+                "fix: pass -P images=always or -P images=on_demand"
+            )
         if wire != "anthropic":
             # A dropped speed would bill at standard rates while the user
             # believes fast mode is on; a dropped cap is a limit that never
@@ -273,6 +314,7 @@ class LLMAgentPolicy(PolicyBase):
         self._effort = effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
+        self._images = images
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -285,6 +327,7 @@ class LLMAgentPolicy(PolicyBase):
             effort=effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
+            images=images,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -295,6 +338,8 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
+        self._pending: _PendingCapture | None = None
+        self._revealed: set[str] = set()
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -305,6 +350,7 @@ class LLMAgentPolicy(PolicyBase):
             embodiment_info.observation_space,
             embodiment_info.control_hz,
             self._max_speed_frac,
+            images=self._images,
         )
         self._toolset = toolset
         self._state_labels = toolset.state_labels()
@@ -319,7 +365,8 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
-        formatted = _SYSTEM_TEMPLATE.format(name=self._embodiment_name, budget=self._max_llm_calls)
+        template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
+        formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
@@ -333,6 +380,8 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] goal: {scene.instruction}")
         self._delta_cursor = 0
         self._calls_used = 0
+        self._pending = None
+        self._revealed.clear()
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist the transcript at the end of the trial."""
@@ -375,13 +424,41 @@ class LLMAgentPolicy(PolicyBase):
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
             )
-        self._messages.append(
-            {
-                "role": "user",
-                "content": _observation_content(observation, self._state_labels),
-            }
+        self._revealed.clear()
+        reveal: tuple[str, ...] | None = None
+        narration: str | None = None
+        if self._images == "on_demand":
+            reveal = ()
+            pending = self._pending
+            self._pending = None
+            if pending is not None:
+                requested = (
+                    tuple(observation.images)
+                    if pending.requested is None
+                    else _unique_names(pending.requested)
+                )
+                reveal = tuple(name for name in requested if name in observation.images)
+                missing = tuple(name for name in requested if name not in observation.images)
+                self._revealed.update(reveal)
+                narration = self._pending_narration(pending, observation, missing)
+        observation_content = _observation_content(
+            observation,
+            self._state_labels,
+            reveal=reveal,
+            narration=narration,
         )
+        if self._images == "on_demand":
+            available = _quoted_names(tuple(observation.images))
+            camera_line = (
+                f"Cameras available to take_pic: {available}."
+                if available
+                else "No camera images are available to take_pic in this observation."
+            )
+            observation_content[0]["text"] += f"\n{camera_line}"
+        self._messages.append({"role": "user", "content": observation_content})
         summary = f"{len(observation.images)} camera(s)"
+        if self._images == "on_demand":
+            summary += " available"
         state_summary = " | ".join(_state_lines(observation, self._state_labels))
         if state_summary:
             summary = f"{summary}, {state_summary}"
@@ -391,6 +468,7 @@ class LLMAgentPolicy(PolicyBase):
         else:
             self._echo(f"[agent] >> observation: {summary}")
         failures = 0
+        rejections = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
@@ -414,34 +492,138 @@ class LLMAgentPolicy(PolicyBase):
                 if failures >= _MAX_CONSECUTIVE_FAILURES:
                     raise RuntimeError(f"LLM produced no tool call in {failures} consecutive turns")
                 self._messages.append(
-                    {"role": "user", "content": "Respond with exactly one tool call."}
+                    {
+                        "role": "user",
+                        "content": (
+                            _ON_DEMAND_NUDGE
+                            if self._images == "on_demand"
+                            else "Respond with exactly one tool call."
+                        ),
+                    }
                 )
                 continue
 
-            call, *extras = message.tool_calls
-            for extra in extras:
-                # Every tool_call id needs an answer on the wire; only the
-                # first call per turn is executed.
+            chunk: ActionChunk | None = None
+            target: npt.NDArray[np.float64] | None = None
+            immediate_frames: tuple[str, ...] = ()
+            closed = False
+            closed_after_failure = False
+            stopped = False
+            last_error: str | None = None
+            for call in message.tool_calls:
+                result_text: str
+                echo_text: str | None = None
+                is_capture = self._images == "on_demand" and call.name == "take_pic"
+                if not closed:
+                    result = toolset.execute(call, observation)
+                    if is_capture:
+                        closed = True
+                        if result.error is not None:
+                            result_text = result.error
+                            failures += 1
+                            last_error = result.error
+                            closed_after_failure = True
+                        elif result.capture == ():
+                            result_text = "no camera images are available in this observation"
+                            rejections += 1
+                            if rejections > 1:
+                                failures += 1
+                                last_error = result_text
+                            closed_after_failure = True
+                        else:
+                            requested = (
+                                tuple(observation.images)
+                                if result.capture is None
+                                else _unique_names(result.capture)
+                            )
+                            skipped = tuple(name for name in requested if name in self._revealed)
+                            immediate_frames = tuple(
+                                name for name in requested if name not in self._revealed
+                            )
+                            if immediate_frames:
+                                self._revealed.update(immediate_frames)
+                                result_text = (
+                                    f"captured {len(immediate_frames)} frame(s): "
+                                    f"{_quoted_names(immediate_frames)}"
+                                )
+                                if skipped:
+                                    result_text += f" (already shown: {_quoted_names(skipped)})"
+                                failures = 0
+                                echo_text = f"captured {len(immediate_frames)} frame(s)"
+                            else:
+                                result_text = (
+                                    "already shown for this observation: "
+                                    f"{_quoted_names(skipped)}; the view cannot change until "
+                                    "the robot moves"
+                                )
+                                rejections += 1
+                                if rejections > 1:
+                                    failures += 1
+                                    last_error = result_text
+                                closed_after_failure = True
+                    else:
+                        if result.error is not None:
+                            result_text = result.error
+                            failures += 1
+                            last_error = result.error
+                            closed = True
+                            closed_after_failure = True
+                        else:
+                            result_text = result.note
+                            if result.chunk is not None:
+                                chunk = result.chunk
+                                target = result.target
+                                stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                closed = True
+                elif is_capture and chunk is not None and not stopped and self._pending is None:
+                    # The closed-state exception validates only the capture
+                    # that may ride behind a motion. A failed validation keeps
+                    # the queue slot open for a later call in this same turn.
+                    result = toolset.execute(call, observation)
+                    if result.error is not None:
+                        result_text = result.error
+                    elif result.capture == ():
+                        result_text = "no camera images are available in this observation"
+                    else:
+                        self._pending = _PendingCapture(
+                            requested=result.capture,
+                            issued_step=observation.extra.get("env_step"),
+                            chunk_len=len(chunk),
+                            target=target,
+                        )
+                        result_text = (
+                            "queued: frames arrive with the next observation, "
+                            "after the motion plays"
+                        )
+                        requested = (
+                            tuple(observation.images) if result.capture is None else result.capture
+                        )
+                        echo_text = f"queued capture: {_quoted_names(requested)}"
+                elif is_capture and chunk is not None and stopped:
+                    result_text = "ignored: the trial ends with this call"
+                elif closed_after_failure:
+                    result_text = "ignored: an earlier call in this turn failed"
+                else:
+                    result_text = "ignored: one tool call per turn"
+
+                self._messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result_text}
+                )
+                self._echo(f"[agent] -- {echo_text or result_text}")
+
+            if immediate_frames:
                 self._messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": extra.id,
-                        "content": "ignored: one tool call per turn",
+                        "role": "user",
+                        "content": _image_parts(observation, reveal=immediate_frames),
                     }
                 )
-                self._echo("[agent] -- ignored: one tool call per turn")
-            result = toolset.execute(call, observation)
-            self._messages.append(
-                {"role": "tool", "tool_call_id": call.id, "content": result.error or result.note}
-            )
-            self._echo(f"[agent] -- {result.error or result.note}")
-            if result.error:
-                failures += 1
-                if failures >= _MAX_CONSECUTIVE_FAILURES:
-                    raise RuntimeError(f"LLM tool calls kept failing; last error: {result.error}")
-                continue
-            assert result.chunk is not None  # execute() sets exactly one of chunk/error
-            return result.chunk
+            if chunk is not None:
+                return chunk
+            if failures >= _MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
+                )
 
     def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not
@@ -449,8 +631,48 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] -- {why}; forcing give_up")
         synthetic = ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))
         result = toolset.execute(synthetic, observation)
-        assert result.chunk is not None
+        if result.chunk is None:  # pragma: no cover - synthetic stop is structurally valid
+            raise RuntimeError(f"forced give_up failed: {result.error}")
         return result.chunk
+
+    def _pending_narration(
+        self,
+        pending: _PendingCapture,
+        observation: Observation,
+        missing: tuple[str, ...],
+    ) -> str:
+        """Describe observed playout, residual, and any cameras missing at delivery."""
+        arriving_step = observation.extra.get("env_step")
+        if (
+            isinstance(pending.issued_step, int)
+            and isinstance(arriving_step, int)
+            and (advanced := arriving_step - pending.issued_step) > 0
+        ):
+            if advanced >= pending.chunk_len:
+                narration = (
+                    f"The motion finished playing ({pending.chunk_len} of "
+                    f"{pending.chunk_len} steps)."
+                )
+            else:
+                narration = (
+                    f"The motion played {advanced} of {pending.chunk_len} steps before "
+                    "this observation; it did not run to the end."
+                )
+        else:
+            narration = "These frames follow the motion."
+
+        toolset = self._toolset
+        if pending.target is not None and toolset is not None:
+            residual = toolset.residual(pending.target, observation)
+            if residual is not None:
+                label, magnitude = residual
+                narration += (
+                    " Largest remaining offset from the requested target is "
+                    f"{magnitude:.4g} on {label}."
+                )
+        if missing:
+            narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
+        return narration
 
     def _echo(self, text: str) -> None:
         if self._transcript_echo:
@@ -487,19 +709,49 @@ def _step_label(observation: Observation) -> str:
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
+    *,
+    reveal: tuple[str, ...] | None = None,
+    narration: str | None = None,
 ) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs."""
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
     lines.extend(_state_lines(observation, state_labels))
+    if narration is not None:
+        lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
+    parts.extend(_image_parts(observation, reveal=reveal))
+    return parts
+
+
+def _image_parts(
+    observation: Observation,
+    *,
+    reveal: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Build frame labels and payloads without changing the report's label join key."""
+    parts: list[dict[str, Any]] = []
     step_label = _step_label(observation)
     suffix = f" ({step_label})" if step_label else ""
-    for name, image in observation.images.items():
+    names = tuple(observation.images) if reveal is None else reveal
+    for name in names:
+        image = observation.images.get(name)
+        if image is None:
+            continue
         parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
     return parts
+
+
+def _quoted_names(names: tuple[str, ...]) -> str:
+    """Render camera names in stable request order for model-facing narration."""
+    return ", ".join(repr(name) for name in names)
+
+
+def _unique_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    """Deduplicate requested cameras without changing their first-seen order."""
+    return tuple(dict.fromkeys(names))
 
 
 def agent_policy(**kwargs: Any) -> LLMAgentPolicy:

@@ -241,6 +241,47 @@ def test_consecutive_tool_messages_merge_in_history_order() -> None:
     assert sum(1 for m in messages if m["role"] == "user" and isinstance(m["content"], list)) == 1
 
 
+def test_capture_history_keeps_results_contiguous_before_the_image_message() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    url = png_data_url(np.zeros((1, 1, 3), dtype=np.uint8))
+    history = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                _tool_call("move", "move_joints", '{"targets":{"joint":0.2}}'),
+                _tool_call("pic", "take_pic", '{"note":"inspect"}'),
+            ],
+        },
+        {"role": "tool", "tool_call_id": "move", "content": "executing move"},
+        {"role": "tool", "tool_call_id": "pic", "content": "captured 1 frame(s): 'top'"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "camera 'top' (step 1):"},
+                {"type": "image_url", "image_url": {"url": url}},
+            ],
+        },
+    ]
+
+    _client(handler).complete(history, [])
+
+    messages = json.loads(seen[0].content)["messages"]
+    assert messages[1] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "move", "content": "executing move"},
+            {
+                "type": "tool_result",
+                "tool_use_id": "pic",
+                "content": "captured 1 frame(s): 'top'",
+            },
+        ],
+    }
+    assert messages[2]["role"] == "user"
+    assert [part["type"] for part in messages[2]["content"]] == ["text", "image"]
+
+
 def test_interleaved_tool_runs_do_not_merge_across_an_observation() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     history = [
