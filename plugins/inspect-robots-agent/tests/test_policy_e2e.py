@@ -936,6 +936,32 @@ def test_extra_tool_calls_are_answered_but_not_executed(tmp_path: Path) -> None:
     ]
 
 
+def test_extras_behind_a_failed_call_name_the_failure_in_always_mode() -> None:
+    # The reason string is not scoped to on-demand mode: blaming the model for
+    # a surplus call when the real cause was the earlier failure misleads it in
+    # either mode.
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_by", {"deltas": {"nope": 0.05}}),
+                    ("give_up", {"reason": "extra"}),
+                ]
+            ),
+            _tool_response("done", {"summary": "recovered"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    policy.act(Observation(extra={"env_step": 0}))
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[0].startswith("unknown dimension 'nope'")
+    assert results[1] == "ignored: an earlier call in this turn failed"
+
+
 def test_on_demand_observation_names_available_cameras_without_sending_frames() -> None:
     script = _Script([_tool_response("done", {"summary": "observed state"})])
     policy = _policy(script, images="on_demand")
@@ -1032,6 +1058,32 @@ def test_imageless_capture_is_rejected_without_ending_the_trial() -> None:
         "no camera images are available in this observation",
         "done: continued after the dropout",
     ]
+
+
+def test_a_dropout_rejection_does_not_count_toward_the_three_strike_guard() -> None:
+    # The dropout sits between two genuine errors. Treated as an error it would
+    # be the third strike and kill the trial, which is what it did before the
+    # rejection class existed; treated as the free rejection it is, the trial
+    # survives to the next decision.
+    script = _Script(
+        [
+            _tool_response("take_pic", {"note": "  "}, add_default_note=False),
+            _tool_response("take_pic", {"note": "The dropout may have cleared."}),
+            _tool_response("take_pic", {"note": ""}, add_default_note=False),
+            _tool_response("done", {"summary": "survived two errors around a dropout"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    chunk = policy.act(_vision_observation(cameras=()))
+
+    assert chunk.actions[0].meta["stop_reason"] == "done"
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[1] == "no camera images are available in this observation"
+    assert results[0] == results[2]
+    assert results[0].startswith("note is required")
 
 
 def test_repeated_imageless_capture_rejections_escalate_with_bounded_calls() -> None:

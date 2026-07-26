@@ -252,8 +252,13 @@ the correct mirror of the request and keeps a single dispatch path rather than
 two divergent ones. Two existing tests pin the old order and must be updated:
 `test_transcript_echo_marks_extra_tool_calls_before_executed_result` and
 `test_extra_tool_calls_are_answered_but_not_executed` (`test_policy_e2e.py:417`
-and `:832`). The `ignored: one tool call per turn` wording is deliberately
-unchanged so only the order moves. CHANGELOG records it.
+and `:832`). Extras behind a *successful* call keep the
+`ignored: one tool call per turn` wording, so for them only the order moves.
+Extras behind a call that *failed* are answered
+`ignored: an earlier call in this turn failed`, which is not scoped to
+on-demand mode: the old wording blamed the model for a surplus call when the
+real cause was the earlier failure, and that is misleading in either mode.
+CHANGELOG records both.
 
 ### 3d. Immediate capture
 

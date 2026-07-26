@@ -27,9 +27,12 @@ All notable changes to this project are documented here. The format is based on
   `act()` is free and later rejections escalate to the three-strike guard,
   bounding repeated capture refusals (#173).
 - **Agent plugin:** tool results in `images=always` mode now follow the model's
-  tool-call order. Extra calls remain answered with
-  `ignored: one tool call per turn` and are not executed; only their result
-  ordering relative to the executed call changes (#173).
+  tool-call order, and extra calls are still never executed. Two things change:
+  their result ordering relative to the executed call, and the reason string
+  when the executed call itself failed, which is now
+  `ignored: an earlier call in this turn failed` rather than
+  `ignored: one tool call per turn`. Extras behind a successful call keep the
+  original wording (#173).
 - **Docs site migrated from MkDocs Material to Docusaurus.** The site at
   inspectrobots.org now builds from `website/` (Docusaurus 3) while the
   Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
