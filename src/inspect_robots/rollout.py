@@ -91,6 +91,8 @@ class TrialRecord:
     # Human operator's success verdict, captured once during rollout (R6). Read
     # by OperatorScorer; remains None for unattended/CI runs.
     operator_judgement: str | None = None
+    # Qualitative context from the operator; read by nothing that scores.
+    operator_note: str | None = None
     # Typed transcript of what happened during the trial.
     events: list[Event] = field(default_factory=list)
     # Extensible metadata for the trial (e.g. populated by policies).

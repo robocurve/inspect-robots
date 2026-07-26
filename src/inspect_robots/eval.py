@@ -174,8 +174,9 @@ def eval(
     (never for errored trials, which are recorded but not scored), after the
     rollout returns and before the scorers run. It may mutate the record —
     e.g. capture ``TrialRecord.operator_judgement`` (R6) so the ``operator``
-    scorer can read it. Exceptions it raises propagate to the caller. Note
-    this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
+    scorer can read it, and ``TrialRecord.operator_note`` alongside it, which
+    is recorded but never scored. Exceptions it raises propagate to the caller.
+    Note this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
@@ -314,6 +315,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
         policy_transcripts: list[Any] = []
@@ -378,6 +380,7 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
+                    notes.append(None)
                 else:
                     if before_scoring is not None:
                         # The only trials the hook sees are the ones scorers
@@ -390,19 +393,26 @@ def _run_eval(
                         per_scorer_scores[scorer.name].append(score)
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
+                    # Captured at the same instant as the judgement, on purpose:
+                    # the two are documented as strictly parallel, so a later
+                    # mutation (e.g. from policy.on_trial_end) must not be able
+                    # to reach one of them and miss the other.
                     judgements.append(record.operator_judgement)
+                    notes.append(record.operator_note)
 
                 on_trial_end = getattr(policy, "on_trial_end", None)
                 if callable(on_trial_end):
                     try:
                         on_trial_end(record, log_dir, run_stamp)
                     except Exception as exc:
-                        note = f"policy.on_trial_end failed: {exc}"
+                        # Named `detail`, not `note`: a grader's note is a
+                        # different thing entirely and is collected just above.
+                        detail = f"policy.on_trial_end failed: {exc}"
                         scene_status = "error"
-                        scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                        scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                         if status == "success":
                             status = "error"
-                            error = note
+                            error = detail
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
@@ -432,12 +442,12 @@ def _run_eval(
                 # A reducer failure (e.g. pass_at_k over fewer epochs than k
                 # after a halt, or mean over categorical scores) degrades to an
                 # error log — it must never crash the eval and lose the log.
-                note = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
+                detail = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
                 scene_status = "error"
-                scene_error = note if scene_error is None else f"{scene_error}; {note}"
+                scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                 if status == "success":
                     status = "error"
-                    error = note
+                    error = detail
 
         scene_results.append(
             SceneResult(
@@ -448,6 +458,7 @@ def _run_eval(
                 error=scene_error,
                 instruction=scene.instruction,
                 operator_judgements=tuple(judgements),
+                operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
                 policy_transcripts=tuple(policy_transcripts),

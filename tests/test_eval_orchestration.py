@@ -756,6 +756,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     def judge(record: TrialRecord, scene: Scene) -> None:
         calls.append(record.epoch)
         record.operator_judgement = "yes"
+        record.operator_note = "clean pickup"
 
     (log,) = eval(
         task,
@@ -768,6 +769,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     scene = log.samples[0]
     assert scene.epochs == ({"operator": 1.0}, {})
     assert scene.operator_judgements == ("yes", None)
+    assert scene.operator_notes == ("clean pickup", None)
 
 
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
@@ -834,6 +836,23 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
     assert scene.trial_metadata == ({"test_key": "test_val"}, {})
     assert len(seen_ids) == 2
     assert seen_ids[0] == seen_ids[1]
+
+
+def test_operator_fields_are_captured_before_the_on_trial_end_hook(tmp_path: Path) -> None:
+    # The verdict and the note are documented as strictly parallel, so they must
+    # be read off the record at the same instant. A hook that sets either one
+    # runs too late for both: if one append ever drifts past on_trial_end, this
+    # sees that tuple populated while the other is still (None,), and fails.
+    class _LateJudgePolicy(ScriptedPolicy):
+        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+            record.operator_judgement = "y"
+            record.operator_note = "written too late to be recorded"
+
+    (log,) = eval(_task(), _LateJudgePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    scene = log.samples[0]
+    assert scene.operator_judgements == (None,)
+    assert scene.operator_notes == (None,)
 
 
 def test_on_trial_end_hook_error_on_already_errored_trial(tmp_path: Path) -> None:
