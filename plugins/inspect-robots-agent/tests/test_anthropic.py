@@ -1244,3 +1244,53 @@ def test_explicit_api_key_env_wins_over_the_default() -> None:
     policy._client.complete([_USER], [])
 
     assert seen[0].headers["x-api-key"] == "sk-or"
+
+
+def test_act_marks_the_eviction_anchor_on_the_anthropic_wire() -> None:
+    """Guards the policy -> wire anchor integration end to end.
+
+    Every other anchor test hand-injects ``cache_anchor`` into history; only
+    this one exercises ``act()``'s ``mark_anchor=isinstance(...)`` wiring. If
+    that wiring silently broke (say, a wrapped client failing the isinstance
+    check), the anchor breakpoint would vanish and every hand-injected test
+    would still pass — while live runs degraded to full-prefix rewrites at
+    each eviction with no error to notice.
+    """
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = _anthropic_response(
+            _tool_use(
+                f"toolu_{len(requests)}",
+                "move_by",
+                {"deltas": {"dx": 0.01}, "note": "I see the cube and nudge toward it."},
+            )
+        )
+        return httpx.Response(200, json=payload)
+
+    embodiment = CubePickEmbodiment()
+    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+    policy.bind(embodiment.info)
+    scene = Scene(id="s0", instruction="reach")
+    policy.reset(scene)
+    observation = embodiment.reset(scene, seed=0)
+
+    for _ in range(4):
+        policy.act(observation)
+
+    final = json.loads(requests[-1].content)
+    stub_blocks = [
+        block
+        for message in final["messages"]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "text" and block.get("text", "").endswith("camera frame(s) elided]")
+    ]
+    # 4 cycles at the default horizon of 2 evict the two oldest observations.
+    assert len(stub_blocks) == 2
+    # The newest stub is the anchor; the breakpoint lands on the stubbed
+    # message's last block, which is the stub itself. Older stubs carry none.
+    assert stub_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in stub_blocks[0]
+    assert b"cache_anchor" not in requests[-1].content

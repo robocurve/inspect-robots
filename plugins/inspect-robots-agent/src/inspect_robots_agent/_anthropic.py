@@ -355,6 +355,12 @@ def _translate_messages(
                     "content": message["content"],
                 }
             )
+            # Defensive generality: _evicted_view only ever marks user
+            # messages (tool and assistant turns never carry image parts), so
+            # this branch and the assistant-turn check below are unreachable
+            # today. They stay so a future eviction rule that marks other
+            # roles fails soft (breakpoint applied) instead of silently
+            # dropping the anchor.
             pending_anchor = pending_anchor or message.get("cache_anchor") is True
             continue
         flush_results()

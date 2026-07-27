@@ -59,14 +59,20 @@ All notable changes to this project are documented here. The format is based on
   (unscored) after three consecutive failures, and each correction turn spends
   one `max_llm_calls` unit.
 
-### Added
+### Changed
 
 - **Agent plugin:** outgoing requests now retain camera frames only from the
-  newest two image-bearing messages by default (`-P image_horizon=`), bounding
-  long-episode payloads without changing stored history, transcripts, or frame
-  side-cars. The native Anthropic wire adds automatic prompt-cache breakpoints
-  and records per-trial token/cache totals in `record.metadata["llm_usage"]`,
-  making cache savings directly observable (#188).
+  newest two image-bearing messages by default, bounding long-episode
+  payloads that previously grew until the API's request-size ceiling (HTTP
+  413). Stored history, transcripts, and frame side-cars are unchanged.
+  Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
+### Added
+
+- **Agent plugin:** the native Anthropic wire adds automatic prompt-cache
+  breakpoints (system prompt, eviction boundary, final message) and records
+  per-trial token/cache totals in `record.metadata["llm_usage"]`, making
+  cache savings directly observable via `cache_read_input_tokens` (#188).
 - **Seconds-based benchmark horizons:** `Task(max_seconds=...)` gives every
   compatible embodiment the same physical-time budget. `eval()` resolves it
   with `ceil(max_seconds * embodiment.info.control_hz)`, rejects missing or
