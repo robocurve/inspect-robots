@@ -84,7 +84,8 @@ _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 # dimension has wraparound and axis-coupling problems, so those reps are
 # refused. Displacement pose modes (eef_delta_pose) carry small rotation
 # *deltas*, which mostly clamp per dimension like any other bounded
-# displacement — except quaternions (see _DISPLACEMENT_POSE_UNSAFE_ROT below).
+# displacement — except reps whose no-op is not the origin (see
+# _DISPLACEMENT_POSE_UNSAFE_ROT below).
 _ABSOLUTE_POSE_MODES = _ABSOLUTE_MODES & _POSE_MODES
 _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # Rotation reps that survive independent per-dimension clamping of an absolute
@@ -92,13 +93,16 @@ _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
 # Displacement pose modes carry rotation *deltas*, whose no-op is not the zero
-# vector for these reps (a quaternion identity is (1, 0, 0, 0)). Clamping such
-# a delta per dimension toward a symmetric ±max_delta box drags it away from
-# identity, and downstream re-normalization can amplify the rotation instead
-# of limiting it — the same failure class as clamping an absolute quaternion.
-# euler_xyz/axis_angle deltas have no such problem (their no-op is the zero
-# vector) and clamp fine.
-_DISPLACEMENT_POSE_UNSAFE_ROT = frozenset({"quat_wxyz", "quat_xyzw"})
+# vector for these reps (a quaternion identity is (1, 0, 0, 0); a rot6d
+# identity is (1, 0, 0, 0, 1, 0)). Clamping such a delta per dimension toward
+# a symmetric ±max_delta box drags it away from identity, and downstream
+# re-normalization (Gram-Schmidt orthonormalization for rot6d) can then
+# amplify the rotation instead of limiting it — the same failure class as
+# clamping an absolute quaternion. euler_xyz/axis_angle deltas have no such
+# problem (their no-op is the zero vector) and clamp fine. Note rot6d is
+# limitable for *absolute* orientations (_LIMITABLE_ROT above) but not for
+# displacement deltas — the two sets are deliberately not related.
+_DISPLACEMENT_POSE_UNSAFE_ROT = frozenset({"quat_wxyz", "quat_xyzw", "rot6d"})
 # Derived from RotationRepr itself (not hand-listed) so a rep added there
 # defaults to the safe side of this message without anyone remembering to
 # update it — the refusal set above is still the one source of truth for
@@ -126,8 +130,8 @@ class DeltaLimitApprover:
     Construction never guesses: missing semantics, a needed missing/non-finite
     bound without an explicit ``max_delta``, an absolute pose mode whose
     rotation representation cannot be clamped per-dimension, or a displacement
-    pose mode carrying a quaternion delta (whose identity is not the zero
-    vector, so per-dimension clamping distorts it) all raise ``ValueError``.
+    pose mode carrying a quaternion or rot6d delta (whose identity is not the
+    zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
     ``NaN`` anywhere in a reviewed action raises
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A modified action is
     flagged ``meta["delta_clamped"]``; an unmodified one is returned as the

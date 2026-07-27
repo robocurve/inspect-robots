@@ -25,7 +25,7 @@ class MyVLA:
             action_space=Box(
                 shape=(7,),
                 semantics=ActionSemantics(
-                    control_mode="eef_delta_pose", rotation_repr="rot6d", gripper="continuous"
+                    control_mode="eef_delta_pose", rotation_repr="euler_xyz", gripper="continuous"
                 ),
             ),
             observation_space=ObservationSpace(
