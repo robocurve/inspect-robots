@@ -52,7 +52,11 @@ Checks, in order, before touching the filesystem and then on the content:
   `_defaults.py:34-55`) — `""` and non-`str` non-`None` values →
   `ConfigError` naming the coercion and showing the quoted-string escape
   hatch; `None` stays "feature off" since that is the default;
-- unreadable/missing file → `ConfigError` with a `fix:` line;
+- unreadable/missing file → `ConfigError` with a `fix:` line. Read with
+  `encoding="utf-8"` (matching how the plugins write transcripts, agent
+  `policy.py:397`) and map `UnicodeDecodeError` into this same bucket — it
+  is a `ValueError` subclass, so left uncaught it would bypass
+  `_resolve_or_exit` as a raw traceback;
 - empty/whitespace-only file → `ConfigError` (an empty learnings file is
   always a mistake upstream, better loud than silently absent);
 - decoded text longer than `_PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024`
