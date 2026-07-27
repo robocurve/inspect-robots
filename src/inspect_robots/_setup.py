@@ -109,6 +109,10 @@ def _valid_bool(value: str) -> bool:
     return isinstance(_parse_value(value), bool)
 
 
+def _valid_images_mode(value: str) -> bool:
+    return value in ("on_demand", "always")
+
+
 def _ask(
     prompt: str,
     default: str,
@@ -895,8 +899,12 @@ def _render_config(
     embodiment_args: dict[str, str],
     carried: dict[str, dict[str, str]],
     managed_args: tuple[str, ...] = CAMERA_KEYS,
+    policy_args: dict[str, str] | None = None,
+    managed_policy_args: tuple[str, ...] = (),
 ) -> str:
     """Render a full commented config while carrying unmanaged raw values."""
+    if policy_args is None:
+        policy_args = {}
     sections: list[str] = []
 
     default_lines: list[str] = []
@@ -931,8 +939,20 @@ def _render_config(
     if embodiment_lines:
         sections.append("[embodiment.args]\n" + "\n".join(embodiment_lines))
 
+    policy_lines: list[str] = []
+    for key in managed_policy_args:
+        if key in policy_args:
+            value = policy_args[key].replace("\n", "\n\t")
+            policy_lines.append(f"{key} = {value}")
+    for key, value in carried.get("policy.args", {}).items():
+        if key not in managed_policy_args:
+            value = value.replace("\n", "\n\t")
+            policy_lines.append(f"{key} = {value}")
+    if policy_lines:
+        sections.append("[policy.args]\n" + "\n".join(policy_lines))
+
     for section, values in carried.items():
-        if section in ("defaults", "embodiment.args"):
+        if section in ("defaults", "embodiment.args", "policy.args"):
             continue
         if values:
             lines = []
@@ -1008,6 +1028,37 @@ def run_setup(
             input_fn=input_fn,
             out=out,
         )
+        configured_policy = defaults["policy"]
+        policy_args: dict[str, str] = {}
+        managed_policy_args: tuple[str, ...] = ()
+        if configured_policy == "agent":
+            managed_policy_args = ("images",)
+            existing_policy_args = carried.get("policy.args", {})
+            default_images = "on_demand"
+            if "images" in existing_policy_args:
+                configured_images = existing_policy_args["images"]
+                if _valid_images_mode(configured_images):
+                    default_images = configured_images
+            print(
+                _paint(
+                    "agent camera mode: 'on_demand' lets the model call take_pic when "
+                    "it needs a frame (cuts tokens, but model must remember to look); "
+                    "'always' attaches frames to every step",
+                    _DIM,
+                    out,
+                ),
+                file=out,
+            )
+            images_value = _ask(
+                "agent camera mode",
+                default_images,
+                _valid_images_mode,
+                "camera mode must be 'on_demand' or 'always'",
+                input_fn=input_fn,
+                out=out,
+            )
+            policy_args["images"] = images_value
+
         from inspect_robots.registry import registered
 
         embodiment_factories = registered("embodiment")
@@ -1044,7 +1095,14 @@ def run_setup(
         print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)
         return 1
 
-    text = _render_config(defaults, embodiment_args, carried, managed_args)
+    text = _render_config(
+        defaults,
+        embodiment_args,
+        carried,
+        managed_args,
+        policy_args=policy_args,
+        managed_policy_args=managed_policy_args,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")

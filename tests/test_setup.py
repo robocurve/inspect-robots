@@ -2654,3 +2654,96 @@ def test_suggest_can_pinning_pinned_names_or_no_assigned_kernel_name_are_silent(
     _suggest_can_pinning(order_net, slots, {"left_channel": "can9"}, out=unassigned_out)
     assert pinned_out.getvalue() == ""
     assert unassigned_out.getvalue() == ""
+
+
+def test_render_config_renders_policy_args() -> None:
+    defaults = {
+        "policy": "agent",
+        "embodiment": "yam_arms",
+        "scorer": "success_at_end",
+        "max_steps": "1200",
+        "rerun": "true",
+        "store_frames": "true",
+    }
+    carried = {
+        "policy.args": {"model": "anthropic/claude-fable-5"},
+        "custom": {"key": "val"},
+    }
+    rendered = _render_config(
+        defaults,
+        {},
+        carried,
+        policy_args={"images": "on_demand"},
+        managed_policy_args=("images",),
+    )
+    assert "[policy.args]\nimages = on_demand\nmodel = anthropic/claude-fable-5" in rendered
+    assert "[custom]\nkey = val" in rendered
+
+
+def test_run_setup_prompts_agent_images_mode(tmp_path: Path) -> None:
+    config_file = _config_path(tmp_path)
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    # Input sequence:
+    # 1. policy: agent
+    # 2. embodiment: yam_arms
+    # 3. scorer: Enter (success_at_end)
+    # 4. max steps: Enter (1200)
+    # 5. rerun: Enter (true)
+    # 6. store frames: Enter (true)
+    # 7. agent camera mode: Enter (default on_demand)
+    # 8. configure cameras: n
+    input_fn, _prompts = _scripted_input(["agent", "yam_arms", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    exit_code = run_setup(env, input_fn=input_fn, out=out, interactive=True)
+    assert exit_code == 0
+    text = config_file.read_text(encoding="utf-8")
+    assert "[policy.args]\nimages = on_demand" in text
+    assert "agent camera mode" in out.getvalue()
+
+
+def test_run_setup_prompts_agent_images_mode_always(tmp_path: Path) -> None:
+    config_file = _config_path(tmp_path)
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    # Input sequence:
+    # 1. policy: agent
+    # 2. embodiment: yam_arms
+    # 3. scorer: Enter (success_at_end)
+    # 4. max steps: Enter (1200)
+    # 5. rerun: Enter (true)
+    # 6. store frames: Enter (true)
+    # 7. agent camera mode: always
+    # 8. configure cameras: n
+    input_fn, _prompts = _scripted_input(["agent", "yam_arms", "", "", "", "", "always", "n"])
+    out = io.StringIO()
+
+    exit_code = run_setup(env, input_fn=input_fn, out=out, interactive=True)
+    assert exit_code == 0
+    text = config_file.read_text(encoding="utf-8")
+    assert "[policy.args]\nimages = always" in text
+
+
+def test_run_setup_preserves_existing_agent_images_mode(tmp_path: Path) -> None:
+    config_file = _config_path(tmp_path)
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        "[defaults]\npolicy = agent\nembodiment = yam_arms\n\n[policy.args]\nimages = always\n",
+        encoding="utf-8",
+    )
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    # Input sequence:
+    # 1. policy: Enter (agent)
+    # 2. embodiment: Enter (yam_arms)
+    # 3. scorer: Enter
+    # 4. max steps: Enter
+    # 5. rerun: Enter
+    # 6. store frames: Enter
+    # 7. agent camera mode: Enter (preserves always)
+    # 8. configure cameras: n
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    exit_code = run_setup(env, input_fn=input_fn, out=out, interactive=True)
+    assert exit_code == 0
+    text = config_file.read_text(encoding="utf-8")
+    assert "[policy.args]\nimages = always" in text

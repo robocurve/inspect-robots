@@ -74,8 +74,9 @@ user reads these notes live and in the saved transcript to follow what the
 agent sees and decides.
 
 Camera images are attached to every observation by default
-(`-P images=always`). Set `-P images=on_demand` to send state without image
-payloads and give the model a `take_pic` tool instead:
+(`-P images=always`), though `inspect-robots setup` suggests `on_demand`. Set
+`-P images=on_demand` to send state without image payloads and give the model a
+`take_pic` tool instead:
 
 ```bash
 inspect-robots "pick up the cube" --policy agent \
@@ -218,7 +219,7 @@ be distinguishable, encode it in a named factory's qualname, for example
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
-(default `always`; use `on_demand` for model-requested frames),
+(default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
 renders), and `prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing

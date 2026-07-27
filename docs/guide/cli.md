@@ -115,7 +115,8 @@ failure with "no operator judgement recorded".
 
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
-policy or embodiment is not registered in the current environment, and then
+policy or embodiment is not registered in the current environment, offers
+the `agent` policy's on-demand camera mode (`images = on_demand`), and then
 helps assign camera devices by listing `/dev/v4l/by-id`. If you do not know
 which physical camera a device path belongs to, answer `u` and unplug that
 camera when asked: the wizard rescans and identifies it from the entry that
