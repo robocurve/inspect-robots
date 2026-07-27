@@ -21,6 +21,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin:** runtime camera dropouts in `images=on_demand` now reject
+  `take_pic` without treating a well-formed call as a tool error, so a single
+  dropout no longer errors the trial. The first world-state rejection in one
+  `act()` is free and later rejections escalate to the three-strike guard,
+  bounding repeated capture refusals (#173).
+- **Agent plugin:** tool results in `images=always` mode now follow the model's
+  tool-call order, and extra calls are still never executed. Two things change:
+  their result ordering relative to the executed call, and the reason string
+  when the executed call itself failed, which is now
+  `ignored: an earlier call in this turn failed` rather than
+  `ignored: one tool call per turn`. Extras behind a successful call keep the
+  original wording (#173).
 - **Docs site migrated from MkDocs Material to Docusaurus.** The site at
   inspectrobots.org now builds from `website/` (Docusaurus 3) while the
   Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
@@ -39,6 +51,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Grader notes:** a prompted operator verdict is now followed by one optional
+  line of free text. Bare Enter records nothing, so a grader with nothing to add
+  pays a single keypress. Notes reach the JSON log and the HTML report, a note
+  is kept even on a trial the grader answered `skip`, and no note ever moves a
+  score (#174).
+- **Agent plugin:** `-P images=on_demand` lets the model request camera frames
+  with `take_pic` instead of attaching every frame to every observation. A
+  capture may follow one motion in the same assistant turn and is delivered
+  from the post-motion observation; its narration reports observed playout,
+  any missing cameras, and the measured remaining offset from absolute targets
+  when proprioception is available. `images=always` remains the default
+  (#173).
 - **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
   the end of a trial to persist state or artifacts. The orchestrator calls
   `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy
@@ -52,6 +76,18 @@ All notable changes to this project are documented here. The format is based on
   are stripped from the transcript to save space, as they are already
   recorded in the frame store. The relative path to the transcript is
   stored in the trial's metadata for easy post-hoc analysis (#40).
+- **Agent plugin:** `-P wire=anthropic` selects Anthropic's native Messages
+  API instead of its OpenAI-compat endpoint, which is the only way to reach
+  fast mode: `-P speed=fast` runs Claude Opus 5 and Opus 4.8 at up to 2.5x
+  higher output tokens per second, at roughly double the standard price. Robot
+  control is latency-sensitive, so the arm spends less time waiting on the
+  model. The wire also carries `-P max_output_tokens=` (the Messages API
+  requires an output cap), replays thinking blocks so multi-turn trials hold
+  together, and turns refusals and truncated responses into errors that name
+  their own cause instead of looking like a missing tool call. Absent an
+  explicit `-P base_url=...`, a model that resolves to any endpoint other than
+  Anthropic's own is refused up front with the fix named, rather than 404ing
+  on the first call (#165).
 - **Agent plugin:** `-P wire=responses` selects the OpenAI Responses API wire,
   so reasoning effort works together with function tools on recent OpenAI
   models (Chat Completions rejects the combination, observed on
@@ -116,6 +152,17 @@ All notable changes to this project are documented here. The format is based on
   catch the `ConfigError` raised by `Task`'s epoch validation and surface it
   through the existing `_resolve_or_exit` pattern, matching how invalid
   constructor kwargs are handled for config-file components (#47).
+- **`DeltaLimitApprover` no longer rejects displacement pose modes whose
+  rotation deltas are safe to clamp per dimension** (#143). The per-dimension
+  rotation-repr refusal now fires for absolute pose modes (`eef_abs_pose`,
+  where clamping an absolute orientation has wraparound and axis-coupling
+  problems) and, separately, for quaternion deltas in displacement pose modes
+  (`eef_delta_pose` + `quat_wxyz`/`quat_xyzw`, whose identity is not the zero
+  vector, so per-dimension clamping distorts the rotation instead of limiting
+  it). Euler and axis-angle deltas have no such problem and clamp fine, so an
+  euler-delta embodiment (e.g. BridgeData V2's 7-D xyz+euler deltas) is now
+  guardrail-ready: `doctor` reports it conformant, and CLI runs keep delta
+  limiting instead of silently degrading to clamp-only.
 - **Operator scoring no longer prompts twice for self-confirming embodiments**
   (#53). On interactive ad-hoc runs, definitive `success` or `failure`
   termination verdicts are adopted as the operator judgement, announced on the

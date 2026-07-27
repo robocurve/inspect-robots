@@ -52,6 +52,7 @@ def _golden_log() -> EvalLog:
                 epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
                 operator_judgements=("yes",),
+                operator_notes=("gripper closed early",),
                 trial_metadata=({"foo": "bar"},),
                 termination_reasons=("success",),
                 policy_transcripts=(
@@ -90,6 +91,7 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
     assert restored.samples[0].operator_judgements == ("yes",)
+    assert restored.samples[0].operator_notes == ("gripper closed early",)
     assert restored.samples[0].trial_metadata == ({"foo": "bar"},)
     assert restored.samples[0].termination_reasons == ("success",)
     assert restored.samples[0].policy_transcripts == (
@@ -108,6 +110,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["operator_judgements"]
+        del sample["operator_notes"]
         del sample["trial_metadata"]
         del sample["termination_reasons"]
         del sample["policy_transcripts"]
@@ -117,6 +120,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
+    assert restored.samples[0].operator_notes == ()
     assert restored.samples[0].trial_metadata == ()
     assert restored.samples[0].termination_reasons == ()
     assert restored.samples[0].policy_transcripts == ()

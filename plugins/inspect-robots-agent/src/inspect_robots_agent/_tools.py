@@ -39,17 +39,24 @@ class ToolsetError(Exception):
     """An action space / observation space this toolset cannot drive."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ToolResult:
-    """One executed tool call: an action chunk to play, or an error for the LLM.
+    """The policy-relevant effects of one validated tool call.
 
-    Exactly one of ``chunk``/``error`` is set. ``note`` is the result confirmation
-    text for a successful call, distinct from the call's required ``note`` argument.
+    ``note`` is the result confirmation text for a successful call, distinct
+    from the call's required ``note`` argument. ``capture`` encodes a
+    well-formed capture request: ``None`` means cameras were omitted and the
+    policy should resolve every available camera, ``()`` means the observation
+    had no images to show, and a non-empty tuple names the requested cameras.
+    Motion targets are carried separately so their measured residual can be
+    reported after playout.
     """
 
     chunk: ActionChunk | None = None
     error: str | None = None
     note: str = ""
+    capture: tuple[str, ...] | None = None
+    target: npt.NDArray[np.float64] | None = None
 
 
 class Toolset:
@@ -68,6 +75,8 @@ class Toolset:
         high: npt.NDArray[np.float64],
         step_limits: npt.NDArray[np.float64],
         pose: bool = False,
+        images: str = "always",
+        cameras: tuple[str, ...] = (),
     ):
         self._absolute = absolute
         self._pose = pose
@@ -88,6 +97,8 @@ class Toolset:
         self._low = low
         self._high = high
         self._step_limits = step_limits
+        self._images = images
+        self._cameras = cameras
         if absolute:
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
@@ -187,7 +198,45 @@ class Toolset:
                 },
             },
         }
-        return [move, done, give_up]
+        schemas = [move, done, give_up]
+        if self._images == "on_demand":
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "take_pic",
+                        "description": (
+                            "Capture the current frame from one or more cameras. "
+                            "Omit cameras to capture every available camera. "
+                            "Declared cameras: " + ", ".join(self._cameras) + "."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "cameras": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "Camera names to capture. Valid declared names: "
+                                        + ", ".join(self._cameras)
+                                    ),
+                                },
+                                "note": {
+                                    "type": "string",
+                                    "description": (
+                                        "What you need to inspect and why seeing a camera "
+                                        "frame is necessary before the next decision. The "
+                                        "user reads these notes live and in the saved "
+                                        "transcript."
+                                    ),
+                                },
+                            },
+                            "required": ["note"],
+                        },
+                    },
+                }
+            )
+        return schemas
 
     def execute(self, call: Any, observation: Observation) -> ToolResult:
         """Turn one tool call into an action chunk or an error string for the LLM."""
@@ -199,11 +248,40 @@ class Toolset:
             return ToolResult(error=f"arguments for {call.name} must be a JSON object")
         if call.name in ("done", "give_up"):
             return self._stop(call.name, arguments, observation)
+        if call.name == "take_pic" and self._images == "on_demand":
+            return self._take_pic(arguments, observation)
         if call.name != self._move_tool:
-            return ToolResult(
-                error=f"unknown tool {call.name!r}; available: {self._move_tool}, done, give_up"
-            )
+            available = f"{self._move_tool}, done, give_up"
+            if self._images == "on_demand":
+                available += ", take_pic"
+            return ToolResult(error=f"unknown tool {call.name!r}; available: {available}")
         return self._move(arguments, observation)
+
+    def residual(
+        self, target: npt.NDArray[np.float64], observation: Observation
+    ) -> tuple[str, float] | None:
+        """Return the largest finite target offset, or ``None`` when it cannot be measured."""
+        if self._state_key is None:
+            return None
+        raw_state = observation.state.get(self._state_key)
+        if raw_state is None:
+            return None
+        try:
+            state = np.asarray(raw_state, dtype=np.float64)
+        except Exception:  # pragma: no cover
+            # Delivery must survive third-party state containers whose array
+            # coercion raises something less conventional than ValueError.
+            return None
+        if state.shape != (len(self._labels),):
+            return None
+        try:
+            difference = np.abs(np.subtract(target, state))
+        except Exception:  # pragma: no cover
+            return None
+        if difference.shape != state.shape or not bool(np.all(np.isfinite(difference))):
+            return None
+        index = int(np.argmax(difference))
+        return self._labels[index], float(difference[index])
 
     def _current_state(self, observation: Observation) -> npt.NDArray[np.float64]:
         if self._state_key is None:
@@ -221,6 +299,37 @@ class Toolset:
             chunk=ActionChunk(actions=[action], control_hz=self._hz),
             note=f"{name}: {detail}",
         )
+
+    def _take_pic(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        call_note = arguments.get("note")
+        if not isinstance(call_note, str) or not call_note.strip():
+            return ToolResult(
+                error="note is required: describe what you observe and why you chose this capture"
+            )
+
+        requested = arguments.get("cameras")
+        if "cameras" not in arguments:
+            if not observation.images:
+                return ToolResult(capture=())
+            return ToolResult(capture=None)
+        if (
+            not isinstance(requested, list)
+            or not requested
+            or any(not isinstance(name, str) for name in requested)
+        ):
+            return ToolResult(error="cameras must be a non-empty list of strings when provided")
+        if not observation.images:
+            return ToolResult(capture=())
+        present = tuple(observation.images)
+        unknown = [name for name in requested if name not in observation.images]
+        if unknown:
+            return ToolResult(
+                error=(
+                    f"unknown or unavailable camera {unknown[0]!r}; "
+                    f"available now: {', '.join(repr(name) for name in present)}"
+                )
+            )
+        return ToolResult(capture=tuple(requested))
 
     def _move(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         current: npt.NDArray[np.float64] | None = None
@@ -312,7 +421,8 @@ class Toolset:
             for fraction in fractions
         ]
         actions[-1] = Action(data=np.clip(target.copy(), self._low, self._high))
-        return self._success(actions, steps)
+        clipped_target = np.clip(target.copy(), self._low, self._high)
+        return self._success(actions, steps, target=clipped_target)
 
     def _move_displacement(
         self,
@@ -358,13 +468,20 @@ class Toolset:
             )
         )
 
-    def _success(self, actions: list[Action], steps: int) -> ToolResult:
+    def _success(
+        self,
+        actions: list[Action],
+        steps: int,
+        *,
+        target: npt.NDArray[np.float64] | None = None,
+    ) -> ToolResult:
         note = f"executing {self._move_tool} over {steps} steps"
         if self._hz is not None:
             note += f" ({steps / self._hz:.1f}s)"
         return ToolResult(
             chunk=ActionChunk(actions=actions, control_hz=self._hz),
             note=note,
+            target=target,
         )
 
 
@@ -373,12 +490,18 @@ def build_toolset(
     observation_space: ObservationSpace,
     control_hz: float | None,
     max_speed_frac: float = 0.1,
+    images: str = "always",
 ) -> Toolset:
     """Validate an embodiment's spaces and build its agent-facing tools.
 
     Raises [`ToolsetError`][inspect_robots_agent._tools.ToolsetError] for
     configurations the motion layer cannot drive, before a trial begins.
     """
+    if images == "on_demand" and not observation_space.cameras:
+        raise ToolsetError(
+            "images='on_demand' needs at least one camera declared by the embodiment.\n"
+            "fix: drop -P images=on_demand"
+        )
     semantics = action_space.semantics
     if semantics is None:
         raise ToolsetError(
@@ -507,4 +630,6 @@ def build_toolset(
         high=high64,
         step_limits=step_limits,
         pose=mode in _POSE_MODES,
+        images=images,
+        cameras=tuple(camera.name for camera in observation_space.cameras),
     )

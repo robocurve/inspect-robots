@@ -210,7 +210,10 @@ read by the scorer. Today there is no seam. Add one:
   `{y, yes, n, no, partial, skip}` (a typo like `yse` must not be recorded as a
   failing verdict). `EOFError` counts as `skip`. `skip` → `operator_judgement`
   stays `None` (scores as "no operator judgement recorded") and **no** operator
-  event is appended (`operator_event` requires a `str` verdict). Any other
+  event is appended (`operator_event` requires a `str` verdict).
+  (Superseded in part by plan 0027: a skipped trial that carries a grader note
+  does append an operator event, with `verdict="skip"` and the note.
+  `operator_judgement` still stays `None`, so scoring is unchanged.) Any other
   answer is recorded verbatim (normalized) via `record.operator_judgement` plus
   `transcript.operator_event(t=len(record.steps), verdict=...)` appended to
   `record.events`. The prompt text notes that `partial` counts as failure in the

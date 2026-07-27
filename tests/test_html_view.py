@@ -65,6 +65,9 @@ def _log(
                 error="one trial failed",
                 instruction="pick up the cube",
                 operator_judgements=("y", None),
+                # Deliberately on trial 1, not trial 0: a note at index 0 cannot
+                # tell correct indexing apart from enumerating the filtered list.
+                operator_notes=(None, "gripper closed early"),
                 termination_reasons=("success", None),
                 policy_transcripts=transcripts,
             ),
@@ -136,6 +139,9 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     assert "scene-0" in document and "pick up the cube" in document
     assert "Reduced scores" in document and "Trial scores" in document
     assert "Termination reasons" in document and "Operator judgements" in document
+    assert "Grader notes" in document
+    assert document.count('class="grader-note"') == 1
+    assert ">trial 1</span>gripper closed early</div>" in document
     assert "one trial failed" in document
     assert document.count(">n/a</span>") == 2
     assert "prefers-color-scheme: light" in document
@@ -160,6 +166,7 @@ def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
         reduced={},
         epochs=(),
         operator_judgements=(),
+        operator_notes=(),
         termination_reasons=(),
     )
 
@@ -177,6 +184,21 @@ def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     assert "Trial scores" not in document
     assert "Termination reasons" not in document
     assert "Operator judgements" not in document
+    assert "Grader notes" not in document
+    assert 'class="grader-note"' not in document
+
+
+def test_scene_where_no_trial_carried_a_note_renders_no_grader_notes_block() -> None:
+    # The ordinary case: operator_notes is parallel to epochs, so an unannotated
+    # run is a tuple of Nones, not the empty tuple the omission test above uses.
+    log = _log()
+    scene = dataclasses.replace(log.samples[0], operator_notes=(None, None))
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="no notes")
+
+    assert "Operator judgements" in document
+    assert "Grader notes" not in document
+    assert 'class="grader-note"' not in document
 
 
 def test_every_foreign_text_surface_is_escaped_exactly_once() -> None:
@@ -197,6 +219,7 @@ def test_every_foreign_text_surface_is_escaped_exactly_once() -> None:
         status=attack,
         instruction=attack,
         error=attack,
+        operator_notes=(attack, None),
     )
     results = dataclasses.replace(log.results, metrics={attack: 1.0})
 

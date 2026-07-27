@@ -37,7 +37,7 @@ Providers resolved directly by prefix:
 
 | Prefix | Key | Endpoint |
 |---|---|---|
-| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat) |
+| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat, or native with `-P wire=anthropic`) |
 | `openai/*` | `OPENAI_API_KEY` | OpenAI |
 | `google/*` | `GEMINI_API_KEY` | Google Gemini (OpenAI-compat) |
 | `x-ai/*` or `xai/*` | `XAI_API_KEY` | xAI |
@@ -45,9 +45,14 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
-The wire format defaults to Chat Completions (`-P wire=chat`) for broad
-OpenAI-compatible endpoint support. Switch to `-P wire=responses` when a
-direct OpenAI or compatible endpoint requires the Responses API.
+The wire format defaults to Chat Completions for broad OpenAI-compatible
+endpoint support:
+
+| `-P wire=` | Endpoint | Use it when |
+|---|---|---|
+| `chat` (default) | `/chat/completions` | Anything OpenAI-compatible: OpenRouter, vLLM, Ollama, the Anthropic and Gemini compat endpoints |
+| `responses` | `/responses` | A direct OpenAI or compatible endpoint requires the Responses API |
+| `anthropic` | `/messages` | Driving Claude natively, which is what fast mode needs |
 
 ## How it works
 
@@ -67,6 +72,49 @@ Every move tool call also requires a `note` with one or two plain sentences
 describing the current observation and why the agent chose that motion. The
 user reads these notes live and in the saved transcript to follow what the
 agent sees and decides.
+
+Camera images are attached to every observation by default
+(`-P images=always`). Set `-P images=on_demand` to send state without image
+payloads and give the model a `take_pic` tool instead:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-fable-5 -P images=on_demand \
+    --embodiment cubepick
+```
+
+`take_pic` requires a human-readable `note` and accepts an optional `cameras`
+list. Omitting the list requests every camera available in that observation.
+A camera can be revealed only once per observation because its view cannot
+change until the robot moves. If a runtime camera dropout leaves the
+observation with no images, the well-formed call is rejected with `no camera
+images are available in this observation` instead of counting as a malformed
+tool call. The first such world-state rejection in one policy decision is
+free; repeated rejections escalate to the normal three-strike guard.
+
+A standalone `take_pic` shows the current frame and lets the model decide
+again before moving. A `take_pic` placed after one motion in the same assistant
+turn is queued with `queued: frames arrive with the next observation, after
+the motion plays`: the motion chunk is returned immediately, and the requested
+frames are attached to the next observation after the controller has played
+the available part of the chunk. Two motions still cannot be chained.
+
+Queued-capture narration reports what the rollout actually observed. It says
+whether all requested chunk steps played or only a prefix did, names camera
+frames missing on arrival, and, for absolute control modes with matching
+proprioception, reports the largest measured offset from the requested target.
+The residual is the arrival check: a full step count alone does not prove the
+arm reached its target when an approver rewrote actions or a smoothing
+controller blended them.
+
+Controller choice affects that report. `DefaultController` buffers
+`min(replan_interval, chunk_len)` actions, so a `replan_interval` shorter than
+the interpolation always reports partial playout; a chunk shorter than the
+interval reports finished. `EnsemblingController` re-queries every control
+step, so the observed advance is always one step. It also rebuilds actions
+from chunk metadata, which means `done` and `give_up` do not terminate under
+ensembling (an existing core limitation). A trial that terminates or reaches
+its step limit before the next policy call drops any queued capture.
 
 For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
@@ -98,8 +146,11 @@ motion fall short of the tool's requested total.
 > on real hardware** unless you fully trust the policy and the rig.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
-`wire`, `max_llm_calls` (default `100`), `temperature`, `effort`,
-`max_speed_frac`, `transcript_echo`.
+`wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
+`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
+(default `always`; use `on_demand` for model-requested frames).
+`speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
+either on another wire is an error rather than a silent no-op.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
@@ -120,6 +171,50 @@ pass `-P effort=none` to omit the parameter for endpoints that reject it
 chat completions requires the literal `none` when function tools are in
 play (any other value, or omitting the field, is a 400). In Python,
 `effort=None` omits the field and `effort="none"` sends the wire value.
+
+## Fast mode on Claude
+
+`-P wire=anthropic` drives Claude through the native Messages API instead of
+the OpenAI-compat endpoint. That is the only way to reach fast mode, which
+serves the same model at up to 2.5x higher output tokens per second:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    --embodiment cubepick
+```
+
+The model id keeps the `anthropic/` prefix on this wire, the same as every
+other model string here. Only Anthropic's own endpoint serves `/v1/messages`,
+so anything that resolves elsewhere is refused up front with the fix named: a
+bare `-P model=claude-opus-5`, another provider's prefix such as `openai/`, or
+an OpenRouter `:variant` suffix. Pass `-P base_url=...` to point at a gateway
+that serves the endpoint yourself.
+
+> [!NOTE]
+> With `-P base_url=...` and no `-P api_key_env=`, this wire sends
+> `$ANTHROPIC_API_KEY` to that host. The other wires default to
+> `$OPENROUTER_API_KEY` instead. Name the variable explicitly
+> (`-P api_key_env=MYGW_KEY`) when the gateway takes its own credential, and
+> point it at an unset variable to send no key at all.
+
+Fast mode costs roughly double the standard price on both input and output
+(see [Anthropic's pricing](https://www.anthropic.com/pricing)), and it draws on
+a rate limit separate from standard capacity, so a fast-mode run can hit a 429
+while standard quota sits idle. It is available on Claude Opus 5 and Opus 4.8,
+on the Claude API only: not Bedrock, Vertex, Foundry, or Claude Platform on
+AWS. A rejection that names fast mode is turned into an error naming the fix.
+
+This wire always requests adaptive thinking, which pre-4.6 models such as
+Sonnet 4.5 and Haiku 4.5 do not support. Use `-P wire=chat` for those.
+
+The Messages API requires an output cap, so `-P max_output_tokens=` defaults to
+`16000` here. Thinking bills against that same cap, and a response truncated at
+the limit is an error naming the knob rather than a silently missing tool call.
+Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
+of 64000 or more, which needs streaming this client does not implement yet.
+The read timeout scales with the cap and tops out at 600 s per attempt, so a
+large cap plus retries can sit for several minutes before failing.
 
 ## Reasoning effort on OpenAI models
 
