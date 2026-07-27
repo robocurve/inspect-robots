@@ -19,6 +19,7 @@ from inspect_robots import eval, read_eval_log
 from inspect_robots.approver import ClampApprover
 from inspect_robots.logging.json_log import _sanitize
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end
 from inspect_robots.task import Task
@@ -135,6 +136,32 @@ def test_scene_instruction_and_judgements_serialize_strict(tmp_path: Path) -> No
     assert isinstance(sample, dict)
     assert sample["instruction"] == "reach"
     assert sample["operator_judgements"] == [None]
+    assert sample["operator_notes"] == [None]
+
+
+def test_populated_operator_judgement_and_note_serialize_strict(tmp_path: Path) -> None:
+    # A captured judgement and grader note both survive the strict JSON sink.
+    def judge(record: TrialRecord, scene: Scene) -> None:
+        record.operator_judgement = "y"
+        record.operator_note = "Gripper Closed Early"
+
+    (log,) = eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=judge,
+    )
+    assert log.status == "success"
+    (path,) = tmp_path.glob("*.json")
+    data = _read_strict(path)
+    samples = data["samples"]
+    assert isinstance(samples, list)
+    sample = samples[0]
+    assert isinstance(sample, dict)
+    assert sample["instruction"] == "reach"
+    assert sample["operator_judgements"] == ["y"]
+    assert sample["operator_notes"] == ["Gripper Closed Early"]
 
 
 def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.types import Observation
@@ -168,6 +169,72 @@ def test_translates_history_tools_and_request_options() -> None:
     }
     history_messages = [item for item in body["input"] if "role" in item]
     assert all("type" not in item for item in history_messages)
+
+
+def test_capture_history_keeps_function_outputs_in_call_order_before_images() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    _client(handler).complete(
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tool_call("move", "move_joints", '{"targets":{"joint":0.2}}'),
+                    _tool_call("pic", "take_pic", '{"note":"inspect"}'),
+                ],
+            },
+            {"role": "tool", "tool_call_id": "move", "content": "executing move"},
+            {
+                "role": "tool",
+                "tool_call_id": "pic",
+                "content": "captured 1 frame(s): 'top'",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "camera 'top' (step 1):"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,cG5n"},
+                    },
+                ],
+            },
+        ],
+        tools=[],
+    )
+
+    assert bodies[0]["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "move",
+            "name": "move_joints",
+            "arguments": '{"targets":{"joint":0.2}}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "pic",
+            "name": "take_pic",
+            "arguments": '{"note":"inspect"}',
+        },
+        {"type": "function_call_output", "call_id": "move", "output": "executing move"},
+        {
+            "type": "function_call_output",
+            "call_id": "pic",
+            "output": "captured 1 frame(s): 'top'",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "camera 'top' (step 1):"},
+                {"type": "input_image", "image_url": "data:image/png;base64,cG5n"},
+            ],
+        },
+    ]
 
 
 def test_optional_request_fields_are_omitted_when_unset() -> None:
@@ -532,7 +599,7 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
 
 
 def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
-    with pytest.raises(ValueError, match="wire must be one of"):
+    with pytest.raises(ConfigError, match="wire must be one of"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",

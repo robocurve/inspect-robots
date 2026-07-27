@@ -176,6 +176,10 @@ img.frame {
   margin: 10px 0 6px; padding: 9px 11px; color: var(--amber);
   background: var(--amber-bg); border-left: 3px solid var(--amber-line);
 }
+.grader-note {
+  margin: 8px 0; padding: 9px 11px; color: var(--muted);
+  background: var(--bg); border: 1px solid var(--line); overflow-wrap: anywhere;
+}
 .note-label {
   display: block; font-size: 10px; font-weight: 750;
   letter-spacing: .09em; text-transform: uppercase;
@@ -515,6 +519,17 @@ def _scene_section(
         if not judgements
         else f'<h3>Operator judgements</h3><div class="score-row">{judgements}</div>'
     )
+    notes = "".join(
+        (
+            f'<div class="grader-note"><span class="note-label">trial {index}</span>'
+            f"{_escape(note)}</div>"
+        )
+        for index, note in enumerate(scene.operator_notes)
+        if note is not None
+    )
+    # Unlike the chip rows above, an all-``None`` tuple emits nothing at all:
+    # ``notes`` is empty exactly when no trial carried a note, and most will not.
+    notes_block = "" if not notes else f"<h3>Grader notes</h3>{notes}"
 
     transcripts = "".join(
         (
@@ -530,7 +545,7 @@ def _scene_section(
         '<section class="scene">'
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene.status)}</div>{instruction}{error}{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{transcripts}</section>"
+        f"{reasons_block}{judgements_block}{notes_block}{transcripts}</section>"
     )
 
 

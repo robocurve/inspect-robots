@@ -20,13 +20,22 @@ import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.controller import DefaultController
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import ConfigError
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
-from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace, StateField, StateSpec
+from inspect_robots.spaces import (
+    ActionSemantics,
+    Box,
+    CameraSpec,
+    ObservationSpace,
+    StateField,
+    StateSpec,
+)
 from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
@@ -210,6 +219,72 @@ class _AbsoluteEmbodiment:
 
     def close(self) -> None:
         return None
+
+
+class _VisionAbsoluteEmbodiment:
+    def __init__(self, *, terminate_after_first_step: bool = False) -> None:
+        self._q = np.array([0.0])
+        self._steps = 0
+        self._terminate_after_first_step = terminate_after_first_step
+        self.info = EmbodimentInfo(
+            name="vision-absolute-test",
+            action_space=Box(
+                shape=(1,),
+                low=np.array([-1.0]),
+                high=np.array([1.0]),
+                semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
+            ),
+            observation_space=ObservationSpace(
+                cameras=(
+                    CameraSpec(name="top", height=2, width=2, channels=3),
+                    CameraSpec(name="wrist", height=2, width=2, channels=3),
+                ),
+                state=StateSpec(fields=(StateField(key="q", shape=(1,)),)),
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+        )
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        self._q = np.array([0.0])
+        self._steps = 0
+        return self._observe(scene.instruction)
+
+    def step(self, action: Action) -> StepResult:
+        self._steps += 1
+        self._q = np.asarray(action.data, dtype=np.float64).copy()
+        terminated = self._terminate_after_first_step and self._steps == 1
+        return StepResult(
+            observation=self._observe(None),
+            terminated=terminated,
+            termination_reason="test termination" if terminated else None,
+        )
+
+    def close(self) -> None:
+        return None
+
+    def _observe(self, instruction: str | None) -> Observation:
+        return Observation(
+            images={
+                "top": np.full((2, 2, 3), self._steps, dtype=np.uint8),
+                "wrist": np.full((2, 2, 3), self._steps + 10, dtype=np.uint8),
+            },
+            state={"q": self._q.copy()},
+            instruction=instruction,
+        )
+
+
+def _vision_observation(
+    *,
+    q: float = 0.0,
+    env_step: object = 0,
+    cameras: tuple[str, ...] = ("top", "wrist"),
+) -> Observation:
+    images = {
+        name: np.full((2, 2, 3), index, dtype=np.uint8)
+        for index, name in enumerate(cameras, start=1)
+    }
+    return Observation(state={"q": np.array([q])}, images=images, extra={"env_step": env_step})
 
 
 # --- tests -----------------------------------------------------------------------
@@ -414,7 +489,7 @@ def test_transcript_echo_reports_conversation_in_order(
     assert positions == sorted(positions)
 
 
-def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
+def test_transcript_echo_reports_tool_results_in_call_order(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     policy = _policy(
@@ -444,9 +519,9 @@ def test_transcript_echo_marks_extra_tool_calls_before_executed_result(
         '[agent] << tool_call done({"summary": "first executes"})',
         '[agent] << tool_call give_up({"reason": "extra"})',
         '[agent] << tool_call give_up({"reason": "second extra"})',
-        "[agent] -- ignored: one tool call per turn",
-        "[agent] -- ignored: one tool call per turn",
         "[agent] -- done: first executes",
+        "[agent] -- ignored: one tool call per turn",
+        "[agent] -- ignored: one tool call per turn",
     ]
 
 
@@ -844,12 +919,658 @@ def test_extra_tool_calls_are_answered_but_not_executed(tmp_path: Path) -> None:
     sink = _RecordingSink()
     ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
     assert sink.records[0].termination_reason == "done"
-    ignored = [
-        message
-        for message in script.requests[1]["messages"]
-        if message.get("content") == "ignored: one tool call per turn"
+    results = [
+        message for message in script.requests[1]["messages"] if message.get("role") == "tool"
     ]
-    assert len(ignored) == 1
+    assert results == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_0",
+            "content": "executing move_by over 1 steps (0.1s)",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "ignored: one tool call per turn",
+        },
+    ]
+
+
+def test_extras_behind_a_failed_call_name_the_failure_in_always_mode() -> None:
+    # The reason string is not scoped to on-demand mode: blaming the model for
+    # a surplus call when the real cause was the earlier failure misleads it in
+    # either mode.
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_by", {"deltas": {"nope": 0.05}}),
+                    ("give_up", {"reason": "extra"}),
+                ]
+            ),
+            _tool_response("done", {"summary": "recovered"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    policy.act(Observation(extra={"env_step": 0}))
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[0].startswith("unknown dimension 'nope'")
+    assert results[1] == "ignored: an earlier call in this turn failed"
+
+
+def test_on_demand_observation_names_available_cameras_without_sending_frames() -> None:
+    script = _Script([_tool_response("done", {"summary": "observed state"})])
+    policy = _policy(script, images="on_demand")
+    embodiment = _VisionAbsoluteEmbodiment()
+    policy.bind(embodiment.info)
+    policy.reset(Scene(id="s0", instruction="look selectively"))
+
+    policy.act(_vision_observation())
+
+    observation = script.requests[0]["messages"][-1]
+    assert observation["role"] == "user"
+    assert observation["content"][0]["text"].endswith(
+        "Cameras available to take_pic: 'top', 'wrist'."
+    )
+    assert all(part["type"] != "image_url" for part in observation["content"])
+    assert [tool["function"]["name"] for tool in script.requests[0]["tools"]] == [
+        "move_joints",
+        "done",
+        "give_up",
+        "take_pic",
+    ]
+
+
+def test_immediate_capture_appends_results_then_frames_and_redecides() -> None:
+    script = _Script(
+        [
+            _tool_response(
+                "take_pic",
+                {"cameras": ["top"], "note": "I need to inspect the top view first."},
+            ),
+            _tool_response("done", {"summary": "looked"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    chunk = policy.act(_vision_observation(env_step=7))
+
+    assert chunk.actions[0].meta["request_stop"] is True
+    assert len(script.requests) == 2
+    history = script.requests[1]["messages"]
+    assistant_index = next(
+        index
+        for index, message in enumerate(history)
+        if message.get("tool_calls") and message["tool_calls"][0]["function"]["name"] == "take_pic"
+    )
+    assert history[assistant_index + 1] == {
+        "role": "tool",
+        "tool_call_id": "call_take_pic",
+        "content": "captured 1 frame(s): 'top'",
+    }
+    frame_message = history[assistant_index + 2]
+    assert frame_message["role"] == "user"
+    assert frame_message["content"][0]["text"] == "camera 'top' (step 7):"
+    assert frame_message["content"][1]["type"] == "image_url"
+
+
+def test_immediate_capture_validation_errors_increment_failures() -> None:
+    script = _Script([_tool_response("take_pic", {})])
+    policy = _policy(script, images="on_demand", max_llm_calls=50)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    with pytest.raises(
+        RuntimeError,
+        match="last error: note is required",
+    ):
+        policy.act(_vision_observation())
+
+    assert len(script.requests) == 3
+    assert [
+        message["content"] for message in policy._messages if message.get("role") == "tool"
+    ] == ["note is required: describe what you observe and why you chose this capture"] * 3
+
+
+def test_imageless_capture_is_rejected_without_ending_the_trial() -> None:
+    script = _Script(
+        [
+            _tool_response("take_pic", {"note": "I need the current camera view."}),
+            _tool_response("done", {"summary": "continued after the dropout"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    chunk = policy.act(_vision_observation(cameras=()))
+
+    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert len(script.requests) == 2
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[:2] == [
+        "no camera images are available in this observation",
+        "done: continued after the dropout",
+    ]
+
+
+def test_a_dropout_rejection_does_not_count_toward_the_three_strike_guard() -> None:
+    # The dropout sits between two genuine errors. Treated as an error it would
+    # be the third strike and kill the trial, which is what it did before the
+    # rejection class existed; treated as the free rejection it is, the trial
+    # survives to the next decision.
+    script = _Script(
+        [
+            _tool_response("take_pic", {"note": "  "}, add_default_note=False),
+            _tool_response("take_pic", {"note": "The dropout may have cleared."}),
+            _tool_response("take_pic", {"note": ""}, add_default_note=False),
+            _tool_response("done", {"summary": "survived two errors around a dropout"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    chunk = policy.act(_vision_observation(cameras=()))
+
+    assert chunk.actions[0].meta["stop_reason"] == "done"
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[1] == "no camera images are available in this observation"
+    assert results[0] == results[2]
+    assert results[0].startswith("note is required")
+
+
+def test_repeated_imageless_capture_rejections_escalate_with_bounded_calls() -> None:
+    capture = _tool_response(
+        "take_pic",
+        {
+            "cameras": ["top"],
+            "note": "I need the top view despite the camera dropout.",
+        },
+    )
+    script = _Script([capture])
+    policy = _policy(script, images="on_demand", max_llm_calls=50)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    rejection = "no camera images are available in this observation"
+    with pytest.raises(RuntimeError, match=f"last error: {rejection}"):
+        policy.act(_vision_observation(cameras=()))
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results == [rejection] * 4
+    assert len(script.requests) == 4
+    assert len(script.requests) < policy.config.max_llm_calls
+
+
+def test_take_pic_before_move_short_circuits_with_contiguous_results() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("take_pic", {"note": "I need to look before moving."}),
+                    ("move_joints", {"targets": {"joint": 0.5}}),
+                ]
+            ),
+            _tool_response("done", {"summary": "decided after looking"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect"))
+
+    chunk = policy.act(_vision_observation())
+
+    assert chunk.actions[0].meta["stop_reason"] == "done"
+    history = script.requests[1]["messages"]
+    results = [message for message in history if message.get("role") == "tool"]
+    assert results == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_0",
+            "content": "captured 2 frame(s): 'top', 'wrist'",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "ignored: one tool call per turn",
+        },
+    ]
+    result_indices = [history.index(result) for result in results]
+    assert result_indices[1] == result_indices[0] + 1
+    assert {result["tool_call_id"] for result in results} == {"call_0", "call_1"}
+
+
+def test_invalid_capture_after_move_keeps_chunk_and_leaves_queue_slot_open() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.2}}),
+                    (
+                        "take_pic",
+                        {
+                            "cameras": ["missing"],
+                            "note": "I need a view after the move.",
+                        },
+                    ),
+                    (
+                        "take_pic",
+                        {"cameras": ["top"], "note": "I will use the available top view."},
+                    ),
+                ]
+            )
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move and inspect"))
+
+    chunk = policy.act(_vision_observation())
+
+    assert len(chunk) == 11
+    assert [message["content"] for message in policy._messages[-3:]] == [
+        "executing move_joints over 11 steps (1.1s)",
+        "unknown or unavailable camera 'missing'; available now: 'top', 'wrist'",
+        "queued: frames arrive with the next observation, after the motion plays",
+    ]
+    assert policy._pending is not None
+    assert policy._pending.requested == ("top",)
+
+
+def test_imageless_capture_after_move_is_rejected_without_queuing() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.2}}),
+                    (
+                        "take_pic",
+                        {"note": "I need to inspect the result after moving."},
+                    ),
+                ]
+            )
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move and inspect"))
+
+    chunk = policy.act(_vision_observation(cameras=()))
+
+    assert len(chunk) == 11
+    assert [message["content"] for message in policy._messages[-2:]] == [
+        "executing move_joints over 11 steps (1.1s)",
+        "no camera images are available in this observation",
+    ]
+    assert policy._pending is None
+
+
+def test_two_take_pic_calls_capture_once_and_answer_the_second_ignored() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("take_pic", {"note": "I need the current views."}),
+                    ("take_pic", {"note": "I am asking twice."}),
+                ]
+            ),
+            _tool_response("done", {"summary": "looked once"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    policy.act(_vision_observation())
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[:2] == [
+        "captured 2 frame(s): 'top', 'wrist'",
+        "ignored: one tool call per turn",
+    ]
+    image_messages = [
+        message
+        for message in policy._messages
+        if isinstance(message.get("content"), list)
+        and any(part.get("type") == "image_url" for part in message["content"])
+    ]
+    assert len(image_messages) == 1
+
+
+def test_unknown_tool_error_names_take_pic_in_on_demand_mode() -> None:
+    script = _Script(
+        [
+            _tool_response("look", {"note": "wrong tool"}),
+            _tool_response("done", {"summary": "corrected"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    policy.act(_vision_observation())
+
+    errors = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert errors[0] == ("unknown tool 'look'; available: move_joints, done, give_up, take_pic")
+
+
+def test_valid_capture_after_an_earlier_error_is_ignored_with_failure_reason() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    (
+                        "take_pic",
+                        {"cameras": ["nope"], "note": "I need a camera view."},
+                    ),
+                    (
+                        "take_pic",
+                        {"cameras": ["top"], "note": "I will use the top view."},
+                    ),
+                ]
+            ),
+            _tool_response("done", {"summary": "corrected"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    policy.act(_vision_observation())
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[:2] == [
+        "unknown or unavailable camera 'nope'; available now: 'top', 'wrist'",
+        "ignored: an earlier call in this turn failed",
+    ]
+
+
+def test_repeated_bare_capture_rejections_escalate_with_bounded_calls() -> None:
+    capture = _tool_response(
+        "take_pic",
+        {"note": "I need every view that has not already been shown."},
+    )
+    script = _Script([capture])
+    policy = _policy(script, images="on_demand", max_llm_calls=50)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    with pytest.raises(
+        RuntimeError,
+        match="last error: already shown for this observation",
+    ):
+        policy.act(_vision_observation())
+
+    rejections = [
+        message["content"]
+        for message in policy._messages
+        if message.get("role") == "tool"
+        and str(message["content"]).startswith("already shown for this observation:")
+    ]
+    assert (
+        rejections
+        == [
+            (
+                "already shown for this observation: 'top', 'wrist'; "
+                "the view cannot change until the robot moves"
+            )
+        ]
+        * 4
+    )
+    assert len(script.requests) == 5
+    assert len(script.requests) < policy.config.max_llm_calls
+
+
+def test_named_immediate_capture_reveals_only_unshown_cameras() -> None:
+    script = _Script(
+        [
+            _tool_response(
+                "take_pic",
+                {"cameras": ["top"], "note": "I need the top view."},
+            ),
+            _tool_response(
+                "take_pic",
+                {
+                    "cameras": ["top", "wrist"],
+                    "note": "I also need the wrist view.",
+                },
+            ),
+            _tool_response("done", {"summary": "both seen"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+
+    policy.act(_vision_observation())
+
+    results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
+    assert results[:2] == [
+        "captured 1 frame(s): 'top'",
+        "captured 1 frame(s): 'wrist' (already shown: 'top')",
+    ]
+    frame_messages = [
+        message
+        for message in policy._messages
+        if isinstance(message.get("content"), list)
+        and any(part.get("type") == "image_url" for part in message["content"])
+    ]
+    assert frame_messages[1]["content"][0]["text"] == "camera 'wrist' (step 0):"
+    assert len(frame_messages[1]["content"]) == 2
+
+
+def test_chained_capture_arrives_on_next_observation_with_playout_and_residual() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.2}}),
+                    ("take_pic", {"note": "I need to inspect the result after moving."}),
+                ]
+            ),
+            _tool_response("done", {"summary": "inspected"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move and look"))
+
+    chunk = policy.act(_vision_observation(env_step=4))
+    policy.act(_vision_observation(q=0.196, env_step=15))
+
+    assert len(chunk) == 11
+    first_results = [
+        message["content"]
+        for message in script.requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert first_results == [
+        "executing move_joints over 11 steps (1.1s)",
+        "queued: frames arrive with the next observation, after the motion plays",
+    ]
+    arrived = script.requests[1]["messages"][-1]
+    assert (
+        "The motion finished playing (11 of 11 steps). Largest remaining offset "
+        "from the requested target is 0.004 on joint." in arrived["content"][0]["text"]
+    )
+    assert arrived["content"][1]["text"] == "camera 'top' (step 15):"
+    assert arrived["content"][3]["text"] == "camera 'wrist' (step 15):"
+
+
+def test_chained_capture_reports_default_controller_partial_playout(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.2}}),
+                    ("take_pic", {"note": "I need to see where one played step ends."}),
+                ]
+            ),
+            _tool_response("done", {"summary": "partial observed"}),
+        ]
+    )
+    ir_eval(
+        _task(max_steps=4),
+        _policy(script, images="on_demand"),
+        _VisionAbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        controller=DefaultController(replan_interval=1),
+    )
+
+    arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
+    assert (
+        "The motion played 1 of 11 steps before this observation; it did not run to the end."
+    ) in arrived
+
+
+def test_chained_capture_uses_neutral_narration_when_step_does_not_advance() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.2}}),
+                    ("take_pic", {"note": "I need the post-motion views."}),
+                ]
+            ),
+            _tool_response("done", {"summary": "observed"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+
+    policy.act(_vision_observation(env_step=0))
+    policy.act(_vision_observation(q=0.2, env_step=0))
+
+    arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
+    assert "These frames follow the motion." in arrived
+    assert "finished playing" not in arrived
+    assert "motion played" not in arrived
+
+
+def test_missing_queued_camera_is_narrated_without_raising() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.1}}),
+                    (
+                        "take_pic",
+                        {
+                            "cameras": ["top", "wrist"],
+                            "note": "I need both views after the move.",
+                        },
+                    ),
+                ]
+            ),
+            _tool_response("done", {"summary": "used available view"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+
+    chunk = policy.act(_vision_observation(env_step=0))
+    policy.act(_vision_observation(q=0.1, env_step=len(chunk), cameras=("top",)))
+
+    arrived = script.requests[1]["messages"][-1]["content"]
+    assert "Missing camera(s) in this observation: 'wrist'." in arrived[0]["text"]
+    assert [part["text"] for part in arrived if part["type"] == "text"][1:] == [
+        f"camera 'top' (step {len(chunk)}):"
+    ]
+
+
+def test_queued_capture_is_dropped_when_trial_terminates_and_reset_clears_it(
+    tmp_path: Path,
+) -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("move_joints", {"targets": {"joint": 0.1}}),
+                    ("take_pic", {"note": "I want a frame after this move."}),
+                ]
+            ),
+            _tool_response("done", {"summary": "new trial"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    ir_eval(
+        _task(max_steps=3),
+        policy,
+        _VisionAbsoluteEmbodiment(terminate_after_first_step=True),
+        log_dir=str(tmp_path),
+    )
+
+    assert policy._pending is not None
+    policy.reset(Scene(id="next", instruction="fresh trial"))
+    assert policy._pending is None
+    policy.act(_vision_observation())
+    fresh_observation = script.requests[1]["messages"][-1]["content"]
+    assert all(part["type"] != "image_url" for part in fresh_observation)
+    assert "These frames follow the motion." not in fresh_observation[0]["text"]
+
+
+def test_take_pic_after_done_is_ignored_because_the_trial_ends() -> None:
+    script = _Script(
+        [
+            _multi_tool_response(
+                [
+                    ("done", {"summary": "finished"}),
+                    ("take_pic", {"note": "This cannot arrive after the stop."}),
+                ]
+            )
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    chunk = policy.act(_vision_observation())
+
+    assert chunk.actions[0].meta["request_stop"] is True
+    assert [message["content"] for message in policy._messages[-2:]] == [
+        "done: finished",
+        "ignored: the trial ends with this call",
+    ]
+    assert policy._pending is None
+
+
+def test_images_mode_is_recorded_and_invalid_values_have_a_fix() -> None:
+    policy = _policy(_Script([_text_response("unused")]), images="on_demand")
+
+    assert policy.config.images == "on_demand"
+    with pytest.raises(ConfigError, match=r"(?s)images must be one of.*fix:"):
+        _policy(_Script([_text_response("unused")]), images="sometimes")
+
+
+def test_on_demand_prompt_and_no_tool_nudge_describe_chaining() -> None:
+    script = _Script(
+        [
+            _text_response("I should use a tool."),
+            _tool_response("done", {"summary": "corrected"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect"))
+
+    policy.act(_vision_observation())
+
+    assert (
+        "Camera images are not attached automatically"
+        in script.requests[0]["messages"][0]["content"]
+    )
+    assert script.requests[1]["messages"][-1]["content"] == (
+        "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
+    )
 
 
 def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
@@ -875,7 +1596,7 @@ def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert script.requests[0]["reasoning_effort"] == "none"
 
-    with pytest.raises(ValueError, match=r"or None to omit the field, got 'turbo'"):
+    with pytest.raises(ConfigError, match=r"or None to omit the field, got 'turbo'"):
         _policy(_Script([]), effort="turbo")
 
 
@@ -907,12 +1628,12 @@ def test_non_default_speed_fraction_is_forwarded_through_bind(tmp_path: Path) ->
 
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
 def test_policy_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
-    with pytest.raises(ValueError, match="max_speed_frac must be finite and > 0"):
+    with pytest.raises(ConfigError, match="max_speed_frac must be finite and > 0"):
         _policy(_Script([]), max_speed_frac=max_speed_frac)
 
 
 def test_policy_rejects_empty_call_budget_and_reads_process_environment() -> None:
-    with pytest.raises(ValueError, match="max_llm_calls must be >= 1"):
+    with pytest.raises(ConfigError, match="max_llm_calls must be >= 1"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",

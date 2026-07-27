@@ -26,7 +26,23 @@ All notable changes to this project are documented here. The format is based on
   only after the policy/embodiment/task triple is known to be compatible. This
   prevents adapters from acting on a seconds-derived budget built from an
   invalid control rate (#160).
-
+- **Agent plugin:** the `LLMAgentPolicy` constructor now raises `ConfigError`
+  (not `ValueError`) for invalid `wire`, `speed`, `effort`, `max_output_tokens`,
+  `max_llm_calls` and `max_speed_frac`, so `_resolve_or_exit` renders a guided
+  message instead of letting the traceback reach the user. This matches the
+  wire-gated checks added alongside them (#168).
+- **Agent plugin:** runtime camera dropouts in `images=on_demand` now reject
+  `take_pic` without treating a well-formed call as a tool error, so a single
+  dropout no longer errors the trial. The first world-state rejection in one
+  `act()` is free and later rejections escalate to the three-strike guard,
+  bounding repeated capture refusals (#173).
+- **Agent plugin:** tool results in `images=always` mode now follow the model's
+  tool-call order, and extra calls are still never executed. Two things change:
+  their result ordering relative to the executed call, and the reason string
+  when the executed call itself failed, which is now
+  `ignored: an earlier call in this turn failed` rather than
+  `ignored: one tool call per turn`. Extras behind a successful call keep the
+  original wording (#173).
 - **Docs site migrated from MkDocs Material to Docusaurus.** The site at
   inspectrobots.org now builds from `website/` (Docusaurus 3) while the
   Markdown source stays in `docs/`; every existing URL, `llms.txt`, and
@@ -51,7 +67,18 @@ All notable changes to this project are documented here. The format is based on
   invalid control rates before `bind_task()` or rollout, and records both the
   declared seconds and resolved steps in eval logs, CLI summaries, inspection,
   and HTML reports (#160).
-
+- **Grader notes:** a prompted operator verdict is now followed by one optional
+  line of free text. Bare Enter records nothing, so a grader with nothing to add
+  pays a single keypress. Notes reach the JSON log and the HTML report, a note
+  is kept even on a trial the grader answered `skip`, and no note ever moves a
+  score (#174).
+- **Agent plugin:** `-P images=on_demand` lets the model request camera frames
+  with `take_pic` instead of attaching every frame to every observation. A
+  capture may follow one motion in the same assistant turn and is delivered
+  from the post-motion observation; its narration reports observed playout,
+  any missing cameras, and the measured remaining offset from absolute targets
+  when proprioception is available. `images=always` remains the default
+  (#173).
 - **Policy lifecycle hook: `on_trial_end`** — policies can now hook into
   the end of a trial to persist state or artifacts. The orchestrator calls
   `policy.on_trial_end(record, log_dir, run_id)` and any metadata the policy
