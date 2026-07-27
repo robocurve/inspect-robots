@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.types import Observation
@@ -598,7 +599,7 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
 
 
 def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
-    with pytest.raises(ValueError, match="wire must be one of"):
+    with pytest.raises(ConfigError, match="wire must be one of"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",

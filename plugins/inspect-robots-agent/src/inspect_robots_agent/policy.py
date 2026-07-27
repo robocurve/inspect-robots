@@ -174,24 +174,23 @@ class LLMAgentPolicy(PolicyBase):
         env: dict[str, str] | None = None,
     ):
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
-            raise ValueError("max_speed_frac must be finite and > 0")
+            raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
-            raise ValueError("max_llm_calls must be >= 1")
+            raise ConfigError("max_llm_calls must be >= 1")
         if effort is not None and effort not in _EFFORT_LEVELS:
-            raise ValueError(
+            raise ConfigError(
                 f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
                 f"the field, got {effort!r}"
             )
         # Order matters from here down (plan 0026): wire is validated before
         # the params that are only legal on one wire, the api_key_env default
         # is applied before resolution, and the OpenRouter check after it.
-        # The new wire-gated checks raise ConfigError so the CLI renders them;
-        # the older ValueErrors above are inconsistent with that and tracked
-        # separately in #168, since converting them changes existing behavior.
+        # Every construction check raises ConfigError so the CLI renders a
+        # guided message instead of a traceback (#168).
         if wire not in _WIRE_FORMATS:
-            raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+            raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
         if speed is not None and speed not in _SPEEDS:
-            raise ValueError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+            raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if images not in _IMAGE_MODES:
             raise ConfigError(
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
@@ -217,7 +216,7 @@ class LLMAgentPolicy(PolicyBase):
             or not isinstance(max_output_tokens, int)
             or max_output_tokens < 1
         ):
-            raise ValueError("max_output_tokens must be an int >= 1")
+            raise ConfigError("max_output_tokens must be an int >= 1")
 
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
