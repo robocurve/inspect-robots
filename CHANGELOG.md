@@ -61,6 +61,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin:** per-camera metric depth from observation extras now renders
+  as near-bright grayscale beside its RGB camera in automatic observations and
+  `take_pic` reveals. Labels anchor the render with the 2nd–98th percentile
+  bright/dim distances, valid-pixel percentage, and optional center depth;
+  `-P depth=off` is the payload-cost kill-switch (#190).
 - **Seconds-based benchmark horizons:** `Task(max_seconds=...)` gives every
   compatible embodiment the same physical-time budget. `eval()` resolves it
   with `ceil(max_seconds * embodiment.info.control_hz)`, rejects missing or
