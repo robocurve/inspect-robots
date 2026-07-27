@@ -15,6 +15,7 @@ import copy
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ from inspect_robots.types import ActionChunk, Observation
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
+from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
@@ -60,6 +62,7 @@ _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh",
 _WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
+_DEPTH_MODES = frozenset({"render", "off"})
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -135,6 +138,7 @@ class AgentPolicyConfig(PolicyConfig):
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
+    depth: str = "render"
 
 
 @dataclass(frozen=True, eq=False)
@@ -154,6 +158,8 @@ class LLMAgentPolicy(PolicyBase):
     compatibility check) adopts the embodiment's spaces and builds the tool
     surface from them. Conversation state is per-trial (``reset``), and the
     selected wire client translates that state without changing the loop.
+    Metric camera depth is rendered by default; pass ``depth="off"`` to omit
+    it without resolving any depth entries.
     """
 
     def __init__(
@@ -170,6 +176,7 @@ class LLMAgentPolicy(PolicyBase):
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
+        depth: str = "render",
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -195,6 +202,11 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError(
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
                 "fix: pass -P images=always or -P images=on_demand"
+            )
+        if depth not in _DEPTH_MODES:
+            raise ConfigError(
+                f"depth must be one of {sorted(_DEPTH_MODES)}, got {depth!r}.\n"
+                "fix: pass -P depth=render or -P depth=off"
             )
         if wire != "anthropic":
             # A dropped speed would bill at standard rates while the user
@@ -314,6 +326,7 @@ class LLMAgentPolicy(PolicyBase):
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
         self._images = images
+        self._depth = depth
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -327,6 +340,7 @@ class LLMAgentPolicy(PolicyBase):
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
             images=images,
+            depth=depth,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -423,6 +437,7 @@ class LLMAgentPolicy(PolicyBase):
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
             )
+        depth = resolve_depth(observation) if self._depth == "render" else {}
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
@@ -445,6 +460,7 @@ class LLMAgentPolicy(PolicyBase):
             self._state_labels,
             reveal=reveal,
             narration=narration,
+            depth=depth,
         )
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
@@ -614,7 +630,11 @@ class LLMAgentPolicy(PolicyBase):
                 self._messages.append(
                     {
                         "role": "user",
-                        "content": _image_parts(observation, reveal=immediate_frames),
+                        "content": _image_parts(
+                            observation,
+                            reveal=immediate_frames,
+                            depth=depth,
+                        ),
                     }
                 )
             if chunk is not None:
@@ -711,6 +731,7 @@ def _observation_content(
     *,
     reveal: tuple[str, ...] | None = None,
     narration: str | None = None,
+    depth: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs."""
     lines = ["Current observation."]
@@ -720,7 +741,7 @@ def _observation_content(
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
-    parts.extend(_image_parts(observation, reveal=reveal))
+    parts.extend(_image_parts(observation, reveal=reveal, depth=depth))
     return parts
 
 
@@ -728,6 +749,7 @@ def _image_parts(
     observation: Observation,
     *,
     reveal: tuple[str, ...] | None = None,
+    depth: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build frame labels and payloads without changing the report's label join key."""
     parts: list[dict[str, Any]] = []
@@ -740,6 +762,8 @@ def _image_parts(
             continue
         parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
+        if depth is not None and name in depth:
+            parts.extend(depth_parts(name, depth[name], step_label))
     return parts
 
 
