@@ -3,7 +3,7 @@
 ## The eval log
 
 Every run produces an immutable [`EvalLog`](/api/#inspect_robots.log.EvalLog): the canonical,
-reproducible record. It mirrors Inspect AI: `version`, `status`, an `eval` spec
+auditable record. It mirrors Inspect AI: `version`, `status`, an `eval` spec
 (task/policy/embodiment, created time, git revision, package versions), `results`
 (aggregate metrics), `stats` (timing, inference latency), per-scene `samples`, and
 a structured `error`.
