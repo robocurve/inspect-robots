@@ -1,6 +1,7 @@
 # 0029 — `prior_learnings`: feed a past run's lessons into the agent's system prompt
 
-Issue: #196. Status: draft.
+Issue: #196. Status: revised after one critique round (CaP-X error-class
+reality acknowledged; `-P` coercion edge cases and cap semantics pinned).
 
 ## Problem
 
@@ -13,7 +14,8 @@ is a documented inert stub (`eval.py:544-547`). An agent that failed a task
 yesterday starts today knowing nothing.
 
 This is the consumer half of a retry-with-learning loop. The producer half
-(plan 0028, issue #195) distills a log into a markdown learnings file at
+(plan 0028, issue #195 — developed in parallel on its own branch, not yet in
+this tree) distills a log into a markdown learnings file at
 `<log_dir>/learnings/<log_stem>.md`. Contract between the halves: plain
 markdown, treated as opaque here, path always explicit — this plan works with
 a hand-written notes file just as well as with a generated one.
@@ -32,18 +34,36 @@ reachable today through the existing `-P k=v` passthrough (`cli.py:151`,
 ### Construction (fail fast)
 
 `prior_learnings: str | None = None` — a filesystem path. At `__init__`,
-alongside the existing guided-`ConfigError` checks (house convention, #168):
+every failure raises `errors.ConfigError` with a `fix:` line (house
+convention, #168), because that is the class `_resolve_or_exit`
+(`cli.py:464-476`) converts into a guided message — a `ValueError` would
+surface as a raw traceback. In the agent plugin this matches the neighboring
+checks; **CaP-X currently raises plain `ValueError` throughout and never
+imports `ConfigError`** (capx `policy.py:157-171`), so there the new checks
+deliberately break local style: add `from inspect_robots.errors import
+ConfigError` and raise it for `prior_learnings` failures anyway. Migrating
+CaP-X's existing `ValueError`s to `ConfigError` is a worthwhile follow-up,
+not this plan.
 
+Checks, in order, before touching the filesystem and then on the content:
+
+- not a `str` (the `-P` parser coerces: `-P prior_learnings=` → `""`,
+  `=none` → `None` which silently disables the feature, `=42` → `int`,
+  `_defaults.py:34-55`) — `""` and non-`str` non-`None` values →
+  `ConfigError` naming the coercion and showing the quoted-string escape
+  hatch; `None` stays "feature off" since that is the default;
 - unreadable/missing file → `ConfigError` with a `fix:` line;
 - empty/whitespace-only file → `ConfigError` (an empty learnings file is
   always a mistake upstream, better loud than silently absent);
-- file larger than 32 KiB → `ConfigError` telling the user to summarize it
-  first (the producer's output is ~1-2 KiB; a 32 KiB ceiling stops someone
-  pointing this at a raw transcript and silently bloating every system
-  prompt).
+- decoded text longer than `_PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024`
+  characters → `ConfigError` telling the user to summarize it first (the
+  producer's output is ~1-2 KiB; the ceiling stops someone pointing this at
+  a raw transcript and silently bloating every system prompt). The constant
+  is duplicated in both plugin packages — they share no code — with a
+  cross-reference comment in each so the copies can't drift silently.
 
 The text is read once at construction and stored; `reset()` must not do I/O
-per trial. A sha256 of the content is computed at the same time.
+per trial. A sha256 of the stored text is computed at the same time.
 
 ### Prompt assembly
 
@@ -75,14 +95,20 @@ runs. Recording rides the existing config plumbing:
 (capx `policy.py:107`) each gain
 
 ```python
-prior_learnings: str | None = None          # the path, as passed
-prior_learnings_sha256: str | None = None   # content hash at construction
+prior_learnings: str | None = None          # resolved absolute path
+prior_learnings_sha256: str | None = None   # hash of the injected text
 ```
 
 `eval()` already serializes the config dataclass into
 `EvalSpec.policy_config` (`eval.py:291`), so every log self-documents both
-that learnings were injected and *exactly which* learnings (the hash pins the
-content even if the file is later edited). No core changes needed.
+that learnings were injected and which learnings. The recorded path is
+resolved to absolute (a cwd-relative path recorded verbatim may not resolve
+later). Precise provenance claim: the hash *identifies* the injected text —
+it lets you verify a candidate file, but if the file is edited or deleted
+the text itself is recoverable only from transcript sidecars (which embed
+the system message). We accept hash-as-identity rather than storing the text
+in every log; the learnings file lives in `log_dir` alongside the logs, so
+in practice it survives with them. No core changes needed.
 
 ## Files
 
@@ -90,9 +116,13 @@ content even if the file is later edited). No core changes needed.
   constructor param + validation, config fields, `reset()` block.
 - `plugins/inspect-robots-capx/src/inspect_robots_capx/policy.py` — same.
 - `plugins/inspect-robots-agent/tests/`, `plugins/inspect-robots-capx/tests/`
-  — new cases.
-- README / agent plugin docs — one short "retry with learning" subsection
-  showing the two-command loop with plan 0028's `summarize`.
+  — new cases (plugins run ruff D1 + `mypy --strict`: new params and config
+  fields need docstrings and full annotations; plugin coverage is
+  report-only, but the new branches are all cheap to cover).
+- Both plugin READMEs document the new parameter; top-level README (and the
+  Docusaurus docs if they gain a page for this) get one short "retry with
+  learning" subsection showing the two-command loop with plan 0028's
+  `summarize`.
 
 ## Testing
 
@@ -102,8 +132,10 @@ content even if the file is later edited). No core changes needed.
   `config.prior_learnings_sha256` are set.
 - Default off: no param → system prompt byte-identical to today's; config
   fields `None`.
-- Error paths: missing path, empty file, oversize file — each a `ConfigError`
-  whose message contains a `fix:` line.
+- Error paths: missing path, empty file, oversize file, `""` (the
+  `-P prior_learnings=` coercion), and a non-string value (e.g. `42`) — each
+  a `ConfigError` whose message contains a `fix:` line, raised in both
+  plugins.
 - Interaction: learnings + embodiment docs both present → order is template,
   docs, learnings.
 - Epochs: two `reset()` calls both carry the learnings block (state survives
