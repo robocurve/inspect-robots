@@ -768,7 +768,7 @@ def test_chat_wire_records_no_max_output_tokens() -> None:
     ],
 )
 def test_invalid_configurations_raise(kwargs: dict[str, Any], match: str) -> None:
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(ConfigError, match=match):
         _policy(**kwargs)
 
 
@@ -785,7 +785,7 @@ def test_wire_gated_params_raise_config_error_so_the_cli_renders_them(
 
 def test_misspelled_wire_reports_the_wire_not_the_speed() -> None:
     # Ordering guard: wire is validated before the params gated on it.
-    with pytest.raises(ValueError, match="wire must be one of"):
+    with pytest.raises(ConfigError, match="wire must be one of"):
         _policy(wire="antropic", speed="fast")
 
 

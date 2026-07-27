@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin:** the `LLMAgentPolicy` constructor now raises `ConfigError`
+  (not `ValueError`) for invalid `wire`, `speed`, `effort`, `max_output_tokens`,
+  `max_llm_calls` and `max_speed_frac`, so `_resolve_or_exit` renders a guided
+  message instead of letting the traceback reach the user. This matches the
+  wire-gated checks added alongside them (#168).
 - **Agent plugin:** runtime camera dropouts in `images=on_demand` now reject
   `take_pic` without treating a well-formed call as a tool error, so a single
   dropout no longer errors the trial. The first world-state rejection in one
