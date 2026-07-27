@@ -2771,7 +2771,7 @@ def test_render_config_managed_policy_args_missing_from_policy_args() -> None:
         "policy": "agent",
         "embodiment": "yam_arms",
     }
-    carried = {"empty_section": {}}
+    carried: dict[str, dict[str, str]] = {"empty_section": {}}
     rendered = _render_config(
         defaults,
         {},
