@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin:** `LLMAgentPolicy` constructor validation for `wire`, `speed`,
+  `effort`, `max_llm_calls`, `max_speed_frac`, and `max_output_tokens` now
+  raises `ConfigError` instead of `ValueError`, consistent with the other
+  constructor checks and the CLI's guided-error rendering (#168).
+
 - **Agent plugin:** runtime camera dropouts in `images=on_demand` now reject
   `take_pic` without treating a well-formed call as a tool error, so a single
   dropout no longer errors the trial. The first world-state rejection in one
