@@ -143,6 +143,7 @@ class AssistantMessage:
 
     content: str | None
     tool_calls: tuple[ToolCall, ...]
+    usage: dict[str, int] | None = None
 
     def raw(self) -> dict[str, Any]:
         """The wire-format dict to append back onto the conversation."""

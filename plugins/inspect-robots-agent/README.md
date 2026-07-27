@@ -147,10 +147,24 @@ motion fall short of the tool's requested total.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
-`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
-(default `always`; use `on_demand` for model-requested frames).
+`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`, and
+`image_horizon`.
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
 either on another wire is an error rather than a silent no-op.
+
+| Image option | Default | Behavior |
+|---|---|---|
+| `-P images=` | `always` | Attach every observation's frames; use `on_demand` for model-requested frames |
+| `-P image_horizon=` | `2` | Keep frames from the newest two image-bearing messages in each outgoing request |
+
+Set `-P image_horizon=none` to send the full image history. Do not use a bare
+`-P image_horizon=`: the CLI parses it as an empty string, which the policy
+rejects. Full history grows request bodies by about 420 KB per observation
+with three cameras and can reach a 413 response around 85 observations. The
+default replaces older outgoing camera parts with deterministic text stubs;
+the saved conversation, transcript, and separately stored frames remain
+complete and unchanged.
+
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
@@ -160,6 +174,10 @@ The speed fraction defaults to `0.1` and applies only to absolute modes.
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
 Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a transcript observation to its stored frame.
 Live Rerun transcript streaming happens automatically when a Rerun sink is attached.
+At trial end, `record.metadata["llm_usage"]` records `llm_calls` and the summed
+integer token counters returned by the wire. The native Anthropic wire
+includes input, output, cache-creation, and cache-read tokens; other wires
+currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the
@@ -215,6 +233,17 @@ Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
 of 64000 or more, which needs streaming this client does not implement yet.
 The read timeout scales with the cap and tops out at 600 s per attempt, so a
 large cap plus retries can sit for several minutes before failing.
+
+Prompt caching is automatic on this wire. Requests use up to three ephemeral
+breakpoints: the system prompt, the newest elided-image anchor when one exists,
+and the final message. Check
+`record.metadata["llm_usage"]["cache_read_input_tokens"]` to verify cache hits;
+it should become positive after the first ordinary call.
+Anthropic searches only 20 blocks behind a breakpoint, so a cycle with heavy
+retry or on-demand rejection churn can cause one silent full-prefix rewrite
+and a temporary zero cache-read count. A final nudge also changes wire shape
+once it is superseded. Both are cost blips rather than errors, and the anchor
+normally restores the hit on the next cycle.
 
 ## Reasoning effort on OpenAI models
 
