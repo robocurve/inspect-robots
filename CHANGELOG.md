@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Task horizon binding now follows compatibility checking.** An
+  embodiment's optional `bind_task()` hook receives the resolved step envelope
+  only after the policy/embodiment/task triple is known to be compatible. This
+  prevents adapters from acting on a seconds-derived budget built from an
+  invalid control rate (#160).
 - **Agent plugin:** the `LLMAgentPolicy` constructor now raises `ConfigError`
   (not `ValueError`) for invalid `wire`, `speed`, `effort`, `max_output_tokens`,
   `max_llm_calls` and `max_speed_frac`, so `_resolve_or_exit` renders a guided
@@ -56,6 +61,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Seconds-based benchmark horizons:** `Task(max_seconds=...)` gives every
+  compatible embodiment the same physical-time budget. `eval()` resolves it
+  with `ceil(max_seconds * embodiment.info.control_hz)`, rejects missing or
+  invalid control rates before `bind_task()` or rollout, and records both the
+  declared seconds and resolved steps in eval logs, CLI summaries, inspection,
+  and HTML reports (#160).
 - **Grader notes:** a prompted operator verdict is now followed by one optional
   line of free text. Bare Enter records nothing, so a grader with nothing to add
   pays a single keypress. Notes reach the JSON log and the HTML report, a note

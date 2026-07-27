@@ -10,6 +10,7 @@ import pytest
 
 from inspect_robots import eval, eval_set, read_eval_log
 from inspect_robots.errors import (
+    CompatibilityError,
     ConfigError,
     EmbodimentFault,
     PolicyError,
@@ -538,6 +539,30 @@ def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:
     assert [c for c in aware.calls if c != "reset"] == [TaskEnvelope(name="t", max_steps=7)]
 
 
+def test_eval_resolves_seconds_horizon_into_envelope_rollout_and_log(tmp_path: Path) -> None:
+    class _HorizonAware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.envelopes: list[TaskEnvelope] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.envelopes.append(envelope)
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="reach")],
+        scorer=success_at_end(),
+        max_seconds=0.1,
+    )
+    aware = _HorizonAware()
+    (log,) = eval(task, ScriptedPolicy(), aware, log_dir=str(tmp_path))
+
+    assert aware.envelopes == [TaskEnvelope(name="timed", max_steps=1)]
+    assert log.samples[0].termination_reasons == ("max_steps",)
+    assert log.eval.max_seconds == 0.1
+    assert log.eval.max_steps == 1
+
+
 def test_bind_task_rebinds_per_eval_latest_wins(tmp_path: Path) -> None:
     class _HorizonAware(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -578,8 +603,8 @@ def test_raising_bind_task_aborts_before_any_rollout(tmp_path: Path) -> None:
     assert _CLOSED == ["closed"]  # registry-owned embodiment still released
 
 
-def test_bind_task_runs_before_the_compatibility_check(tmp_path: Path) -> None:
-    """The hook fires pre-compat: a raising bind_task wins over an incompatible pairing."""
+def test_compatibility_check_runs_before_bind_task(tmp_path: Path) -> None:
+    """An incompatible pair fails before the embodiment receives an envelope."""
 
     class _WidePolicy(ScriptedPolicy):
         def __init__(self) -> None:
@@ -589,8 +614,32 @@ def test_bind_task_runs_before_the_compatibility_check(tmp_path: Path) -> None:
                 action_space=Box(shape=(9,), semantics=ActionSemantics("joint_pos")),
             )
 
-    with pytest.raises(RuntimeError, match="refusing this task"):
+    with pytest.raises(CompatibilityError, match="action_dim"):
         eval(_task(max_steps=5), _WidePolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
+
+
+def test_invalid_seconds_rate_fails_before_bind_task(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    class _RateMissing(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(self.info, control_hz=None)
+            self.envelopes: list[TaskEnvelope] = []
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            self.envelopes.append(envelope)
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="reach")],
+        scorer=success_at_end(),
+        max_seconds=120.0,
+    )
+    embodiment = _RateMissing()
+    with pytest.raises(CompatibilityError, match="task_horizon_control_rate"):
+        eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.envelopes == []
 
 
 def test_embodiment_base_bind_task_is_a_noop() -> None:
