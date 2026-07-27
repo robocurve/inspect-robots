@@ -30,28 +30,28 @@ repos:
     hooks:
       - id: ruff-check
         name: ruff (lint, autofix)
-        entry: uv run ruff check --fix
+        entry: uv run --extra dev ruff check --fix
         language: system
         types_or: [python, pyi]
         require_serial: true
 
       - id: ruff-format
         name: ruff (format)
-        entry: uv run ruff format
+        entry: uv run --extra dev ruff format
         language: system
         types_or: [python, pyi]
         require_serial: true
 
       - id: mypy
         name: mypy (strict)
-        entry: uv run mypy
+        entry: uv run --extra dev mypy
         language: system
         types: [python]
         pass_filenames: false
 
       - id: pytest-coverage
         name: pytest (100% coverage gate)
-        entry: uv run pytest --cov --cov-report=term-missing
+        entry: uv run --extra dev pytest --cov --cov-report=term-missing
         language: system
         always_run: true # run on every push, even when no .py files changed
         pass_filenames: false
