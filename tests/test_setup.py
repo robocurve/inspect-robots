@@ -2747,3 +2747,37 @@ def test_run_setup_preserves_existing_agent_images_mode(tmp_path: Path) -> None:
     assert exit_code == 0
     text = config_file.read_text(encoding="utf-8")
     assert "[policy.args]\nimages = always" in text
+
+
+def test_run_setup_ignores_invalid_existing_agent_images_mode(tmp_path: Path) -> None:
+    config_file = _config_path(tmp_path)
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        "[defaults]\npolicy = agent\nembodiment = yam_arms\n\n[policy.args]\nimages = invalid\n",
+        encoding="utf-8",
+    )
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "n"])
+    out = io.StringIO()
+
+    exit_code = run_setup(env, input_fn=input_fn, out=out, interactive=True)
+    assert exit_code == 0
+    text = config_file.read_text(encoding="utf-8")
+    assert "[policy.args]\nimages = on_demand" in text
+
+
+def test_render_config_managed_policy_args_missing_from_policy_args() -> None:
+    defaults = {
+        "policy": "agent",
+        "embodiment": "yam_arms",
+    }
+    carried = {"empty_section": {}}
+    rendered = _render_config(
+        defaults,
+        {},
+        carried,
+        policy_args={},
+        managed_policy_args=("images",),
+    )
+    assert "[policy.args]" not in rendered
+    assert "[empty_section]" not in rendered
