@@ -4,10 +4,11 @@
 
 # Inspect Robots
 
-### An open-source evaluation framework for benchmarking AI and robots in the physical world
+### An open-source evaluation framework for physical AI
 
-Define a robotics benchmark once, then run any policy against any compatible
-embodiment (a real robot or a simulator) with reproducible logs and first-class
+Define a robotics benchmark once, then run any policy (LLM agent, VLA) against
+any compatible embodiment (a real arm or humanoid, or a simulator) with
+auditable logs (grader scores, LLM transcript, full config) and first-class
 [Rerun](https://github.com/rerun-io/rerun) visualization.
 
 If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotics.
@@ -49,13 +50,9 @@ uv venv && uv pip install inspect-robots
 ```
 
 Any venv workflow works. Activate it once (`source .venv/bin/activate`;
-`.venv\Scripts\activate` on Windows) and call `inspect-robots` directly,
-as shown below.
-
-> [!NOTE]
-> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots` —
-> inside a uv project, `uv run` re-syncs to the lockfile and silently
-> uninstalls what `uv pip install` just added.
+`.venv\Scripts\activate` on Windows) and call `inspect-robots` directly. Inside
+an existing uv project, avoid `uv run inspect-robots`, which re-syncs to the
+lockfile and silently uninstalls what `uv pip install` just added.
 
 ## Quickstart
 
@@ -126,7 +123,7 @@ inspect-robots "place the fork on the plate" --policy agent \
 
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
-`inspect-robots view LOG.json` — for `--store-frames` runs it includes the
+`inspect-robots view LOG.json`. For `--store-frames` runs it includes the
 camera frames the model saw.
 
 ### Generate robot policy code with CaP-X
@@ -237,6 +234,11 @@ the compatibility check without extra configuration.
 Trossen discontinued the WidowX 250S in July 2025. That adapter supports
 existing 250S rigs; the successor WidowX AI uses a different stack.
 
+New robot integrations are welcome. If your rig is not listed,
+[Authoring an embodiment adapter](https://inspectrobots.org/guide/adapters/)
+walks through both halves of the pair, and opening an issue with the robot and
+its SDK is a good first step.
+
 ### Simulation and mock
 
 | World | `--embodiment` | Package | Action contract |
@@ -254,18 +256,15 @@ and `xpolicylab` (40+ served VLAs) adapt to whichever embodiment they are paired
 with; `capx` (code-as-policy) needs a joint-space one. A mismatch is caught by
 the compatibility check before anything moves, not mid-rollout.
 
-To write an adapter for a robot that is not listed, see
-[Authoring an embodiment adapter](https://inspectrobots.org/guide/adapters/).
-
 ## Why Inspect Robots
 
 - **Real-world first.** Interfaces assume real-robot reality: human-in-the-loop
   reset, no privileged success oracle, wall-clock control rate. Simulators just
   offer more (seeding, privileged success, rendering) via opt-in capabilities.
 - **Compatibility checked up front.** Before any rollout, the
-  `(policy, embodiment)` pair is validated — action/observation spaces,
-  semantics, control rate, scene realizability — and fails fast if not.
-- **Reproducible.** Every run yields an immutable, schema-versioned `EvalLog`
+  `(policy, embodiment)` pair is validated (action/observation spaces,
+  semantics, control rate, scene realizability) and fails fast if not.
+- **Auditable.** Every run yields an immutable, schema-versioned `EvalLog`
   with the resolved config, git revision, and package versions. It is re-readable
   across releases and re-scorable offline.
 - **Light core.** Depends only on NumPy. Rerun and simulator/VLA backends are
@@ -277,7 +276,7 @@ To write an adapter for a robot that is not listed, see
   a slow viewer connection drops camera frames first (whole steps only under
   sustained stall) instead of delaying the robot control loop, and camera
   streams are JPEG-compressed by default.
-- **Pluggable.** Backends ship as separate packages — the first-party plugins
+- **Pluggable.** Backends ship as separate packages: the first-party plugins
   below, and rig plugins like `inspect-robots-yam`. Entry points make them
   appear in `inspect-robots list` automatically.
 - **VLA-native.** Action chunking, open-loop execution, and ACT/ALOHA temporal
@@ -411,7 +410,6 @@ If you use Inspect Robots in your research, please cite it:
   title   = {Inspect Robots: The open-source evaluation framework for physical AI},
   year    = {2026},
   url     = {https://github.com/robocurve/inspect-robots},
-  version = {0.3.0},
   license = {MIT}
 }
 ```
