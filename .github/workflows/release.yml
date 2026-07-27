@@ -40,7 +40,7 @@ jobs:
     outputs:
       tag: ${{ steps.bump.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # full tag history to find the latest version
       - name: Compute next tag from latest v* tag
@@ -73,7 +73,7 @@ jobs:
     permissions:
       id-token: write  # OIDC token for PyPI trusted publishing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
           fetch-depth: 0  # hatch-vcs derives the version from git tags
@@ -93,7 +93,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
@@ -116,7 +116,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
@@ -139,7 +139,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
@@ -162,7 +162,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
@@ -185,7 +185,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.cut.outputs.tag || github.ref }}
       - name: Install uv
