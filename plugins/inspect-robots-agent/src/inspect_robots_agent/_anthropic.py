@@ -120,7 +120,13 @@ class AnthropicClient:
             "messages": translated,
         }
         if system is not None:
-            body["system"] = system
+            body["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if tools:
             body["tools"] = _translate_tools(tools)
         if temperature is not None:
@@ -264,6 +270,35 @@ def _assistant_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _with_cache_breakpoint(turn: dict[str, Any]) -> dict[str, Any]:
+    """Return a turn with ephemeral caching on its last eligible content block."""
+    content = turn.get("content")
+    if isinstance(content, str):
+        return {
+            **turn,
+            "content": [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    if not isinstance(content, list):
+        return turn
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if block.get("type") in {"thinking", "redacted_thinking"}:
+            continue
+        copied_content = list(content)
+        copied_content[index] = {
+            **block,
+            "cache_control": {"type": "ephemeral"},
+        }
+        return {**turn, "content": copied_content}
+    return turn
+
+
 def _translate_messages(
     messages: list[dict[str, Any]],
     raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]],
@@ -279,11 +314,19 @@ def _translate_messages(
     system: str | None = None
     translated: list[dict[str, Any]] = []
     pending_results: list[dict[str, Any]] = []
+    pending_anchor = False
+    anchor_turn: dict[str, Any] | None = None
 
     def flush_results() -> None:
+        nonlocal anchor_turn, pending_anchor
         if pending_results:
-            translated.append({"role": "user", "content": list(pending_results)})
+            turn = {"role": "user", "content": list(pending_results)}
+            if pending_anchor:
+                turn = _with_cache_breakpoint(turn)
+                anchor_turn = turn
+            translated.append(turn)
             pending_results.clear()
+            pending_anchor = False
 
     for index, message in enumerate(messages):
         role = message.get("role")
@@ -312,6 +355,7 @@ def _translate_messages(
                     "content": message["content"],
                 }
             )
+            pending_anchor = pending_anchor or message.get("cache_anchor") is True
             continue
         flush_results()
         if role == "assistant":
@@ -332,13 +376,28 @@ def _translate_messages(
                 # The nudge retry path appends exactly this; an assistant
                 # message with an empty content array is a 400.
                 continue
-            translated.append({"role": "assistant", "content": blocks})
+            turn = {"role": "assistant", "content": blocks}
+            if message.get("cache_anchor") is True:
+                turn = _with_cache_breakpoint(turn)
+                anchor_turn = turn
+            translated.append(turn)
             continue
         if role != "user":
             raise RuntimeError(f"unsupported message role {role!r}")
-        translated.append({"role": role, "content": _translate_content(message["content"])})
+        turn = {"role": role, "content": _translate_content(message["content"])}
+        if message.get("cache_anchor") is True:
+            turn = _with_cache_breakpoint(turn)
+            anchor_turn = turn
+        translated.append(turn)
 
     flush_results()
+    if translated and translated[-1] is not anchor_turn:
+        # Anthropic's 20-block lookback can miss after unusually heavy retry
+        # churn, causing one harmless full-prefix write. The nudge string also
+        # changes from a wrapped final block to a bare string once superseded,
+        # so that final-breakpoint entry can miss once; the anchor still hits
+        # and both cases self-heal on the next ordinary cycle.
+        translated[-1] = _with_cache_breakpoint(translated[-1])
     return system, translated
 
 
