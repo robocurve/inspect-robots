@@ -113,6 +113,60 @@ def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sanitized
 
 
+def _evicted_view(
+    messages: list[dict[str, Any]],
+    horizon: int,
+    *,
+    mark_anchor: bool = False,
+) -> list[dict[str, Any]]:
+    """Return a view with camera frames older than the image horizon stubbed."""
+    image_message_indices = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance((content := message.get("content")), list)
+        and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in content
+        )
+    ]
+    stubbed_indices = image_message_indices[:-horizon]
+    if not stubbed_indices:
+        return list(messages)
+
+    newest_stubbed = stubbed_indices[-1]
+    view = list(messages)
+    for message_index in stubbed_indices:
+        message = messages[message_index]
+        content = message["content"]
+        assert isinstance(content, list)
+        image_indices = [
+            index
+            for index, part in enumerate(content)
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        removed_indices = set(image_indices)
+        for image_index in image_indices:
+            if image_index == 0:
+                continue
+            label = content[image_index - 1]
+            if isinstance(label, dict) and label.get("type") == "text":
+                removed_indices.add(image_index - 1)
+        stubbed_content = [
+            part for index, part in enumerate(content) if index not in removed_indices
+        ]
+        stubbed_content.append(
+            {
+                "type": "text",
+                "text": f"[{len(image_indices)} camera frame(s) elided]",
+            }
+        )
+        stubbed_message = {**message, "content": stubbed_content}
+        if mark_anchor and message_index == newest_stubbed:
+            stubbed_message["cache_anchor"] = True
+        view[message_index] = stubbed_message
+    return view
+
+
 @dataclass(frozen=True)
 class AgentPolicyConfig(PolicyConfig):
     """Inference-time configuration recorded in the eval log.
@@ -135,6 +189,7 @@ class AgentPolicyConfig(PolicyConfig):
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
+    image_horizon: int | None = 2
 
 
 @dataclass(frozen=True, eq=False)
@@ -170,6 +225,7 @@ class LLMAgentPolicy(PolicyBase):
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
+        image_horizon: int | None = 2,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -217,6 +273,15 @@ class LLMAgentPolicy(PolicyBase):
             or max_output_tokens < 1
         ):
             raise ConfigError("max_output_tokens must be an int >= 1")
+        if image_horizon is not None and (
+            isinstance(image_horizon, bool)
+            or not isinstance(image_horizon, int)
+            or image_horizon < 1
+        ):
+            raise ConfigError(
+                "image_horizon must be an int >= 1, or None to send full image history.\n"
+                "fix: pass -P image_horizon=N or -P image_horizon=none"
+            )
 
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
@@ -314,6 +379,7 @@ class LLMAgentPolicy(PolicyBase):
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
         self._images = images
+        self._image_horizon = image_horizon
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -327,6 +393,7 @@ class LLMAgentPolicy(PolicyBase):
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
             images=images,
+            image_horizon=image_horizon,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -471,8 +538,15 @@ class LLMAgentPolicy(PolicyBase):
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
+            outgoing = self._messages
+            if self._image_horizon is not None:
+                outgoing = _evicted_view(
+                    self._messages,
+                    self._image_horizon,
+                    mark_anchor=isinstance(self._client, AnthropicClient),
+                )
             message = self._client.complete(
-                self._messages,
+                outgoing,
                 toolset.schemas(),
                 temperature=self._temperature,
                 reasoning_effort=self._effort,
