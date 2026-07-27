@@ -22,12 +22,14 @@ pytest + mock transports (existing patterns in
 
 ## Global Constraints
 
-- Repo gates: `ruff check .`, `ruff format --check .`, strict `mypy` over src
-  **and** tests, `pytest --cov` (the plugin's CI coverage job is report-only,
-  `--cov-fail-under=0` — still: add tests for every new branch; the explicit
-  list is in each task).
-- Ruff D1: docstring on every public module/class/function — state the
-  contract, not the symbol name.
+- Repo gates for this plugin: `ruff check .`, `ruff format --check .`, and
+  strict `mypy` over `src/inspect_robots_agent` (the plugin CI job does not
+  type-check tests); the coverage job is report-only (`--cov-fail-under=0`)
+  — still: add tests for every new branch; the explicit list is in each
+  task.
+- Ruff D1: docstring on every public module/class/function in `src/` —
+  state the contract, not the symbol name (the plugin's pyproject exempts
+  `tests/**` from D1).
 - No provider SDKs in `plugins/inspect-robots-agent` — hand-built request
   bodies over httpx only.
 - Every construction-time validation failure raises
@@ -218,9 +220,13 @@ pytest + mock transports (existing patterns in
   ~6 translated blocks on a normal cycle, but a cycle with maximum retry
   churn (3 failed turns and/or repeated on_demand rejections, ~4 blocks
   each) can exceed Anthropic's 20-block lookback and cause one silent
-  full-prefix re-write — a cost blip, not an error. Note this in the code
-  comment so a live `cache_read_input_tokens=0` after a messy cycle isn't
-  debugged as a placement bug.
+  full-prefix re-write — a cost blip, not an error. A second same-class blip:
+  the nudge message's wire shape flips between calls (wrapped block list
+  while final, bare string once superseded), so that position's final-
+  breakpoint entry may miss on the next call — self-healing, the anchor
+  entry still hits. Cover both in the same code comment so a live
+  `cache_read_input_tokens=0` after a messy cycle isn't debugged as a
+  placement bug.
 - No breakpoint on tools: the system breakpoint caches tools+system together
   (tools render before system).
 - Other wires: `ChatClient.complete` and `ResponsesClient.complete` gain no
@@ -247,9 +253,10 @@ pytest + mock transports (existing patterns in
   `test_act_drives_a_multi_turn_trial_and_replays_thinking` (calls
   `first["system"].startswith(...)`, and asserts the nudge message body is
   the bare string `"Respond with exactly one tool call."` — now wrapped when
-  it is the final message). In test_policy_e2e.py, check
-  `test_consecutive_tool_messages_merge_in_history_order` (counts
-  list-content user messages) for the same wrap interaction and adjust.
+  it is the final message). (`test_consecutive_tool_messages_merge_in_history_order` in
+  test_anthropic.py was checked and does **not** break: its final message
+  has list content and its assertions tolerate an added `cache_control`
+  key — no change needed there.)
 - [ ] **Step 2: Run, verify failures.**
 - [ ] **Step 3: Implement** in `complete()` + `_translate_messages`.
 - [ ] **Step 4: Full plugin suite green.**
@@ -261,8 +268,7 @@ pytest + mock transports (existing patterns in
 **Files:**
 - Modify: `plugins/inspect-robots-agent/src/inspect_robots_agent/_llm.py`
   (`AssistantMessage`), `_anthropic.py` (`_parse_response`), `policy.py`
-  (aggregation + metadata), `_responses.py` (kwarg parity only if Task 1's
-  call-site change requires none — see note)
+  (aggregation + metadata). `_responses.py` needs no edit.
 - Test: `plugins/inspect-robots-agent/tests/test_anthropic.py`,
   `plugins/inspect-robots-agent/tests/test_policy_e2e.py`
 
