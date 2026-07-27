@@ -314,6 +314,27 @@ def test_delta_pose_euler_rotation_deltas_are_guardrail_conformant() -> None:
     assert "guardrails" not in _codes(info)
 
 
+def test_delta_pose_rot6d_rotation_deltas_are_a_guardrail_error() -> None:
+    # A rot6d delta's identity is (1, 0, 0, 0, 1, 0), not the zero vector:
+    # per-dimension clamping distorts it and post-clamp Gram-Schmidt
+    # re-normalization can amplify the rotation instead of limiting it, the
+    # same failure class as an absolute quaternion. 3 xyz + 6 rot6d + 1
+    # gripper = 10 dims.
+    info = _info(
+        space=Box(
+            shape=(10,),
+            low=np.full(10, -0.1),
+            high=np.full(10, 0.1),
+            semantics=ActionSemantics(
+                "eef_delta_pose",
+                rotation_repr="rot6d",
+                dim_labels=tuple("abcdefghij"),
+            ),
+        ),
+    )
+    assert _codes(info)["guardrails"] == "error"
+
+
 def test_missing_control_hz_is_a_warning() -> None:
     info = _good_absolute()
     silent = EmbodimentInfo(
