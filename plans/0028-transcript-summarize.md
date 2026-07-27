@@ -69,7 +69,7 @@ summary is a long document, so the request sends an explicit generous
 cap — a silently truncated learnings file is worse than an error.
 
 A missing key with `--model` set raises `errors.ConfigError` with a `fix:`
-line (house convention, #168; same shape as `_llm.py:220-225`), caught in
+line (house convention, #168; same shape as `_llm.py:123-128`), caught in
 `_cmd_summarize` the way `_cmd_run` catches it — never a traceback.
 
 ### New module: `src/inspect_robots/_summarize.py`
