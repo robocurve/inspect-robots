@@ -1596,7 +1596,7 @@ def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert script.requests[0]["reasoning_effort"] == "none"
 
-    with pytest.raises(ValueError, match=r"or None to omit the field, got 'turbo'"):
+    with pytest.raises(ConfigError, match=r"or None to omit the field, got 'turbo'"):
         _policy(_Script([]), effort="turbo")
 
 
@@ -1628,12 +1628,12 @@ def test_non_default_speed_fraction_is_forwarded_through_bind(tmp_path: Path) ->
 
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
 def test_policy_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
-    with pytest.raises(ValueError, match="max_speed_frac must be finite and > 0"):
+    with pytest.raises(ConfigError, match="max_speed_frac must be finite and > 0"):
         _policy(_Script([]), max_speed_frac=max_speed_frac)
 
 
 def test_policy_rejects_empty_call_budget_and_reads_process_environment() -> None:
-    with pytest.raises(ValueError, match="max_llm_calls must be >= 1"):
+    with pytest.raises(ConfigError, match="max_llm_calls must be >= 1"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",

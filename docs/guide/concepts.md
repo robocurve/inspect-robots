@@ -22,8 +22,9 @@ without inheriting anything. Convenience base classes (`PolicyBase`,
 ## Tasks and scenes
 
 A [`Task`](/api/#inspect_robots.task.Task) is an embodiment-agnostic benchmark: a dataset
-of [`Scene`](/api/#inspect_robots.scene.Scene)s plus scorer(s), a step horizon, and an epoch
-count. A `Scene` is the robotics analog of Inspect AI's `Sample`, one initial
+of [`Scene`](/api/#inspect_robots.scene.Scene)s plus scorer(s), a step- or seconds-based
+horizon, and an epoch count. A seconds horizon is resolved to integer steps from
+the paired embodiment's declared control rate. A `Scene` is the robotics analog of Inspect AI's `Sample`, one initial
 condition: an instruction, an optional success [`Target`](/api/#inspect_robots.scene.Target),
 and a seed.
 
@@ -33,7 +34,8 @@ Before any rollout, [`check_compatibility`](/api/#inspect_robots.compat.check_co
 `(policy, embodiment)` pair: action dimensions and [`ActionSemantics`](/api/#inspect_robots.spaces.ActionSemantics)
 (control mode, rotation representation, gripper, frame), the observation
 cameras/state keys the policy requires (resolving a name remap), the control rate,
-and whether each scene is realizable on the embodiment. Hard mismatches fail fast
+whether a seconds-based task has a usable control rate, and whether each scene
+is realizable on the embodiment. Hard mismatches fail fast
 with a [`CompatibilityError`](/api/#inspect_robots.errors.CompatibilityError).
 
 ## The rollout
