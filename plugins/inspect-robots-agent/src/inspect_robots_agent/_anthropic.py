@@ -435,9 +435,19 @@ def _parse_response(payload: dict[str, Any]) -> AssistantMessage:
             )
         # thinking blocks matter only to the replay cache, not to the turn.
     joined = "".join(texts)
+    raw_usage = payload.get("usage")
+    usage = (
+        {
+            str(key): value
+            for key, value in raw_usage.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        if isinstance(raw_usage, dict)
+        else None
+    )
     # Never "": it would round-trip into the next request as an empty text
     # block, which is a 400.
-    return AssistantMessage(content=joined or None, tool_calls=tuple(calls))
+    return AssistantMessage(content=joined or None, tool_calls=tuple(calls), usage=usage)
 
 
 def _terminal_message(payload: dict[str, Any], stop_reason: Any) -> str:

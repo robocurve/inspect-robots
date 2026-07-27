@@ -1720,3 +1720,124 @@ def test_on_trial_end_writes_transcript_and_strips_images(tmp_path: Path) -> Non
     obs_parts = obs["content"]
     assert any(p["type"] == "text" for p in obs_parts)
     assert all(p["type"] != "image_url" for p in obs_parts)
+
+
+def test_anthropic_usage_is_summed_into_trial_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payloads = [
+        {
+            "id": "msg_move",
+            "type": "message",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_move",
+                    "name": "move_by",
+                    "input": {
+                        "deltas": {"dx": 0.01},
+                        "note": "I see the cube and move toward it.",
+                    },
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 4,
+                "cache_read_input_tokens": 0,
+            },
+        },
+        {
+            "id": "msg_done",
+            "type": "message",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_done",
+                    "name": "done",
+                    "input": {"summary": "done"},
+                }
+            ],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 7,
+            },
+        },
+    ]
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        payload = payloads[min(calls, len(payloads) - 1)]
+        calls += 1
+        return httpx.Response(200, json=payload)
+
+    sink = _RecordingSink()
+    policy = LLMAgentPolicy(
+        model="claude-opus-5",
+        wire="anthropic",
+        base_url="http://llm.test/v1",
+        transcript_echo=True,
+        transport=httpx.MockTransport(handler),
+        env={},
+    )
+    ir_eval(_task(), policy, CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+
+    assert sink.records[0].metadata["llm_usage"] == {
+        "llm_calls": 2,
+        "input_tokens": 22,
+        "output_tokens": 5,
+        "cache_creation_input_tokens": 4,
+        "cache_read_input_tokens": 7,
+    }
+    stderr = capsys.readouterr().err
+    assert "[agent] -- usage: in=10 cache_read=0 out=2" in stderr
+    assert "[agent] -- usage: in=12 cache_read=7 out=3" in stderr
+
+
+def test_reset_clears_usage_accumulated_by_the_previous_trial(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "done"})])
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="old", instruction="stop"))
+    policy.act(Observation())
+
+    policy.reset(Scene(id="fresh", instruction="wait"))
+    record = TrialRecord(scene_id="fresh", epoch=0, seed=0)
+    policy.on_trial_end(record, str(tmp_path), "run")
+
+    assert "llm_usage" not in record.metadata
+
+
+def test_trial_with_zero_llm_calls_omits_usage_metadata(tmp_path: Path) -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="wait"))
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    policy.on_trial_end(record, str(tmp_path), "run")
+
+    assert "llm_usage" not in record.metadata
+
+
+def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.01}}),
+            _tool_response("done", {"summary": "done"}),
+        ]
+    )
+    sink = _RecordingSink()
+
+    ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+
+    assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}

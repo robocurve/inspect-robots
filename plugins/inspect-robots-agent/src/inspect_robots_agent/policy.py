@@ -124,10 +124,7 @@ def _evicted_view(
         index
         for index, message in enumerate(messages)
         if isinstance((content := message.get("content")), list)
-        and any(
-            isinstance(part, dict) and part.get("type") == "image_url"
-            for part in content
-        )
+        and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
     ]
     stubbed_indices = image_message_indices[:-horizon]
     if not stubbed_indices:
@@ -404,6 +401,7 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
         self._revealed: set[str] = set()
 
@@ -446,6 +444,7 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] goal: {scene.instruction}")
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals.clear()
         self._pending = None
         self._revealed.clear()
 
@@ -467,6 +466,11 @@ class LLMAgentPolicy(PolicyBase):
 
         # Make path relative to log_dir for portability
         record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
+        if self._calls_used:
+            record.metadata["llm_usage"] = {
+                "llm_calls": self._calls_used,
+                **{key: value for key, value in self._usage_totals.items() if key != "llm_calls"},
+            }
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""
@@ -552,6 +556,15 @@ class LLMAgentPolicy(PolicyBase):
                 reasoning_effort=self._effort,
             )
             self._calls_used += 1
+            if message.usage is not None:
+                for key, value in message.usage.items():
+                    self._usage_totals[key] = self._usage_totals.get(key, 0) + value
+                self._echo(
+                    "[agent] -- usage: "
+                    f"in={message.usage.get('input_tokens', 0)} "
+                    f"cache_read={message.usage.get('cache_read_input_tokens', 0)} "
+                    f"out={message.usage.get('output_tokens', 0)}"
+                )
             raw_message = message.raw()
             self._messages.append(raw_message)
             content = raw_message.get("content")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from typing import Any
 
 import httpx
@@ -105,9 +106,7 @@ def test_on_demand_image_only_message_stubs_to_one_text_part() -> None:
 
     view = _evicted_view([image_only, _observation_message("new")], 1)
 
-    assert view[0]["content"] == [
-        {"type": "text", "text": "[1 camera frame(s) elided]"}
-    ]
+    assert view[0]["content"] == [{"type": "text", "text": "[1 camera frame(s) elided]"}]
 
 
 def test_non_list_content_passes_through_untouched() -> None:
@@ -194,12 +193,15 @@ def test_none_horizon_sends_all_observation_images_across_three_cycles() -> None
         ]
         assert len(image_messages) == cycle
 
-    assert sum(
-        1
-        for message in policy._messages
-        if isinstance(message.get("content"), list)
-        and any(part.get("type") == "image_url" for part in message["content"])
-    ) == 3
+    assert (
+        sum(
+            1
+            for message in policy._messages
+            if isinstance(message.get("content"), list)
+            and any(part.get("type") == "image_url" for part in message["content"])
+        )
+        == 3
+    )
 
 
 def test_eviction_boundary_and_already_stubbed_prefix_are_byte_stable() -> None:
@@ -260,7 +262,7 @@ def test_eviction_boundary_and_already_stubbed_prefix_are_byte_stable() -> None:
             )
         }
 
-    for previous, current in zip(requests, requests[1:]):
+    for previous, current in pairwise(requests):
         newly_stubbed = stub_indices(current) - stub_indices(previous)
         boundary = min(newly_stubbed) if newly_stubbed else len(previous["messages"])
         previous_prefix = json.dumps(

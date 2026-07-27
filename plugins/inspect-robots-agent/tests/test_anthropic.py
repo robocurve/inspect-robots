@@ -17,6 +17,7 @@ from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._anthropic import (
     _DEFAULT_MAX_OUTPUT_TOKENS,
     AnthropicClient,
+    _parse_response,
 )
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent._png import png_data_url
@@ -593,6 +594,28 @@ def test_empty_text_normalizes_to_none() -> None:
     message = _client(handler).complete([_USER], [])
 
     assert message.content is None
+
+
+def test_parse_response_filters_usage_to_non_bool_int_values() -> None:
+    payload = _anthropic_response(_text("ok"), stop_reason="end_turn")
+    payload["usage"] = {
+        "input_tokens": 11,
+        "output_tokens": 3,
+        "cache_creation": {"ephemeral_5m_input_tokens": 4},
+        "service_tier": "standard_only",
+        "synthetic": True,
+    }
+
+    message = _parse_response(payload)
+
+    assert message.usage == {"input_tokens": 11, "output_tokens": 3}
+    assert "usage" not in message.raw()
+
+
+def test_parse_response_without_usage_keeps_it_none() -> None:
+    message = _parse_response(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    assert message.usage is None
 
 
 def test_refusal_raises_with_category() -> None:
