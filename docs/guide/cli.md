@@ -315,6 +315,28 @@ The default endpoint is `https://api.anthropic.com/v1`, and the default API key
 variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
 `--api-key-env VAR` for another compatible provider.
 
+### Retry with learning
+
+The learnings file exists to be fed back in. The
+[`agent`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-agent)
+and
+[`capx`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-capx)
+policies accept a `prior_learnings` path and append the file's text to the
+system prompt after any embodiment notes, framed as hints that may be stale
+(the current observation always wins):
+
+```bash
+inspect-robots summarize logs/cubepick-reach_xxxx.json --model claude-sonnet-4-5
+inspect-robots "place the fork on the plate" --policy agent \
+    -P prior_learnings=logs/learnings/cubepick-reach_xxxx.md
+```
+
+The policy reads the file once when it is constructed and records its resolved
+path and content hash in the log's policy configuration, so runs that saw
+prior notes are never mistaken for cold-start runs when comparing results. Any
+hand-written markdown file works in place of a generated one. Validation
+details and limits live in the plugin READMEs linked above.
+
 ## `inspect-robots view`
 
 Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
