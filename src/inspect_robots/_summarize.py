@@ -43,7 +43,11 @@ class TrialTranscript:
 
 
 def _is_dropped(transcript: object) -> bool:
-    return isinstance(transcript, dict) and transcript.get("transcript_dropped") is True
+    # rollout._collect_transcript leaves either marker dict in place of the
+    # conversation: transcript_dropped (size) or transcript_error (hook raised).
+    return isinstance(transcript, dict) and (
+        transcript.get("transcript_dropped") is True or "transcript_error" in transcript
+    )
 
 
 def _read_sidecar(scene: SceneResult, index: int, log_dir: Path) -> list[object] | None:
@@ -52,8 +56,14 @@ def _read_sidecar(scene: SceneResult, index: int, log_dir: Path) -> list[object]
     pointer = scene.trial_metadata[index].get("transcript")
     if not isinstance(pointer, str) or not pointer:
         return None
+    # The pointer is foreign text from a portable log: refuse anything that
+    # resolves outside the log's directory (absolute paths, ".." traversal),
+    # or summarize would read arbitrary files into the learnings document.
     try:
-        with (log_dir / pointer).open(encoding="utf-8") as handle:
+        target = (log_dir / pointer).resolve()
+        if not target.is_relative_to(log_dir.resolve()):
+            return None
+        with target.open(encoding="utf-8") as handle:
             return [json.loads(line) for line in handle]
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
@@ -283,7 +293,7 @@ def chat_completion(
         content = message["content"]
         if not isinstance(content, str):
             raise TypeError
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError, TypeError):
         raise ConfigError(
             f"summary endpoint returned a malformed reply: {_response_excerpt(response_body)}\n"
             "fix: use an OpenAI-compatible /chat/completions endpoint"

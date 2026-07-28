@@ -155,6 +155,42 @@ def test_missing_or_malformed_sidecar_degrades_to_no_transcript(tmp_path: Path) 
     assert [item.source for item in transcripts] == ["none", "none", "none"]
 
 
+def test_sidecar_pointer_cannot_escape_log_dir(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    secret = tmp_path / "secret.jsonl"
+    secret.write_text(json.dumps({"role": "assistant", "content": "secret"}) + "\n")
+    log = _eval_log()
+    scene = replace(
+        log.samples[1],
+        trial_metadata=(
+            {"transcript": str(secret)},
+            {"transcript": "../secret.jsonl"},
+        ),
+        policy_transcripts=(None, None),
+    )
+
+    transcripts = load_transcripts(replace(log, samples=(scene,)), log_dir / "run.json")
+
+    assert [item.source for item in transcripts] == ["none", "none"]
+
+
+def test_transcript_error_marker_falls_back_like_dropped(log_path: Path) -> None:
+    log = _eval_log()
+    scene = replace(
+        log.samples[0],
+        policy_transcripts=(
+            {"transcript_error": "policy transcript hook raised"},
+            log.samples[0].policy_transcripts[1],
+        ),
+    )
+
+    transcripts = load_transcripts(replace(log, samples=(scene,)), log_path)
+
+    assert transcripts[0].source == "none"
+    assert transcripts[1].source == "sidecar"
+
+
 def test_digest_is_stable_and_covers_each_trial(log_path: Path) -> None:
     log = _eval_log()
     digest = build_digest(log, load_transcripts(log, log_path))
@@ -368,6 +404,7 @@ def test_chat_completion_rejects_non_2xx_with_body_excerpt(status: int) -> None:
     [
         b"",
         b'{"choices":[{"message":{"content":null}}]}',
+        b"\xff\xfe not utf-8",
     ],
 )
 def test_chat_completion_rejects_malformed_replies(reply: bytes) -> None:
