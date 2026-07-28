@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from inspect_robots._html import _agent_notes, _chat_content, _display_status
+from inspect_robots._pointers import resolve_log_pointer
 from inspect_robots.cli import _OUTCOME_PHRASES
 from inspect_robots.errors import ConfigError
 from inspect_robots.log import EvalLog, SceneResult, read_eval_log
@@ -50,19 +51,14 @@ def _is_dropped(transcript: object) -> bool:
     )
 
 
-def _read_sidecar(scene: SceneResult, index: int, log_dir: Path) -> list[object] | None:
+def _read_sidecar(scene: SceneResult, index: int, log_path: Path) -> list[object] | None:
     if index >= len(scene.trial_metadata):
         return None
     pointer = scene.trial_metadata[index].get("transcript")
-    if not isinstance(pointer, str) or not pointer:
+    target = resolve_log_pointer(log_path, pointer)
+    if target is None:
         return None
-    # The pointer is foreign text from a portable log: refuse anything that
-    # resolves outside the log's directory (absolute paths, ".." traversal),
-    # or summarize would read arbitrary files into the learnings document.
     try:
-        target = (log_dir / pointer).resolve()
-        if not target.is_relative_to(log_dir.resolve()):
-            return None
         with target.open(encoding="utf-8") as handle:
             return [json.loads(line) for line in handle]
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -80,7 +76,7 @@ def load_transcripts(log: EvalLog, log_path: Path) -> list[TrialTranscript]:
             if inline is not None and not _is_dropped(inline):
                 transcripts.append(TrialTranscript(scene.scene_id, index, inline, "inline"))
                 continue
-            sidecar = _read_sidecar(scene, index, log_path.parent)
+            sidecar = _read_sidecar(scene, index, log_path)
             if sidecar is not None:
                 transcripts.append(TrialTranscript(scene.scene_id, index, sidecar, "sidecar"))
             else:

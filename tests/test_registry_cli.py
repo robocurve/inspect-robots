@@ -1146,6 +1146,34 @@ def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
     return path
 
 
+def _write_wire_log(
+    tmp_path: Path,
+    trials: tuple[list[dict[str, object]], ...],
+    *,
+    pointer_override: str | None = None,
+) -> tuple[Path, Path]:
+    log = _step_limit_log(reasons=tuple("success" for _ in trials))
+    pointers: list[dict[str, object]] = []
+    for epoch, rows in enumerate(trials):
+        pointer = (
+            pointer_override
+            if pointer_override is not None
+            else f"wire/run/s0-e{epoch}/calls.jsonl"
+        )
+        pointers.append({"wire_capture": pointer})
+        if pointer_override is None:
+            calls_path = tmp_path / pointer
+            calls_path.parent.mkdir(parents=True, exist_ok=True)
+            calls_path.write_text(
+                "".join(f"{json.dumps(row)}\n" for row in rows),
+                encoding="utf-8",
+            )
+    scene = dataclasses.replace(log.samples[0], trial_metadata=tuple(pointers))
+    log_path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "wire.json")
+    blob_dir = tmp_path / "wire" / "run" / "blobs"
+    return log_path, blob_dir
+
+
 def _view_frame_log(frames_dir: str) -> EvalLog:
     log = _transcript_log()
     chat = [
@@ -1271,10 +1299,12 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log: EvalLog,
         *,
         title: str,
+        log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
     ) -> str:
         del log, title, frames_dir
+        assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
 
@@ -1680,6 +1710,187 @@ def test_plain_inspect_mentions_recorded_policy_transcripts(
     assert "policy transcripts: recorded (--transcript to print)" in out
     assert f"hint: HTML viewer: inspect-robots view {path}" in out
     assert "scene s0, trial 0:" not in out
+
+
+def test_inspect_wire_table_reports_attempts_images_and_new_blob_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "a" * 64
+    missing_sha = "c" * 64
+    reference = f"data:image/png;base64,$blob:{sha}"
+    rows: list[dict[str, object]] = [
+        {
+            "call": 0,
+            "attempt": 0,
+            "endpoint": "/chat/completions",
+            "duration_s": 0.1251,
+            "status": 429,
+            "request": {
+                "messages": [{"content": [reference, reference, f"$blob:{missing_sha}", 3]}]
+            },
+            "response": {"error": "retry"},
+        },
+        {
+            "call": 0,
+            "attempt": 1,
+            "endpoint": "/chat/completions",
+            "duration_s": True,
+            "status": None,
+            "request": {"messages": [{"content": reference}]},
+            "response": None,
+        },
+    ]
+    path, blob_dir = _write_wire_log(tmp_path, (rows,))
+    blob_dir.mkdir(parents=True)
+    (blob_dir / f"{sha}.png").write_bytes(b"blob")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire calls:" in out
+    assert "trial  call  attempt  endpoint  status  duration  images  new blob bytes" in out
+    assert "s0-e0  0  0  /chat/completions  429  0.125s  3  4" in out
+    assert "s0-e0  0  1  /chat/completions  -  -  1  0" in out
+
+
+def test_inspect_wire_call_dumps_every_retry_with_symbolic_blobs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "b" * 64
+    rows: list[dict[str, object]] = [
+        {
+            "call": 3,
+            "attempt": attempt,
+            "endpoint": "/responses",
+            "duration_s": 0.2,
+            "status": status,
+            "request": {"input": [{"image_url": f"$blob:{sha}"}]},
+            "response": response,
+        }
+        for attempt, status, response in (
+            (0, 500, {"error": "retry"}),
+            (1, 200, "raw response"),
+        )
+    ]
+    rows[0]["error"] = "temporary transport detail"
+    path, _ = _write_wire_log(tmp_path, (rows,))
+
+    assert main(["inspect", str(path), "--wire", "3"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire trial s0-e0, call 3:" in out
+    assert out.count("attempt ") == 2
+    assert f"$blob:{sha}" in out
+    assert '"error": "retry"' in out
+    assert '"raw response"' in out
+    assert "endpoint: /responses" in out
+    assert "status: 500" in out
+    assert "error: temporary transport detail" in out
+
+
+def test_inspect_wire_call_requires_trial_for_multiple_captures(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/messages",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    path, _ = _write_wire_log(tmp_path, ([row], [row]))
+
+    with pytest.raises(
+        SystemExit,
+        match=r"--trial is required.*available trials: s0-e0, s0-e1",
+    ):
+        main(["inspect", str(path), "--wire", "0"])
+
+
+def test_inspect_wire_trial_selects_one_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/first",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    second = {**first, "endpoint": "/second"}
+    path, _ = _write_wire_log(tmp_path, ([first], [second]))
+
+    assert main(["inspect", str(path), "--wire", "0", "--trial", "s0-e1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire trial s0-e1, call 0:" in out
+    assert "/first" not in out
+
+
+def test_inspect_wire_missing_capture_is_non_error_for_table_and_error_for_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("success",)), tmp_path, "none-wire.json")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit, match="no wire capture recorded"):
+        main(["inspect", str(path), "--wire", "0"])
+
+
+def test_inspect_wire_hostile_pointer_is_treated_as_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _ = _write_wire_log(tmp_path, ([],), pointer_override="../outside/calls.jsonl")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+
+def test_inspect_wire_guides_invalid_trial_call_and_trial_without_dump(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "call": 1,
+        "attempt": 0,
+        "endpoint": "/responses",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    path, _ = _write_wire_log(tmp_path, ([row],))
+
+    with pytest.raises(SystemExit, match=r"wire trial 'missing' not found.*s0-e0"):
+        main(["inspect", str(path), "--wire", "1", "--trial", "missing"])
+    with pytest.raises(SystemExit, match="wire call 2 not found in trial s0-e0"):
+        main(["inspect", str(path), "--wire", "2"])
+    with pytest.raises(SystemExit, match="--trial requires an integer --wire CALL"):
+        main(["inspect", str(path), "--wire", "--trial", "s0-e0"])
+    with pytest.raises(SystemExit, match="--trial requires --wire CALL"):
+        main(["inspect", str(path), "--trial", "s0-e0"])
+
+
+@pytest.mark.parametrize("contents", [None, "", "[]\n", "{\n"])
+def test_inspect_wire_unreadable_or_invalid_sidecars_are_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    contents: str | None,
+) -> None:
+    path, _ = _write_wire_log(tmp_path, ([{}],))
+    calls_path = tmp_path / "wire" / "run" / "s0-e0" / "calls.jsonl"
+    if contents is None:
+        calls_path.unlink()
+    else:
+        calls_path.write_text(contents, encoding="utf-8")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
 
 
 def test_run_summary_adds_agent_conversation_hint_when_recorded(
