@@ -2309,7 +2309,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
+def test_registered_task_stays_silent_unless_operator_ends_episode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -2328,7 +2328,8 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
 
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("R6: --task runs must not block")
+        "builtins.input",
+        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -2397,6 +2398,60 @@ def test_registered_task_prompts_when_operator_ends_episode(
     log = _read_only_log(log_dir)
     assert log.samples[0].operator_judgements == ("y",)
     assert log.samples[0].operator_notes == ("smooth grasp",)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_tty", "no_prompt_flag"])
+def test_registered_task_operator_end_suppressed_without_tty_or_with_no_prompt(
+    suppress: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The run-command twin of the eval-set suppression tests: the gate is
+    # evaluated per command, so each command needs its own negative coverage.
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-suppressed-for-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "-T",
+        "num_scenes=1",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    if suppress == "no_tty":
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    else:
+        _tty_stdin(monkeypatch)
+        argv.insert(1, "--no-prompt")
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("suppressed run must not prompt")
+    )
+    try:
+        rc = main(argv)
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    assert _read_only_log(tmp_path / "logs").samples[0].operator_judgements == (None,)
     capsys.readouterr()
 
 

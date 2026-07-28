@@ -96,7 +96,7 @@ _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
     "max_steps": "hit step limit",
-    "operator_end": "ended by operator",
+    OPERATOR_END: "ended by operator",
     "give_up": "gave up",
     "done": "reported done",
     "policy_stop": "stopped by policy",
@@ -145,8 +145,9 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     """Add the flags common to ``run`` and ``eval-set``.
 
     Component selection (``--policy``/``--embodiment``/``-P``/``-E``/``--sim``),
-    guardrails, logging, and epoch/error handling live here so a new shared flag
-    lands in both commands at once instead of drifting between two copies.
+    guardrails, logging, prompting control, and epoch/error handling live here
+    so a new shared flag lands in both commands at once instead of drifting
+    between two copies.
     """
     parser.add_argument(
         "--no-prompt",
@@ -585,6 +586,15 @@ def _prompt_operator_on_operator_end(record: TrialRecord, scene: Scene) -> None:
         _prompt_operator(record, scene)
 
 
+def _attended(args: argparse.Namespace) -> bool:
+    """True when the operator can be prompted: a real TTY and no ``--no-prompt``.
+
+    The single source of truth for the prompt gate shared by ``run`` and
+    ``eval-set`` — the same anti-drift argument as ``_add_shared_eval_args``.
+    """
+    return not args.no_prompt and sys.stdin.isatty()
+
+
 def _step_limit_count(log: EvalLog) -> int:
     """Count recorded trials whose termination reason is the step horizon."""
     return sum(
@@ -983,7 +993,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
 
         before_scoring = None
-        if not args.no_prompt and sys.stdin.isatty():
+        if _attended(args):
             if is_adhoc and any(s.name == "operator" for s in task.scorers):
                 # Ad-hoc operator-scored runs: every non-definitive trial is
                 # prompted, exactly as before.
@@ -1119,7 +1129,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
         before_scoring = None
-        if not args.no_prompt and sys.stdin.isatty():
+        if _attended(args):
             # Registered tasks only here: prompt for exactly the trials a human
             # ended by keypress (OPERATOR_END); everything else stays
             # non-blocking and unattended-safe (R6).
