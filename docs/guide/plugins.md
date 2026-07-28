@@ -51,6 +51,29 @@ shows up in `inspect-robots list` and resolves by name in `eval()` and the CLI.
 This is how the ecosystem stays decoupled: this repository is the framework;
 specific simulators, VLA weights, and benchmarks live in their own packages.
 
+### Reading user defaults
+
+Plugin CLIs can read the configuration written by `inspect-robots setup`
+through `inspect_robots.defaults`. Constructor args belong to the component
+named by their owner field — apply `embodiment_args` only when the owner is
+the embodiment *your* plugin drives, or args recorded for another rig will
+configure yours:
+
+```python
+import os
+
+from inspect_robots.defaults import load_defaults
+
+defaults = load_defaults(os.environ)
+if defaults.embodiment_args_owner == "my_embodiment":
+    args = defaults.embodiment_args
+```
+
+A plugin that ships several embodiments (or expects subclasses registered by
+other packages) can resolve the owner with
+`inspect_robots.registry.registered("embodiment")` and check the factory's
+class instead of comparing names.
+
 ## First-party plugins
 
 Five adapters ship from the Inspect Robots repository as separate packages,

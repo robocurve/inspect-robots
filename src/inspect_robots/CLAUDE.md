@@ -31,7 +31,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `_summarize.py` | `inspect-robots summarize`: load inline or sidecar policy transcripts per trial, build an offline markdown digest, and optionally request a grounded learnings document over the OpenAI-compatible chat wire |
 | `_pngenc.py` | strict-uint8, NumPy plus stdlib PNG and data-URL encoding for stored camera frames |
 | `_video.py` | `inspect-robots video`: reunite a log with its `FrameStore` side-cars and pipe them to the ffmpeg binary, one MP4 per (trial, camera) stream (plan 0016: stderr temp file not pipe, per-stream failure isolation, strict uint8) |
-| `_defaults.py` | user default policy/embodiment (+ `--sim` counterpart) for the zero-config CLI: env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `set_default` backs `config set` |
+| `defaults.py` | public reader for user default policy/embodiment (+ `--sim` counterpart): env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `_set_default` backs `config set` |
 | `_dotenv.py` | dependency-free `.env` parsing and working-directory auto-loading with real environment variables taking precedence |
 | `_setup.py` | the `inspect-robots setup` wizard (plans 0009 and 0011): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with unplug-to-identify and CAN udev guidance, fallback camera discovery, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |

@@ -11,8 +11,8 @@ from functools import partial
 from pathlib import Path
 from typing import IO
 
-from inspect_robots._defaults import _config_path, parse_value
 from inspect_robots.conformance import DeviceSlot, device_slots
+from inspect_robots.defaults import _parse_value, config_path
 
 # Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
 _BOLD = "1"
@@ -101,12 +101,12 @@ def _valid_text(_value: str) -> bool:
 
 
 def _valid_max_steps(value: str) -> bool:
-    parsed = parse_value(value)
+    parsed = _parse_value(value)
     return isinstance(parsed, int) and not isinstance(parsed, bool) and parsed >= 1
 
 
 def _valid_bool(value: str) -> bool:
-    return isinstance(parse_value(value), bool)
+    return isinstance(_parse_value(value), bool)
 
 
 def _ask(
@@ -959,7 +959,7 @@ def run_setup(
     if not interactive:
         raise SystemExit("setup is interactive; see the README for manual config")
 
-    path = _config_path(env)
+    path = config_path(env)
     if path is None:
         raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
 

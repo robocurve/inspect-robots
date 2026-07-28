@@ -59,8 +59,29 @@ All notable changes to this project are documented here. The format is based on
   (unscored) after three consecutive failures, and each correction turn spends
   one `max_llm_calls` unit.
 
+### Changed
+
+- **Agent plugin:** outgoing requests now retain camera frames only from the
+  newest two image-bearing messages by default, bounding long-episode
+  payloads that previously grew until the API's request-size ceiling (HTTP
+  413). Stored history, transcripts, and frame side-cars are unchanged.
+  Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
 ### Added
 
+- **Public user-defaults API:** `inspect_robots.defaults` lets plugin CLIs read
+  the configuration written by `inspect-robots setup`, including config-file
+  source paths and the args-owner metadata needed to apply hardware settings
+  safely (#197).
+- **Agent plugin:** per-camera metric depth from observation extras now renders
+  as near-bright grayscale beside its RGB camera in automatic observations and
+  `take_pic` reveals. Labels anchor the render with the 2nd–98th percentile
+  bright/dim distances, valid-pixel percentage, and optional center depth;
+  `-P depth=off` is the payload-cost kill-switch (#190).
+- **Agent plugin:** the native Anthropic wire adds automatic prompt-cache
+  breakpoints (system prompt, eviction boundary, final message) and records
+  per-trial token/cache totals in `record.metadata["llm_usage"]`, making
+  cache savings directly observable via `cache_read_input_tokens` (#188).
 - **Seconds-based benchmark horizons:** `Task(max_seconds=...)` gives every
   compatible embodiment the same physical-time budget. `eval()` resolves it
   with `ceil(max_seconds * embodiment.info.control_hz)`, rejects missing or
