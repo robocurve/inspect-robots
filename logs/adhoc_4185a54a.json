@@ -1,0 +1,54 @@
+{
+  "error": "EmbodimentFault: [Errno 19] No such device",
+  "eval": {
+    "created": "2026-07-14T00:49:50.793547+00:00",
+    "embodiment": "yam_arms",
+    "embodiment_info": {
+      "capabilities": [
+        "self_paced"
+      ],
+      "control_hz": 10.0,
+      "is_simulated": false
+    },
+    "git_commit": "8b6bec9c6334f130bb70d5667caa2c7898bc6c81-dirty",
+    "inspect_robots_version": "0.6.0",
+    "policy": "molmoact2",
+    "policy_config": {
+      "action_horizon": 30,
+      "replan_interval": null,
+      "temperature": null
+    },
+    "seed": 0,
+    "task": "adhoc"
+  },
+  "results": {
+    "metrics": {},
+    "total_scenes": 1,
+    "total_trials": 1
+  },
+  "samples": [
+    {
+      "epochs": [
+        {}
+      ],
+      "error": "EmbodimentFault: [Errno 19] No such device",
+      "instruction": "place the fork on the plate",
+      "operator_judgements": [
+        null
+      ],
+      "reduced": {},
+      "scene_id": "scene-0",
+      "status": "error"
+    }
+  ],
+  "stats": {
+    "completed_at": "2026-07-14T00:49:51.064361+00:00",
+    "duration_s": 0.2672834759578109,
+    "frames_dir": "logs/frames/20260714_004950_130d765f",
+    "mean_inference_latency_s": null,
+    "started_at": "2026-07-14T00:49:50.797084+00:00",
+    "total_steps": 0
+  },
+  "status": "error",
+  "version": 1
+}

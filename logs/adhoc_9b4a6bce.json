@@ -1,0 +1,54 @@
+{
+  "error": "EmbodimentFault: No module named 'i2rt'",
+  "eval": {
+    "created": "2026-07-14T00:43:28.451466+00:00",
+    "embodiment": "yam_arms",
+    "embodiment_info": {
+      "capabilities": [
+        "self_paced"
+      ],
+      "control_hz": 10.0,
+      "is_simulated": false
+    },
+    "git_commit": "8b6bec9c6334f130bb70d5667caa2c7898bc6c81",
+    "inspect_robots_version": "0.6.0",
+    "policy": "molmoact2",
+    "policy_config": {
+      "action_horizon": 30,
+      "replan_interval": null,
+      "temperature": null
+    },
+    "seed": 0,
+    "task": "adhoc"
+  },
+  "results": {
+    "metrics": {},
+    "total_scenes": 1,
+    "total_trials": 1
+  },
+  "samples": [
+    {
+      "epochs": [
+        {}
+      ],
+      "error": "EmbodimentFault: No module named 'i2rt'",
+      "instruction": "place the fork on the plate",
+      "operator_judgements": [
+        null
+      ],
+      "reduced": {},
+      "scene_id": "scene-0",
+      "status": "error"
+    }
+  ],
+  "stats": {
+    "completed_at": "2026-07-14T00:43:39.793989+00:00",
+    "duration_s": 0.0008485030848532915,
+    "frames_dir": "logs/frames/20260714_004328_962c634b",
+    "mean_inference_latency_s": null,
+    "started_at": "2026-07-14T00:43:39.793167+00:00",
+    "total_steps": 0
+  },
+  "status": "error",
+  "version": 1
+}
