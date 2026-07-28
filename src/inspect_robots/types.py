@@ -80,14 +80,22 @@ class ActionChunk:
         return len(self.actions)
 
 
+# Standard termination reason for "a human operator ended this episode by
+# keypress, without giving a verdict". Non-definitive on purpose: the verdict
+# (y/n/partial/skip + optional grader note) is collected by the CLI's operator
+# prompt, which fires for attended trials that end with this reason (#194).
+OPERATOR_END = "operator_end"
+
+
 @dataclass(frozen=True, eq=False)
 class StepResult:
     """The outcome of applying one action to an embodiment.
 
     ``terminated`` means the task ended (success or hard failure);
     ``termination_reason`` disambiguates (e.g. ``"success"``, ``"collision"``,
-    ``"fault"``, ``"out_of_bounds"``). ``truncated`` means a time/horizon cutoff.
-    A simulator may expose privileged success via ``info``.
+    ``"fault"``, ``"out_of_bounds"``, ``"operator_end"`` — the standard reason
+    for operator-ended episodes awaiting a verdict). ``truncated`` means a
+    time/horizon cutoff. A simulator may expose privileged success via ``info``.
     """
 
     observation: Observation

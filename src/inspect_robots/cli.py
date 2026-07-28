@@ -66,6 +66,7 @@ from inspect_robots.defaults import (
     _set_default,
     load_defaults,
 )
+from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
@@ -98,6 +99,7 @@ _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
     "max_steps": "hit step limit",
+    OPERATOR_END: "ended by operator",
     "give_up": "gave up",
     "done": "reported done",
     "policy_stop": "stopped by policy",
@@ -147,9 +149,15 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     """Add the flags common to ``run`` and ``eval-set``.
 
     Component selection (``--policy``/``--embodiment``/``-P``/``-E``/``--sim``),
-    guardrails, logging, and epoch/error handling live here so a new shared flag
-    lands in both commands at once instead of drifting between two copies.
+    guardrails, logging, prompting control, and epoch/error handling live here
+    so a new shared flag lands in both commands at once instead of drifting
+    between two copies.
     """
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="never ask the terminal operator for a success verdict or grader notes",
+    )
     parser.add_argument("--policy", help="registered policy name (default: user config)")
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
@@ -232,11 +240,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="scorer for an --instruction run (default: config or "
         f"{_ADHOC_SCORER_FALLBACK!r}); invalid with --task",
-    )
-    p_run.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="never ask the terminal operator for a success verdict or grader notes",
     )
     p_run.add_argument(
         "--rerun",
@@ -603,6 +606,26 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     # operator_event documents "skip" as "no judgement" for its consumers.
     if answer != "skip" or note is not None:
         record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
+
+
+def _prompt_operator_on_operator_end(record: TrialRecord, scene: Scene) -> None:
+    """Prompt only for trials the operator demonstrably ended (R6-safe).
+
+    ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
+    here can never block an unattended run — every other reason (``max_steps``
+    included) keeps R6's non-blocking behavior for registered tasks.
+    """
+    if record.termination_reason == OPERATOR_END:
+        _prompt_operator(record, scene)
+
+
+def _attended(args: argparse.Namespace) -> bool:
+    """True when the operator can be prompted: a real TTY and no ``--no-prompt``.
+
+    The single source of truth for the prompt gate shared by ``run`` and
+    ``eval-set`` — the same anti-drift argument as ``_add_shared_eval_args``.
+    """
+    return not args.no_prompt and sys.stdin.isatty()
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -1003,15 +1026,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
 
         before_scoring = None
-        if (
-            is_adhoc
-            and not args.no_prompt
-            and sys.stdin.isatty()
-            and any(s.name == "operator" for s in task.scorers)
-        ):
-            # Ad-hoc runs only: a registered task with an operator scorer keeps
-            # R6's non-blocking, unattended-safe behavior (judgement stays None).
-            before_scoring = _prompt_operator
+        if _attended(args):
+            if is_adhoc and any(s.name == "operator" for s in task.scorers):
+                # Ad-hoc operator-scored runs: every non-definitive trial is
+                # prompted, exactly as before.
+                before_scoring = _prompt_operator
+            else:
+                # Any task, registered included: a trial the operator ended by
+                # keypress owes a verdict; everything else stays non-blocking
+                # and unattended-safe (R6).
+                before_scoring = _prompt_operator_on_operator_end
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1137,6 +1161,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
+        before_scoring = None
+        if _attended(args):
+            # Registered tasks only here: prompt for exactly the trials a human
+            # ended by keypress (OPERATOR_END); everything else stays
+            # non-blocking and unattended-safe (R6).
+            before_scoring = _prompt_operator_on_operator_end
         try:
             success, logs = eval_set(
                 tasks,
@@ -1150,6 +1180,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 retry_attempts=args.retry_attempts,
+                before_scoring=before_scoring,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log
