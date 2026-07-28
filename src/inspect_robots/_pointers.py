@@ -7,7 +7,9 @@ also avoids an ``_html`` → ``_summarize`` → ``cli`` → ``_html`` import cyc
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 
 def resolve_log_pointer(log_path: Path, pointer: object) -> Path | None:
@@ -35,3 +37,28 @@ def derive_blob_dir(log_path: Path, target: Path) -> Path | None:
     if not blob_dir.is_relative_to(log_path.parent.resolve()):
         return None
     return blob_dir
+
+
+def read_jsonl_prefix(target: Path) -> list[dict[str, Any]] | None:
+    """Read a sidecar's longest valid prefix of JSON-object lines.
+
+    Wire sidecars are append-only and flushed per row; a crash can strand a
+    torn final line, and that torn tail must not discard the rows before it —
+    the crashed call is the forensic payload. Parsing stops at the first
+    unparsable or non-object line; ``None`` means the file itself was
+    unreadable or held no valid row.
+    """
+    rows: list[dict[str, Any]] = []
+    try:
+        with target.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(row, dict):
+                    break
+                rows.append(row)
+    except (OSError, UnicodeError):
+        return None
+    return rows or None

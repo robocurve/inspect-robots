@@ -439,3 +439,26 @@ def test_blob_write_is_atomic_and_partial_writes_leave_no_blob(
     (blob,) = (tmp_path / "wire/run-1/blobs").glob("*.png")
     assert not list((tmp_path / "wire/run-1/blobs").glob(".*.tmp"))
     assert hashlib.sha256(blob.read_bytes()).hexdigest() == blob.stem
+
+
+class _InterruptingHandle:
+    """Stand-in file handle whose close simulates a mid-close Ctrl-C."""
+
+    def close(self) -> None:
+        raise KeyboardInterrupt
+
+
+def test_keyboard_interrupt_in_begin_and_end_trial_propagates(tmp_path: Path) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    _record(capture)
+    capture._handle = cast(TextIO, _InterruptingHandle())
+    with pytest.raises(KeyboardInterrupt):
+        capture.begin_trial(str(tmp_path), "run-1", "scene-e1")
+
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-2", "scene-e0")
+    _record(capture)
+    capture._handle = cast(TextIO, _InterruptingHandle())
+    with pytest.raises(KeyboardInterrupt):
+        capture.end_trial()

@@ -223,6 +223,9 @@ class WireCapture:
             self._blob_dir.mkdir(parents=True, exist_ok=True)
             # Atomic publish: a partial write must never sit under the
             # content hash, or dedup would pin the poisoned bytes run-long.
+            # The deterministic temp name is safe only while trials run
+            # sequentially in one process and run_ids are uuid-suffixed;
+            # parallel trials would need per-writer temp names.
             tmp = self._blob_dir / f".{digest}.tmp"
             tmp.write_bytes(decoded)
             os.replace(tmp, path)

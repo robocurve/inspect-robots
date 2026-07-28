@@ -56,7 +56,7 @@ from inspect_robots._html import (
     _is_chat_transcript,
     render_html,
 )
-from inspect_robots._pointers import derive_blob_dir, resolve_log_pointer
+from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
     _ADHOC_SCORER_FALLBACK,
@@ -851,12 +851,8 @@ def _load_wire_trials(log: EvalLog, log_path: Path) -> list[_WireTrial]:
             target = resolve_log_pointer(log_path, scene.trial_metadata[epoch].get("wire_capture"))
             if target is None:
                 continue
-            try:
-                with target.open(encoding="utf-8") as handle:
-                    loaded = [json.loads(line) for line in handle]
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if not loaded or not all(isinstance(row, dict) for row in loaded):
+            loaded = read_jsonl_prefix(target)
+            if loaded is None:
                 continue
             blob_dir = derive_blob_dir(log_path, target)
             if blob_dir is None:
@@ -864,7 +860,7 @@ def _load_wire_trials(log: EvalLog, log_path: Path) -> list[_WireTrial]:
             trials.append(
                 _WireTrial(
                     f"{scene.scene_id}-e{epoch}",
-                    cast(list[dict[str, Any]], loaded),
+                    loaded,
                     blob_dir,
                 )
             )

@@ -252,6 +252,11 @@ remains available via `inspect --wire`.
 Tools render once per trial (the toolset is fixed at `bind()`; schemas are
 identical across calls by construction).
 
+**Torn tails.** Rows are flushed per attempt, but a SIGKILL mid-write
+can strand a torn final line; readers therefore consume the **longest
+valid prefix** of JSON-object lines and drop only the unparsable tail —
+all-or-nothing parsing would discard exactly the crashed trial's capture.
+
 **Pointer resolution.** No viewer resolves `metadata["transcript"]` today;
 the only code resolving it is `_summarize.py:53-68`
 (`log_path.parent / pointer` with an `is_relative_to` traversal guard,

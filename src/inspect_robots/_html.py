@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
-from inspect_robots._pointers import derive_blob_dir, resolve_log_pointer
+from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
@@ -507,17 +507,13 @@ def _load_wire_rows(
     target = resolve_log_pointer(log_path, scene.trial_metadata[trial].get("wire_capture"))
     if target is None:
         return None
-    try:
-        with target.open(encoding="utf-8") as handle:
-            loaded = [json.loads(line) for line in handle]
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not loaded or not all(isinstance(row, dict) for row in loaded):
+    loaded = read_jsonl_prefix(target)
+    if loaded is None:
         return None
     blob_dir = derive_blob_dir(log_path, target)
     if blob_dir is None:
         return None
-    return cast(list[dict[str, Any]], loaded), blob_dir
+    return loaded, blob_dir
 
 
 def _wire_blob_tokens(value: object) -> list[str]:
