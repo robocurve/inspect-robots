@@ -286,6 +286,33 @@ For runs whose policy recorded conversations (such as `--policy agent`),
 inspect-robots inspect logs/cubepick-reach_xxxx.json --transcript
 ```
 
+## `inspect-robots summarize`
+
+Distill a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) into a markdown
+learnings file:
+
+```bash
+inspect-robots summarize logs/cubepick-reach_xxxx.json
+```
+
+Without `--model`, the command works offline and writes a deterministic digest
+of run identity, trial outcomes, operator feedback, errors, and transcript
+statistics. The default output is
+`logs/learnings/cubepick-reach_xxxx.md`. Use `-o FILE` to select another path
+or `-o -` to write only the document to stdout.
+
+With `--model`, the digest and the tail of each recorded policy transcript are
+sent to an OpenAI-compatible chat-completions endpoint:
+
+```bash
+inspect-robots summarize logs/cubepick-reach_xxxx.json \
+  --model claude-sonnet-4-5
+```
+
+The default endpoint is `https://api.anthropic.com/v1`, and the default API key
+variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
+`--api-key-env VAR` for another compatible provider.
+
 ## `inspect-robots view`
 
 Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
