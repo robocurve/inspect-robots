@@ -17,6 +17,8 @@ import httpx
 
 from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall
 
+from ._capture import WireCapture
+
 _ANTHROPIC_VERSION = "2023-06-01"
 _FAST_MODE_BETA = "fast-mode-2026-02-01"
 
@@ -58,6 +60,7 @@ class AnthropicClient:
         max_retries: int = 3,
         backoff_s: float = 1.0,
         transport: httpx.BaseTransport | None = None,
+        capture: WireCapture | None = None,
     ):
         self._provider = provider
         self._max_output_tokens = max_output_tokens
@@ -73,6 +76,7 @@ class AnthropicClient:
         self._speed = speed
         self._max_retries = max_retries
         self._backoff_s = backoff_s
+        self._capture = capture
         # tool_use id -> the verbatim content array of the response it came in.
         # Keyed on id alone because the API guarantees tool_use ids are unique
         # within a conversation; a gateway that recycles them would replay the
@@ -139,14 +143,37 @@ class AnthropicClient:
         last_error = "unknown error"
         last_status: int | None = None
         for attempt in range(self._max_retries):
+            t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/messages", json=body)
             except httpx.TransportError as exc:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/messages",
+                        request=body,
+                        status=None,
+                        response_text=None,
+                        error=str(exc),
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 last_error = str(exc)
                 # Reset, or a 429 followed by a connection failure would emit
                 # the fast-mode rate-limit guidance for the wrong cause.
                 last_status = None
             else:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/messages",
+                        request=body,
+                        status=response.status_code,
+                        response_text=response.text,
+                        error=None,
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 last_status = response.status_code
                 if response.status_code == 200:
                     payload = response.json()
