@@ -7,6 +7,7 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -41,7 +42,12 @@ from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
-from inspect_robots_agent.policy import _SYSTEM_TEMPLATE, AgentPolicyConfig, _observation_content
+from inspect_robots_agent.policy import (
+    _PRIOR_LEARNINGS_TEXT_LIMIT,
+    _SYSTEM_TEMPLATE,
+    AgentPolicyConfig,
+    _observation_content,
+)
 
 # --- scripted-conversation harness ---------------------------------------------
 
@@ -53,6 +59,10 @@ _NOTE_CONTRACT = (
     "to see what you see and what you decide, so write them for a human reader."
 )
 _NOTE_ERROR = "note is required: describe what you observe and why you chose this motion"
+_PRIOR_LEARNINGS_FRAME = (
+    "\n\nNotes from a previous attempt at tasks like this one. They may "
+    "be wrong or stale; the current observation always wins:\n"
+)
 
 
 def _with_default_note(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -360,6 +370,108 @@ def test_absent_embodiment_docs_leave_the_prompt_unchanged(docs: str | None) -> 
 
     assert transcript is not None
     assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+
+
+def test_prior_learnings_follow_embodiment_docs_and_record_provenance(
+    tmp_path: Path,
+) -> None:
+    docs = "Use the wrist camera before closing the gripper."
+    learnings = "# Prior lessons\n\nApproach from the object's left side.\n"
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(
+        _Script([_text_response("unused")]),
+        prior_learnings=str(path),
+    )
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == (
+        _SYSTEM_TEMPLATE.format(name="cubepick", budget=100)
+        + "\n\nEmbodiment notes:\n"
+        + docs
+        + _PRIOR_LEARNINGS_FRAME
+        + learnings
+    )
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.prior_learnings == str(path.resolve())
+    assert (
+        policy.config.prior_learnings_sha256
+        == hashlib.sha256(learnings.encode("utf-8")).hexdigest()
+    )
+
+
+def test_prior_learnings_default_off_preserves_prompt_and_config() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == _SYSTEM_TEMPLATE.format(name="(unbound)", budget=100)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.prior_learnings is None
+    assert policy.config.prior_learnings_sha256 is None
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("missing.md", None),
+        ("empty.md", ""),
+        ("whitespace.md", " \n\t"),
+        ("oversize.md", "x" * (_PRIOR_LEARNINGS_TEXT_LIMIT + 1)),
+    ],
+    ids=["missing", "empty", "whitespace", "oversize"],
+)
+def test_prior_learnings_file_errors_are_guided(
+    tmp_path: Path,
+    filename: str,
+    contents: str | None,
+) -> None:
+    path = tmp_path / filename
+    if contents is not None:
+        path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"(?s)prior_learnings.*fix:"):
+        _policy(
+            _Script([_text_response("unused")]),
+            prior_learnings=str(path),
+        )
+
+
+@pytest.mark.parametrize("value", ["", 42], ids=["empty_string", "non_string"])
+def test_prior_learnings_coercion_errors_are_guided(value: object) -> None:
+    with pytest.raises(ConfigError, match=r"(?s)prior_learnings.*fix:.*coerces unquoted values"):
+        _policy(
+            _Script([_text_response("unused")]),
+            prior_learnings=value,
+        )
+
+
+def test_prior_learnings_are_not_reread_on_reset(tmp_path: Path) -> None:
+    learnings = "Keep the camera centered on the target."
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    policy = _policy(
+        _Script([_text_response("unused")]),
+        prior_learnings=str(path),
+    )
+
+    policy.reset(Scene(id="s0", instruction="reach"))
+    first = policy.transcript()
+    path.unlink()
+    policy.reset(Scene(id="s1", instruction="reach again"))
+    second = policy.transcript()
+
+    assert first is not None
+    assert second is not None
+    assert first[0]["content"] == second[0]["content"]
+    assert _PRIOR_LEARNINGS_FRAME + learnings in second[0]["content"]
 
 
 def test_system_prompt_requires_human_readable_move_notes() -> None:

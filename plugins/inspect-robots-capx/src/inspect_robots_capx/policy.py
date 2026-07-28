@@ -11,17 +11,20 @@ from __future__ import annotations
 import atexit
 import contextlib
 import copy
+import hashlib
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
 
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
@@ -42,6 +45,9 @@ _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh",
 _WIRE_FORMATS = frozenset({"chat", "responses"})
 _EXECUTION_REPORT_CHAR_LIMIT = 16_000
 _REPORT_TRUNCATION_MARKER = "[execution report truncated; tail follows]\n"
+
+# Duplicated in inspect_robots_agent/policy.py; keep both limits in sync.
+_PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _FENCED_CODE = re.compile(r"^```(?:python)?[ \t]*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCED_ANYWHERE = re.compile(r"```(?:python)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
@@ -125,10 +131,18 @@ class CapxPolicyConfig(PolicyConfig):
     request_timeout_s: float = 120.0
     gripper_open_is_high: bool = True
     transcript_echo: bool = False
+    #: Resolved absolute path to the injected prior-learnings file.
+    prior_learnings: str | None = None
+    #: SHA-256 hexdigest of the injected prior-learnings text.
+    prior_learnings_sha256: str | None = None
 
 
 class CapxPolicy(PolicyBase):
-    """Runs a persistent CaP-X-style codegen conversation over a bound joint arm."""
+    """Runs a persistent CaP-X-style codegen conversation over a bound joint arm.
+
+    ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
+    and appends its text to every trial's system prompt.
+    """
 
     def __init__(
         self,
@@ -151,9 +165,47 @@ class CapxPolicy(PolicyBase):
         request_timeout_s: float = 120.0,
         gripper_open_is_high: bool = True,
         transcript_echo: bool = False,
+        prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ) -> None:
+        prior_learnings_path: str | None = None
+        prior_learnings_text: str | None = None
+        prior_learnings_sha256: str | None = None
+        if prior_learnings is not None:
+            if not isinstance(prior_learnings, str) or not prior_learnings:
+                raise ConfigError(
+                    "prior_learnings must be a non-empty filesystem path string, "
+                    f"got {prior_learnings!r}.\n"
+                    "fix: the -P parser coerces unquoted values; pass "
+                    "-P 'prior_learnings=\"path/to/learnings.md\"'"
+                )
+            path = Path(prior_learnings)
+            try:
+                prior_learnings_text = path.read_text(encoding="utf-8")
+                prior_learnings_path = str(path.resolve())
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} could not be read as UTF-8 "
+                    f"({exc}).\n"
+                    "fix: pass the path to a readable UTF-8 learnings file"
+                ) from exc
+            if not prior_learnings_text.strip():
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} is empty or whitespace-only.\n"
+                    "fix: add concise notes to the file or omit -P prior_learnings="
+                )
+            if len(prior_learnings_text) > _PRIOR_LEARNINGS_TEXT_LIMIT:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} has "
+                    f"{len(prior_learnings_text)} characters; the limit is "
+                    f"{_PRIOR_LEARNINGS_TEXT_LIMIT}.\n"
+                    "fix: summarize it first and pass the path to the shorter learnings file"
+                )
+            prior_learnings_sha256 = hashlib.sha256(
+                prior_learnings_text.encode("utf-8")
+            ).hexdigest()
+
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be >= 1")
         if max_code_failures < 1:
@@ -201,6 +253,7 @@ class CapxPolicy(PolicyBase):
         self._max_speed_frac = max_speed_frac
         self._gripper_open_is_high = gripper_open_is_high
         self._transcript_echo = transcript_echo
+        self._prior_learnings_text = prior_learnings_text
         self.config = CapxPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -221,6 +274,8 @@ class CapxPolicy(PolicyBase):
             request_timeout_s=request_timeout_s,
             gripper_open_is_high=gripper_open_is_high,
             transcript_echo=transcript_echo,
+            prior_learnings=prior_learnings_path,
+            prior_learnings_sha256=prior_learnings_sha256,
         )
         self.info = PolicyInfo(name="capx", action_space=Box(shape=(1,)))
         self._motion: MotionQueue | None = None
@@ -346,6 +401,13 @@ class CapxPolicy(PolicyBase):
         )
         if self._embodiment_docs is not None and self._embodiment_docs.strip():
             system += "\n\nEmbodiment notes:\n" + self._embodiment_docs.strip()
+        if self._prior_learnings_text is not None:
+            system = (
+                system
+                + "\n\nNotes from a previous attempt at tasks like this one. They may "
+                + "be wrong or stale; the current observation always wins:\n"
+                + self._prior_learnings_text
+            )
         self._messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": f"Goal: {scene.instruction}"},

@@ -148,9 +148,14 @@ motion fall short of the tool's requested total.
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
-(default `always`; use `on_demand` for model-requested frames).
+(default `always`; use `on_demand` for model-requested frames), and
+`prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
 either on another wire is an error rather than a silent no-op.
+Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
+file to the system prompt after any embodiment notes. The file is read once
+when the policy is constructed, and its resolved path and content hash are
+recorded in the eval configuration.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
