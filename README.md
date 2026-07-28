@@ -174,6 +174,18 @@ Pretty-print a saved eval log:
 inspect-robots inspect logs/cubepick-reach_*.json
 ```
 
+Distill a saved log into a markdown learnings file:
+
+```bash
+inspect-robots summarize logs/cubepick-reach_*.json
+inspect-robots summarize logs/cubepick-reach_*.json --model claude-sonnet-4-5
+```
+
+Without `--model`, the command writes a deterministic offline digest. With a
+model, it sends the digest and bounded transcript tails to an OpenAI-compatible
+chat endpoint. Output defaults to `logs/learnings/<log-stem>.md`; use `-o FILE`
+to choose a path or `-o -` for stdout.
+
 Render a saved eval log as a self-contained HTML report:
 
 ```bash
