@@ -329,48 +329,66 @@ def _run_eval(
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
             bus.on_trial_start(scene.id, epoch)
-            record: TrialRecord | None
-            try:
-                record = rollout(
-                    policy,
-                    embodiment,
-                    scene,
-                    max_steps=task_envelope.max_steps,
-                    seed=trial_seed,
-                    epoch=epoch,
-                    controller=controller,
-                    approver=approver,
-                    sink=bus,
-                    frame_store=frame_store,
-                )
-            except _CancelledTrial as exc:
-                status = "cancelled"
-                error = str(exc)
-                scene_status = "cancelled"
-                scene_error = error
-                halted = True
-                cancelled_exc = exc
-                record = exc.record
-            except (EmbodimentFault, SafetyAbort) as exc:
-                # Hardware/safety failures always halt the whole eval; the
-                # partial trial record (if any) is preserved below.
-                status = "error"
-                error = f"{type(exc).__name__}: {exc}"
-                scene_status = "error"
-                scene_error = error
-                halted = True
-                record = exc.record
-            except PolicyError as exc:
-                error_count += 1
-                scene_status = "error"
-                scene_error = f"{type(exc).__name__}: {exc}"
-                record = exc.record or TrialRecord(
-                    scene_id=scene.id,
-                    epoch=epoch,
-                    seed=trial_seed,
-                    status="error",
-                    error=scene_error,
-                )
+            record: TrialRecord | None = None
+            policy_start_failed = False
+            on_trial_start = getattr(policy, "on_trial_start", None)
+            if callable(on_trial_start):
+                try:
+                    on_trial_start(scene.id, epoch, log_dir, run_stamp)
+                except Exception as exc:
+                    policy_start_failed = True
+                    error_count += 1
+                    scene_status = "error"
+                    scene_error = f"policy.on_trial_start failed: {exc}"
+                    record = TrialRecord(
+                        scene_id=scene.id,
+                        epoch=epoch,
+                        seed=trial_seed,
+                        status="error",
+                        error=scene_error,
+                    )
+            if not policy_start_failed:
+                try:
+                    record = rollout(
+                        policy,
+                        embodiment,
+                        scene,
+                        max_steps=task_envelope.max_steps,
+                        seed=trial_seed,
+                        epoch=epoch,
+                        controller=controller,
+                        approver=approver,
+                        sink=bus,
+                        frame_store=frame_store,
+                    )
+                except _CancelledTrial as exc:
+                    status = "cancelled"
+                    error = str(exc)
+                    scene_status = "cancelled"
+                    scene_error = error
+                    halted = True
+                    cancelled_exc = exc
+                    record = exc.record
+                except (EmbodimentFault, SafetyAbort) as exc:
+                    # Hardware/safety failures always halt the whole eval; the
+                    # partial trial record (if any) is preserved below.
+                    status = "error"
+                    error = f"{type(exc).__name__}: {exc}"
+                    scene_status = "error"
+                    scene_error = error
+                    halted = True
+                    record = exc.record
+                except PolicyError as exc:
+                    error_count += 1
+                    scene_status = "error"
+                    scene_error = f"{type(exc).__name__}: {exc}"
+                    record = exc.record or TrialRecord(
+                        scene_id=scene.id,
+                        epoch=epoch,
+                        seed=trial_seed,
+                        status="error",
+                        error=scene_error,
+                    )
 
             if record is not None:
                 total_trials += 1
@@ -404,19 +422,24 @@ def _run_eval(
                     judgements.append(record.operator_judgement)
                     notes.append(record.operator_note)
 
-                on_trial_end = getattr(policy, "on_trial_end", None)
-                if callable(on_trial_end):
-                    try:
-                        on_trial_end(record, log_dir, run_stamp)
-                    except Exception as exc:
-                        # Named `detail`, not `note`: a grader's note is a
-                        # different thing entirely and is collected just above.
-                        detail = f"policy.on_trial_end failed: {exc}"
-                        scene_status = "error"
-                        scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
-                        if status == "success":
-                            status = "error"
-                            error = detail
+                # A never-reset trial must not persist the previous trial's
+                # policy state under this trial's identity.
+                if not policy_start_failed:
+                    on_trial_end = getattr(policy, "on_trial_end", None)
+                    if callable(on_trial_end):
+                        try:
+                            on_trial_end(record, log_dir, run_stamp)
+                        except Exception as exc:
+                            # Named `detail`, not `note`: a grader's note is a
+                            # different thing entirely and is collected just above.
+                            detail = f"policy.on_trial_end failed: {exc}"
+                            scene_status = "error"
+                            scene_error = (
+                                detail if scene_error is None else f"{scene_error}; {detail}"
+                            )
+                            if status == "success":
+                                status = "error"
+                                error = detail
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
