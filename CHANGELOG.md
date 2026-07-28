@@ -69,6 +69,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin:** per-camera metric depth from observation extras now renders
+  as near-bright grayscale beside its RGB camera in automatic observations and
+  `take_pic` reveals. Labels anchor the render with the 2nd–98th percentile
+  bright/dim distances, valid-pixel percentage, and optional center depth;
+  `-P depth=off` is the payload-cost kill-switch (#190).
 - **Agent plugin:** the native Anthropic wire adds automatic prompt-cache
   breakpoints (system prompt, eviction boundary, final message) and records
   per-trial token/cache totals in `record.metadata["llm_usage"]`, making
