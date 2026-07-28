@@ -30,6 +30,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import re
 import sys
 import zlib
@@ -96,6 +97,8 @@ class WireCapture:
             self._relative_path = (Path("wire") / run_id / safe_trial_id / "calls.jsonl").as_posix()
         except BaseException as exc:
             self._disable(exc)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
 
     def record(
         self,
@@ -141,6 +144,8 @@ class WireCapture:
             self._rows_written = True
         except BaseException as exc:
             self._disable(exc)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
 
     def end_trial(self) -> str | None:
         """Close the trial and return its relative JSONL pointer when nonempty."""
@@ -154,6 +159,8 @@ class WireCapture:
             return pointer
         except BaseException as exc:
             self._disable(exc)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             return pointer
 
     def warn_if_never_began(self) -> None:
@@ -214,7 +221,11 @@ class WireCapture:
         path = self._blob_dir / f"{digest}.png"
         if not path.exists():
             self._blob_dir.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(decoded)
+            # Atomic publish: a partial write must never sit under the
+            # content hash, or dedup would pin the poisoned bytes run-long.
+            tmp = self._blob_dir / f".{digest}.tmp"
+            tmp.write_bytes(decoded)
+            os.replace(tmp, path)
         return f"$blob:{digest}"
 
     @staticmethod

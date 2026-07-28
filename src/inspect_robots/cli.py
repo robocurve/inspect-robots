@@ -56,7 +56,7 @@ from inspect_robots._html import (
     _is_chat_transcript,
     render_html,
 )
-from inspect_robots._pointers import resolve_log_pointer
+from inspect_robots._pointers import derive_blob_dir, resolve_log_pointer
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
     _ADHOC_SCORER_FALLBACK,
@@ -858,11 +858,14 @@ def _load_wire_trials(log: EvalLog, log_path: Path) -> list[_WireTrial]:
                 continue
             if not loaded or not all(isinstance(row, dict) for row in loaded):
                 continue
+            blob_dir = derive_blob_dir(log_path, target)
+            if blob_dir is None:
+                continue
             trials.append(
                 _WireTrial(
                     f"{scene.scene_id}-e{epoch}",
                     cast(list[dict[str, Any]], loaded),
-                    target.parent.parent / "blobs",
+                    blob_dir,
                 )
             )
     return trials

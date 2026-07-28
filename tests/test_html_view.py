@@ -847,7 +847,7 @@ def test_wire_section_renders_blob_stubs_breakpoints_and_request_summary(
 
 @pytest.mark.parametrize(
     "mode",
-    ["missing-metadata", "deleted", "traversal", "empty", "non-object", "malformed"],
+    ["missing-metadata", "deleted", "traversal", "shallow", "empty", "non-object", "malformed"],
 )
 def test_wire_section_is_absent_for_unavailable_sidecars(tmp_path: Path, mode: str) -> None:
     if mode == "missing-metadata":
@@ -857,6 +857,20 @@ def test_wire_section_is_absent_for_unavailable_sidecars(tmp_path: Path, mode: s
         scene = dataclasses.replace(
             log.samples[0],
             trial_metadata=({"wire_capture": "../outside/calls.jsonl"}, {}),
+        )
+        document = render_html(
+            dataclasses.replace(log, samples=(scene,)),
+            title="absent",
+            log_path=tmp_path / "run.json",
+        )
+    elif mode == "shallow":
+        # A depth-0 pointer resolves inside the log dir, but its derived
+        # blobs dir (parent.parent / "blobs") would land one level above it.
+        (tmp_path / "calls.jsonl").write_text('{"call": 0}\n', encoding="utf-8")
+        log = _log()
+        scene = dataclasses.replace(
+            log.samples[0],
+            trial_metadata=({"wire_capture": "calls.jsonl"}, {}),
         )
         document = render_html(
             dataclasses.replace(log, samples=(scene,)),

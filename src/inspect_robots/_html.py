@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
-from inspect_robots._pointers import resolve_log_pointer
+from inspect_robots._pointers import derive_blob_dir, resolve_log_pointer
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
@@ -514,7 +514,10 @@ def _load_wire_rows(
         return None
     if not loaded or not all(isinstance(row, dict) for row in loaded):
         return None
-    return cast(list[dict[str, Any]], loaded), target.parent.parent / "blobs"
+    blob_dir = derive_blob_dir(log_path, target)
+    if blob_dir is None:
+        return None
+    return cast(list[dict[str, Any]], loaded), blob_dir
 
 
 def _wire_blob_tokens(value: object) -> list[str]:

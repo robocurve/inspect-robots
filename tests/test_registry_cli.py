@@ -1852,6 +1852,16 @@ def test_inspect_wire_hostile_pointer_is_treated_as_missing(
     assert "no wire capture recorded" in capsys.readouterr().out
 
 
+def test_inspect_wire_shallow_pointer_is_treated_as_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "calls.jsonl").write_text('{"call": 0}\n', encoding="utf-8")
+    path, _ = _write_wire_log(tmp_path, ([],), pointer_override="calls.jsonl")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+
 def test_inspect_wire_guides_invalid_trial_call_and_trial_without_dump(
     tmp_path: Path,
 ) -> None:

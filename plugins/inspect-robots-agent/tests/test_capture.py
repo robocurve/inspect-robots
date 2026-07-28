@@ -366,3 +366,76 @@ def test_version_skew_warning_is_once_per_never_begun_instance(
     capture.end_trial()
     capture.warn_if_never_began()
     assert capsys.readouterr().err == ""
+
+
+def test_keyboard_interrupt_in_record_propagates_after_disabling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    monkeypatch.setattr(
+        "inspect_robots_agent._capture.copy.deepcopy",
+        lambda value: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _record(capture)
+    monkeypatch.undo()
+    _record(capture)
+    assert capture.end_trial() is None
+    assert "wire capture disabled" in capsys.readouterr().err
+
+
+def test_blob_write_is_atomic_and_partial_writes_leave_no_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+
+    def _partial_write(self: Path, data: bytes) -> int:
+        self.write_text("partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", _partial_write)
+    _record(
+        capture,
+        request={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{_PAYLOAD}"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert "wire capture disabled" in capsys.readouterr().err
+    monkeypatch.undo()
+
+    blob_dir = tmp_path / "wire/run-1/blobs"
+    published = list(blob_dir.glob("*.png")) if blob_dir.exists() else []
+    assert published == []
+
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e1")
+    _record(
+        capture,
+        request={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{_PAYLOAD}"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    (blob,) = (tmp_path / "wire/run-1/blobs").glob("*.png")
+    assert not list((tmp_path / "wire/run-1/blobs").glob(".*.tmp"))
+    assert hashlib.sha256(blob.read_bytes()).hexdigest() == blob.stem
