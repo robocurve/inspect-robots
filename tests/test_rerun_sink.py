@@ -12,7 +12,7 @@ import time
 import types
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pytest
@@ -242,12 +242,18 @@ class _ExplodingImage(_RawImage):
         raise ValueError("cannot encode")
 
 
+class _TextDocument(NamedTuple):
+    text: str
+    media_type: str
+
+
 def _install_fake_rerun(
     monkeypatch: pytest.MonkeyPatch,
     *,
     image_cls: type[_RawImage] = _CompressibleImage,
     gate: threading.Event | None = None,
     log_error: Exception | None = None,
+    text_document: bool = True,
 ) -> list[tuple[str, object]]:
     """Install a fake ``rerun`` module (new-API surface); return the (path, value) log."""
     logged: list[tuple[str, object]] = []
@@ -271,6 +277,8 @@ def _install_fake_rerun(
     fake.Image = image_cls  # type: ignore[attr-defined]
     fake.Scalars = lambda v: ("Scalars", v)  # type: ignore[attr-defined]
     fake.TextLog = lambda t, *, level=None: ("TextLog", t, level)  # type: ignore[attr-defined]
+    if text_document:
+        fake.TextDocument = _TextDocument  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "rerun", fake)
     return logged
 
@@ -391,8 +399,126 @@ def test_policy_messages_emit_ordered_levels_on_the_step_timeline(
         ("trial/scene/e2/llm", ("TextLog", "tool: result", "DEBUG")),
         ("trial/scene/e2/llm", ("TextLog", "system: prompt", "TRACE")),
         ("trial/scene/e2/llm", ("TextLog", "critic: other", "TRACE")),
+        (
+            "trial/scene/e2/llm/latest",
+            _TextDocument(
+                "**[INFO]** assistant: answer\n\n---\n\n"
+                "**[INFO]** user: question\n\n---\n\n"
+                "**[DEBUG]** tool: result\n\n---\n\n"
+                "**[TRACE]** system: prompt\n\n---\n\n"
+                "**[TRACE]** critic: other",
+                media_type="text/markdown",
+            ),
+        ),
     ]
     sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_transcript_emission_logs_rows_and_markdown_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        3,
+        (("INFO", "assistant: answer"), ("DEBUG", "tool: result")),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    assert logged == [
+        ("set_time", ("step", {"sequence": 3})),
+        ("trial/scene/e0/llm", ("TextLog", "assistant: answer", "INFO")),
+        ("trial/scene/e0/llm", ("TextLog", "tool: result", "DEBUG")),
+        (
+            "trial/scene/e0/llm/latest",
+            _TextDocument(
+                "**[INFO]** assistant: answer\n\n---\n\n**[DEBUG]** tool: result",
+                media_type="text/markdown",
+            ),
+        ),
+    ]
+
+
+def test_transcript_document_composes_multiline_entries_with_hard_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "camera 'top':"},
+            {"type": "image_url", "image_url": {"url": "elided"}},
+            {"type": "text", "text": "after"},
+        ],
+    }
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        4,
+        (_render_message(message), ("DEBUG", "tool: result")),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    documents = [value for path, value in logged if path == "trial/scene/e0/llm/latest"]
+    assert documents == [
+        _TextDocument(
+            "**[INFO]** user: camera 'top':  \n"
+            "[image_url part]  \n"
+            "after\n\n---\n\n"
+            "**[DEBUG]** tool: result",
+            media_type="text/markdown",
+        )
+    ]
+
+
+def test_transcript_payload_emits_exactly_one_document_for_multiple_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        5,
+        (("INFO", "first"), ("DEBUG", "second"), ("TRACE", "third")),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    assert [path for path, _ in logged].count("trial/scene/e0/llm/latest") == 1
+
+
+def test_empty_transcript_payload_emits_no_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+
+    RerunSink()._emit_transcript(rr, _TranscriptPayload("trial/scene/e0", 6, ()))
+
+    assert logged == [("set_time", ("step", {"sequence": 6}))]
+
+
+def test_sdk_without_text_document_keeps_transcript_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = _install_fake_rerun(monkeypatch, text_document=False)
+    rr = sys.modules["rerun"]
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        7,
+        (("INFO", "assistant: answer"), ("DEBUG", "tool: result")),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    assert logged == [
+        ("set_time", ("step", {"sequence": 7})),
+        ("trial/scene/e0/llm", ("TextLog", "assistant: answer", "INFO")),
+        ("trial/scene/e0/llm", ("TextLog", "tool: result", "DEBUG")),
+    ]
 
 
 @pytest.mark.parametrize(

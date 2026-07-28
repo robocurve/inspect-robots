@@ -41,6 +41,9 @@ no ``flush`` method. A new sink in the same process can still hang in
 
 Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
 successive trials never overwrite one another on the shared step timeline.
+Transcripts are emitted as ``TextLog`` rows at ``{prefix}/llm`` paired with a
+markdown ``TextDocument`` at ``{prefix}/llm/latest`` for a wrapped,
+timeline-synced reading pane.
 
 Install with ``pip install "inspect-robots[rerun]"``.
 """
@@ -279,6 +282,19 @@ class RerunSink:
         self._set_step(rr, payload.t)
         for level, text in payload.entries:
             rr.log(f"{payload.prefix}/llm", rr.TextLog(text, level=level))
+        self._emit_transcript_document(rr, payload)
+
+    def _emit_transcript_document(self, rr: Any, payload: _TranscriptPayload) -> None:
+        text_document = getattr(rr, "TextDocument", None)
+        if text_document is None or not payload.entries:
+            return
+        body = "\n\n---\n\n".join(
+            f"**[{level}]** " + text.replace("\n", "  \n") for level, text in payload.entries
+        )
+        rr.log(
+            f"{payload.prefix}/llm/latest",
+            text_document(body, media_type="text/markdown"),
+        )
 
     def _ensure_worker(self) -> None:
         if self._worker is not None and self._worker.is_alive():
