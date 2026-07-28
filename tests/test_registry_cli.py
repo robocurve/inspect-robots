@@ -12,8 +12,16 @@ import pytest
 
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
-from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
+from inspect_robots.defaults import (
+    _ENV_EMBODIMENT as ENV_EMBODIMENT,
+)
+from inspect_robots.defaults import (
+    _ENV_POLICY as ENV_POLICY,
+)
+from inspect_robots.defaults import (
+    _ENV_SIM_EMBODIMENT as ENV_SIM_EMBODIMENT,
+)
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve

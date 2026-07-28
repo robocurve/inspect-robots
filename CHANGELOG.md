@@ -69,6 +69,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Public user-defaults API:** `inspect_robots.defaults` lets plugin CLIs read
+  the configuration written by `inspect-robots setup`, including config-file
+  source paths and the args-owner metadata needed to apply hardware settings
+  safely (#197).
 - **Agent plugin:** per-camera metric depth from observation extras now renders
   as near-bright grayscale beside its RGB camera in automatic observations and
   `take_pic` reveals. Labels anchor the render with the 2nd–98th percentile
