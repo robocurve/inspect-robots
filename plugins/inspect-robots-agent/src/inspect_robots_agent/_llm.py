@@ -17,6 +17,8 @@ import httpx
 
 from inspect_robots.errors import ConfigError
 
+from ._capture import WireCapture
+
 ENV_MODEL = "INSPECT_ROBOTS_MODEL"
 
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
@@ -176,10 +178,12 @@ class ChatClient:
         max_retries: int = 3,
         backoff_s: float = 1.0,
         transport: httpx.BaseTransport | None = None,
+        capture: WireCapture | None = None,
     ):
         self._provider = provider
         self._max_retries = max_retries
         self._backoff_s = backoff_s
+        self._capture = capture
         headers = {}
         if provider.api_key:
             headers["Authorization"] = f"Bearer {provider.api_key}"
@@ -207,11 +211,34 @@ class ChatClient:
 
         last_error = "unknown error"
         for attempt in range(self._max_retries):
+            t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/chat/completions", json=body)
             except httpx.TransportError as exc:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/chat/completions",
+                        request=body,
+                        status=None,
+                        response_text=None,
+                        error=str(exc),
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 last_error = str(exc)
             else:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/chat/completions",
+                        request=body,
+                        status=response.status_code,
+                        response_text=response.text,
+                        error=None,
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 if response.status_code == 200:
                     return _parse_message(response.json())
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"

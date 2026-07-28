@@ -180,6 +180,17 @@ The speed fraction defaults to `0.1` and applies only to absolute modes.
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
 Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a transcript observation to its stored frame.
 Live Rerun transcript streaming happens automatically when a Rerun sink is attached.
+
+Wire capture is on by default (`-P wire_capture=false` to disable): every
+request attempt each wire client posts — tool schemas, evicted view, depth
+composites, cache breakpoints — and every response land in
+`wire/<run_id>/<trial_id>/calls.jsonl` under the log directory, with image
+payloads deduplicated as `$blob:<sha256>` references into
+`wire/<run_id>/blobs/`. The format contract lives in the
+`inspect_robots_agent._capture` module docstring; browse captures with
+`inspect-robots view` (Wire section) or `inspect-robots inspect --wire`.
+Requires a core with the `on_trial_start` policy hook; on older cores the
+policy prints one notice and captures nothing.
 At trial end, `record.metadata["llm_usage"]` records `llm_calls` and the summed
 integer token counters returned by the wire. The native Anthropic wire
 includes input, output, cache-creation, and cache-read tokens; other wires

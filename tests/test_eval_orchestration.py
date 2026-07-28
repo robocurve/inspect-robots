@@ -857,8 +857,131 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 9. on_trial_end hook: artifact persistence via trial metadata.
+# 9. Policy trial lifecycle hooks: setup and artifact persistence.
 # --------------------------------------------------------------------------- #
+def test_on_trial_start_runs_before_each_trials_first_act(tmp_path: Path) -> None:
+    events: list[tuple[object, ...]] = []
+
+    class _StartHookPolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.epoch = -1
+
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            self.epoch = epoch
+            events.append(("start", scene_id, epoch, log_dir, run_id))
+
+        def act(self, observation: Observation) -> ActionChunk:
+            events.append(("act", self.epoch))
+            return super().act(observation)
+
+    eval(_task(epochs=2), _StartHookPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    starts = [event for event in events if event[0] == "start"]
+    assert [(event[1], event[2], event[3]) for event in starts] == [
+        ("s0", 0, str(tmp_path)),
+        ("s0", 1, str(tmp_path)),
+    ]
+    assert starts[0][4] == starts[1][4]
+    for epoch in range(2):
+        start_index = next(
+            i for i, event in enumerate(events) if event[:3] == ("start", "s0", epoch)
+        )
+        act_index = next(i for i, event in enumerate(events) if event == ("act", epoch))
+        assert start_index < act_index
+
+
+def test_raising_on_trial_start_skips_rollout_but_keeps_results_parallel(
+    tmp_path: Path,
+) -> None:
+    class _LifecycleSink(_RecordingSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.starts: list[tuple[str, int]] = []
+
+        def on_trial_start(self, scene_id: str, epoch: int) -> None:
+            self.starts.append((scene_id, epoch))
+
+    class _StartFailurePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.current_epoch = -1
+            self.resets: list[int] = []
+            self.acts: list[int] = []
+            self.ends: list[int] = []
+
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            self.current_epoch = epoch
+            if epoch == 0:
+                raise RuntimeError("capture setup exploded")
+
+        def reset(self, scene: Scene) -> None:
+            self.resets.append(self.current_epoch)
+            super().reset(scene)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.acts.append(self.current_epoch)
+            return super().act(observation)
+
+        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+            self.ends.append(record.epoch)
+
+    policy = _StartFailurePolicy()
+    sink = _LifecycleSink()
+    (log,) = eval(
+        _task(epochs=2),
+        policy,
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink, JsonLogSink(str(tmp_path))],
+    )
+
+    scene = log.samples[0]
+    parallel = (
+        scene.epochs,
+        scene.operator_judgements,
+        scene.operator_notes,
+        scene.trial_metadata,
+        scene.termination_reasons,
+        scene.policy_transcripts,
+    )
+    assert {len(values) for values in parallel} == {2}
+    assert scene.epochs[0] == {}
+    assert scene.error == "policy.on_trial_start failed: capture setup exploded"
+    assert log.results.total_trials == 2
+    assert log.results.errored_trials == 1
+    assert policy.resets == [1]
+    assert policy.acts and set(policy.acts) == {1}
+    assert policy.ends == [1]
+    assert sink.starts == [("s0", 0), ("s0", 1)]
+    assert [record.epoch for record in sink.records] == [0, 1]
+    assert sink.records[0].status == "error"
+    assert sink.records[0].error == scene.error
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_raising_on_trial_start_counts_toward_fail_on_error(tmp_path: Path) -> None:
+    class _SecondStartFails(ScriptedPolicy):
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            if epoch == 1:
+                raise RuntimeError("second setup exploded")
+
+    (log,) = eval(
+        _task(epochs=3),
+        _SecondStartFails(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        fail_on_error=True,
+    )
+
+    assert log.status == "error"
+    assert log.error == "fail_on_error threshold exceeded (1 errors)"
+    assert log.results.total_trials == 2
+    assert log.results.errored_trials == 1
+    assert len(log.samples[0].epochs) == 2
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
 def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: Path) -> None:
     task = _task(epochs=2)
     seen_ids: list[str] = []

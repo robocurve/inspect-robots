@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,7 +19,10 @@ from inspect_robots_agent._anthropic import (
     _DEFAULT_MAX_OUTPUT_TOKENS,
     AnthropicClient,
     _parse_response,
+    _translate_messages,
+    _with_cache_breakpoint,
 )
+from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent._png import png_data_url
 
@@ -86,6 +90,11 @@ def _capture(*responses: dict[str, Any], status: int = 200) -> tuple[list[httpx.
         return httpx.Response(status, json=payload)
 
     return seen, handler
+
+
+def _wire_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "wire/run-1/scene-e0/calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 _SYSTEM = {"role": "system", "content": "you drive a robot"}
@@ -203,6 +212,36 @@ def test_final_string_content_wraps_into_cached_text_block() -> None:
             "cache_control": {"type": "ephemeral"},
         }
     ]
+
+
+def test_cache_breakpoint_defensive_shapes_and_foreign_role_anchors() -> None:
+    non_content = {"role": "user", "content": None}
+    thinking_only = {
+        "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "private"}],
+    }
+
+    assert _with_cache_breakpoint(non_content) is non_content
+    assert _with_cache_breakpoint(thinking_only) is thinking_only
+
+    _, translated = _translate_messages(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "toolu_1",
+                "content": "ok",
+                "cache_anchor": True,
+            },
+            {
+                "role": "assistant",
+                "content": "continued",
+                "cache_anchor": True,
+            },
+        ],
+        {},
+    )
+    assert translated[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert translated[1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_replayed_final_assistant_breakpoint_is_copy_on_write_and_stable() -> None:
@@ -571,6 +610,40 @@ def test_terminal_responses_do_not_populate_the_cache(stop_reason: str) -> None:
         client.complete([_USER], [])
 
     assert client._raw_blocks_by_tool_use_id == {}
+
+
+def test_capture_precedes_terminal_stop_reason_raise(tmp_path: Path) -> None:
+    payload = _anthropic_response(_text("partial"), stop_reason="refusal")
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(200, json=payload),
+        capture=capture,
+    )
+
+    with pytest.raises(RuntimeError, match="refused"):
+        client.complete([_USER], [])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] == 200
+    assert row["response"] == payload
+
+
+def test_capture_records_anthropic_transport_error(tmp_path: Path) -> None:
+    def offline(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("anthropic offline", request=request)
+
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(offline, max_retries=1, capture=capture)
+
+    with pytest.raises(RuntimeError, match="anthropic offline"):
+        client.complete([_USER], [])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] is None
+    assert row["response"] is None
+    assert row["error"] == "anthropic offline"
 
 
 # -- parsing ---------------------------------------------------------------------
