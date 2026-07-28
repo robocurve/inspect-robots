@@ -126,6 +126,20 @@ Read the recorded agent conversation with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
 camera frames the model saw.
 
+### Retry with learning
+
+Summarize a failed log into a learnings file, then pass those notes to the
+next agent run:
+
+```bash
+inspect-robots summarize logs/failed-run.json
+inspect-robots "place the fork on the plate" --policy agent \
+    -P prior_learnings=logs/learnings/failed-run.md
+```
+
+The `summarize` command produces the markdown file. The policy reads it once
+and records its resolved path and content hash in the eval configuration.
+
 ### Generate robot policy code with CaP-X
 
 The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a

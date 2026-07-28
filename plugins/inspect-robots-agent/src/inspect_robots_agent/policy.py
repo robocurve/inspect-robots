@@ -12,6 +12,7 @@ selected client translates it to the configured API wire format.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -63,6 +64,9 @@ _WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
+
+# Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
+_PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -191,6 +195,10 @@ class AgentPolicyConfig(PolicyConfig):
     images: str = "always"
     depth: str = "render"
     image_horizon: int | None = 2
+    #: Resolved absolute path to the injected prior-learnings file.
+    prior_learnings: str | None = None
+    #: SHA-256 hexdigest of the injected prior-learnings text.
+    prior_learnings_sha256: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -212,6 +220,8 @@ class LLMAgentPolicy(PolicyBase):
     selected wire client translates that state without changing the loop.
     Metric camera depth is rendered by default; pass ``depth="off"`` to omit
     it without resolving any depth entries.
+    ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
+    and appends its text to every trial's system prompt.
     """
 
     def __init__(
@@ -230,9 +240,47 @@ class LLMAgentPolicy(PolicyBase):
         images: str = "always",
         depth: str = "render",
         image_horizon: int | None = 2,
+        prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> None:
+        prior_learnings_path: str | None = None
+        prior_learnings_text: str | None = None
+        prior_learnings_sha256: str | None = None
+        if prior_learnings is not None:
+            if not isinstance(prior_learnings, str) or not prior_learnings:
+                raise ConfigError(
+                    "prior_learnings must be a non-empty filesystem path string, "
+                    f"got {prior_learnings!r}.\n"
+                    "fix: the -P parser coerces unquoted values; pass "
+                    "-P 'prior_learnings=\"path/to/learnings.md\"'"
+                )
+            path = Path(prior_learnings)
+            try:
+                prior_learnings_text = path.read_text(encoding="utf-8")
+                prior_learnings_path = str(path.resolve())
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} could not be read as UTF-8 "
+                    f"({exc}).\n"
+                    "fix: pass the path to a readable UTF-8 learnings file"
+                ) from exc
+            if not prior_learnings_text.strip():
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} is empty or whitespace-only.\n"
+                    "fix: add concise notes to the file or omit -P prior_learnings="
+                )
+            if len(prior_learnings_text) > _PRIOR_LEARNINGS_TEXT_LIMIT:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} has "
+                    f"{len(prior_learnings_text)} characters; the limit is "
+                    f"{_PRIOR_LEARNINGS_TEXT_LIMIT}.\n"
+                    "fix: summarize it first and pass the path to the shorter learnings file"
+                )
+            prior_learnings_sha256 = hashlib.sha256(
+                prior_learnings_text.encode("utf-8")
+            ).hexdigest()
+
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
@@ -390,6 +438,7 @@ class LLMAgentPolicy(PolicyBase):
         self._images = images
         self._depth = depth
         self._image_horizon = image_horizon
+        self._prior_learnings_text = prior_learnings_text
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -405,6 +454,8 @@ class LLMAgentPolicy(PolicyBase):
             images=images,
             depth=depth,
             image_horizon=image_horizon,
+            prior_learnings=prior_learnings_path,
+            prior_learnings_sha256=prior_learnings_sha256,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -448,6 +499,13 @@ class LLMAgentPolicy(PolicyBase):
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
+        if self._prior_learnings_text is not None:
+            formatted = (
+                formatted
+                + "\n\nNotes from a previous attempt at tasks like this one. They may "
+                + "be wrong or stale; the current observation always wins:\n"
+                + self._prior_learnings_text
+            )
         self._messages = [
             {
                 "role": "system",
