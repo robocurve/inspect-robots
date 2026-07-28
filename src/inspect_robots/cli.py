@@ -15,6 +15,8 @@ Subcommands:
   per-task row instead of a full summary per task.
 - ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
   optionally append recorded policy conversations.
+- ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
+  into a deterministic digest or model-written learnings file.
 - ``inspect-robots view LOG.json [-o OUT.html] [--open]`` — render a saved eval log
   as a self-contained HTML report.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
@@ -39,29 +41,30 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from inspect_robots import __version__
-from inspect_robots._defaults import (
-    ADHOC_MAX_STEPS_FALLBACK,
-    ADHOC_SCORER_FALLBACK,
-    CONFIG_KEYS,
-    ENV_EMBODIMENT,
-    ENV_POLICY,
-    ENV_SIM_EMBODIMENT,
-    Defaults,
-    load_defaults,
-    parse_value,
-    set_default,
-)
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
     _chat_content,
     _display_status,
     _is_chat_transcript,
     render_html,
+)
+from inspect_robots.defaults import (
+    _ADHOC_MAX_STEPS_FALLBACK,
+    _ADHOC_SCORER_FALLBACK,
+    _CONFIG_KEYS,
+    _ENV_EMBODIMENT,
+    _ENV_POLICY,
+    _ENV_SIM_EMBODIMENT,
+    Defaults,
+    _parse_value,
+    _set_default,
+    load_defaults,
 )
 
 if TYPE_CHECKING:
@@ -117,6 +120,7 @@ _SUBCOMMANDS = (
     "run",
     "eval-set",
     "inspect",
+    "summarize",
     "view",
     "video",
     "config",
@@ -124,7 +128,7 @@ _SUBCOMMANDS = (
     "doctor",
 )
 
-_ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
+_ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 
@@ -135,7 +139,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
         if "=" not in pair:
             raise SystemExit(f"expected key=value, got {pair!r}")
         key, _, value = pair.partition("=")
-        out[key] = parse_value(value)
+        out[key] = _parse_value(value)
     return out
 
 
@@ -221,13 +225,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="horizon of an --instruction run (default: config or "
-        f"{ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
+        f"{_ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
     )
     p_run.add_argument(
         "--scorer",
         default=None,
         help="scorer for an --instruction run (default: config or "
-        f"{ADHOC_SCORER_FALLBACK!r}); invalid with --task",
+        f"{_ADHOC_SCORER_FALLBACK!r}); invalid with --task",
     )
     p_run.add_argument(
         "--no-prompt",
@@ -275,6 +279,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript",
         action="store_true",
         help="append recorded policy transcripts",
+    )
+
+    p_summarize = sub.add_parser(
+        "summarize",
+        help="distill a saved eval log into a markdown learnings file",
+    )
+    p_summarize.add_argument("log", help="path to an EvalLog JSON file")
+    p_summarize.add_argument(
+        "--model",
+        default=None,
+        help="OpenAI-compatible model id (default: deterministic digest only)",
+    )
+    p_summarize.add_argument(
+        "--base-url",
+        default="https://api.anthropic.com/v1",
+        help="OpenAI-compatible API base URL (default: https://api.anthropic.com/v1)",
+    )
+    p_summarize.add_argument(
+        "--api-key-env",
+        default="ANTHROPIC_API_KEY",
+        metavar="VAR",
+        help="environment variable holding the API key (default: ANTHROPIC_API_KEY)",
+    )
+    p_summarize.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help="output markdown file (default: LOG_DIR/learnings/LOG_STEM.md; - writes stdout)",
     )
 
     p_view = sub.add_parser("view", help="render a saved eval log as a self-contained HTML report")
@@ -344,7 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
-    p_set.add_argument("key", choices=CONFIG_KEYS)
+    p_set.add_argument("key", choices=_CONFIG_KEYS)
     p_set.add_argument("value")
     config_sub.add_parser("show", help="print resolved defaults and their sources")
     return parser
@@ -444,7 +477,7 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     raise SystemExit(
         "--sim given but no sim embodiment configured.\n"
         f"registered embodiments: {names}\n"
-        f"fix: set ${ENV_SIM_EMBODIMENT}, or run "
+        f"fix: set ${_ENV_SIM_EMBODIMENT}, or run "
         "'inspect-robots config set sim_embodiment NAME'"
     )
 
@@ -939,11 +972,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     defaults = load_defaults(os.environ)
 
     if is_adhoc:
-        scorer_name = args.scorer or defaults.scorer or ADHOC_SCORER_FALLBACK
+        scorer_name = args.scorer or defaults.scorer or _ADHOC_SCORER_FALLBACK
         max_steps = (
             args.max_steps
             if args.max_steps is not None
-            else (defaults.max_steps or ADHOC_MAX_STEPS_FALLBACK)
+            else (defaults.max_steps or _ADHOC_MAX_STEPS_FALLBACK)
         )
         task = Task(
             name="adhoc",
@@ -1278,6 +1311,61 @@ def _cmd_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    """Distill a saved log and atomically write its markdown learnings artifact."""
+    from inspect_robots._summarize import summarize
+    from inspect_robots.errors import ConfigError
+
+    stdout_mode = args.out == "-"
+    log_path = Path(args.log)
+    out_path = (
+        None
+        if stdout_mode
+        else (
+            log_path.parent / "learnings" / f"{log_path.stem}.md"
+            if args.out is None
+            else Path(args.out)
+        )
+    )
+    if out_path is not None and out_path.exists() and out_path.is_dir():
+        raise SystemExit(f"--out {out_path} is a directory; pass a Markdown file path")
+    if out_path is not None and out_path.resolve() == log_path.resolve():
+        # The one data-loss path in this command: rendering over the log it reads.
+        raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
+
+    try:
+        document = summarize(
+            log_path,
+            model=args.model,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+        )
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if stdout_mode:
+        sys.stdout.write(document)
+        return 0
+
+    file_path = cast(Path, out_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=file_path.parent,
+        prefix=f".{file_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(document)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = Path(handle.name)
+    os.replace(temp_path, file_path)
+    print(f"wrote {file_path}")
+    return 0
+
+
 def _cmd_video(args: argparse.Namespace) -> int:
     """Render a log's stored frames to one MP4 per (trial, camera) stream.
 
@@ -1410,7 +1498,7 @@ def _cmd_setup() -> int:
 
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
-        path = set_default(os.environ, args.key, args.value)
+        path = _set_default(os.environ, args.key, args.value)
         print(f"wrote {args.key} = {args.value} to {path}")
         return 0
     defaults = load_defaults(os.environ)
@@ -1460,6 +1548,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_eval_set(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log, transcript=args.transcript)
+    if args.command == "summarize":
+        return _cmd_summarize(args)
     if args.command == "view":
         return _cmd_view(args)
     if args.command == "video":
