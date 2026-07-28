@@ -1,0 +1,60 @@
+{
+  "error": null,
+  "eval": {
+    "created": "2026-07-14T20:01:18.330574+00:00",
+    "embodiment": "yam_arms",
+    "embodiment_info": {
+      "capabilities": [
+        "self_paced"
+      ],
+      "control_hz": 10.0,
+      "is_simulated": false
+    },
+    "git_commit": "bbd0e714c6ffc7f847f5487c9cba061124a8229b-dirty",
+    "inspect_robots_version": "0.8.1.dev13+gbb56f34ad",
+    "policy": "molmoact2",
+    "policy_config": {
+      "action_horizon": 30,
+      "replan_interval": null,
+      "temperature": null
+    },
+    "seed": 0,
+    "task": "adhoc"
+  },
+  "results": {
+    "metrics": {
+      "success_at_end": 1.0
+    },
+    "total_scenes": 1,
+    "total_trials": 1
+  },
+  "samples": [
+    {
+      "epochs": [
+        {
+          "success_at_end": 1.0
+        }
+      ],
+      "error": null,
+      "instruction": "place the fork on the plate",
+      "operator_judgements": [
+        null
+      ],
+      "reduced": {
+        "success_at_end": 1.0
+      },
+      "scene_id": "scene-0",
+      "status": "success"
+    }
+  ],
+  "stats": {
+    "completed_at": "2026-07-14T20:02:06.230881+00:00",
+    "duration_s": 47.78080574399792,
+    "frames_dir": "logs/frames/20260714_200118_ac7e6018",
+    "mean_inference_latency_s": 0.3907253405583712,
+    "started_at": "2026-07-14T20:01:18.450088+00:00",
+    "total_steps": 356
+  },
+  "status": "success",
+  "version": 1
+}

@@ -1,0 +1,60 @@
+{
+  "error": null,
+  "eval": {
+    "created": "2026-07-14T00:59:00.112100+00:00",
+    "embodiment": "yam_arms",
+    "embodiment_info": {
+      "capabilities": [
+        "self_paced"
+      ],
+      "control_hz": 10.0,
+      "is_simulated": false
+    },
+    "git_commit": "8b6bec9c6334f130bb70d5667caa2c7898bc6c81-dirty",
+    "inspect_robots_version": "0.6.0",
+    "policy": "molmoact2",
+    "policy_config": {
+      "action_horizon": 30,
+      "replan_interval": null,
+      "temperature": null
+    },
+    "seed": 0,
+    "task": "adhoc"
+  },
+  "results": {
+    "metrics": {
+      "operator": 1.0
+    },
+    "total_scenes": 1,
+    "total_trials": 1
+  },
+  "samples": [
+    {
+      "epochs": [
+        {
+          "operator": 1.0
+        }
+      ],
+      "error": null,
+      "instruction": "place the fork on the plate",
+      "operator_judgements": [
+        "y"
+      ],
+      "reduced": {
+        "operator": 1.0
+      },
+      "scene_id": "scene-0",
+      "status": "success"
+    }
+  ],
+  "stats": {
+    "completed_at": "2026-07-14T01:01:27.734397+00:00",
+    "duration_s": 147.6157049080357,
+    "frames_dir": "logs/frames/20260714_005900_e7f6cf72",
+    "mean_inference_latency_s": 0.2834631687379442,
+    "started_at": "2026-07-14T00:59:00.118706+00:00",
+    "total_steps": 1200
+  },
+  "status": "success",
+  "version": 1
+}
