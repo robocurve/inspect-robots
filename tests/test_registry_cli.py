@@ -1856,7 +1856,8 @@ def test_inspect_wire_keeps_rows_before_a_torn_tail_line(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     row = {"call": 0, "attempt": 0, "endpoint": "/chat/completions", "status": 200}
-    path, calls_path = _write_wire_log(tmp_path, ([row],))
+    path, _ = _write_wire_log(tmp_path, ([row],))
+    calls_path = tmp_path / "wire/run/s0-e0/calls.jsonl"
     with calls_path.open("a", encoding="utf-8") as handle:
         handle.write('{"call": 1, "attempt": 0, "sta')
 

@@ -51,7 +51,15 @@ def read_jsonl_prefix(target: Path) -> list[dict[str, Any]] | None:
     rows: list[dict[str, Any]] = []
     try:
         with target.open(encoding="utf-8") as handle:
-            for line in handle:
+            while True:
+                try:
+                    line = handle.readline()
+                except UnicodeError:
+                    # A torn multi-byte tail is still a torn tail: keep the
+                    # prefix rather than voiding the crashed trial's capture.
+                    break
+                if not line:
+                    break
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
@@ -59,6 +67,6 @@ def read_jsonl_prefix(target: Path) -> list[dict[str, Any]] | None:
                 if not isinstance(row, dict):
                     break
                 rows.append(row)
-    except (OSError, UnicodeError):
+    except OSError:
         return None
     return rows or None
