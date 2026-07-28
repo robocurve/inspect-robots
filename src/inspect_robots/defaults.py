@@ -1,16 +1,20 @@
 """Read the user configuration shared by Inspect Robots and plugin CLIs.
 
-Explicit arguments supplied by a caller are never overridden. Component names
-from environment variables override names from
+Component names from environment variables override names from
 ``<config-home>/inspect-robots/config.ini``, but they never override the args
-owners recorded by that file. An args section is valid only for its owner; for
-example:
+owners recorded by that file. An args section is valid only for its owner —
+apply ``embodiment_args`` only after confirming the owner is the embodiment
+*you* drive, or the args recorded for someone else's rig will configure yours:
 
 ```python
 defaults = load_defaults(os.environ)
-if defaults.embodiment_args_owner is not None:
+if defaults.embodiment_args_owner == "my_embodiment":
     args = defaults.embodiment_args
 ```
+
+(Plugins with several embodiments can resolve the owner through
+``inspect_robots.registry.registered`` and check its class instead of
+comparing names.)
 
 A missing file yields empty defaults. A malformed or type-invalid file raises
 ``SystemExit`` naming the file, with a plain one-line message that callers may
@@ -96,7 +100,7 @@ def config_path(env: Mapping[str, str]) -> Path | None:
 
     The result is ``<config-home>/inspect-robots/config.ini``, whether or not
     the file exists. Return ``None`` when neither ``XDG_CONFIG_HOME`` nor
-    ``HOME`` is set.
+    ``HOME`` is set; a variable set to the empty string counts as unset.
     """
     if xdg := env.get("XDG_CONFIG_HOME"):
         home = Path(xdg)

@@ -71,3 +71,26 @@ def test_public_load_defaults_round_trips_embodiment_args(tmp_path: Path) -> Non
         "can_channel": "can0",
     }
     assert loaded.embodiment_args_owner == "yam-bimanual"
+
+
+def test_config_path_empty_string_env_counts_as_unset(tmp_path: Path) -> None:
+    assert defaults.config_path({"XDG_CONFIG_HOME": "", "HOME": ""}) is None
+    assert defaults.config_path({"XDG_CONFIG_HOME": "", "HOME": str(tmp_path)}) == (
+        tmp_path / ".config" / "inspect-robots" / "config.ini"
+    )
+
+
+def test_malformed_config_exits_with_one_line_message(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        # Two errors on separate lines: configparser reports multi-line.
+        "[defaults\nbroken more\n",
+    )
+    try:
+        defaults.load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    except SystemExit as exc:
+        message = str(exc)
+        assert "config.ini" in message
+        assert "\n" not in message
+    else:  # pragma: no cover - the assertion is the test
+        raise AssertionError("malformed config must raise SystemExit")
