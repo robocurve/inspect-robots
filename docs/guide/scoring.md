@@ -62,3 +62,11 @@ verdict, captured *once* during the rollout (as a transcript event) and read
 back by [`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
 A [`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface is reserved for scoring final
 frames with a vision-language classifier.
+
+Trials that end with `termination_reason="operator_end"` are prompted on any
+attended run — registered tasks included — so judgement-reading scorers (the
+`operator` scorer, or task scorers that fall back to `operator_judgement`)
+work with operator-in-the-loop embodiments. `success_at_end` reads only
+embodiment-detected `"success"` terminations and scores operator-graded trials
+as failures; pair attended operator-graded runs with a judgement-reading
+scorer instead.

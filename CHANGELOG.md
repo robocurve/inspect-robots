@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `OPERATOR_END` termination-reason constant (`"operator_end"`): the standard
+  reason for "a human ended this episode by keypress, verdict pending". Attended
+  runs now prompt for exactly those trials — registered tasks and `eval-set`
+  included (#194).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the

@@ -684,6 +684,139 @@ def test_cli_eval_set_sim_flag(
     assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
 
 
+def test_eval_set_prompts_when_operator_ends_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", ""] * 4)
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [("y",)] * 4
+    assert [s.operator_notes for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
+def test_eval_set_operator_end_does_not_prompt_without_tty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("non-TTY eval-set must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
+def test_eval_set_operator_end_respects_no_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("--no-prompt eval-set must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--no-prompt",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
 def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2184,7 +2317,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
+def test_registered_task_stays_silent_unless_operator_ends_episode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -2203,7 +2336,8 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
 
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("R6: --task runs must not block")
+        "builtins.input",
+        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -2225,6 +2359,107 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
     assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+    capsys.readouterr()
+
+
+def test_registered_task_prompts_when_operator_ends_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", "smooth grasp"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.samples[0].operator_notes == ("smooth grasp",)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_tty", "no_prompt_flag"])
+def test_registered_task_operator_end_suppressed_without_tty_or_with_no_prompt(
+    suppress: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The run-command twin of the eval-set suppression tests: the gate is
+    # evaluated per command, so each command needs its own negative coverage.
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-suppressed-for-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "-T",
+        "num_scenes=1",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    if suppress == "no_tty":
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    else:
+        _tty_stdin(monkeypatch)
+        argv.insert(1, "--no-prompt")
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("suppressed run must not prompt")
+    )
+    try:
+        rc = main(argv)
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    assert _read_only_log(tmp_path / "logs").samples[0].operator_judgements == (None,)
     capsys.readouterr()
 
 
@@ -2519,6 +2754,57 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof(
     assert record.operator_note is None
     (event,) = record.events
     assert event.data == {"verdict": "n", "source": "prompt", "note": None}
+
+
+def test_prompt_on_operator_end_prompts_and_records_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.cli import _prompt_operator_on_operator_end
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    answers = iter(["partial", "left gripper slipped"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason="operator_end",
+    )
+    _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    assert record.operator_judgement == "partial"
+    assert record.operator_note == "left gripper slipped"
+    capsys.readouterr()
+
+
+def test_prompt_on_operator_end_ignores_other_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator_on_operator_end
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("must not prompt: not operator_end")
+    )
+    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
+        record = TrialRecord(
+            scene_id="s0",
+            epoch=0,
+            seed=0,
+            terminated=True,
+            truncated=truncated,
+            termination_reason=reason,
+        )
+        _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
+        assert record.operator_judgement is None
+
+
+def test_outcome_phrase_maps_operator_end() -> None:
+    from inspect_robots.cli import _OUTCOME_PHRASES
+
+    assert _OUTCOME_PHRASES["operator_end"] == "ended by operator"
 
 
 # --------------------------------------------------------------------------- #
