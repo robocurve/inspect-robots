@@ -404,7 +404,9 @@ def test_chat_completion_rejects_non_2xx_with_body_excerpt(status: int) -> None:
     [
         b"",
         b'{"choices":[{"message":{"content":null}}]}',
-        b"\xff\xfe not utf-8",
+        # A lone invalid UTF-8 lead byte: no BOM interpretation, so
+        # json.loads raises UnicodeDecodeError rather than JSONDecodeError.
+        b"\xff",
     ],
 )
 def test_chat_completion_rejects_malformed_replies(reply: bytes) -> None:
