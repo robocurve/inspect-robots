@@ -17,6 +17,7 @@ from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._anthropic import (
     _DEFAULT_MAX_OUTPUT_TOKENS,
     AnthropicClient,
+    _parse_response,
 )
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent._png import png_data_url
@@ -105,7 +106,13 @@ def test_request_shape_and_headers() -> None:
     assert body["model"] == "claude-opus-5"
     assert body["max_tokens"] == _DEFAULT_MAX_OUTPUT_TOKENS
     assert body["thinking"] == {"type": "adaptive"}
-    assert body["system"] == "you drive a robot"
+    assert body["system"] == [
+        {
+            "type": "text",
+            "text": "you drive a robot",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
     assert body["output_config"] == {"effort": "low"}
     assert body["tools"] == [
         {
@@ -156,6 +163,133 @@ def test_empty_api_key_omits_header() -> None:
     _client(handler, provider=provider).complete([_USER], [])
 
     assert "x-api-key" not in seen[0].headers
+
+
+def test_cache_anchor_marks_last_block_without_leaking_marker() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    history = [
+        _SYSTEM,
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "stable state"},
+                {"type": "text", "text": "[3 camera frame(s) elided]"},
+            ],
+            "cache_anchor": True,
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "fresh observation"}],
+        },
+    ]
+
+    _client(handler).complete(history, [])
+
+    body = json.loads(seen[0].content)
+    anchor = body["messages"][0]["content"]
+    assert anchor[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_anchor" not in json.dumps(body)
+
+
+def test_final_string_content_wraps_into_cached_text_block() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    _client(handler).complete([_USER], [])
+
+    assert json.loads(seen[0].content)["messages"][-1]["content"] == [
+        {
+            "type": "text",
+            "text": "Goal: pick the cube",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_replayed_final_assistant_breakpoint_is_copy_on_write_and_stable() -> None:
+    first = _anthropic_response(_thinking(), _text("moving"), _tool_use("toolu_1"))
+    later = _anthropic_response(_text("done"), stop_reason="end_turn")
+    seen, handler = _capture(first, later, later)
+    client = _client(handler)
+
+    message = client.complete([_USER], [])
+    history = [
+        _USER,
+        {
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [_tool_call("toolu_1", "done", message.tool_calls[0].arguments)],
+        },
+    ]
+    stored = client._raw_blocks_by_tool_use_id["toolu_1"]
+    original = json.loads(json.dumps(stored))
+
+    client.complete(history, [])
+    client.complete(history, [])
+
+    assert stored == original
+    assert all("cache_control" not in block for block in stored)
+    for request in seen[1:]:
+        replayed = json.loads(request.content)["messages"][-1]["content"]
+        assert sum("cache_control" in block for block in replayed) == 1
+
+
+def test_representative_request_has_exactly_three_cache_breakpoints() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    history = [
+        _SYSTEM,
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "[3 camera frame(s) elided]"}],
+            "cache_anchor": True,
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "fresh observation"}],
+        },
+    ]
+
+    _client(handler).complete(history, [])
+
+    assert json.dumps(json.loads(seen[0].content)).count('"cache_control"') == 3
+
+
+def test_anchor_and_final_coincidence_adds_one_breakpoint() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    history = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "[1 camera frame(s) elided]"}],
+            "cache_anchor": True,
+        }
+    ]
+
+    _client(handler).complete(history, [])
+
+    final = json.loads(seen[0].content)["messages"][-1]
+    assert json.dumps(final).count('"cache_control"') == 1
+
+
+def test_thinking_tail_places_breakpoint_on_last_non_thinking_block() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+    client = _client(handler)
+    client._raw_blocks_by_tool_use_id["toolu_1"] = [
+        _text("moving"),
+        _tool_use("toolu_1"),
+        _thinking(),
+    ]
+    history = [
+        {
+            "role": "assistant",
+            "content": "moving",
+            "tool_calls": [_tool_call("toolu_1", "done", '{"summary":"ok"}')],
+        }
+    ]
+
+    client.complete(history, [])
+
+    blocks = json.loads(seen[0].content)["messages"][-1]["content"]
+    assert "cache_control" not in blocks[-1]
+    assert blocks[-2]["cache_control"] == {"type": "ephemeral"}
 
 
 # -- translation -----------------------------------------------------------------
@@ -460,6 +594,28 @@ def test_empty_text_normalizes_to_none() -> None:
     message = _client(handler).complete([_USER], [])
 
     assert message.content is None
+
+
+def test_parse_response_filters_usage_to_non_bool_int_values() -> None:
+    payload = _anthropic_response(_text("ok"), stop_reason="end_turn")
+    payload["usage"] = {
+        "input_tokens": 11,
+        "output_tokens": 3,
+        "cache_creation": {"ephemeral_5m_input_tokens": 4},
+        "service_tier": "standard_only",
+        "synthetic": True,
+    }
+
+    message = _parse_response(payload)
+
+    assert message.usage == {"input_tokens": 11, "output_tokens": 3}
+    assert "usage" not in message.raw()
+
+
+def test_parse_response_without_usage_keeps_it_none() -> None:
+    message = _parse_response(_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    assert message.usage is None
 
 
 def test_refusal_raises_with_category() -> None:
@@ -1040,7 +1196,8 @@ def test_act_drives_a_multi_turn_trial_and_replays_thinking() -> None:
     policy.act(Observation())
 
     first = json.loads(requests[0].content)
-    assert first["system"].startswith("You are controlling a real robot")
+    assert first["system"][0]["text"].startswith("You are controlling a real robot")
+    assert first["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert all(m["role"] != "system" for m in first["messages"])
 
     # Turn 2 carries the dropped-assistant-then-nudge shape: the text-only turn
@@ -1048,7 +1205,13 @@ def test_act_drives_a_multi_turn_trial_and_replays_thinking() -> None:
     second = json.loads(requests[1].content)
     roles = [m["role"] for m in second["messages"]]
     assert roles == ["user", "user", "user"]
-    assert second["messages"][-1]["content"] == "Respond with exactly one tool call."
+    assert second["messages"][-1]["content"] == [
+        {
+            "type": "text",
+            "text": "Respond with exactly one tool call.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
 
     # Next act(): tool results merge into one user turn, then the observation.
     policy.act(Observation())
@@ -1081,3 +1244,53 @@ def test_explicit_api_key_env_wins_over_the_default() -> None:
     policy._client.complete([_USER], [])
 
     assert seen[0].headers["x-api-key"] == "sk-or"
+
+
+def test_act_marks_the_eviction_anchor_on_the_anthropic_wire() -> None:
+    """Guards the policy -> wire anchor integration end to end.
+
+    Every other anchor test hand-injects ``cache_anchor`` into history; only
+    this one exercises ``act()``'s ``mark_anchor=isinstance(...)`` wiring. If
+    that wiring silently broke (say, a wrapped client failing the isinstance
+    check), the anchor breakpoint would vanish and every hand-injected test
+    would still pass — while live runs degraded to full-prefix rewrites at
+    each eviction with no error to notice.
+    """
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = _anthropic_response(
+            _tool_use(
+                f"toolu_{len(requests)}",
+                "move_by",
+                {"deltas": {"dx": 0.01}, "note": "I see the cube and nudge toward it."},
+            )
+        )
+        return httpx.Response(200, json=payload)
+
+    embodiment = CubePickEmbodiment()
+    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+    policy.bind(embodiment.info)
+    scene = Scene(id="s0", instruction="reach")
+    policy.reset(scene)
+    observation = embodiment.reset(scene, seed=0)
+
+    for _ in range(4):
+        policy.act(observation)
+
+    final = json.loads(requests[-1].content)
+    stub_blocks = [
+        block
+        for message in final["messages"]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "text" and block.get("text", "").endswith("camera frame(s) elided]")
+    ]
+    # 4 cycles at the default horizon of 2 evict the two oldest observations.
+    assert len(stub_blocks) == 2
+    # The newest stub is the anchor; the breakpoint lands on the stubbed
+    # message's last block, which is the stub itself. Older stubs carry none.
+    assert stub_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in stub_blocks[0]
+    assert b"cache_anchor" not in requests[-1].content

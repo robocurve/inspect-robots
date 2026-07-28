@@ -116,6 +116,57 @@ def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sanitized
 
 
+def _evicted_view(
+    messages: list[dict[str, Any]],
+    horizon: int,
+    *,
+    mark_anchor: bool = False,
+) -> list[dict[str, Any]]:
+    """Return a view with camera frames older than the image horizon stubbed."""
+    image_message_indices = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance((content := message.get("content")), list)
+        and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+    ]
+    stubbed_indices = image_message_indices[:-horizon]
+    if not stubbed_indices:
+        return list(messages)
+
+    newest_stubbed = stubbed_indices[-1]
+    view = list(messages)
+    for message_index in stubbed_indices:
+        message = messages[message_index]
+        content = message["content"]
+        assert isinstance(content, list)
+        image_indices = [
+            index
+            for index, part in enumerate(content)
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        removed_indices = set(image_indices)
+        for image_index in image_indices:
+            if image_index == 0:
+                continue
+            label = content[image_index - 1]
+            if isinstance(label, dict) and label.get("type") == "text":
+                removed_indices.add(image_index - 1)
+        stubbed_content = [
+            part for index, part in enumerate(content) if index not in removed_indices
+        ]
+        stubbed_content.append(
+            {
+                "type": "text",
+                "text": f"[{len(image_indices)} camera frame(s) elided]",
+            }
+        )
+        stubbed_message = {**message, "content": stubbed_content}
+        if mark_anchor and message_index == newest_stubbed:
+            stubbed_message["cache_anchor"] = True
+        view[message_index] = stubbed_message
+    return view
+
+
 @dataclass(frozen=True)
 class AgentPolicyConfig(PolicyConfig):
     """Inference-time configuration recorded in the eval log.
@@ -139,6 +190,7 @@ class AgentPolicyConfig(PolicyConfig):
     transcript_echo: bool = False
     images: str = "always"
     depth: str = "render"
+    image_horizon: int | None = 2
 
 
 @dataclass(frozen=True, eq=False)
@@ -177,6 +229,7 @@ class LLMAgentPolicy(PolicyBase):
         transcript_echo: bool = False,
         images: str = "always",
         depth: str = "render",
+        image_horizon: int | None = 2,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
     ):
@@ -229,6 +282,15 @@ class LLMAgentPolicy(PolicyBase):
             or max_output_tokens < 1
         ):
             raise ConfigError("max_output_tokens must be an int >= 1")
+        if image_horizon is not None and (
+            isinstance(image_horizon, bool)
+            or not isinstance(image_horizon, int)
+            or image_horizon < 1
+        ):
+            raise ConfigError(
+                "image_horizon must be an int >= 1, or None to send full image history.\n"
+                "fix: pass -P image_horizon=N or -P image_horizon=none"
+            )
 
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
@@ -327,6 +389,7 @@ class LLMAgentPolicy(PolicyBase):
         self._transcript_echo = transcript_echo
         self._images = images
         self._depth = depth
+        self._image_horizon = image_horizon
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -341,6 +404,7 @@ class LLMAgentPolicy(PolicyBase):
             transcript_echo=transcript_echo,
             images=images,
             depth=depth,
+            image_horizon=image_horizon,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -351,6 +415,7 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
         self._revealed: set[str] = set()
 
@@ -393,6 +458,7 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] goal: {scene.instruction}")
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals.clear()
         self._pending = None
         self._revealed.clear()
 
@@ -414,6 +480,11 @@ class LLMAgentPolicy(PolicyBase):
 
         # Make path relative to log_dir for portability
         record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
+        if self._calls_used:
+            record.metadata["llm_usage"] = {
+                "llm_calls": self._calls_used,
+                **{key: value for key, value in self._usage_totals.items() if key != "llm_calls"},
+            }
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""
@@ -487,13 +558,29 @@ class LLMAgentPolicy(PolicyBase):
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
+            outgoing = self._messages
+            if self._image_horizon is not None:
+                outgoing = _evicted_view(
+                    self._messages,
+                    self._image_horizon,
+                    mark_anchor=isinstance(self._client, AnthropicClient),
+                )
             message = self._client.complete(
-                self._messages,
+                outgoing,
                 toolset.schemas(),
                 temperature=self._temperature,
                 reasoning_effort=self._effort,
             )
             self._calls_used += 1
+            if message.usage is not None:
+                for key, value in message.usage.items():
+                    self._usage_totals[key] = self._usage_totals.get(key, 0) + value
+                self._echo(
+                    "[agent] -- usage: "
+                    f"in={message.usage.get('input_tokens', 0)} "
+                    f"cache_read={message.usage.get('cache_read_input_tokens', 0)} "
+                    f"out={message.usage.get('output_tokens', 0)}"
+                )
             raw_message = message.raw()
             self._messages.append(raw_message)
             content = raw_message.get("content")
