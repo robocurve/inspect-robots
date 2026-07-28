@@ -1022,6 +1022,14 @@ def test_trial_end_skips_flush_once_stalled(monkeypatch: pytest.MonkeyPatch) -> 
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
+def test_real_rerun_accepts_the_transcript_document_call() -> None:
+    """The real SDK accepts the exact TextDocument construction the sink emits."""
+    rr = pytest.importorskip("rerun")
+    if not hasattr(rr, "TextDocument"):
+        pytest.skip("pre-TextDocument rerun-sdk lacks the archetype")
+    rr.TextDocument("**[INFO]** assistant: hi  \nthere", media_type="text/markdown")
+
+
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     """The real SDK atexit path is bounded after a connected peer stops reading."""
     rr = pytest.importorskip("rerun")

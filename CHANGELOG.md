@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Rerun sink: transcript `TextLog` rows at `trial/<scene>/e<epoch>/llm` are now
+  paired with a markdown `TextDocument` at `…/llm/latest` — add a Text Document
+  view for a wrapped, timeline-synced transcript reading pane (#203).
+
 - `OPERATOR_END` termination-reason constant (`"operator_end"`): the standard
   reason for "a human ended this episode by keypress, verdict pending". Attended
   runs now prompt for exactly those trials — registered tasks and `eval-set`
