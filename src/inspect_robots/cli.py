@@ -15,6 +15,8 @@ Subcommands:
   per-task row instead of a full summary per task.
 - ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
   optionally append recorded policy conversations.
+- ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
+  into a deterministic digest or model-written learnings file.
 - ``inspect-robots view LOG.json [-o OUT.html] [--open]`` — render a saved eval log
   as a self-contained HTML report.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
@@ -39,6 +41,7 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -117,6 +120,7 @@ _SUBCOMMANDS = (
     "run",
     "eval-set",
     "inspect",
+    "summarize",
     "view",
     "video",
     "config",
@@ -275,6 +279,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript",
         action="store_true",
         help="append recorded policy transcripts",
+    )
+
+    p_summarize = sub.add_parser(
+        "summarize",
+        help="distill a saved eval log into a markdown learnings file",
+    )
+    p_summarize.add_argument("log", help="path to an EvalLog JSON file")
+    p_summarize.add_argument(
+        "--model",
+        default=None,
+        help="OpenAI-compatible model id (default: deterministic digest only)",
+    )
+    p_summarize.add_argument(
+        "--base-url",
+        default="https://api.anthropic.com/v1",
+        help="OpenAI-compatible API base URL (default: https://api.anthropic.com/v1)",
+    )
+    p_summarize.add_argument(
+        "--api-key-env",
+        default="ANTHROPIC_API_KEY",
+        metavar="VAR",
+        help="environment variable holding the API key (default: ANTHROPIC_API_KEY)",
+    )
+    p_summarize.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help="output markdown file (default: LOG_DIR/learnings/LOG_STEM.md; - writes stdout)",
     )
 
     p_view = sub.add_parser("view", help="render a saved eval log as a self-contained HTML report")
@@ -1278,6 +1311,61 @@ def _cmd_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    """Distill a saved log and atomically write its markdown learnings artifact."""
+    from inspect_robots._summarize import summarize
+    from inspect_robots.errors import ConfigError
+
+    stdout_mode = args.out == "-"
+    log_path = Path(args.log)
+    out_path = (
+        None
+        if stdout_mode
+        else (
+            log_path.parent / "learnings" / f"{log_path.stem}.md"
+            if args.out is None
+            else Path(args.out)
+        )
+    )
+    if out_path is not None and out_path.exists() and out_path.is_dir():
+        raise SystemExit(f"--out {out_path} is a directory; pass a Markdown file path")
+    if out_path is not None and out_path.resolve() == log_path.resolve():
+        # The one data-loss path in this command: rendering over the log it reads.
+        raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
+
+    try:
+        document = summarize(
+            log_path,
+            model=args.model,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+        )
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if stdout_mode:
+        sys.stdout.write(document)
+        return 0
+
+    file_path = cast(Path, out_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=file_path.parent,
+        prefix=f".{file_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(document)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = Path(handle.name)
+    os.replace(temp_path, file_path)
+    print(f"wrote {file_path}")
+    return 0
+
+
 def _cmd_video(args: argparse.Namespace) -> int:
     """Render a log's stored frames to one MP4 per (trial, camera) stream.
 
@@ -1460,6 +1548,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_eval_set(args)
     if args.command == "inspect":
         return _cmd_inspect(args.log, transcript=args.transcript)
+    if args.command == "summarize":
+        return _cmd_summarize(args)
     if args.command == "view":
         return _cmd_view(args)
     if args.command == "video":
