@@ -7,14 +7,24 @@ from pathlib import Path
 
 import pytest
 
-from inspect_robots._defaults import (
-    ENV_EMBODIMENT,
-    ENV_POLICY,
-    ENV_SIM_EMBODIMENT,
+from inspect_robots.defaults import (
+    _ENV_EMBODIMENT as ENV_EMBODIMENT,
+)
+from inspect_robots.defaults import (
+    _ENV_POLICY as ENV_POLICY,
+)
+from inspect_robots.defaults import (
+    _ENV_SIM_EMBODIMENT as ENV_SIM_EMBODIMENT,
+)
+from inspect_robots.defaults import (
     Defaults,
     load_defaults,
-    parse_value,
-    set_default,
+)
+from inspect_robots.defaults import (
+    _parse_value as parse_value,
+)
+from inspect_robots.defaults import (
+    _set_default as set_default,
 )
 
 

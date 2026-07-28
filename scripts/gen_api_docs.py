@@ -18,6 +18,7 @@ _SECTIONS = (
         "Policy & embodiment",
         ("inspect_robots.policy", "inspect_robots.embodiment"),
     ),
+    ("User configuration", ("inspect_robots.defaults",)),
     ("Tasks & scenes", ("inspect_robots.scene", "inspect_robots.task")),
     ("Scoring", ("inspect_robots.scorer",)),
     (
