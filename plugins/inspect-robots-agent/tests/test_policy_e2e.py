@@ -7,9 +7,11 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +21,7 @@ import httpx
 import numpy as np
 import pytest
 
+import inspect_robots_agent.policy as agent_policy_module
 from inspect_robots import eval as ir_eval
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
 from inspect_robots.controller import DefaultController
@@ -38,15 +41,18 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.task import Task
-from inspect_robots.types import Action, Observation, StepResult
+from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
+from inspect_robots_agent._tools import ToolResult
 from inspect_robots_agent.policy import (
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _SYSTEM_TEMPLATE,
     AgentPolicyConfig,
+    _image_parts,
     _observation_content,
+    _PendingCapture,
 )
 
 # --- scripted-conversation harness ---------------------------------------------
@@ -63,6 +69,7 @@ _PRIOR_LEARNINGS_FRAME = (
     "\n\nNotes from a previous attempt at tasks like this one. They may "
     "be wrong or stale; the current observation always wins:\n"
 )
+_BLOB_RE = re.compile(r"\$blob:([0-9a-f]{64})")
 
 
 def _with_default_note(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +164,77 @@ class _Script:
         self.requests.append(json.loads(request.content))
         payload = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
         return httpx.Response(200, json=payload)
+
+
+class _WireScript:
+    """Serve equivalent move/done turns on each supported provider wire."""
+
+    def __init__(self, wire: str):
+        self.wire = wire
+        self.requests: list[dict[str, Any]] = []
+        self.turns = [
+            (
+                "move_joints",
+                _with_default_note("move_joints", {"targets": {"joint": 0.1}}),
+            ),
+            ("done", {"summary": "captured"}),
+        ]
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(json.loads(request.content))
+        index = min(len(self.requests) - 1, len(self.turns) - 1)
+        name, arguments = self.turns[index]
+        if self.wire == "chat":
+            payload = _tool_response(name, arguments, add_default_note=False)
+        elif self.wire == "responses":
+            payload = {
+                "id": f"resp_{index}",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": f"fc_{index}",
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": f"call_{index}",
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    }
+                ],
+            }
+        else:
+            payload = {
+                "id": f"msg_{index}",
+                "type": "message",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"toolu_{index}",
+                        "name": name,
+                        "input": arguments,
+                    }
+                ],
+                "stop_reason": "tool_use",
+            }
+        return httpx.Response(200, json=payload)
+
+
+def _inline_blobs(value: Any, blob_dir: Path) -> Any:
+    if isinstance(value, str):
+
+        def replace_blob(match: re.Match[str]) -> str:
+            blob = (blob_dir / f"{match.group(1)}.png").read_bytes()
+            return base64.b64encode(blob).decode("ascii")
+
+        return _BLOB_RE.sub(replace_blob, value)
+    if isinstance(value, list):
+        return [_inline_blobs(item, blob_dir) for item in value]
+    if isinstance(value, dict):
+        return {key: _inline_blobs(item, blob_dir) for key, item in value.items()}
+    return value
+
+
+def _wire_rows(path: Path) -> list[dict[str, Any]]:
+    return [cast(dict[str, Any], json.loads(line)) for line in path.read_text().splitlines()]
 
 
 class _FlushRecordingStream(io.StringIO):
@@ -318,6 +396,7 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     # Headroom splits a box-sized move into two steps, then done holds once.
     assert len(record.steps) == 3
     assert logs[0].eval.policy_config["model"] == "test/model"
+    assert logs[0].eval.policy_config["wire_capture"] is True
     assert logs[0].eval.policy_config["max_llm_calls"] == 100
     assert logs[0].eval.policy_config["max_speed_frac"] == 0.1
     (transcript,) = logs[0].samples[0].policy_transcripts
@@ -325,6 +404,197 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert transcript is not None
     assert "move_by" in serialized and "done" in serialized
     assert "data:" not in serialized
+
+
+@pytest.mark.parametrize("wire", ["chat", "responses", "anthropic"])
+def test_wire_capture_matches_each_transport_body_after_blob_inlining(
+    wire: str, tmp_path: Path
+) -> None:
+    script = _WireScript(wire)
+    sink = _RecordingSink()
+    policy = LLMAgentPolicy(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        wire=wire,
+        image_horizon=1,
+        depth="off",
+        transport=httpx.MockTransport(script),
+        env={},
+    )
+
+    ir_eval(
+        _task(max_steps=20),
+        policy,
+        _VisionAbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+
+    (record,) = sink.records
+    pointer = record.metadata["wire_capture"]
+    assert isinstance(pointer, str)
+    capture_path = tmp_path / pointer
+    assert capture_path.is_file()
+    rows = _wire_rows(capture_path)
+    row = next(row for row in rows if row["call"] == 1 and row["attempt"] == 0)
+    assert (
+        row["endpoint"]
+        == {
+            "chat": "/chat/completions",
+            "responses": "/responses",
+            "anthropic": "/messages",
+        }[wire]
+    )
+    blob_dir = capture_path.parent.parent / "blobs"
+    captured_request = _inline_blobs(row["request"], blob_dir)
+    assert captured_request == script.requests[1]
+    assert "camera frame(s) elided" in json.dumps(captured_request)
+
+    if wire == "anthropic":
+        elision_blocks = [
+            block
+            for message in captured_request["messages"]
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+            if "camera frame(s) elided" in block.get("text", "")
+        ]
+        assert elision_blocks
+        assert elision_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_zero_llm_call_trial_creates_no_capture_file_or_metadata(tmp_path: Path) -> None:
+    class _FailsBeforeLLM(LLMAgentPolicy):
+        def act(self, observation: Observation) -> ActionChunk:
+            raise RuntimeError("failed before first LLM call")
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be called")
+
+    policy = _FailsBeforeLLM(
+        model="test/model",
+        base_url="http://llm.test/v1",
+        transport=httpx.MockTransport(unexpected_request),
+        env={},
+    )
+    sink = _RecordingSink()
+
+    ir_eval(
+        _task(),
+        policy,
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+
+    (record,) = sink.records
+    assert record.status == "error"
+    assert "wire_capture" not in record.metadata
+    assert not (tmp_path / "wire").exists()
+    assert policy._capture is not None
+    assert policy._capture.end_trial() is None
+
+
+def test_wire_capture_false_constructs_no_sink_or_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_capture() -> None:
+        raise AssertionError("WireCapture must not be constructed")
+
+    monkeypatch.setattr(agent_policy_module, "WireCapture", unexpected_capture)
+    script = _Script([_tool_response("done", {"summary": "disabled"})])
+    policy = _policy(script, wire_capture=False)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire_capture is False
+    assert policy._client._capture is None
+    sink = _RecordingSink()
+
+    ir_eval(
+        _task(),
+        policy,
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+
+    assert "wire_capture" not in sink.records[0].metadata
+    assert not (tmp_path / "wire").exists()
+
+
+def test_version_skew_warning_fires_once_across_trial_ends(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    first = TrialRecord(scene_id="s0", epoch=0, seed=0, status="success")
+    second = TrialRecord(scene_id="s0", epoch=1, seed=1, status="success")
+
+    policy.on_trial_end(first, str(tmp_path), "run-1")
+    policy.on_trial_end(second, str(tmp_path), "run-1")
+
+    assert capsys.readouterr().err == (
+        "[agent] wire capture inactive: core predates on_trial_start\n"
+    )
+    assert "wire_capture" not in first.metadata
+    assert "wire_capture" not in second.metadata
+
+
+def test_success_without_action_chunk_retries_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _Script(
+        [
+            _tool_response("done", {"summary": "first"}),
+            _tool_response("done", {"summary": "second"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    toolset = policy._toolset
+    assert toolset is not None
+    execute = toolset.execute
+    calls = 0
+
+    def no_chunk_once(call: Any, observation: Observation) -> ToolResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ToolResult(note="accepted without an action")
+        return execute(call, observation)
+
+    monkeypatch.setattr(toolset, "execute", no_chunk_once)
+
+    chunk = policy.act(Observation())
+
+    assert chunk.actions[0].meta["request_stop"] is True
+    assert len(script.requests) == 2
+
+
+def test_pending_narration_handles_absent_target_and_residual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = _vision_observation(env_step=2)
+    without_target = _PendingCapture(
+        requested=("top",),
+        issued_step=1,
+        chunk_len=1,
+        target=None,
+    )
+    assert "finished playing" in policy._pending_narration(without_target, observation, ())
+
+    toolset = policy._toolset
+    assert toolset is not None
+    monkeypatch.setattr(toolset, "residual", lambda target, current: None)
+    with_target = replace(without_target, target=np.array([0.1]))
+    narration = policy._pending_narration(with_target, observation, ())
+    assert "remaining offset" not in narration
+
+
+def test_image_parts_skip_requested_camera_missing_from_observation() -> None:
+    observation = _vision_observation(cameras=("top",))
+
+    assert _image_parts(observation, reveal=("wrist",), depth={}) == []
 
 
 def test_transcript_is_none_before_first_reset() -> None:

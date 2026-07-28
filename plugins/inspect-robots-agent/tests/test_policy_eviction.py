@@ -109,6 +109,31 @@ def test_on_demand_image_only_message_stubs_to_one_text_part() -> None:
     assert view[0]["content"] == [{"type": "text", "text": "[1 camera frame(s) elided]"}]
 
 
+def test_unlabelled_and_nontext_image_predecessors_are_preserved() -> None:
+    first_image = {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,first"}}],
+    }
+    nontext_label = {
+        "role": "user",
+        "content": [
+            {"type": "vendor_label", "value": 1},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,second"}},
+        ],
+    }
+
+    view = _evicted_view(
+        [first_image, nontext_label, _observation_message("new")],
+        1,
+    )
+
+    assert view[0]["content"] == [{"type": "text", "text": "[1 camera frame(s) elided]"}]
+    assert view[1]["content"] == [
+        {"type": "vendor_label", "value": 1},
+        {"type": "text", "text": "[1 camera frame(s) elided]"},
+    ]
+
+
 def test_non_list_content_passes_through_untouched() -> None:
     plain = {"role": "user", "content": "Respond with exactly one tool call."}
 

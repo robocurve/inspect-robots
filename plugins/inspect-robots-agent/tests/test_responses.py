@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,8 +14,9 @@ from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.types import Observation
 from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import Provider
-from inspect_robots_agent._responses import ResponsesClient
+from inspect_robots_agent._responses import ResponsesClient, _translate_content_parts
 from inspect_robots_agent.policy import AgentPolicyConfig
 
 
@@ -60,6 +62,11 @@ def _tool_call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
 def _client(handler: Any, **kwargs: Any) -> ResponsesClient:
     provider = Provider(base_url="http://llm.test/v1", api_key="sk-test", model="m")
     return ResponsesClient(provider, transport=httpx.MockTransport(handler), **kwargs)
+
+
+def _wire_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "wire/run-1/scene-e0/calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def test_translates_history_tools_and_request_options() -> None:
@@ -169,6 +176,10 @@ def test_translates_history_tools_and_request_options() -> None:
     }
     history_messages = [item for item in body["input"] if "role" in item]
     assert all("type" not in item for item in history_messages)
+
+
+def test_unknown_content_part_is_ignored() -> None:
+    assert _translate_content_parts([{"type": "vendor_extension", "value": "x"}]) == []
 
 
 def test_capture_history_keeps_function_outputs_in_call_order_before_images() -> None:
@@ -503,6 +514,45 @@ def test_failed_status_raises_once_and_does_not_populate_cache() -> None:
             "arguments": "{}",
         }
     ]
+
+
+def test_capture_precedes_failed_payload_raise(tmp_path: Path) -> None:
+    payload = {
+        "id": "resp_failed",
+        "status": "failed",
+        "error": {"message": "reasoning token limit reached"},
+        "output": [],
+    }
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(200, json=payload),
+        capture=capture,
+    )
+
+    with pytest.raises(RuntimeError, match="reasoning token limit reached"):
+        client.complete(messages=[], tools=[])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] == 200
+    assert row["response"] == payload
+
+
+def test_capture_records_responses_transport_error(tmp_path: Path) -> None:
+    def offline(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("responses offline", request=request)
+
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(offline, max_retries=1, capture=capture)
+
+    with pytest.raises(RuntimeError, match="responses offline"):
+        client.complete(messages=[], tools=[])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] is None
+    assert row["response"] is None
+    assert row["error"] == "responses offline"
 
 
 @pytest.mark.parametrize("status_code", [429, 500, 503])

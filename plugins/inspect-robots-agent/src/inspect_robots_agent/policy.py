@@ -49,6 +49,8 @@ from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import Toolset, build_toolset
 
+from ._capture import WireCapture
+
 _MAX_CONSECUTIVE_FAILURES = 3
 
 #: The only endpoint that serves /v1/messages without an explicit base_url.
@@ -184,6 +186,7 @@ class AgentPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     wire: str = "chat"
+    wire_capture: bool = True
     speed: str | None = None
     #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
     #: wires, where nothing constrained the output.
@@ -230,6 +233,7 @@ class LLMAgentPolicy(PolicyBase):
         base_url: str | None = None,
         api_key_env: str | None = None,
         wire: str = "chat",
+        wire_capture: bool = True,
         speed: str | None = None,
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
@@ -414,6 +418,7 @@ class LLMAgentPolicy(PolicyBase):
             if wire == "anthropic"
             else None
         )
+        self._capture = WireCapture() if wire_capture else None
         self._client: ChatClient | ResponsesClient | AnthropicClient
         if wire == "anthropic":
             assert resolved_max_output_tokens is not None
@@ -422,11 +427,12 @@ class LLMAgentPolicy(PolicyBase):
                 max_output_tokens=resolved_max_output_tokens,
                 speed=speed,
                 transport=transport,
+                capture=self._capture,
             )
         elif wire == "responses":
-            self._client = ResponsesClient(provider, transport=transport)
+            self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
         else:
-            self._client = ChatClient(provider, transport=transport)
+            self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
         # Robot control is latency-sensitive: default to low reasoning effort
@@ -445,6 +451,7 @@ class LLMAgentPolicy(PolicyBase):
             base_url=provider.base_url,
             api_key_env=api_key_env,
             wire=wire,
+            wire_capture=wire_capture,
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
@@ -520,8 +527,19 @@ class LLMAgentPolicy(PolicyBase):
         self._pending = None
         self._revealed.clear()
 
+    def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+        """Begin streaming wire attempts for the next trial when enabled."""
+        if self._capture is not None:
+            self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
+
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
-        """Persist the transcript at the end of the trial."""
+        """Persist wire capture and the transcript at the end of the trial."""
+        if self._capture is not None:
+            capture_path = self._capture.end_trial()
+            if capture_path is not None:
+                record.metadata["wire_capture"] = capture_path
+            self._capture.warn_if_never_began()
+
         messages = self.transcript()
         if not messages:
             return

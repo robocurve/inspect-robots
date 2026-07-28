@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import math
@@ -15,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
+from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
@@ -25,6 +27,9 @@ _JSON_STRING_LIMIT = 2048
 _FRAME_LABEL_RE = re.compile(r"camera '(?P<name>.*)' \(step (?P<step>\d{1,12})\):")
 _FRAME_PLACEHOLDER = "[image omitted: streamed camera frame]"
 _FRAME_MAX_SIDE = 448
+_BLOB_SENTINEL_RE = re.compile(r"\$blob:([^\s]+)")
+_BLOB_SHA_RE = re.compile(r"[0-9a-f]{64}")
+_MISSING = object()
 
 
 @dataclass
@@ -44,6 +49,17 @@ class _FrameContext:
     frames_dir: Path
     trial_prefix: str
     budget: _FrameBudget
+
+
+@dataclass
+class _WireContext:
+    """Track one trial's blob directory, budget, and emitted image anchors."""
+
+    blob_dir: Path
+    trial_id: str
+    budget: _FrameBudget
+    emitted: set[str]
+    denied: set[str]
 
 
 _STYLES = """
@@ -190,6 +206,12 @@ pre {
   font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .none { color: var(--muted); margin: 28px 0; }
+.wire-static, .wire-change { margin: 10px 0; }
+.wire-change { color: var(--muted); }
+.wire-media { margin: 8px 0; }
+.wire-blob { display: block; }
+.wire-broken { color: var(--red); }
+.wire-placeholder { color: var(--muted); }
 """.strip()
 
 
@@ -476,8 +498,228 @@ def _render_trial_transcript(
     return _render_transcript(transcript, _trial_frame_context(frame_ctx, scene_id, trial))
 
 
+def _load_wire_rows(
+    scene: SceneResult, trial: int, log_path: Path | None
+) -> tuple[list[dict[str, Any]], Path] | None:
+    """Load one guarded wire sidecar and derive its run-scoped blob directory."""
+    if log_path is None or trial >= len(scene.trial_metadata):
+        return None
+    target = resolve_log_pointer(log_path, scene.trial_metadata[trial].get("wire_capture"))
+    if target is None:
+        return None
+    loaded = read_jsonl_prefix(target)
+    if loaded is None:
+        return None
+    blob_dir = derive_blob_dir(log_path, target)
+    if blob_dir is None:
+        return None
+    return loaded, blob_dir
+
+
+def _wire_blob_tokens(value: object) -> list[str]:
+    """Return every blob token suffix found recursively in a captured value."""
+    if isinstance(value, str):
+        return [match.group(1) for match in _BLOB_SENTINEL_RE.finditer(value)]
+    if isinstance(value, list):
+        return [token for item in value for token in _wire_blob_tokens(item)]
+    if isinstance(value, dict):
+        return [token for item in value.values() for token in _wire_blob_tokens(item)]
+    return []
+
+
+def _render_wire_blob(token: str, context: _WireContext) -> str:
+    """Render one validated blob reference as an embed, link, elision, or error."""
+    if _BLOB_SHA_RE.fullmatch(token) is None:
+        return (
+            f'<span class="wire-broken">{_escape(f"[broken blob reference: $blob:{token}]")}</span>'
+        )
+    anchor = f"wire-{_safe(context.trial_id)}-{token[:12]}"
+    if token in context.emitted:
+        return f'<a href="#{_escape(anchor)}">[blob {_escape(token[:12])}]</a>'
+    if token in context.denied:
+        return '<span class="wire-placeholder">[blob elided: media budget]</span>'
+
+    # ``token`` has passed the exact lowercase-sha guard above.  Only now may
+    # foreign JSONL text participate in a filesystem path.
+    path = context.blob_dir / f"{token}.png"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return (
+            f'<span class="wire-broken">{_escape(f"[broken blob reference: $blob:{token}]")}</span>'
+        )
+    encoded = base64.b64encode(raw).decode("ascii")
+    budget = context.budget
+    if budget.truncated or (budget.limit and budget.payload_bytes + len(encoded) > budget.limit):
+        budget.truncated = True
+        context.denied.add(token)
+        return '<span class="wire-placeholder">[blob elided: media budget]</span>'
+    budget.payload_bytes += len(encoded)
+    budget.embedded += 1
+    context.emitted.add(token)
+    return (
+        f'<span class="wire-blob" id="{_escape(anchor)}">'
+        '<img class="frame" loading="lazy" '
+        f'alt="wire blob {_escape(token[:12])}" src="data:image/png;base64,{encoded}"></span>'
+    )
+
+
+def _render_wire_value(value: object, context: _WireContext) -> str:
+    """Render captured JSON verbatim enough for forensic keys, then its blob media."""
+    dumped = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
+    media = "".join(
+        f'<div class="wire-media">{_render_wire_blob(token, context)}</div>'
+        for token in _wire_blob_tokens(value)
+    )
+    return f"<pre>{_escape(dumped)}</pre>{media}"
+
+
+def _wire_messages(request: dict[str, Any]) -> list[object]:
+    """Return the messages-shaped sequence used by any supported wire."""
+    messages = request.get("messages", request.get("input"))
+    return cast(list[object], messages) if isinstance(messages, list) else []
+
+
+def _wire_effort(request: dict[str, Any]) -> object:
+    """Extract the supported top-level or nested effort parameter."""
+    if "reasoning_effort" in request:
+        return request["reasoning_effort"]
+    reasoning = request.get("reasoning")
+    if isinstance(reasoning, dict) and "effort" in reasoning:
+        return reasoning["effort"]
+    output_config = request.get("output_config")
+    if isinstance(output_config, dict) and "effort" in output_config:
+        return output_config["effort"]
+    return "n/a"
+
+
+def _wire_request(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a captured request mapping, degrading malformed rows to empty."""
+    request = row.get("request")
+    return cast(dict[str, Any], request) if isinstance(request, dict) else {}
+
+
+def _render_wire_call(
+    row: dict[str, Any],
+    previous_messages: list[object] | None,
+    first_tools: object,
+    first_system: object,
+    context: _WireContext,
+) -> str:
+    """Render one attempt row with static-field change notes and message deltas."""
+    request = _wire_request(row)
+    messages = _wire_messages(request)
+    if previous_messages is None:
+        changed: list[tuple[int, object]] = []
+        new_messages = messages
+    else:
+        changed = [
+            (index, message)
+            for index, message in enumerate(messages[: len(previous_messages)])
+            if message != previous_messages[index]
+        ]
+        new_messages = messages[len(previous_messages) :]
+
+    notes: list[str] = []
+    if request.get("tools", _MISSING) != first_tools:
+        notes.append("tools changed from the trial's first call")
+    if request.get("system", _MISSING) != first_system:
+        notes.append("system changed from the trial's first call")
+    notes.extend(f"message {index} changed as sent" for index, _ in changed)
+    changes = "".join(f'<p class="wire-change">{_escape(note)}</p>' for note in notes)
+    changed_messages = "".join(
+        (
+            f'<div class="wire-change">message {index} current as-sent form</div>'
+            f"{_render_wire_value(message, context)}"
+        )
+        for index, message in changed
+    )
+    additions = "".join(_render_wire_value(message, context) for message in new_messages)
+    if not additions and not changed_messages:
+        additions = '<p class="wire-change">no new messages</p>'
+
+    tools = request.get("tools")
+    tool_count = len(tools) if isinstance(tools, list) else 0
+    params = "".join(
+        (
+            _definition("model", request.get("model", "n/a")),
+            _definition("effort", _wire_effort(request)),
+            _definition("temperature", request.get("temperature", "n/a")),
+            _definition("tool count", tool_count),
+        )
+    )
+    call = row.get("call", "?")
+    attempt = row.get("attempt", "?")
+    endpoint = row.get("endpoint", "?")
+    status = row.get("status")
+    duration = row.get("duration_s")
+    shown_status = "null" if status is None else status
+    shown_duration = (
+        f"{_number(duration)} s"
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+        else "n/a"
+    )
+    summary = (
+        f"call {_escape(call)} attempt {_escape(attempt)} · {_escape(endpoint)} · "
+        f"status {_escape(shown_status)} · {_escape(shown_duration)}"
+    )
+    return (
+        f'<details class="wire-call"><summary>{summary}</summary>'
+        f"<dl>{params}</dl>{changes}{changed_messages}{additions}</details>"
+    )
+
+
+def _render_trial_wire(
+    scene: SceneResult,
+    trial: int,
+    log_path: Path | None,
+    budget: _FrameBudget,
+) -> str:
+    """Render one trial's guarded wire capture, or nothing when unavailable."""
+    loaded = _load_wire_rows(scene, trial, log_path)
+    if loaded is None:
+        return ""
+    rows, blob_dir = loaded
+    first_request = _wire_request(rows[0])
+    first_tools = first_request.get("tools", _MISSING)
+    first_system = first_request.get("system", _MISSING)
+    context = _WireContext(
+        blob_dir=blob_dir,
+        trial_id=f"{scene.scene_id}-e{trial}",
+        budget=budget,
+        emitted=set(),
+        denied=set(),
+    )
+    static = ""
+    if first_tools is not _MISSING:
+        static += (
+            '<div class="wire-static"><strong>Tools (trial initial)</strong>'
+            f"{_render_wire_value(first_tools, context)}</div>"
+        )
+    if first_system is not _MISSING:
+        static += (
+            '<div class="wire-static"><strong>System (trial initial)</strong>'
+            f"{_render_wire_value(first_system, context)}</div>"
+        )
+
+    calls: list[str] = []
+    previous: list[object] | None = None
+    for row in rows:
+        calls.append(_render_wire_call(row, previous, first_tools, first_system, context))
+        previous = _wire_messages(_wire_request(row))
+    return (
+        '<details class="wire"><summary>'
+        f"Trial {trial} Wire</summary>{static}{''.join(calls)}</details>"
+    )
+
+
 def _scene_section(
-    scene: SceneResult, *, open_transcript: bool, frame_ctx: _FrameContext | None = None
+    scene: SceneResult,
+    *,
+    open_transcript: bool,
+    budget: _FrameBudget,
+    log_path: Path | None,
+    frame_ctx: _FrameContext | None = None,
 ) -> str:
     """Render one complete scene card and its available trial transcripts."""
     instruction = (
@@ -541,11 +783,14 @@ def _scene_section(
         for trial, transcript in enumerate(scene.policy_transcripts)
         if transcript is not None
     )
+    wires = "".join(
+        _render_trial_wire(scene, trial, log_path, budget) for trial in range(len(scene.epochs))
+    )
     return (
         '<section class="scene">'
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene.status)}</div>{instruction}{error}{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{notes_block}{transcripts}</section>"
+        f"{reasons_block}{judgements_block}{notes_block}{transcripts}{wires}</section>"
     )
 
 
@@ -553,6 +798,7 @@ def render_html(
     log: EvalLog,
     *,
     title: str,
+    log_path: Path | None = None,
     frames_dir: Path | None = None,
     frames_budget_bytes: int = 50_000_000,
 ) -> str:
@@ -616,6 +862,8 @@ def render_html(
         _scene_section(
             scene,
             open_transcript=transcript_count == 1,
+            budget=budget,
+            log_path=log_path,
             frame_ctx=frame_ctx,
         )
         for scene in log.samples
@@ -626,7 +874,7 @@ def render_html(
     frames_chip = (
         ""
         if not budget.truncated
-        else '<span class="chip">frames truncated at '
+        else '<span class="chip">embedded media truncated at '
         f"{frames_budget_bytes / 1_000_000:g} MB ({budget.embedded} embedded)</span>"
     )
     meta_tail = (

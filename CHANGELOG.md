@@ -9,6 +9,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Wire capture: eval logs now record 100% of what the LLM saw. The agent
+  policy captures every request/response attempt at the wire-client
+  serialization point (tool schemas, evicted view, depth composites,
+  `cache_control` breakpoints, retries) into `wire/<run_id>/` sidecars with
+  content-addressed image blobs, on by default (`-P wire_capture=false` to
+  opt out). New core `on_trial_start` policy hook (fail-safe: a raising
+  hook errors the trial, never the eval), HTML report **Wire** section, and
+  `inspect --wire` call-table/dump. Format contract in
+  `inspect_robots_agent._capture`; guide in *Logging & Rerun* (#206, #207).
+
 - Rerun sink: transcript `TextLog` rows at `trial/<scene>/e<epoch>/llm` are now
   paired with a markdown `TextDocument` at `…/llm/latest` — add a Text Document
   view for a wrapped, timeline-synced transcript reading pane (#203).

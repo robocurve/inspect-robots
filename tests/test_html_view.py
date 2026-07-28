@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
+import json
 import re
 import struct
 from collections.abc import Sequence
@@ -102,6 +104,29 @@ def _parts(name: str = "top_cam", step: int = 4) -> list[object]:
 
 def _frame_log(parts: Sequence[object], *, role: str = "user") -> EvalLog:
     return _log(transcripts=(_chat({"role": role, "content": list(parts)}),))
+
+
+def _wire_log(
+    tmp_path: Path,
+    rows: Sequence[object],
+    *,
+    pointer: str = "wire/run/scene-0-e0/calls.jsonl",
+    scene_id: str = "scene-0",
+) -> tuple[EvalLog, Path, Path]:
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        scene_id=scene_id,
+        trial_metadata=({"wire_capture": pointer}, {}),
+    )
+    log_path = tmp_path / "run.json"
+    calls_path = tmp_path / pointer
+    calls_path.parent.mkdir(parents=True, exist_ok=True)
+    calls_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in rows),
+        encoding="utf-8",
+    )
+    return dataclasses.replace(log, samples=(scene,)), log_path, calls_path
 
 
 def _png_dimensions_from_document(document: str) -> tuple[int, int]:
@@ -719,7 +744,7 @@ def test_frame_budget_embeds_first_then_truncates_remaining(tmp_path: Path) -> N
     assert document.count('<img class="frame"') == 1
     assert document.count("[image omitted: streamed camera frame]") == 2
     budget_mb = payload_size / 1_000_000
-    assert f"frames truncated at {budget_mb:g} MB (1 embedded)" in document
+    assert f"embedded media truncated at {budget_mb:g} MB (1 embedded)" in document
 
 
 def test_zero_frame_budget_is_unlimited(tmp_path: Path) -> None:
@@ -732,7 +757,7 @@ def test_zero_frame_budget_is_unlimited(tmp_path: Path) -> None:
     )
 
     assert document.count('<img class="frame"') == 2
-    assert document.count("frames truncated at") == 0
+    assert document.count("embedded media truncated at") == 0
 
 
 def test_non_truncated_frame_render_has_no_truncation_chip(tmp_path: Path) -> None:
@@ -740,7 +765,7 @@ def test_non_truncated_frame_render_has_no_truncation_chip(tmp_path: Path) -> No
 
     document = render_html(_frame_log(_parts()), title="fits", frames_dir=tmp_path)
 
-    assert document.count("frames truncated at") == 0
+    assert document.count("embedded media truncated at") == 0
 
 
 def test_non_chat_transcript_never_embeds_frames(tmp_path: Path) -> None:
@@ -761,3 +786,324 @@ def test_non_user_chat_messages_never_embed_frames(tmp_path: Path, role: str) ->
 
     assert '<img class="frame"' not in document
     assert "[image omitted: streamed camera frame]" in document
+
+
+def test_wire_section_renders_blob_stubs_breakpoints_and_request_summary(
+    tmp_path: Path,
+) -> None:
+    png = b"\x89PNG\r\nwire"
+    sha = hashlib.sha256(png).hexdigest()
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/messages",
+        "duration_s": 0.125,
+        "status": 200,
+        "request": {
+            "model": "claude-test",
+            "reasoning_effort": "high",
+            "temperature": 0.2,
+            "system": [{"type": "text", "text": "system prompt"}],
+            "tools": [{"name": "move", "description": "move safely"}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "[image omitted: context window]",
+                            "count": 1,
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": f"$blob:{sha}",
+                            },
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+    log, log_path, calls_path = _wire_log(tmp_path, [row], scene_id="scene / 0")
+    blob_dir = calls_path.parent.parent / "blobs"
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+
+    document = render_html(log, title="wire", log_path=log_path)
+
+    anchor = f"wire-{_safe('scene / 0-e0')}-{sha[:12]}"
+    assert "Trial 0 Wire" in document
+    assert "/messages" in document
+    assert "claude-test" in document and "high" in document and "0.2" in document
+    assert "[image omitted: context window]" in document
+    assert "cache_control" in document and "ephemeral" in document
+    assert f'id="{anchor}"' in document
+    assert f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}" in document
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["missing-metadata", "deleted", "traversal", "shallow", "empty", "non-object", "malformed"],
+)
+def test_wire_section_is_absent_for_unavailable_sidecars(tmp_path: Path, mode: str) -> None:
+    if mode == "missing-metadata":
+        document = render_html(_log(), title="absent", log_path=tmp_path / "run.json")
+    elif mode == "traversal":
+        log = _log()
+        scene = dataclasses.replace(
+            log.samples[0],
+            trial_metadata=({"wire_capture": "../outside/calls.jsonl"}, {}),
+        )
+        document = render_html(
+            dataclasses.replace(log, samples=(scene,)),
+            title="absent",
+            log_path=tmp_path / "run.json",
+        )
+    elif mode == "shallow":
+        # A depth-0 pointer resolves inside the log dir, but its derived
+        # blobs dir (parent.parent / "blobs") would land one level above it.
+        (tmp_path / "calls.jsonl").write_text('{"call": 0}\n', encoding="utf-8")
+        log = _log()
+        scene = dataclasses.replace(
+            log.samples[0],
+            trial_metadata=({"wire_capture": "calls.jsonl"}, {}),
+        )
+        document = render_html(
+            dataclasses.replace(log, samples=(scene,)),
+            title="absent",
+            log_path=tmp_path / "run.json",
+        )
+    else:
+        log, log_path, calls_path = _wire_log(tmp_path, [{"request": {}}])
+        if mode == "deleted":
+            calls_path.unlink()
+        elif mode == "empty":
+            calls_path.write_text("", encoding="utf-8")
+        elif mode == "non-object":
+            calls_path.write_text("[]\n", encoding="utf-8")
+        else:
+            calls_path.write_text("{\n", encoding="utf-8")
+        document = render_html(log, title="absent", log_path=log_path)
+
+    assert "Trial 0 Wire" not in document
+
+
+def test_wire_section_survives_torn_tail_line(tmp_path: Path) -> None:
+    log, log_path, calls_path = _wire_log(tmp_path, [{"call": 0, "request": {}}])
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"call": 1, "request": {"model": "trunc')
+
+    document = render_html(log, title="torn", log_path=log_path)
+
+    assert "Trial 0 Wire" in document
+
+
+def test_wire_hostile_and_missing_blob_references_render_broken(tmp_path: Path) -> None:
+    uppercase = "A" * 64
+    missing = "b" * 64
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/responses",
+        "duration_s": "unknown",
+        "status": 200,
+        "request": {
+            "input": [
+                {"content": "$blob:../../x"},
+                {"content": f"$blob:{uppercase}"},
+                {"content": f"$blob:{missing}"},
+            ],
+            "tools": "malformed",
+        },
+    }
+    log, log_path, _ = _wire_log(tmp_path, [row])
+
+    document = render_html(log, title="hostile", log_path=log_path)
+
+    assert document.count("broken blob reference") == 3
+    assert "../../x" in document
+    assert "data:image/png;base64," not in document
+
+
+def test_wire_budget_denial_never_emits_a_dangling_repeat_link(tmp_path: Path) -> None:
+    png = b"budgeted"
+    sha = hashlib.sha256(png).hexdigest()
+    message = {"role": "user", "content": f"data:image/png;base64,$blob:{sha}"}
+    rows = [
+        {
+            "call": call,
+            "attempt": 0,
+            "endpoint": "/chat/completions",
+            "duration_s": 0.1,
+            "status": 200,
+            "request": {"messages": [message] if call == 0 else [message, message]},
+        }
+        for call in range(2)
+    ]
+    log, log_path, calls_path = _wire_log(tmp_path, rows)
+    blob_dir = calls_path.parent.parent / "blobs"
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+
+    document = render_html(log, title="budget", log_path=log_path, frames_budget_bytes=1)
+
+    assert document.count("[blob elided: media budget]") == 2
+    assert f'href="#wire-scene-0-e0-{sha[:12]}"' not in document
+    assert "embedded media truncated at" in document
+
+
+def test_wire_repeat_blob_links_to_the_single_first_embed(tmp_path: Path) -> None:
+    png = b"repeat"
+    sha = hashlib.sha256(png).hexdigest()
+    reference = f"data:image/png;base64,$blob:{sha}"
+    rows = [
+        {
+            "call": 0,
+            "attempt": 0,
+            "endpoint": "/responses",
+            "duration_s": 0.1,
+            "status": 200,
+            "request": {"input": [{"content": reference}]},
+        },
+        {
+            "call": 1,
+            "attempt": 0,
+            "endpoint": "/responses",
+            "duration_s": 0.2,
+            "status": 200,
+            "request": {"input": [{"content": reference}, {"content": reference}]},
+        },
+    ]
+    log, log_path, calls_path = _wire_log(tmp_path, rows)
+    blob_dir = calls_path.parent.parent / "blobs"
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+
+    document = render_html(log, title="repeat", log_path=log_path)
+
+    anchor = f"wire-scene-0-e0-{sha[:12]}"
+    assert document.count(f'id="{anchor}"') == 1
+    assert document.count(f'href="#{anchor}"') == 1
+
+
+def test_wire_messages_are_delta_rendered_with_changed_as_sent_form(
+    tmp_path: Path,
+) -> None:
+    old_message = {"role": "user", "content": "original full text"}
+    rewritten = {
+        "role": "user",
+        "content": [{"type": "text", "text": "[image omitted: evicted view]"}],
+    }
+    new_message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "brand-new message"}],
+        "cache_control": {"type": "ephemeral"},
+    }
+    rows = [
+        {
+            "call": 0,
+            "attempt": 0,
+            "endpoint": "/messages",
+            "duration_s": 0.1,
+            "status": 200,
+            "request": {"messages": [old_message]},
+        },
+        {
+            "call": 1,
+            "attempt": 0,
+            "endpoint": "/messages",
+            "duration_s": 0.1,
+            "status": 200,
+            "request": {
+                "messages": [rewritten, new_message],
+                "reasoning": {"effort": "medium"},
+            },
+        },
+    ]
+    log, log_path, _ = _wire_log(tmp_path, rows)
+
+    document = render_html(log, title="delta", log_path=log_path)
+    second_call = document[document.index("call 1 attempt 0") :]
+
+    assert "message 0 changed as sent" in second_call
+    assert "[image omitted: evicted view]" in second_call
+    assert "brand-new message" in second_call
+    assert "cache_control" in second_call
+    assert "original full text" not in second_call
+
+
+def test_wire_tools_and_system_render_once_then_only_report_changes(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "call": 0,
+            "attempt": 0,
+            "endpoint": "/messages",
+            "duration_s": 0.1,
+            "status": 200,
+            "request": {
+                "system": "initial-system",
+                "tools": [{"name": "initial-tool"}],
+                "messages": [],
+                "output_config": {"effort": "low"},
+            },
+        },
+        {
+            "call": 0,
+            "attempt": 1,
+            "endpoint": "/messages",
+            "duration_s": 0.2,
+            "status": 429,
+            "request": {
+                "system": "initial-system",
+                "tools": [{"name": "initial-tool"}],
+                "messages": [],
+            },
+        },
+        {
+            "call": 1,
+            "attempt": 0,
+            "endpoint": "/messages",
+            "duration_s": 0.3,
+            "status": 200,
+            "request": {
+                "system": "changed-system",
+                "tools": [{"name": "changed-tool"}],
+                "messages": [],
+            },
+        },
+    ]
+    log, log_path, _ = _wire_log(tmp_path, rows)
+
+    document = render_html(log, title="static", log_path=log_path)
+
+    assert document.count("initial-system") == 1
+    assert document.count("initial-tool") == 1
+    assert "changed-system" not in document
+    assert "changed-tool" not in document
+    assert document.count("tools changed from the trial") == 1
+    assert document.count("system changed from the trial") == 1
+    assert "no new messages" in document
+
+
+def test_wire_malformed_request_degrades_to_an_empty_call(tmp_path: Path) -> None:
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/chat/completions",
+        "duration_s": None,
+        "status": None,
+        "request": [],
+    }
+    log, log_path, _ = _wire_log(tmp_path, [row])
+
+    document = render_html(log, title="malformed", log_path=log_path)
+
+    assert "Trial 0 Wire" in document
+    assert "no new messages" in document
+    assert "<dd>n/a</dd>" in document
