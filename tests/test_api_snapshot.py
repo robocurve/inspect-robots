@@ -45,6 +45,7 @@ EXPECTED = {
     "Observation",
     "Action",
     "ActionChunk",
+    "OPERATOR_END",
     "StepResult",
     "Box",
     "ActionSemantics",
