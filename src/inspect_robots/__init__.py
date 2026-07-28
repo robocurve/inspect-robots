@@ -5,8 +5,9 @@ defined once as a [`Task`][inspect_robots.task.Task] and run against any compati
 pairing of a [`Policy`][inspect_robots.policy.Policy] (the VLA) and an
 [`Embodiment`][inspect_robots.embodiment.Embodiment] (a real robot or simulator).
 
-The public API is everything exported here via ``__all__``. Anything not listed
-(or prefixed with ``_``) is private and carries no stability guarantee.
+The public API is every name and public submodule exported here via ``__all__``.
+Anything not listed (or prefixed with ``_``) is private and carries no stability
+guarantee.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ try:
 except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed tree
     __version__ = "0.0.0+unknown"
 
+from inspect_robots import defaults
 from inspect_robots.embodiment import (
     Embodiment,
     EmbodimentBase,
@@ -92,6 +94,7 @@ __all__ = [
     "TaskEnvelope",
     "TrialRecord",
     "__version__",
+    "defaults",
     "embodiment",
     "episode_length",
     "eval",

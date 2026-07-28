@@ -147,8 +147,10 @@ motion fall short of the tool's requested total.
 
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
-`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`, and
-`image_horizon`.
+`temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
+(default `always`; use `on_demand` for model-requested frames),
+`image_horizon`, and `depth` (default `render`; use `off` to omit depth
+renders).
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
 either on another wire is an error rather than a silent no-op.
 
@@ -189,6 +191,43 @@ pass `-P effort=none` to omit the parameter for endpoints that reject it
 chat completions requires the literal `none` when function tools are in
 play (any other value, or omitting the field, is a 400). In Python,
 `effort=None` omits the field and `effort="none"` sends the wire value.
+
+## Depth rendering
+
+For each camera, the policy looks for metric depth in
+`observation.extra[f"{cam}_depth"]`. When present, it renders the depth as a
+grayscale image immediately after that camera's RGB image: near is bright,
+far is dim, and invalid pixels are black. Depth follows RGB in both
+`images=always` observations and `take_pic` reveals under
+`images=on_demand`.
+
+Each render is preceded by a metric label:
+
+```text
+depth 'left_cam' (step 3): bright 0.09 m -> dim 1.41 m (2nd-98th pctl), 87% valid, center 0.31 m:
+```
+
+The bright and dim distances anchor the grayscale window at the 2nd and 98th
+percentiles of valid depth. The valid percentage is an integer, and the
+center depth appears only when the center pixel is valid. As with RGB camera
+labels, the `(step N)` suffix is present only when the observation carries an
+integer environment step; otherwise the label starts
+`depth 'left_cam': bright ...`.
+
+Depth rendering defaults to `-P depth=render`. Set `-P depth=off` to restore
+RGB-only observation payloads. Each rendered depth camera adds another image
+to an observation or reveal, so this kill-switch is useful when input payload
+cost matters.
+
+A camera with no `{cam}_depth` key is unchanged. If a depth thunk fails, its
+value is non-numeric or not two-dimensional, or fewer than 1% of its pixels
+are valid, the policy emits a descriptive text line and no depth image.
+
+Saved transcripts retain the metric depth label but replace the depth image
+with the standard `[image omitted: streamed camera frame]` placeholder. The
+HTML viewer shows that placeholder text verbatim below the depth label because
+the frame store has no saved frame for rendered depth. This is a known
+cosmetic artifact; the metric label remains available in the report.
 
 ## Fast mode on Claude
 

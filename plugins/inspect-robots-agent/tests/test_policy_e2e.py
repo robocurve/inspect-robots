@@ -452,6 +452,98 @@ def test_observation_content_step_label_fallbacks() -> None:
     assert numpy_step[1]["text"] == "camera 'top':"
 
 
+def test_observation_message_places_depth_immediately_after_its_camera() -> None:
+    script = _Script([_tool_response("done", {"summary": "observed depth"})])
+    policy = _policy(script)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect depth"))
+    observation = _vision_observation(env_step=3)
+    observation = replace(
+        observation,
+        extra={
+            **observation.extra,
+            "top_depth": lambda: np.full((2, 2), 0.5, dtype=np.float64),
+        },
+    )
+
+    policy.act(observation)
+
+    content = script.requests[0]["messages"][-1]["content"]
+    assert content[1]["text"] == "camera 'top' (step 3):"
+    assert content[2]["type"] == "image_url"
+    assert content[3]["text"] == (
+        "depth 'top' (step 3): bright 0.50 m -> dim 0.50 m "
+        "(2nd-98th pctl), 100% valid, center 0.50 m:"
+    )
+    assert content[4]["type"] == "image_url"
+    assert content[5]["text"] == "camera 'wrist' (step 3):"
+
+
+def test_depth_off_preserves_pre_depth_observation_message() -> None:
+    calls = 0
+
+    def depth_thunk() -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return np.full((2, 2), 0.5, dtype=np.float64)
+
+    script = _Script([_tool_response("done", {"summary": "ignored depth"})])
+    policy = _policy(script, depth="off")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="ignore depth"))
+    observation = _vision_observation(env_step=4)
+    observation = replace(
+        observation,
+        extra={**observation.extra, "top_depth": depth_thunk},
+    )
+    expected = _observation_content(observation, policy._state_labels)
+
+    policy.act(observation)
+
+    assert script.requests[0]["messages"][-1]["content"] == expected
+    assert calls == 0
+
+
+def test_missing_depth_key_preserves_pre_depth_observation_message() -> None:
+    script = _Script([_tool_response("done", {"summary": "rgb only"})])
+    policy = _policy(script)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect rgb"))
+    observation = _vision_observation(env_step=5)
+    expected = _observation_content(observation, policy._state_labels)
+
+    policy.act(observation)
+
+    assert script.requests[0]["messages"][-1]["content"] == expected
+
+
+def test_failing_depth_thunk_keeps_observation_message_valid() -> None:
+    def depth_thunk() -> np.ndarray:
+        raise RuntimeError("camera offline")
+
+    script = _Script([_tool_response("done", {"summary": "used rgb"})])
+    policy = _policy(script)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="inspect available data"))
+    observation = _vision_observation(env_step=6)
+    observation = replace(
+        observation,
+        extra={**observation.extra, "top_depth": depth_thunk},
+    )
+
+    policy.act(observation)
+
+    content = script.requests[0]["messages"][-1]["content"]
+    assert content[1]["text"] == "camera 'top' (step 6):"
+    assert content[2]["type"] == "image_url"
+    assert content[3] == {
+        "type": "text",
+        "text": "depth 'top' unavailable: camera offline",
+    }
+    assert content[4]["text"] == "camera 'wrist' (step 6):"
+    assert sum(part["type"] == "image_url" for part in content) == 2
+
+
 def test_transcript_echo_defaults_off(capsys: pytest.CaptureFixture[str]) -> None:
     policy = _policy(_Script([_tool_response("done", {"summary": "quiet"})]))
     policy.bind(CubePickEmbodiment().info)
@@ -1020,6 +1112,44 @@ def test_immediate_capture_appends_results_then_frames_and_redecides() -> None:
     assert frame_message["content"][1]["type"] == "image_url"
 
 
+def test_immediate_capture_reuses_once_resolved_depth() -> None:
+    calls = 0
+
+    def depth_thunk() -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return np.full((2, 2), 0.5, dtype=np.float64)
+
+    script = _Script(
+        [
+            _tool_response(
+                "take_pic",
+                {"cameras": ["top"], "note": "I need the top RGB and depth view."},
+            ),
+            _tool_response("done", {"summary": "looked with depth"}),
+        ]
+    )
+    policy = _policy(script, images="on_demand")
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="look"))
+    observation = _vision_observation(env_step=7)
+    observation = replace(
+        observation,
+        extra={**observation.extra, "top_depth": depth_thunk},
+    )
+
+    policy.act(observation)
+
+    history = script.requests[1]["messages"]
+    frame_message = history[-1]
+    assert frame_message["role"] == "user"
+    assert frame_message["content"][0]["text"] == "camera 'top' (step 7):"
+    assert frame_message["content"][1]["type"] == "image_url"
+    assert frame_message["content"][2]["text"].startswith("depth 'top' (step 7):")
+    assert frame_message["content"][3]["type"] == "image_url"
+    assert calls == 1
+
+
 def test_immediate_capture_validation_errors_increment_failures() -> None:
     script = _Script([_tool_response("take_pic", {})])
     policy = _policy(script, images="on_demand", max_llm_calls=50)
@@ -1549,6 +1679,14 @@ def test_images_mode_is_recorded_and_invalid_values_have_a_fix() -> None:
     assert policy.config.images == "on_demand"
     with pytest.raises(ConfigError, match=r"(?s)images must be one of.*fix:"):
         _policy(_Script([_text_response("unused")]), images="sometimes")
+
+
+def test_depth_mode_is_recorded_and_invalid_values_have_a_fix() -> None:
+    policy = _policy(_Script([_text_response("unused")]), depth="off")
+
+    assert policy.config.depth == "off"
+    with pytest.raises(ConfigError, match=r"(?s)depth must be one of.*fix:"):
+        _policy(_Script([_text_response("unused")]), depth="sometimes")
 
 
 def test_on_demand_prompt_and_no_tool_nudge_describe_chaining() -> None:

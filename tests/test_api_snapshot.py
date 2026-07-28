@@ -61,6 +61,8 @@ EXPECTED = {
     "sink",
     "registered",
     "resolve",
+    # public submodules
+    "defaults",
     # meta
     "__version__",
 }
