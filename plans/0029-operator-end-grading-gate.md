@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: `inspect_robots.OPERATOR_END == "operator_end"` (also importable from `inspect_robots.types`). Task 2 imports it in `cli.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_operator_end_constant_is_public_vocabulary() -> None:
@@ -39,12 +39,12 @@ def test_operator_end_constant_is_public_vocabulary() -> None:
     assert inspect_robots.OPERATOR_END is OPERATOR_END
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `uv run pytest tests/ -q -k operator_end_constant`
 Expected: FAIL with `ImportError: cannot import name 'OPERATOR_END'`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/inspect_robots/types.py`, directly above `class StepResult`:
 
@@ -60,7 +60,7 @@ Extend the `StepResult` docstring's reason examples (line 88-89) to include `"op
 
 In `src/inspect_robots/__init__.py`, import `OPERATOR_END` from `.types` alongside the existing `StepResult` import and add `"OPERATOR_END"` to `__all__` (ASCII-sorted: it slots before `"Observation"`).
 
-- [ ] **Step 4: Update the API snapshot and changelog**
+- [x] **Step 4: Update the API snapshot and changelog**
 
 `tests/test_api_snapshot.py::test_public_api_snapshot` asserts the exact `__all__` set — add `"OPERATOR_END"` to `EXPECTED` (it's a set; position is free). In `CHANGELOG.md`, the `[Unreleased]` section currently has only `### Removed` and `### Changed` (lines 8-22) — create an `### Added` subsection first (Keep-a-Changelog order: Added before Removed) containing:
 
@@ -71,12 +71,12 @@ In `src/inspect_robots/__init__.py`, import `OPERATOR_END` from `.types` alongsi
   included (#194).
 ```
 
-- [ ] **Step 5: Run the test to verify it passes, then the full suite**
+- [x] **Step 5: Run the test to verify it passes, then the full suite**
 
 Run: `uv run pytest tests/ -q -k "operator_end_constant or api_snapshot" && uv run pytest -q`
 Expected: PASS; full suite green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/inspect_robots/types.py src/inspect_robots/__init__.py tests/test_types_spaces.py tests/test_api_snapshot.py CHANGELOG.md
@@ -95,7 +95,7 @@ git commit -m "feat(types): OPERATOR_END termination-reason constant (#194)"
 - Consumes: `OPERATOR_END` from Task 1 — imported in `cli.py` as a **top-level runtime import** (`from inspect_robots.types import OPERATOR_END`). Do NOT add it to the `if TYPE_CHECKING:` block at `cli.py:67-73` (that import is erased at runtime and the hook would `NameError`).
 - Produces: `_prompt_operator_on_operator_end(record, scene)` — module-level in `cli.py` so tests can import it, same signature as `_prompt_operator`.
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
 
 Add after the last `_prompt_operator` unit test, mirroring their record-construction style. There is **no** shared `_terminated_record` helper — `test_prompt_operator_unit_semantics` uses a local `_record()` closure (`tests/test_registry_cli.py:2387`); read `test_prompt_operator_still_prompts_without_definitive_verdict` (line 2270) and inline the same `TrialRecord`/steps construction with the reason swapped. Where the snippets below say `_terminated_record(...)`, substitute that inlined construction:
 
@@ -130,12 +130,12 @@ def test_prompt_on_operator_end_ignores_other_reasons(
 
 (If no `_terminated_record` helper exists, inline the same record construction the neighboring tests use — do not invent a new fixture style.)
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `uv run pytest tests/test_registry_cli.py -q -k operator_end`
 Expected: FAIL with `ImportError: cannot import name '_prompt_operator_on_operator_end'`
 
-- [ ] **Step 3: Implement the hook and the gate**
+- [x] **Step 3: Implement the hook and the gate**
 
 In `src/inspect_robots/cli.py`, after `_prompt_operator` (around line 575):
 
@@ -186,12 +186,12 @@ def test_outcome_phrase_maps_operator_end() -> None:
 
 Both Step 1 snippets use `Scene(...)`: import it function-locally (`from inspect_robots.scene import Scene`), matching the neighboring tests (`tests/test_registry_cli.py:2234, 2277`).
 
-- [ ] **Step 4: Run the unit tests to verify they pass**
+- [x] **Step 4: Run the unit tests to verify they pass**
 
 Run: `uv run pytest tests/test_registry_cli.py -q -k operator_end`
 Expected: PASS
 
-- [ ] **Step 5: Write the CLI-level registered-task test**
+- [x] **Step 5: Write the CLI-level registered-task test**
 
 Following the in-test registration pattern (`tests/test_registry_cli.py:628-640` for the embodiment, `:2180-2219` for the registered task + cleanup):
 
@@ -245,7 +245,7 @@ def test_registered_task_prompts_when_operator_ends_episode(
 
 The `-T num_scenes=1` is load-bearing: `cubepick-reach` defaults to `num_scenes=4` (`src/inspect_robots/_builtins.py:42-50`), which would mean 4 prompted trials and a `StopIteration` from the 2-answer iterator (`before_scoring` exceptions propagate out of `main()`, `eval.py:389-393`). `-T` is defined at `cli.py:217` and reaches the task factory via `_parse_kvs` (`cli.py:132-139, 956`); `parse_value` coerces `"1"` to `int` (`_defaults.py:34-54`).
 
-- [ ] **Step 6: Wire eval-set the same way**
+- [x] **Step 6: Wire eval-set the same way**
 
 `eval-set` currently never prompts: `_cmd_eval_set` doesn't pass `before_scoring` to `eval_set()` (`cli.py:1107-1119`) even though `eval_set()` accepts it (`eval.py:538`), and its subparser has no `--no-prompt`. Three edits:
 
@@ -272,12 +272,12 @@ and pass `before_scoring=before_scoring` to `eval_set(...)`.
 
 4. Two more cases in the same test (or siblings): (a) non-TTY stdin with `input` set to `pytest.fail` — `eval-set` completes and `[s.operator_judgements for s in log.samples] == [(None,)] * 4`; (b) TTY stdin **with `--no-prompt`** and `input` set to `pytest.fail` — same silent result. Case (b) is the only behavioral coverage of the new flag (branch coverage alone won't catch its absence: `not args.no_prompt` short-circuits into the same false-exit as a non-TTY).
 
-- [ ] **Step 7: Run the CLI-level tests, then the full suite and gates**
+- [x] **Step 7: Run the CLI-level tests, then the full suite and gates**
 
 Run: `uv run pytest tests/test_registry_cli.py -q -k operator_end && uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run mypy`
 Expected: all green — including the untouched `test_registered_task_never_prompts_even_with_operator_scorer_on_tty`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/inspect_robots/cli.py tests/test_registry_cli.py
@@ -294,7 +294,7 @@ git commit -m "feat(cli): grade attended trials that end with operator_end, regi
 **Interfaces:**
 - Consumes: the constant and gate from Tasks 1-2. Nothing downstream.
 
-- [ ] **Step 1: Document the contract for embodiment authors**
+- [x] **Step 1: Document the contract for embodiment authors**
 
 In `docs/guide/policies-and-embodiments.md`, in the `StepResult` section (lines 61-101; anchor on `def step(self, action: Action) -> StepResult:` at line 82), add:
 
@@ -309,7 +309,7 @@ terminate with a definitive `"success"`/`"failure"`: that suppresses the
 framework prompt and locks the run out of partial/skip verdicts and notes.
 ```
 
-- [ ] **Step 2: Document the scoring pairing**
+- [x] **Step 2: Document the scoring pairing**
 
 In `docs/guide/scoring.md`, in the operator-scorer section (anchor: line 17 `operator_scorer,  # reads a human verdict recorded during the rollout` and line 62), add after the existing prose:
 
@@ -323,7 +323,7 @@ as failures; pair attended operator-graded runs with a judgement-reading
 scorer instead.
 ```
 
-- [ ] **Step 3: Fix the stale CLI-guide claim**
+- [x] **Step 3: Fix the stale CLI-guide claim**
 
 The stale sentence spans `docs/guide/cli.md:107-110`: "Piped/CI stdin, `--no-prompt`, or a registered `--task` run never prompt or adopt an embodiment verdict, and an unjudged trial honestly scores as failure with 'no operator judgement recorded'." The registered-task clause becomes false; keep the scoring clause. Replace with:
 
@@ -336,7 +336,7 @@ unattended runs stay non-blocking. An unjudged trial honestly scores as
 failure with "no operator judgement recorded".
 ```
 
-- [ ] **Step 4: Run gates and commit**
+- [x] **Step 4: Run gates and commit**
 
 Run: `uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run mypy`
 Expected: PASS

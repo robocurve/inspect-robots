@@ -104,10 +104,12 @@ line of grader notes. Bare Enter or whitespace-only input records no note. An
 adopted embodiment verdict is not followed by a notes prompt, so a self-scoring
 embodiment still costs no keypresses per trial.
 `skip` records no judgement, but a grader note entered for that trial is still
-recorded. Notes never affect the score. Piped/CI stdin, `--no-prompt`, or a
-registered `--task` run never prompt or adopt an embodiment verdict: unattended
-runs stay non-blocking, and an unjudged trial honestly scores as failure with
-"no operator judgement recorded".
+recorded. Notes never affect the score. Piped/CI stdin or `--no-prompt` never
+prompt. A registered `--task` or `eval-set` run prompts only for trials that end
+with `termination_reason="operator_end"` — a human pressed the end-episode key — and
+never adopts an embodiment verdict or prompts for any other ending, so
+unattended runs stay non-blocking. An unjudged trial honestly scores as
+failure with "no operator judgement recorded".
 
 ## `inspect-robots setup`
 
