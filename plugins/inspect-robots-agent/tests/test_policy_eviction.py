@@ -309,3 +309,134 @@ def test_eviction_boundary_and_already_stubbed_prefix_are_byte_stable() -> None:
             if message_index in stub_indices(body)
         }
         assert len(stable_forms) == 1
+
+
+def test_on_demand_allows_re_reveal_after_eviction() -> None:
+    responses = [
+        # Call 1: take_pic top
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps({"cameras": ["top"], "note": "Check top view"}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 2: take_pic front
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps({"cameras": ["front"], "note": "Check front view"}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 3: take_pic left
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_3",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps({"cameras": ["left"], "note": "Check left view"}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 4: take_pic top again (was evicted since image_horizon=2)
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_4",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps({"cameras": ["top"], "note": "Check top view again"}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 5: move_by
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_5",
+                                "type": "function",
+                                "function": {
+                                    "name": "move_by",
+                                    "arguments": json.dumps({"deltas": {"dx": 0.01}, "note": "Move"}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    ]
+
+    response_iter = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(response_iter))
+
+    embodiment = CubePickEmbodiment()
+    policy = _policy(
+        images="on_demand",
+        image_horizon=2,
+        transport=httpx.MockTransport(handler),
+    )
+    policy.bind(embodiment.info)
+    scene = Scene(id="s0", instruction="reach")
+    policy.reset(scene)
+    observation = embodiment.reset(scene, seed=0)
+
+    # Should complete without error / refusal when re-requesting 'top' after eviction
+    chunk = policy.act(observation)
+    assert chunk is not None
+
