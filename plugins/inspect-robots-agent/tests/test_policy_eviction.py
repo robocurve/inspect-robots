@@ -326,7 +326,9 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                                 "type": "function",
                                 "function": {
                                     "name": "take_pic",
-                                    "arguments": json.dumps({"cameras": ["top"], "note": "Check top view"}),
+                                    "arguments": json.dumps(
+                                        {"cameras": ["top"], "note": "Check top"}
+                                    ),
                                 },
                             }
                         ],
@@ -347,7 +349,9 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                                 "type": "function",
                                 "function": {
                                     "name": "take_pic",
-                                    "arguments": json.dumps({"cameras": ["front"], "note": "Check front view"}),
+                                    "arguments": json.dumps(
+                                        {"cameras": ["front"], "note": "Check front"}
+                                    ),
                                 },
                             }
                         ],
@@ -368,7 +372,9 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                                 "type": "function",
                                 "function": {
                                     "name": "take_pic",
-                                    "arguments": json.dumps({"cameras": ["left"], "note": "Check left view"}),
+                                    "arguments": json.dumps(
+                                        {"cameras": ["left"], "note": "Check left"}
+                                    ),
                                 },
                             }
                         ],
@@ -389,7 +395,9 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                                 "type": "function",
                                 "function": {
                                     "name": "take_pic",
-                                    "arguments": json.dumps({"cameras": ["top"], "note": "Check top view again"}),
+                                    "arguments": json.dumps(
+                                        {"cameras": ["top"], "note": "Check top again"}
+                                    ),
                                 },
                             }
                         ],
@@ -410,7 +418,9 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                                 "type": "function",
                                 "function": {
                                     "name": "move_by",
-                                    "arguments": json.dumps({"deltas": {"dx": 0.01}, "note": "Move"}),
+                                    "arguments": json.dumps(
+                                        {"deltas": {"dx": 0.01}, "note": "Move"}
+                                    ),
                                 },
                             }
                         ],

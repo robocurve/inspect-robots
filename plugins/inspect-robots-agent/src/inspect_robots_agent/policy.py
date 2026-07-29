@@ -745,20 +745,32 @@ class LLMAgentPolicy(PolicyBase):
                                 if result.capture is None
                                 else _unique_names(result.capture)
                             )
-                            # Exclude cameras from self._revealed if their image-bearing message was evicted by image_horizon
+                            # Exclude cameras from self._revealed if their image-bearing message
+                            # was evicted by image_horizon
                             if self._image_horizon is not None:
                                 active_camera_names: set[str] = set()
                                 for msg in outgoing:
-                                    if isinstance((cnt := msg.get("content")), list):
-                                        for part in cnt:
-                                            if isinstance(part, dict) and part.get("type") == "text":
+                                    content_list = msg.get("content")
+                                    if isinstance(content_list, list):
+                                        for part in content_list:
+                                            if (
+                                                isinstance(part, dict)
+                                                and part.get("type") == "text"
+                                            ):
                                                 text = part.get("text", "")
                                                 if text.startswith("camera "):
-                                                    # e.g. "camera 'top' (step 0):" or "camera 'front':" or "Camera top:"
                                                     for term in text.split():
-                                                        if (term.startswith("'") or term.startswith('"')):
-                                                            active_camera_names.add(term.strip("'\"").rstrip(":"))
-                                self._revealed.intersection_update(active_camera_names)
+                                                        if term.startswith(
+                                                            ("'", '"')
+                                                        ):
+                                                            active_camera_names.add(
+                                                                term.strip(
+                                                                    "'\""
+                                                                ).rstrip(":")
+                                                            )
+                                self._revealed.intersection_update(
+                                    active_camera_names
+                                )
 
                             skipped = tuple(name for name in requested if name in self._revealed)
                             immediate_frames = tuple(
