@@ -222,3 +222,6 @@ __marimo__/
 
 # uv.lock is committed: CI installs with `uv sync --locked` for reproducible
 # builds. Run `uv lock` after changing dependencies in pyproject.toml.
+
+# Eval outputs (default sink directory) must never be committed (#212).
+logs/
