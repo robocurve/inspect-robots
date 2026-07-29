@@ -328,7 +328,8 @@ adapter shipped from this repo as separate packages:
   LLM (Claude, GPT, anything behind an OpenAI-compatible API) drive any
   embodiment through tool calls, as a first-class policy. The same
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
-  next to fine-tuned VLAs.
+  next to fine-tuned VLAs. A programmatic motion pre-check hook can return
+  correctable rejection reasons before absolute action chunks are emitted.
 - **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
