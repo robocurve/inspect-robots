@@ -86,11 +86,21 @@ PreCheck = Callable[[npt.NDArray[np.float64]], str | None]
   the hook is programmatic-only, following the `prior_learnings` coercion
   guard precedent), stored, and passed to `build_toolset` in `bind()`
   alongside the existing space arguments.
-- Recorded config: `AgentPolicyConfig` gains a `pre_check` field carrying
-  the callable's dotted `module.qualname` string (`None` when unset), so
-  two logs from materially different agents are never pooled as identical
-  configs — the same reproducibility rule that made #199 record the
-  `prior_learnings` path and sha256.
+- Recorded config: `AgentPolicyConfig` gains a `pre_check` field (`str |
+  None`, `None` when unset) identifying the hook. Derivation must handle
+  everything `callable()` admits: use
+  `f"{pre_check.__module__}.{pre_check.__qualname__}"` when both
+  attributes exist (plain functions, methods), else fall back to
+  `f"{type(pre_check).__module__}.{type(pre_check).__qualname__}"`
+  (callable instances, `functools.partial`), via `getattr` with defaults —
+  never a bare attribute access, which would crash at construction and
+  fail strict mypy. Honest scope: this records adapter *code identity*
+  only; two runs of the same adapter over differently configured checkers
+  (say, different `table_height`) record the same string. That is best
+  effort for an unserializable callable, one notch better than nothing and
+  weaker than #199's path+sha256; the README states the limitation and
+  suggests encoding checker config in the callable's qualname (a named
+  factory) when it matters.
 - `build_toolset(...)` gains `pre_check: PreCheck | None = None`, validates
   the displacement-mode refusal (§3) next to its existing mode checks, and
   hands it to `Toolset`.
