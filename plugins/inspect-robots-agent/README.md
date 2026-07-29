@@ -141,6 +141,76 @@ absolute interpolants. In displacement modes, a value tighter than the action
 box can truncate each `move_by` step. Either setting can make the executed
 motion fall short of the tool's requested total.
 
+## Motion pre-check
+
+Python callers can pass `pre_check=` to `LLMAgentPolicy` to inspect one
+absolute motion before its chunk is emitted. The callable receives a
+read-only float64 array with shape `(steps, dim)`. It contains the exact
+already-clipped action waypoints for one move call. The first row is the first
+commanded waypoint and the last row is the final target. Return `None` to
+allow the motion. Return a nonempty human-readable string to reject it. The
+agent receives `pre-check rejected this motion: <reason>` and can choose a
+different target on the next turn.
+
+Here is an adapter for the collision checker from
+[`inspect-robots-yam`](https://github.com/robocurve/inspect-robots-yam):
+
+```python
+import numpy as np
+import numpy.typing as npt
+
+from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_yam.collision import CollisionChecker
+
+
+def make_yam_collision_pre_check(checker: CollisionChecker):
+    """Reject the first emitted YAM waypoint whose geometry penetrates."""
+
+    def check_yam_waypoints(
+        waypoints: npt.NDArray[np.float64],
+    ) -> str | None:
+        for index, waypoint in enumerate(waypoints):
+            report = checker.check(waypoint)
+            if report.collided:
+                return f"{report.geom1}:{report.geom2} at waypoint {index}"
+        return None
+
+    return check_yam_waypoints
+
+
+checker = CollisionChecker()
+policy = LLMAgentPolicy(pre_check=make_yam_collision_pre_check(checker))
+```
+
+This hook is programmatic-only. `-P` CLI flags carry serialized values and
+cannot carry callables. Displacement control modes are refused at bind time
+when a pre-check is configured because their emitted vectors are per-step
+deltas, not absolute configurations.
+
+**Layering:** The pre-check supplies model feedback. The framework approver
+chain remains the enforcement backstop. Passing the pre-check does not imply
+that an approver will pass the motion. In particular, the YAM collision
+approver sweeps interpolated substeps finer than the emitted waypoint spacing
+at low control rates. An adapter that needs parity should interpolate and
+check between emitted waypoints itself.
+
+**Exceptions:** Exceptions from the callable propagate. The rollout converts
+a generic exception into `PolicyError`, so the trial fails and
+`fail_on_error` applies. A typed `SafetyAbort` keeps its own meaning and halts
+the eval. A crashing or hard-vetoing adapter must fail visibly. Silently
+allowing the motion is never acceptable.
+
+**Retry budget:** A rejection is a normal tool error. Three rejected moves in
+a row raise a policy error instead of reaching `give_up`. Verify rig
+measurements such as `table_height` and base offsets so an over-conservative
+checker does not consume the budget.
+
+**Recorded identity:** Eval configuration records only the adapter code
+identity as `module.qualname`. Two runs using the same adapter with differently
+configured checkers record the same string. When checker configuration must
+be distinguishable, encode it in a named factory's qualname, for example
+`make_lab_a_table_742mm_pre_check`.
+
 > [!WARNING]
 > Guardrails are on by default at the CLI. **Never pass `--disable-guardrails`
 > on real hardware** unless you fully trust the policy and the rig.
