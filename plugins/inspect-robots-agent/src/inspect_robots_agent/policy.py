@@ -760,17 +760,11 @@ class LLMAgentPolicy(PolicyBase):
                                                 text = part.get("text", "")
                                                 if text.startswith("camera "):
                                                     for term in text.split():
-                                                        if term.startswith(
-                                                            ("'", '"')
-                                                        ):
+                                                        if term.startswith(("'", '"')):
                                                             active_camera_names.add(
-                                                                term.strip(
-                                                                    "'\""
-                                                                ).rstrip(":")
+                                                                term.strip("'\"").rstrip(":")
                                                             )
-                                self._revealed.intersection_update(
-                                    active_camera_names
-                                )
+                                self._revealed.intersection_update(active_camera_names)
 
                             skipped = tuple(name for name in requested if name in self._revealed)
                             immediate_frames = tuple(

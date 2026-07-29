@@ -449,4 +449,3 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
     # Should complete without error / refusal when re-requesting 'top' after eviction
     chunk = policy.act(observation)
     assert chunk is not None
-
