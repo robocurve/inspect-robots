@@ -19,7 +19,7 @@ jobs:
       contents: read
       issues: write  # open the failure alert
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # hatch-vcs derives the version from git tags
       - name: Install uv

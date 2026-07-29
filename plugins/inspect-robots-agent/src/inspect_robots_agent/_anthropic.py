@@ -17,6 +17,8 @@ import httpx
 
 from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall
 
+from ._capture import WireCapture
+
 _ANTHROPIC_VERSION = "2023-06-01"
 _FAST_MODE_BETA = "fast-mode-2026-02-01"
 
@@ -58,6 +60,7 @@ class AnthropicClient:
         max_retries: int = 3,
         backoff_s: float = 1.0,
         transport: httpx.BaseTransport | None = None,
+        capture: WireCapture | None = None,
     ):
         self._provider = provider
         self._max_output_tokens = max_output_tokens
@@ -73,6 +76,7 @@ class AnthropicClient:
         self._speed = speed
         self._max_retries = max_retries
         self._backoff_s = backoff_s
+        self._capture = capture
         # tool_use id -> the verbatim content array of the response it came in.
         # Keyed on id alone because the API guarantees tool_use ids are unique
         # within a conversation; a gateway that recycles them would replay the
@@ -120,7 +124,13 @@ class AnthropicClient:
             "messages": translated,
         }
         if system is not None:
-            body["system"] = system
+            body["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if tools:
             body["tools"] = _translate_tools(tools)
         if temperature is not None:
@@ -133,14 +143,37 @@ class AnthropicClient:
         last_error = "unknown error"
         last_status: int | None = None
         for attempt in range(self._max_retries):
+            t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/messages", json=body)
             except httpx.TransportError as exc:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/messages",
+                        request=body,
+                        status=None,
+                        response_text=None,
+                        error=str(exc),
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 last_error = str(exc)
                 # Reset, or a 429 followed by a connection failure would emit
                 # the fast-mode rate-limit guidance for the wrong cause.
                 last_status = None
             else:
+                if self._capture is not None:
+                    self._capture.record(
+                        attempt=attempt,
+                        endpoint="/messages",
+                        request=body,
+                        status=response.status_code,
+                        response_text=response.text,
+                        error=None,
+                        t_start=t_start,
+                        duration_s=time.time() - t_start,
+                    )
                 last_status = response.status_code
                 if response.status_code == 200:
                     payload = response.json()
@@ -264,6 +297,35 @@ def _assistant_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _with_cache_breakpoint(turn: dict[str, Any]) -> dict[str, Any]:
+    """Return a turn with ephemeral caching on its last eligible content block."""
+    content = turn.get("content")
+    if isinstance(content, str):
+        return {
+            **turn,
+            "content": [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    if not isinstance(content, list):
+        return turn
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if block.get("type") in {"thinking", "redacted_thinking"}:
+            continue
+        copied_content = list(content)
+        copied_content[index] = {
+            **block,
+            "cache_control": {"type": "ephemeral"},
+        }
+        return {**turn, "content": copied_content}
+    return turn
+
+
 def _translate_messages(
     messages: list[dict[str, Any]],
     raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]],
@@ -279,11 +341,19 @@ def _translate_messages(
     system: str | None = None
     translated: list[dict[str, Any]] = []
     pending_results: list[dict[str, Any]] = []
+    pending_anchor = False
+    anchor_turn: dict[str, Any] | None = None
 
     def flush_results() -> None:
+        nonlocal anchor_turn, pending_anchor
         if pending_results:
-            translated.append({"role": "user", "content": list(pending_results)})
+            turn = {"role": "user", "content": list(pending_results)}
+            if pending_anchor:
+                turn = _with_cache_breakpoint(turn)
+                anchor_turn = turn
+            translated.append(turn)
             pending_results.clear()
+            pending_anchor = False
 
     for index, message in enumerate(messages):
         role = message.get("role")
@@ -312,6 +382,13 @@ def _translate_messages(
                     "content": message["content"],
                 }
             )
+            # Defensive generality: _evicted_view only ever marks user
+            # messages (tool and assistant turns never carry image parts), so
+            # this branch and the assistant-turn check below are unreachable
+            # today. They stay so a future eviction rule that marks other
+            # roles fails soft (breakpoint applied) instead of silently
+            # dropping the anchor.
+            pending_anchor = pending_anchor or message.get("cache_anchor") is True
             continue
         flush_results()
         if role == "assistant":
@@ -332,13 +409,28 @@ def _translate_messages(
                 # The nudge retry path appends exactly this; an assistant
                 # message with an empty content array is a 400.
                 continue
-            translated.append({"role": "assistant", "content": blocks})
+            turn = {"role": "assistant", "content": blocks}
+            if message.get("cache_anchor") is True:
+                turn = _with_cache_breakpoint(turn)
+                anchor_turn = turn
+            translated.append(turn)
             continue
         if role != "user":
             raise RuntimeError(f"unsupported message role {role!r}")
-        translated.append({"role": role, "content": _translate_content(message["content"])})
+        turn = {"role": role, "content": _translate_content(message["content"])}
+        if message.get("cache_anchor") is True:
+            turn = _with_cache_breakpoint(turn)
+            anchor_turn = turn
+        translated.append(turn)
 
     flush_results()
+    if translated and translated[-1] is not anchor_turn:
+        # Anthropic's 20-block lookback can miss after unusually heavy retry
+        # churn, causing one harmless full-prefix write. The nudge string also
+        # changes from a wrapped final block to a bare string once superseded,
+        # so that final-breakpoint entry can miss once; the anchor still hits
+        # and both cases self-heal on the next ordinary cycle.
+        translated[-1] = _with_cache_breakpoint(translated[-1])
     return system, translated
 
 
@@ -376,9 +468,19 @@ def _parse_response(payload: dict[str, Any]) -> AssistantMessage:
             )
         # thinking blocks matter only to the replay cache, not to the turn.
     joined = "".join(texts)
+    raw_usage = payload.get("usage")
+    usage = (
+        {
+            str(key): value
+            for key, value in raw_usage.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        if isinstance(raw_usage, dict)
+        else None
+    )
     # Never "": it would round-trip into the next request as an empty text
     # block, which is a 400.
-    return AssistantMessage(content=joined or None, tool_calls=tuple(calls))
+    return AssistantMessage(content=joined or None, tool_calls=tuple(calls), usage=usage)
 
 
 def _terminal_message(payload: dict[str, Any], stop_reason: Any) -> str:

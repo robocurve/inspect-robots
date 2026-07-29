@@ -222,3 +222,8 @@ __marimo__/
 
 # uv.lock is committed: CI installs with `uv sync --locked` for reproducible
 # builds. Run `uv lock` after changing dependencies in pyproject.toml.
+
+# Run artifacts: eval log sinks and rerun recordings live outside version
+# control; share them as release assets or external storage instead.
+logs/
+*.rrd

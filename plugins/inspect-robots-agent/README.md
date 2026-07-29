@@ -141,6 +141,76 @@ absolute interpolants. In displacement modes, a value tighter than the action
 box can truncate each `move_by` step. Either setting can make the executed
 motion fall short of the tool's requested total.
 
+## Motion pre-check
+
+Python callers can pass `pre_check=` to `LLMAgentPolicy` to inspect one
+absolute motion before its chunk is emitted. The callable receives a
+read-only float64 array with shape `(steps, dim)`. It contains the exact
+already-clipped action waypoints for one move call. The first row is the first
+commanded waypoint and the last row is the final target. Return `None` to
+allow the motion. Return a nonempty human-readable string to reject it. The
+agent receives `pre-check rejected this motion: <reason>` and can choose a
+different target on the next turn.
+
+Here is an adapter for the collision checker from
+[`inspect-robots-yam`](https://github.com/robocurve/inspect-robots-yam):
+
+```python
+import numpy as np
+import numpy.typing as npt
+
+from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_yam.collision import CollisionChecker
+
+
+def make_yam_collision_pre_check(checker: CollisionChecker):
+    """Reject the first emitted YAM waypoint whose geometry penetrates."""
+
+    def check_yam_waypoints(
+        waypoints: npt.NDArray[np.float64],
+    ) -> str | None:
+        for index, waypoint in enumerate(waypoints):
+            report = checker.check(waypoint)
+            if report.collided:
+                return f"{report.geom1}:{report.geom2} at waypoint {index}"
+        return None
+
+    return check_yam_waypoints
+
+
+checker = CollisionChecker()
+policy = LLMAgentPolicy(pre_check=make_yam_collision_pre_check(checker))
+```
+
+This hook is programmatic-only. `-P` CLI flags carry serialized values and
+cannot carry callables. Displacement control modes are refused at bind time
+when a pre-check is configured because their emitted vectors are per-step
+deltas, not absolute configurations.
+
+**Layering:** The pre-check supplies model feedback. The framework approver
+chain remains the enforcement backstop. Passing the pre-check does not imply
+that an approver will pass the motion. In particular, the YAM collision
+approver sweeps interpolated substeps finer than the emitted waypoint spacing
+at low control rates. An adapter that needs parity should interpolate and
+check between emitted waypoints itself.
+
+**Exceptions:** Exceptions from the callable propagate. The rollout converts
+a generic exception into `PolicyError`, so the trial fails and
+`fail_on_error` applies. A typed `SafetyAbort` keeps its own meaning and halts
+the eval. A crashing or hard-vetoing adapter must fail visibly. Silently
+allowing the motion is never acceptable.
+
+**Retry budget:** A rejection is a normal tool error. Three rejected moves in
+a row raise a policy error instead of reaching `give_up`. Verify rig
+measurements such as `table_height` and base offsets so an over-conservative
+checker does not consume the budget.
+
+**Recorded identity:** Eval configuration records only the adapter code
+identity as `module.qualname`. Two runs using the same adapter with differently
+configured checkers record the same string. When checker configuration must
+be distinguishable, encode it in a named factory's qualname, for example
+`make_lab_a_table_742mm_pre_check`.
+
 > [!WARNING]
 > Guardrails are on by default at the CLI. **Never pass `--disable-guardrails`
 > on real hardware** unless you fully trust the policy and the rig.
@@ -148,9 +218,29 @@ motion fall short of the tool's requested total.
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
-(default `always`; use `on_demand` for model-requested frames).
+(default `always`; use `on_demand` for model-requested frames),
+`image_horizon`, `depth` (default `render`; use `off` to omit depth
+renders), and `prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
 either on another wire is an error rather than a silent no-op.
+
+| Image option | Default | Behavior |
+|---|---|---|
+| `-P images=` | `always` | Attach every observation's frames; use `on_demand` for model-requested frames |
+| `-P image_horizon=` | `2` | Keep frames from the newest two image-bearing messages in each outgoing request |
+
+Set `-P image_horizon=none` to send the full image history. Do not use a bare
+`-P image_horizon=`: the CLI parses it as an empty string, which the policy
+rejects. Full history grows request bodies by about 420 KB per observation
+with three cameras and can reach a 413 response around 85 observations. The
+default replaces older outgoing camera parts with deterministic text stubs;
+the saved conversation, transcript, and separately stored frames remain
+complete and unchanged.
+
+Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
+file to the system prompt after any embodiment notes. The file is read once
+when the policy is constructed, and its resolved path and content hash are
+recorded in the eval configuration.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
@@ -160,6 +250,21 @@ The speed fraction defaults to `0.1` and applies only to absolute modes.
 `LLMAgentPolicy.transcript()` returns the current conversation as a deep copy with streamed camera frames replaced by omission markers, ready for core eval-log persistence.
 Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a transcript observation to its stored frame.
 Live Rerun transcript streaming happens automatically when a Rerun sink is attached.
+
+Wire capture is on by default (`-P wire_capture=false` to disable): every
+request attempt each wire client posts — tool schemas, evicted view, depth
+composites, cache breakpoints — and every response land in
+`wire/<run_id>/<trial_id>/calls.jsonl` under the log directory, with image
+payloads deduplicated as `$blob:<sha256>` references into
+`wire/<run_id>/blobs/`. The format contract lives in the
+`inspect_robots_agent._capture` module docstring; browse captures with
+`inspect-robots view` (Wire section) or `inspect-robots inspect --wire`.
+Requires a core with the `on_trial_start` policy hook; on older cores the
+policy prints one notice and captures nothing.
+At trial end, `record.metadata["llm_usage"]` records `llm_calls` and the summed
+integer token counters returned by the wire. The native Anthropic wire
+includes input, output, cache-creation, and cache-read tokens; other wires
+currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
 Reasoning effort defaults to `low`: robot control is latency-sensitive (the
 arm stands still while the model thinks), safety guardrails sit below the
@@ -171,6 +276,43 @@ pass `-P effort=none` to omit the parameter for endpoints that reject it
 chat completions requires the literal `none` when function tools are in
 play (any other value, or omitting the field, is a 400). In Python,
 `effort=None` omits the field and `effort="none"` sends the wire value.
+
+## Depth rendering
+
+For each camera, the policy looks for metric depth in
+`observation.extra[f"{cam}_depth"]`. When present, it renders the depth as a
+grayscale image immediately after that camera's RGB image: near is bright,
+far is dim, and invalid pixels are black. Depth follows RGB in both
+`images=always` observations and `take_pic` reveals under
+`images=on_demand`.
+
+Each render is preceded by a metric label:
+
+```text
+depth 'left_cam' (step 3): bright 0.09 m -> dim 1.41 m (2nd-98th pctl), 87% valid, center 0.31 m:
+```
+
+The bright and dim distances anchor the grayscale window at the 2nd and 98th
+percentiles of valid depth. The valid percentage is an integer, and the
+center depth appears only when the center pixel is valid. As with RGB camera
+labels, the `(step N)` suffix is present only when the observation carries an
+integer environment step; otherwise the label starts
+`depth 'left_cam': bright ...`.
+
+Depth rendering defaults to `-P depth=render`. Set `-P depth=off` to restore
+RGB-only observation payloads. Each rendered depth camera adds another image
+to an observation or reveal, so this kill-switch is useful when input payload
+cost matters.
+
+A camera with no `{cam}_depth` key is unchanged. If a depth thunk fails, its
+value is non-numeric or not two-dimensional, or fewer than 1% of its pixels
+are valid, the policy emits a descriptive text line and no depth image.
+
+Saved transcripts retain the metric depth label but replace the depth image
+with the standard `[image omitted: streamed camera frame]` placeholder. The
+HTML viewer shows that placeholder text verbatim below the depth label because
+the frame store has no saved frame for rendered depth. This is a known
+cosmetic artifact; the metric label remains available in the report.
 
 ## Fast mode on Claude
 
@@ -215,6 +357,17 @@ Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
 of 64000 or more, which needs streaming this client does not implement yet.
 The read timeout scales with the cap and tops out at 600 s per attempt, so a
 large cap plus retries can sit for several minutes before failing.
+
+Prompt caching is automatic on this wire. Requests use up to three ephemeral
+breakpoints: the system prompt, the newest elided-image anchor when one exists,
+and the final message. Check
+`record.metadata["llm_usage"]["cache_read_input_tokens"]` to verify cache hits;
+it should become positive after the first ordinary call.
+Anthropic searches only 20 blocks behind a breakpoint, so a cycle with heavy
+retry or on-demand rejection churn can cause one silent full-prefix rewrite
+and a temporary zero cache-read count. A final nudge also changes wire shape
+once it is superseded. Both are cost blips rather than errors, and the anchor
+normally restores the hit on the next cycle.
 
 ## Reasoning effort on OpenAI models
 

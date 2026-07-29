@@ -13,8 +13,10 @@ Subcommands:
   one resolved policy/embodiment pair via
   [`eval_set`][inspect_robots.eval.eval_set]. Prints one status line and a compact
   per-task row instead of a full summary per task.
-- ``inspect-robots inspect LOG.json [--transcript]`` — print a saved eval log and
-  optionally append recorded policy conversations.
+- ``inspect-robots inspect LOG.json [--transcript] [--wire [CALL]]`` — print a
+  saved eval log and optionally append policy conversations or captured wire calls.
+- ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
+  into a deterministic digest or model-written learnings file.
 - ``inspect-robots view LOG.json [-o OUT.html] [--open]`` — render a saved eval log
   as a self-contained HTML report.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
@@ -37,25 +39,16 @@ import fnmatch
 import json
 import math
 import os
+import re
 import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from inspect_robots import __version__
-from inspect_robots._defaults import (
-    ADHOC_MAX_STEPS_FALLBACK,
-    ADHOC_SCORER_FALLBACK,
-    CONFIG_KEYS,
-    ENV_EMBODIMENT,
-    ENV_POLICY,
-    ENV_SIM_EMBODIMENT,
-    Defaults,
-    load_defaults,
-    parse_value,
-    set_default,
-)
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
     _chat_content,
@@ -63,6 +56,20 @@ from inspect_robots._html import (
     _is_chat_transcript,
     render_html,
 )
+from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
+from inspect_robots.defaults import (
+    _ADHOC_MAX_STEPS_FALLBACK,
+    _ADHOC_SCORER_FALLBACK,
+    _CONFIG_KEYS,
+    _ENV_EMBODIMENT,
+    _ENV_POLICY,
+    _ENV_SIM_EMBODIMENT,
+    Defaults,
+    _parse_value,
+    _set_default,
+    load_defaults,
+)
+from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
@@ -95,6 +102,7 @@ _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
     "max_steps": "hit step limit",
+    OPERATOR_END: "ended by operator",
     "give_up": "gave up",
     "done": "reported done",
     "policy_stop": "stopped by policy",
@@ -117,6 +125,7 @@ _SUBCOMMANDS = (
     "run",
     "eval-set",
     "inspect",
+    "summarize",
     "view",
     "video",
     "config",
@@ -124,7 +133,7 @@ _SUBCOMMANDS = (
     "doctor",
 )
 
-_ENV_BY_KIND = {"policy": ENV_POLICY, "embodiment": ENV_EMBODIMENT}
+_ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 
@@ -135,7 +144,7 @@ def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
         if "=" not in pair:
             raise SystemExit(f"expected key=value, got {pair!r}")
         key, _, value = pair.partition("=")
-        out[key] = parse_value(value)
+        out[key] = _parse_value(value)
     return out
 
 
@@ -143,9 +152,15 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     """Add the flags common to ``run`` and ``eval-set``.
 
     Component selection (``--policy``/``--embodiment``/``-P``/``-E``/``--sim``),
-    guardrails, logging, and epoch/error handling live here so a new shared flag
-    lands in both commands at once instead of drifting between two copies.
+    guardrails, logging, prompting control, and epoch/error handling live here
+    so a new shared flag lands in both commands at once instead of drifting
+    between two copies.
     """
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="never ask the terminal operator for a success verdict or grader notes",
+    )
     parser.add_argument("--policy", help="registered policy name (default: user config)")
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
@@ -221,18 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="horizon of an --instruction run (default: config or "
-        f"{ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
+        f"{_ADHOC_MAX_STEPS_FALLBACK}); invalid with --task",
     )
     p_run.add_argument(
         "--scorer",
         default=None,
         help="scorer for an --instruction run (default: config or "
-        f"{ADHOC_SCORER_FALLBACK!r}); invalid with --task",
-    )
-    p_run.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="never ask the terminal operator for a success verdict or grader notes",
+        f"{_ADHOC_SCORER_FALLBACK!r}); invalid with --task",
     )
     p_run.add_argument(
         "--rerun",
@@ -275,6 +285,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript",
         action="store_true",
         help="append recorded policy transcripts",
+    )
+    p_inspect.add_argument(
+        "--wire",
+        nargs="?",
+        const=True,
+        default=None,
+        type=int,
+        metavar="CALL",
+        help="append the wire-call table, or dump every attempt for CALL",
+    )
+    p_inspect.add_argument(
+        "--trial",
+        default=None,
+        metavar="SCENE-eEPOCH",
+        help="select a captured trial for --wire CALL",
+    )
+
+    p_summarize = sub.add_parser(
+        "summarize",
+        help="distill a saved eval log into a markdown learnings file",
+    )
+    p_summarize.add_argument("log", help="path to an EvalLog JSON file")
+    p_summarize.add_argument(
+        "--model",
+        default=None,
+        help="OpenAI-compatible model id (default: deterministic digest only)",
+    )
+    p_summarize.add_argument(
+        "--base-url",
+        default="https://api.anthropic.com/v1",
+        help="OpenAI-compatible API base URL (default: https://api.anthropic.com/v1)",
+    )
+    p_summarize.add_argument(
+        "--api-key-env",
+        default="ANTHROPIC_API_KEY",
+        metavar="VAR",
+        help="environment variable holding the API key (default: ANTHROPIC_API_KEY)",
+    )
+    p_summarize.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        metavar="FILE",
+        help="output markdown file (default: LOG_DIR/learnings/LOG_STEM.md; - writes stdout)",
     )
 
     p_view = sub.add_parser("view", help="render a saved eval log as a self-contained HTML report")
@@ -344,7 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
-    p_set.add_argument("key", choices=CONFIG_KEYS)
+    p_set.add_argument("key", choices=_CONFIG_KEYS)
     p_set.add_argument("value")
     config_sub.add_parser("show", help="print resolved defaults and their sources")
     return parser
@@ -444,7 +498,7 @@ def _pick_sim_embodiment(defaults: Defaults) -> tuple[str, str]:
     raise SystemExit(
         "--sim given but no sim embodiment configured.\n"
         f"registered embodiments: {names}\n"
-        f"fix: set ${ENV_SIM_EMBODIMENT}, or run "
+        f"fix: set ${_ENV_SIM_EMBODIMENT}, or run "
         "'inspect-robots config set sim_embodiment NAME'"
     )
 
@@ -570,6 +624,26 @@ def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
     # operator_event documents "skip" as "no judgement" for its consumers.
     if answer != "skip" or note is not None:
         record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
+
+
+def _prompt_operator_on_operator_end(record: TrialRecord, scene: Scene) -> None:
+    """Prompt only for trials the operator demonstrably ended (R6-safe).
+
+    ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
+    here can never block an unattended run — every other reason (``max_steps``
+    included) keeps R6's non-blocking behavior for registered tasks.
+    """
+    if record.termination_reason == OPERATOR_END:
+        _prompt_operator(record, scene)
+
+
+def _attended(args: argparse.Namespace) -> bool:
+    """True when the operator can be prompted: a real TTY and no ``--no-prompt``.
+
+    The single source of truth for the prompt gate shared by ``run`` and
+    ``eval-set`` — the same anti-drift argument as ``_add_shared_eval_args``.
+    """
+    return not args.no_prompt and sys.stdin.isatty()
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -743,6 +817,150 @@ def _print_policy_transcripts(log: EvalLog) -> None:
                 continue
             for line in json.dumps(transcript, indent=2).splitlines():
                 _print_degraded(f"    {line}")
+
+
+class _WireTrial(NamedTuple):
+    """A readable wire sidecar and its trial/run filesystem context."""
+
+    trial_id: str
+    rows: list[dict[str, Any]]
+    blob_dir: Path
+
+
+_WIRE_BLOB_RE = re.compile(r"\$blob:([0-9a-f]{64})")
+
+
+def _wire_blob_shas(value: object) -> list[str]:
+    """Return every valid symbolic blob reference in a captured JSON value."""
+    if isinstance(value, str):
+        return [match.group(1) for match in _WIRE_BLOB_RE.finditer(value)]
+    if isinstance(value, list):
+        return [sha for item in value for sha in _wire_blob_shas(item)]
+    if isinstance(value, dict):
+        return [sha for item in value.values() for sha in _wire_blob_shas(item)]
+    return []
+
+
+def _load_wire_trials(log: EvalLog, log_path: Path) -> list[_WireTrial]:
+    """Load every readable guarded wire sidecar referenced by an eval log."""
+    trials: list[_WireTrial] = []
+    for scene in log.samples:
+        for epoch in range(len(scene.epochs)):
+            if epoch >= len(scene.trial_metadata):
+                continue
+            target = resolve_log_pointer(log_path, scene.trial_metadata[epoch].get("wire_capture"))
+            if target is None:
+                continue
+            loaded = read_jsonl_prefix(target)
+            if loaded is None:
+                continue
+            blob_dir = derive_blob_dir(log_path, target)
+            if blob_dir is None:
+                continue
+            trials.append(
+                _WireTrial(
+                    f"{scene.scene_id}-e{epoch}",
+                    loaded,
+                    blob_dir,
+                )
+            )
+    return trials
+
+
+def _wire_request(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one row's request mapping, degrading malformed foreign data."""
+    request = row.get("request")
+    return cast(dict[str, Any], request) if isinstance(request, dict) else {}
+
+
+def _print_wire_table(trials: list[_WireTrial]) -> None:
+    """Print the compact all-trials wire attempt table."""
+    if not trials:
+        print("no wire capture recorded")
+        return
+    print("wire calls:")
+    print("  trial  call  attempt  endpoint  status  duration  images  new blob bytes")
+    for trial in trials:
+        seen: set[str] = set()
+        for row in trial.rows:
+            shas = _wire_blob_shas(_wire_request(row))
+            first_shas = set(shas).difference(seen)
+            seen.update(shas)
+            new_bytes = 0
+            for sha in first_shas:
+                with suppress(OSError):
+                    new_bytes += (trial.blob_dir / f"{sha}.png").stat().st_size
+            duration = row.get("duration_s")
+            shown_duration = (
+                f"{duration:.3f}s"
+                if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                else "-"
+            )
+            status = "-" if row.get("status") is None else str(row["status"])
+            print(
+                f"  {trial.trial_id}  {row.get('call', '-')}  "
+                f"{row.get('attempt', '-')}  {row.get('endpoint', '-')}  "
+                f"{status}  {shown_duration}  {len(shas)}  {new_bytes}"
+            )
+
+
+def _available_wire_trials(trials: list[_WireTrial]) -> str:
+    """Format captured trial ids for a guided CLI error."""
+    return ", ".join(trial.trial_id for trial in trials)
+
+
+def _print_wire_call(trials: list[_WireTrial], call: int, selected_trial: str | None) -> None:
+    """Pretty-print every captured attempt for one logical call index."""
+    if not trials:
+        raise SystemExit("no wire capture recorded; omit CALL to print an empty table")
+    if selected_trial is None:
+        if len(trials) > 1:
+            raise SystemExit(
+                "--trial is required for --wire CALL; available trials: "
+                f"{_available_wire_trials(trials)}"
+            )
+        trial = trials[0]
+    else:
+        matches = [trial for trial in trials if trial.trial_id == selected_trial]
+        if not matches:
+            raise SystemExit(
+                f"wire trial {selected_trial!r} not found; available trials: "
+                f"{_available_wire_trials(trials)}"
+            )
+        trial = matches[0]
+
+    rows = [row for row in trial.rows if row.get("call") == call]
+    if not rows:
+        raise SystemExit(f"wire call {call} not found in trial {trial.trial_id}")
+    print(f"wire trial {trial.trial_id}, call {call}:")
+    for row in rows:
+        print(f"attempt {row.get('attempt', '-')}:")
+        print(f"  endpoint: {row.get('endpoint', '-')}")
+        print(f"  status: {row.get('status')}")
+        print(f"  duration_s: {row.get('duration_s', '-')}")
+        if "error" in row:
+            _print_degraded(f"  error: {row['error']}")
+        for label in ("request", "response"):
+            _print_degraded(f"  {label}:")
+            dumped = json.dumps(row.get(label), indent=2, sort_keys=True, ensure_ascii=False)
+            for line in dumped.splitlines():
+                _print_degraded(f"    {line}")
+
+
+def _print_wire_capture(
+    log: EvalLog,
+    log_path: Path,
+    wire: int | bool,
+    selected_trial: str | None,
+) -> None:
+    """Print either the capture table or every attempt for one call."""
+    trials = _load_wire_trials(log, log_path)
+    if wire is True:
+        if selected_trial is not None:
+            raise SystemExit("--trial requires an integer --wire CALL")
+        _print_wire_table(trials)
+        return
+    _print_wire_call(trials, wire, selected_trial)
 
 
 def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
@@ -939,11 +1157,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     defaults = load_defaults(os.environ)
 
     if is_adhoc:
-        scorer_name = args.scorer or defaults.scorer or ADHOC_SCORER_FALLBACK
+        scorer_name = args.scorer or defaults.scorer or _ADHOC_SCORER_FALLBACK
         max_steps = (
             args.max_steps
             if args.max_steps is not None
-            else (defaults.max_steps or ADHOC_MAX_STEPS_FALLBACK)
+            else (defaults.max_steps or _ADHOC_MAX_STEPS_FALLBACK)
         )
         task = Task(
             name="adhoc",
@@ -970,15 +1188,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
 
         before_scoring = None
-        if (
-            is_adhoc
-            and not args.no_prompt
-            and sys.stdin.isatty()
-            and any(s.name == "operator" for s in task.scorers)
-        ):
-            # Ad-hoc runs only: a registered task with an operator scorer keeps
-            # R6's non-blocking, unattended-safe behavior (judgement stays None).
-            before_scoring = _prompt_operator
+        if _attended(args):
+            if is_adhoc and any(s.name == "operator" for s in task.scorers):
+                # Ad-hoc operator-scored runs: every non-definitive trial is
+                # prompted, exactly as before.
+                before_scoring = _prompt_operator
+            else:
+                # Any task, registered included: a trial the operator ended by
+                # keypress owes a verdict; everything else stays non-blocking
+                # and unattended-safe (R6).
+                before_scoring = _prompt_operator_on_operator_end
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1104,6 +1323,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
+        before_scoring = None
+        if _attended(args):
+            # Registered tasks only here: prompt for exactly the trials a human
+            # ended by keypress (OPERATOR_END); everything else stays
+            # non-blocking and unattended-safe (R6).
+            before_scoring = _prompt_operator_on_operator_end
         try:
             success, logs = eval_set(
                 tasks,
@@ -1117,6 +1342,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 retry_attempts=args.retry_attempts,
+                before_scoring=before_scoring,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log
@@ -1147,7 +1373,13 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     return 0 if success else 1
 
 
-def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
+def _cmd_inspect(
+    path: str,
+    *,
+    transcript: bool = False,
+    wire: int | bool | None = None,
+    trial: str | None = None,
+) -> int:
     from inspect_robots import read_eval_log
 
     log = read_eval_log(path)
@@ -1214,6 +1446,10 @@ def _cmd_inspect(path: str, *, transcript: bool = False) -> int:
     elif _has_policy_transcripts(log):
         print("policy transcripts: recorded (--transcript to print)")
         print(_styled(f"hint: HTML viewer: inspect-robots view {path}", _DIM))
+    if wire is not None:
+        _print_wire_capture(log, Path(path), wire, trial)
+    elif trial is not None:
+        raise SystemExit("--trial requires --wire CALL")
     return 0 if log.status == "success" else 1
 
 
@@ -1250,6 +1486,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
     document = render_html(
         log,
         title=f"{log.eval.task} - {log_path.name}",
+        log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(args.frames_budget * 1_000_000),
     )
@@ -1275,6 +1512,61 @@ def _cmd_view(args: argparse.Namespace) -> int:
         else:
             if not opened:
                 print(f"warning: could not open browser for {file_path}", file=sys.stderr)
+    return 0
+
+
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    """Distill a saved log and atomically write its markdown learnings artifact."""
+    from inspect_robots._summarize import summarize
+    from inspect_robots.errors import ConfigError
+
+    stdout_mode = args.out == "-"
+    log_path = Path(args.log)
+    out_path = (
+        None
+        if stdout_mode
+        else (
+            log_path.parent / "learnings" / f"{log_path.stem}.md"
+            if args.out is None
+            else Path(args.out)
+        )
+    )
+    if out_path is not None and out_path.exists() and out_path.is_dir():
+        raise SystemExit(f"--out {out_path} is a directory; pass a Markdown file path")
+    if out_path is not None and out_path.resolve() == log_path.resolve():
+        # The one data-loss path in this command: rendering over the log it reads.
+        raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
+
+    try:
+        document = summarize(
+            log_path,
+            model=args.model,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+        )
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if stdout_mode:
+        sys.stdout.write(document)
+        return 0
+
+    file_path = cast(Path, out_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=file_path.parent,
+        prefix=f".{file_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(document)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temp_path = Path(handle.name)
+    os.replace(temp_path, file_path)
+    print(f"wrote {file_path}")
     return 0
 
 
@@ -1410,7 +1702,7 @@ def _cmd_setup() -> int:
 
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
-        path = set_default(os.environ, args.key, args.value)
+        path = _set_default(os.environ, args.key, args.value)
         print(f"wrote {args.key} = {args.value} to {path}")
         return 0
     defaults = load_defaults(os.environ)
@@ -1459,7 +1751,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval-set":
         return _cmd_eval_set(args)
     if args.command == "inspect":
-        return _cmd_inspect(args.log, transcript=args.transcript)
+        return _cmd_inspect(
+            args.log,
+            transcript=args.transcript,
+            wire=args.wire,
+            trial=args.trial,
+        )
+    if args.command == "summarize":
+        return _cmd_summarize(args)
     if args.command == "view":
         return _cmd_view(args)
     if args.command == "video":

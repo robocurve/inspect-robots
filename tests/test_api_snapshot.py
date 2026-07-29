@@ -45,6 +45,7 @@ EXPECTED = {
     "Observation",
     "Action",
     "ActionChunk",
+    "OPERATOR_END",
     "StepResult",
     "Box",
     "ActionSemantics",
@@ -60,6 +61,8 @@ EXPECTED = {
     "sink",
     "registered",
     "resolve",
+    # public submodules
+    "defaults",
     # meta
     "__version__",
 }

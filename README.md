@@ -126,6 +126,20 @@ Read the recorded agent conversation with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
 camera frames the model saw.
 
+### Retry with learning
+
+Summarize a failed log into a learnings file, then pass those notes to the
+next agent run:
+
+```bash
+inspect-robots summarize logs/failed-run.json
+inspect-robots "place the fork on the plate" --policy agent \
+    -P prior_learnings=logs/learnings/failed-run.md
+```
+
+The `summarize` command produces the markdown file. The policy reads it once
+and records its resolved path and content hash in the eval configuration.
+
 ### Generate robot policy code with CaP-X
 
 The [inspect-robots-capx](plugins/inspect-robots-capx/) plugin evaluates a
@@ -173,6 +187,18 @@ Pretty-print a saved eval log:
 ```bash
 inspect-robots inspect logs/cubepick-reach_*.json
 ```
+
+Distill a saved log into a markdown learnings file:
+
+```bash
+inspect-robots summarize logs/cubepick-reach_*.json
+inspect-robots summarize logs/cubepick-reach_*.json --model claude-sonnet-4-5
+```
+
+Without `--model`, the command writes a deterministic offline digest. With a
+model, it sends the digest and bounded transcript tails to an OpenAI-compatible
+chat endpoint. Output defaults to `logs/learnings/<log-stem>.md`; use `-o FILE`
+to choose a path or `-o -` for stdout.
 
 Render a saved eval log as a self-contained HTML report:
 
@@ -302,7 +328,8 @@ adapter shipped from this repo as separate packages:
   LLM (Claude, GPT, anything behind an OpenAI-compatible API) drive any
   embodiment through tool calls, as a first-class policy. The same
   `--policy agent` runs ad-hoc instructions and scores on registered tasks
-  next to fine-tuned VLAs.
+  next to fine-tuned VLAs. A programmatic motion pre-check hook can return
+  correctable rejection reasons before absolute action chunks are emitted.
 - **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,

@@ -80,7 +80,9 @@ Policies that support transcript streaming automatically add conversation rows
 at `trial/<scene>/e<epoch>/llm`. In the Rerun viewer, add a TextLog view and
 select that entity path. Tool results use the DEBUG level and system prompts use
 TRACE, so enable both levels in the view's log-level filter to see the whole
-conversation.
+conversation. The same updates are also available as markdown at
+`trial/<scene>/e<epoch>/llm/latest`; add a Text Document view for a wrapped
+reading pane that stays synchronized with the timeline cursor.
 
 Scrubbing the `step` timeline highlights the transcript rows emitted for that
 control step alongside its camera and state data. This live stream is a
@@ -143,3 +145,45 @@ the placeholder in place.
 of assembling the path from the transcript label. That remains the right advice
 for programmatic consumers. The `view` command performs this join internally
 with the same sanitizer and an exact-match-or-degrade contract.
+
+## Wire capture
+
+The agent policy records **exactly what each LLM call sent and received** —
+by default, for every run. The saved transcript alone is not that object:
+outgoing requests carry the tool schemas, only the newest `image_horizon`
+frames (older ones become elision stubs), rendered depth composites, and, on
+the Anthropic wire, `cache_control` breakpoints — none of which survive into
+`policy_transcripts`. Wire capture stores the real thing, per attempt,
+including retries and the failed calls a run died on.
+
+Layout, under the log directory:
+
+```
+wire/<run_id>/<trial_id>/calls.jsonl   one JSON row per HTTP attempt
+wire/<run_id>/blobs/<sha256>.png       content-addressed image bytes
+```
+
+Each row records `call`, `attempt`, `endpoint`, `t`, `duration_s`,
+`request`, `status`, `response`, and (failed attempts only) `error`. Image
+payloads inside `request` are replaced by `$blob:<sha256>` sentinels — the
+sha of the decoded PNG stored once in `blobs/` — with every other part key,
+including data-URL prefixes and `cache_control`, preserved verbatim.
+Restoring a byte-faithful request is a string substitution: replace each
+sentinel with the base64 of its blob file. The trial's record points at its
+capture via `metadata["wire_capture"]`.
+
+Browse it with either viewer:
+
+- `inspect-robots view <log>` — each trial gains a collapsible **Wire**
+  section: per-call status, params, delta-rendered messages as sent, and
+  the frames the model could actually see, deduplicated against the
+  report's embedded-media budget.
+- `inspect-robots inspect <log> --wire` — a per-trial call table;
+  `--wire N` (with `--trial <scene>-e<epoch>` when the log has several
+  trials) dumps every attempt row of call `N`.
+
+Capture is best-effort and can never fail an eval: any sink error prints
+one warning and disables capture for that trial. Disable it entirely with
+`-P wire_capture=false`. Budget for roughly `store_frames`-scale disk usage
+(a 100-call three-camera trial with depth rendering writes on the order of
+100 MB, dominated by blobs).

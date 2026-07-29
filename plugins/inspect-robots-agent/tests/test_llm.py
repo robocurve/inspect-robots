@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+import inspect_robots_agent._llm as llm_module
 from inspect_robots.errors import ConfigError
+from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 
 # --- provider resolution ladder ----------------------------------------------
@@ -229,6 +232,11 @@ def _client(handler: Any, **kwargs: Any) -> ChatClient:
     return ChatClient(provider, transport=httpx.MockTransport(handler), **kwargs)
 
 
+def _wire_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "wire/run-1/scene-e0/calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
 def test_complete_sends_wire_format_and_parses_tool_calls() -> None:
     seen: list[httpx.Request] = []
 
@@ -315,6 +323,94 @@ def test_client_error_does_not_retry() -> None:
     with pytest.raises(RuntimeError, match="bad tool schema"):
         client.complete(messages=[], tools=[])
     assert calls["n"] == 1  # 4xx is our bug, not weather; retrying can't help
+
+
+def test_capture_precedes_nonretryable_4xx_raise(tmp_path: Path) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(400, json={"error": {"message": "bad input"}}),
+        capture=capture,
+    )
+
+    with pytest.raises(RuntimeError, match="bad input"):
+        client.complete(messages=[], tools=[])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] == 400
+    assert row["response"] == {"error": {"message": "bad input"}}
+
+
+def test_capture_precedes_malformed_json_200_raise(tmp_path: Path) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(200, text="{not-json"),
+        capture=capture,
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        client.complete(messages=[], tools=[])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] == 200
+    assert row["response"] == "{not-json"
+
+
+def test_capture_precedes_wrong_shape_200_key_error(tmp_path: Path) -> None:
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(200, json={"choices": [{}]}),
+        capture=capture,
+    )
+
+    with pytest.raises(KeyError, match="message"):
+        client.complete(messages=[], tools=[])
+
+    (row,) = _wire_rows(tmp_path)
+    assert row["status"] == 200
+    assert row["response"] == {"choices": [{}]}
+
+
+def test_capture_retries_share_call_index_and_record_transport_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("offline", request=request)
+        return httpx.Response(200, json=_tool_call_response())
+
+    class _Clock:
+        def __init__(self) -> None:
+            self._times = iter([10.0, 10.25, 20.0, 20.5])
+
+        def time(self) -> float:
+            return next(self._times)
+
+        def sleep(self, seconds: float) -> None:
+            return None
+
+    monkeypatch.setattr(llm_module, "time", _Clock())
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    client = _client(handler, backoff_s=0.0, capture=capture)
+
+    client.complete(messages=[], tools=[])
+
+    rows = _wire_rows(tmp_path)
+    assert [(row["call"], row["attempt"]) for row in rows] == [(0, 0), (0, 1)]
+    assert [row["t"] for row in rows] == [10.0, 20.0]
+    assert [row["duration_s"] for row in rows] == [0.25, 0.5]
+    assert rows[0]["status"] is None
+    assert rows[0]["response"] is None
+    assert rows[0]["error"] == "offline"
+    assert rows[1]["status"] == 200
+    assert "error" not in rows[1]
 
 
 def test_reasoning_tools_rejection_has_responses_wire_guidance() -> None:

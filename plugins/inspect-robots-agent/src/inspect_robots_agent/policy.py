@@ -12,9 +12,11 @@ selected client translates it to the configured API wire format.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,6 +35,7 @@ from inspect_robots.types import ActionChunk, Observation
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
+from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
@@ -44,7 +47,9 @@ from inspect_robots_agent._llm import (
 )
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
-from inspect_robots_agent._tools import Toolset, build_toolset
+from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
+
+from ._capture import WireCapture
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
@@ -60,6 +65,10 @@ _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh",
 _WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
+_DEPTH_MODES = frozenset({"render", "off"})
+
+# Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
+_PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -92,6 +101,11 @@ how much actually played. Placed alone, it looks before you decide what motion \
 to make. When the goal is achieved call done; if it cannot be achieved call \
 give_up. You have a budget of {budget} LLM calls for the whole trial."""
 
+_PRE_CHECK_PROMPT_CLAUSE = (
+    " A motion pre-check may reject a move with a stated reason. Adjust the target "
+    "rather than repeating a rejected move."
+)
+
 _ON_DEMAND_NUDGE = (
     "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
 )
@@ -113,6 +127,57 @@ def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sanitized
 
 
+def _evicted_view(
+    messages: list[dict[str, Any]],
+    horizon: int,
+    *,
+    mark_anchor: bool = False,
+) -> list[dict[str, Any]]:
+    """Return a view with camera frames older than the image horizon stubbed."""
+    image_message_indices = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance((content := message.get("content")), list)
+        and any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+    ]
+    stubbed_indices = image_message_indices[:-horizon]
+    if not stubbed_indices:
+        return list(messages)
+
+    newest_stubbed = stubbed_indices[-1]
+    view = list(messages)
+    for message_index in stubbed_indices:
+        message = messages[message_index]
+        content = message["content"]
+        assert isinstance(content, list)
+        image_indices = [
+            index
+            for index, part in enumerate(content)
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        removed_indices = set(image_indices)
+        for image_index in image_indices:
+            if image_index == 0:
+                continue
+            label = content[image_index - 1]
+            if isinstance(label, dict) and label.get("type") == "text":
+                removed_indices.add(image_index - 1)
+        stubbed_content = [
+            part for index, part in enumerate(content) if index not in removed_indices
+        ]
+        stubbed_content.append(
+            {
+                "type": "text",
+                "text": f"[{len(image_indices)} camera frame(s) elided]",
+            }
+        )
+        stubbed_message = {**message, "content": stubbed_content}
+        if mark_anchor and message_index == newest_stubbed:
+            stubbed_message["cache_anchor"] = True
+        view[message_index] = stubbed_message
+    return view
+
+
 @dataclass(frozen=True)
 class AgentPolicyConfig(PolicyConfig):
     """Inference-time configuration recorded in the eval log.
@@ -126,6 +191,7 @@ class AgentPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     wire: str = "chat"
+    wire_capture: bool = True
     speed: str | None = None
     #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
     #: wires, where nothing constrained the output.
@@ -135,6 +201,14 @@ class AgentPolicyConfig(PolicyConfig):
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
+    depth: str = "render"
+    image_horizon: int | None = 2
+    #: Resolved absolute path to the injected prior-learnings file.
+    prior_learnings: str | None = None
+    #: SHA-256 hexdigest of the injected prior-learnings text.
+    prior_learnings_sha256: str | None = None
+    #: Best-effort module and qualified-name identity of the motion pre-check.
+    pre_check: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -154,6 +228,10 @@ class LLMAgentPolicy(PolicyBase):
     compatibility check) adopts the embodiment's spaces and builds the tool
     surface from them. Conversation state is per-trial (``reset``), and the
     selected wire client translates that state without changing the loop.
+    Metric camera depth is rendered by default; pass ``depth="off"`` to omit
+    it without resolving any depth entries.
+    ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
+    and appends its text to every trial's system prompt.
     """
 
     def __init__(
@@ -162,6 +240,7 @@ class LLMAgentPolicy(PolicyBase):
         base_url: str | None = None,
         api_key_env: str | None = None,
         wire: str = "chat",
+        wire_capture: bool = True,
         speed: str | None = None,
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
@@ -170,9 +249,68 @@ class LLMAgentPolicy(PolicyBase):
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
+        depth: str = "render",
+        image_horizon: int | None = 2,
+        prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
-    ):
+        pre_check: PreCheck | None = None,
+    ) -> None:
+        prior_learnings_path: str | None = None
+        prior_learnings_text: str | None = None
+        prior_learnings_sha256: str | None = None
+        if prior_learnings is not None:
+            if not isinstance(prior_learnings, str) or not prior_learnings:
+                raise ConfigError(
+                    "prior_learnings must be a non-empty filesystem path string, "
+                    f"got {prior_learnings!r}.\n"
+                    "fix: the -P parser coerces unquoted values; pass "
+                    "-P 'prior_learnings=\"path/to/learnings.md\"'"
+                )
+            path = Path(prior_learnings)
+            try:
+                prior_learnings_text = path.read_text(encoding="utf-8")
+                prior_learnings_path = str(path.resolve())
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} could not be read as UTF-8 "
+                    f"({exc}).\n"
+                    "fix: pass the path to a readable UTF-8 learnings file"
+                ) from exc
+            if not prior_learnings_text.strip():
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} is empty or whitespace-only.\n"
+                    "fix: add concise notes to the file or omit -P prior_learnings="
+                )
+            if len(prior_learnings_text) > _PRIOR_LEARNINGS_TEXT_LIMIT:
+                raise ConfigError(
+                    f"prior_learnings file {prior_learnings!r} has "
+                    f"{len(prior_learnings_text)} characters; the limit is "
+                    f"{_PRIOR_LEARNINGS_TEXT_LIMIT}.\n"
+                    "fix: summarize it first and pass the path to the shorter learnings file"
+                )
+            prior_learnings_sha256 = hashlib.sha256(
+                prior_learnings_text.encode("utf-8")
+            ).hexdigest()
+
+        pre_check_identity: str | None = None
+        if pre_check is not None:
+            if not callable(pre_check):
+                raise ConfigError(
+                    f"pre_check must be callable or None, got {pre_check!r}.\n"
+                    "fix: -P CLI flags cannot carry callables; the pre_check hook is "
+                    "programmatic-only"
+                )
+            module = getattr(pre_check, "__module__", None)
+            qualname = getattr(pre_check, "__qualname__", None)
+            if module is not None and qualname is not None:
+                pre_check_identity = f"{module}.{qualname}"
+            else:
+                hook_type = type(pre_check)
+                type_module = getattr(hook_type, "__module__", None)
+                type_qualname = getattr(hook_type, "__qualname__", None)
+                pre_check_identity = f"{type_module}.{type_qualname}"
+
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
@@ -196,6 +334,11 @@ class LLMAgentPolicy(PolicyBase):
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
                 "fix: pass -P images=always or -P images=on_demand"
             )
+        if depth not in _DEPTH_MODES:
+            raise ConfigError(
+                f"depth must be one of {sorted(_DEPTH_MODES)}, got {depth!r}.\n"
+                "fix: pass -P depth=render or -P depth=off"
+            )
         if wire != "anthropic":
             # A dropped speed would bill at standard rates while the user
             # believes fast mode is on; a dropped cap is a limit that never
@@ -217,6 +360,15 @@ class LLMAgentPolicy(PolicyBase):
             or max_output_tokens < 1
         ):
             raise ConfigError("max_output_tokens must be an int >= 1")
+        if image_horizon is not None and (
+            isinstance(image_horizon, bool)
+            or not isinstance(image_horizon, int)
+            or image_horizon < 1
+        ):
+            raise ConfigError(
+                "image_horizon must be an int >= 1, or None to send full image history.\n"
+                "fix: pass -P image_horizon=N or -P image_horizon=none"
+            )
 
         environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
@@ -292,6 +444,7 @@ class LLMAgentPolicy(PolicyBase):
             if wire == "anthropic"
             else None
         )
+        self._capture = WireCapture() if wire_capture else None
         self._client: ChatClient | ResponsesClient | AnthropicClient
         if wire == "anthropic":
             assert resolved_max_output_tokens is not None
@@ -300,11 +453,12 @@ class LLMAgentPolicy(PolicyBase):
                 max_output_tokens=resolved_max_output_tokens,
                 speed=speed,
                 transport=transport,
+                capture=self._capture,
             )
         elif wire == "responses":
-            self._client = ResponsesClient(provider, transport=transport)
+            self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
         else:
-            self._client = ChatClient(provider, transport=transport)
+            self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
         # Robot control is latency-sensitive: default to low reasoning effort
@@ -314,12 +468,17 @@ class LLMAgentPolicy(PolicyBase):
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
         self._images = images
+        self._depth = depth
+        self._image_horizon = image_horizon
+        self._prior_learnings_text = prior_learnings_text
+        self._pre_check = pre_check
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
             base_url=provider.base_url,
             api_key_env=api_key_env,
             wire=wire,
+            wire_capture=wire_capture,
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
@@ -327,6 +486,11 @@ class LLMAgentPolicy(PolicyBase):
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
             images=images,
+            depth=depth,
+            image_horizon=image_horizon,
+            prior_learnings=prior_learnings_path,
+            prior_learnings_sha256=prior_learnings_sha256,
+            pre_check=pre_check_identity,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -337,6 +501,7 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
         self._revealed: set[str] = set()
 
@@ -350,6 +515,7 @@ class LLMAgentPolicy(PolicyBase):
             embodiment_info.control_hz,
             self._max_speed_frac,
             images=self._images,
+            pre_check=self._pre_check,
         )
         self._toolset = toolset
         self._state_labels = toolset.state_labels()
@@ -366,9 +532,18 @@ class LLMAgentPolicy(PolicyBase):
         """Start a fresh per-trial conversation with the scene goal and call budget."""
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
+        if self._pre_check is not None:
+            formatted += _PRE_CHECK_PROMPT_CLAUSE
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
+        if self._prior_learnings_text is not None:
+            formatted = (
+                formatted
+                + "\n\nNotes from a previous attempt at tasks like this one. They may "
+                + "be wrong or stale; the current observation always wins:\n"
+                + self._prior_learnings_text
+            )
         self._messages = [
             {
                 "role": "system",
@@ -379,11 +554,23 @@ class LLMAgentPolicy(PolicyBase):
         self._echo(f"[agent] goal: {scene.instruction}")
         self._delta_cursor = 0
         self._calls_used = 0
+        self._usage_totals.clear()
         self._pending = None
         self._revealed.clear()
 
+    def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+        """Begin streaming wire attempts for the next trial when enabled."""
+        if self._capture is not None:
+            self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
+
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
-        """Persist the transcript at the end of the trial."""
+        """Persist wire capture and the transcript at the end of the trial."""
+        if self._capture is not None:
+            capture_path = self._capture.end_trial()
+            if capture_path is not None:
+                record.metadata["wire_capture"] = capture_path
+            self._capture.warn_if_never_began()
+
         messages = self.transcript()
         if not messages:
             return
@@ -400,6 +587,11 @@ class LLMAgentPolicy(PolicyBase):
 
         # Make path relative to log_dir for portability
         record.metadata["transcript"] = f"transcripts/{run_id}/{trial_id}.jsonl"
+        if self._calls_used:
+            record.metadata["llm_usage"] = {
+                "llm_calls": self._calls_used,
+                **{key: value for key, value in self._usage_totals.items() if key != "llm_calls"},
+            }
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""
@@ -423,6 +615,7 @@ class LLMAgentPolicy(PolicyBase):
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
             )
+        depth = resolve_depth(observation) if self._depth == "render" else {}
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
@@ -445,6 +638,7 @@ class LLMAgentPolicy(PolicyBase):
             self._state_labels,
             reveal=reveal,
             narration=narration,
+            depth=depth,
         )
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
@@ -471,13 +665,29 @@ class LLMAgentPolicy(PolicyBase):
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
+            outgoing = self._messages
+            if self._image_horizon is not None:
+                outgoing = _evicted_view(
+                    self._messages,
+                    self._image_horizon,
+                    mark_anchor=isinstance(self._client, AnthropicClient),
+                )
             message = self._client.complete(
-                self._messages,
+                outgoing,
                 toolset.schemas(),
                 temperature=self._temperature,
                 reasoning_effort=self._effort,
             )
             self._calls_used += 1
+            if message.usage is not None:
+                for key, value in message.usage.items():
+                    self._usage_totals[key] = self._usage_totals.get(key, 0) + value
+                self._echo(
+                    "[agent] -- usage: "
+                    f"in={message.usage.get('input_tokens', 0)} "
+                    f"cache_read={message.usage.get('cache_read_input_tokens', 0)} "
+                    f"out={message.usage.get('output_tokens', 0)}"
+                )
             raw_message = message.raw()
             self._messages.append(raw_message)
             content = raw_message.get("content")
@@ -614,7 +824,11 @@ class LLMAgentPolicy(PolicyBase):
                 self._messages.append(
                     {
                         "role": "user",
-                        "content": _image_parts(observation, reveal=immediate_frames),
+                        "content": _image_parts(
+                            observation,
+                            reveal=immediate_frames,
+                            depth=depth,
+                        ),
                     }
                 )
             if chunk is not None:
@@ -711,6 +925,7 @@ def _observation_content(
     *,
     reveal: tuple[str, ...] | None = None,
     narration: str | None = None,
+    depth: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs."""
     lines = ["Current observation."]
@@ -720,7 +935,7 @@ def _observation_content(
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
-    parts.extend(_image_parts(observation, reveal=reveal))
+    parts.extend(_image_parts(observation, reveal=reveal, depth=depth))
     return parts
 
 
@@ -728,6 +943,7 @@ def _image_parts(
     observation: Observation,
     *,
     reveal: tuple[str, ...] | None = None,
+    depth: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build frame labels and payloads without changing the report's label join key."""
     parts: list[dict[str, Any]] = []
@@ -740,6 +956,8 @@ def _image_parts(
             continue
         parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
+        if depth is not None and name in depth:
+            parts.extend(depth_parts(name, depth[name], step_label))
     return parts
 
 

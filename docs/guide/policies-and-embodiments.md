@@ -88,6 +88,15 @@ class MyArm:
         ...
 ```
 
+When a human operator ends an episode without giving a verdict (an end-episode
+keypress), terminate with `termination_reason=inspect_robots.OPERATOR_END`
+(`"operator_end"`). Attended runs (interactive terminal, no `--no-prompt`) then
+get the operator prompt — `did the robot succeed? [y/n/partial/skip]` plus an
+optional grader note — for exactly those trials, on registered tasks and ad-hoc
+runs alike. Do **not** ask your own verdict prompt in the embodiment and
+terminate with a definitive `"success"`/`"failure"`: that suppresses the
+framework prompt and locks the run out of partial/skip verdicts and notes.
+
 Lifecycle: [`eval`](/api/#inspect_robots.eval.eval) closes what it resolves. An
 embodiment looked up by registry name is closed when the run finishes (even
 on a halt). If you construct the embodiment object yourself, you own it: call

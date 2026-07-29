@@ -203,8 +203,12 @@ CLI policy arguments use `-P key=value`.
 | `request_timeout_s` | `120` | Total wall-clock budget for one helper HTTP call, retries included. |
 | `gripper_open_is_high` | `true` | Use the gripper high bound as open. |
 | `transcript_echo` | `false` | Echo code and execution feedback to stderr. |
+| `prior_learnings` | `None` | Nonempty UTF-8 notes file appended after embodiment notes. |
 | `transport` | `None` | Programmatic `httpx` transport injection for tests. |
 | `env` | process environment | Programmatic provider-environment override for tests. |
+
+The prior-learnings file is read once when the policy is constructed. Its
+resolved path and content hash are recorded in the eval configuration.
 
 Each helper request retries transient transport errors, HTTP 429, and server
 5xx responses with exponential backoff. The total retry loop stays within

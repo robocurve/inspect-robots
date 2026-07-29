@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,14 @@ _FALLBACK_HZ = 10.0
 _MAX_DURATION_S = 10.0
 _BACKSTOP_STEP_FRAC = 0.05
 _RELATIVE_HEADROOM = 1e-6
+
+#: A motion hook over the exact clipped absolute waypoints for one move call.
+#:
+#: The input is a read-only stacked float64 copy with shape ``(steps, dim)``.
+#: Its first row is the first commanded waypoint and its last row is the final
+#: target. Return ``None`` to allow the motion or a non-empty reason to reject
+#: it. Exceptions propagate unchanged.
+PreCheck = Callable[[npt.NDArray[np.float64]], str | None]
 
 
 class ToolsetError(Exception):
@@ -77,6 +86,7 @@ class Toolset:
         pose: bool = False,
         images: str = "always",
         cameras: tuple[str, ...] = (),
+        pre_check: PreCheck | None = None,
     ):
         self._absolute = absolute
         self._pose = pose
@@ -99,6 +109,7 @@ class Toolset:
         self._step_limits = step_limits
         self._images = images
         self._cameras = cameras
+        self._pre_check = pre_check
         if absolute:
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
@@ -422,6 +433,14 @@ class Toolset:
         ]
         actions[-1] = Action(data=np.clip(target.copy(), self._low, self._high))
         clipped_target = np.clip(target.copy(), self._low, self._high)
+        if self._pre_check is not None:
+            waypoints: npt.NDArray[np.float64] = np.asarray(
+                np.stack([action.data for action in actions]),
+                dtype=np.float64,
+            )
+            waypoints.flags.writeable = False
+            if message := self._pre_check(waypoints):
+                return ToolResult(error="pre-check rejected this motion: " + message)
         return self._success(actions, steps, target=clipped_target)
 
     def _move_displacement(
@@ -491,6 +510,7 @@ def build_toolset(
     control_hz: float | None,
     max_speed_frac: float = 0.1,
     images: str = "always",
+    pre_check: PreCheck | None = None,
 ) -> Toolset:
     """Validate an embodiment's spaces and build its agent-facing tools.
 
@@ -516,6 +536,12 @@ def build_toolset(
         )
     if mode not in _ABSOLUTE_MODES | _DISPLACEMENT_MODES:
         raise ToolsetError(f"control_mode {mode!r} is not supported by the agent policy yet")
+    if pre_check is not None and mode in _DISPLACEMENT_MODES:
+        raise ToolsetError(
+            "pre_check cannot be used with displacement control modes: they emit "
+            "per-step delta vectors that a configuration checker would misread "
+            "(plan 0031)"
+        )
     if control_hz is not None and (not np.isfinite(control_hz) or control_hz <= 0):
         raise ToolsetError("control_hz must be finite and > 0 when declared")
     if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
@@ -632,4 +658,5 @@ def build_toolset(
         pose=mode in _POSE_MODES,
         images=images,
         cameras=tuple(camera.name for camera in observation_space.cameras),
+        pre_check=pre_check,
     )

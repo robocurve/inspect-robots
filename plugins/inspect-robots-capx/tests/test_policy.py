@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 from conftest import CapxStub
 from inspect_robots import eval as ir_eval
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.errors import ConfigError
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import (
@@ -28,7 +30,15 @@ from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_capx import CapxPolicy, CapxPolicyConfig, capx_policy
 from inspect_robots_capx.policy import (
     _EXECUTION_REPORT_CHAR_LIMIT,
+    _HELPER_DOCS,
+    _PRIOR_LEARNINGS_TEXT_LIMIT,
     _REPORT_TRUNCATION_MARKER,
+    _SYSTEM_TEMPLATE,
+)
+
+_PRIOR_LEARNINGS_FRAME = (
+    "\n\nNotes from a previous attempt at tasks like this one. They may "
+    "be wrong or stale; the current observation always wins:\n"
 )
 
 
@@ -106,6 +116,115 @@ def _bound_policy(script: _ScriptedTransport, **kwargs: Any) -> CapxPolicy:
     policy.bind(_info())
     policy.reset(Scene(id="s0", instruction="pick the cube"))
     return policy
+
+
+def test_prior_learnings_follow_embodiment_docs_and_record_provenance(
+    tmp_path: Path,
+) -> None:
+    learnings = "# Prior lessons\n\nVerify IK before closing the gripper.\n"
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    policy = _policy(_ScriptedTransport([]), prior_learnings=str(path))
+    policy.bind(_info())
+    policy.reset(Scene(id="s0", instruction="pick the cube"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    system = transcript[0]["content"]
+    assert isinstance(system, str)
+    template_index = system.index("You generate Python code")
+    docs_index = system.index("Embodiment notes:")
+    learnings_index = system.index(_PRIOR_LEARNINGS_FRAME)
+    assert template_index < docs_index < learnings_index
+    assert system.endswith(_PRIOR_LEARNINGS_FRAME + learnings)
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.prior_learnings == str(path.resolve())
+    assert (
+        policy.config.prior_learnings_sha256
+        == hashlib.sha256(learnings.encode("utf-8")).hexdigest()
+    )
+    policy.close()
+
+
+def test_prior_learnings_default_off_preserves_prompt_and_config() -> None:
+    info = _info()
+    policy = _policy(_ScriptedTransport([]))
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="pick the cube"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert transcript[0]["content"] == (
+        _SYSTEM_TEMPLATE.format(
+            budget=100,
+            name="joint-test",
+            action_summary=(
+                "joint_pos with 2 arm joints ['j0', 'j1'], gripper dim 2 "
+                "(high=open, low=closed), control_hz=10"
+            ),
+            helper_docs=_HELPER_DOCS.format(
+                depth_key="depth",
+                intrinsics_key="intrinsics",
+                extrinsics_key="extrinsics",
+            ),
+        )
+        + "\n\nEmbodiment notes:\n"
+        + str(info.docs)
+    )
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.prior_learnings is None
+    assert policy.config.prior_learnings_sha256 is None
+    policy.close()
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("missing.md", None),
+        ("empty.md", ""),
+        ("whitespace.md", " \n\t"),
+        ("oversize.md", "x" * (_PRIOR_LEARNINGS_TEXT_LIMIT + 1)),
+    ],
+    ids=["missing", "empty", "whitespace", "oversize"],
+)
+def test_prior_learnings_file_errors_are_guided(
+    tmp_path: Path,
+    filename: str,
+    contents: str | None,
+) -> None:
+    path = tmp_path / filename
+    if contents is not None:
+        path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"(?s)prior_learnings.*fix:"):
+        _policy(_ScriptedTransport([]), prior_learnings=str(path))
+
+
+@pytest.mark.parametrize("value", ["", 42], ids=["empty_string", "non_string"])
+def test_prior_learnings_coercion_errors_are_guided(value: object) -> None:
+    with pytest.raises(ConfigError, match=r"(?s)prior_learnings.*fix:.*coerces unquoted values"):
+        _policy(_ScriptedTransport([]), prior_learnings=value)
+
+
+def test_prior_learnings_are_not_reread_on_reset(tmp_path: Path) -> None:
+    learnings = "Keep the gripper open during the approach."
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    policy = _policy(_ScriptedTransport([]), prior_learnings=str(path))
+
+    policy.reset(Scene(id="s0", instruction="pick"))
+    first = policy.transcript()
+    path.unlink()
+    policy.reset(Scene(id="s1", instruction="pick again"))
+    second = policy.transcript()
+
+    assert first is not None
+    assert second is not None
+    assert first[0]["content"] == second[0]["content"]
+    assert _PRIOR_LEARNINGS_FRAME + learnings in second[0]["content"]
+    policy.close()
 
 
 @pytest.mark.parametrize(

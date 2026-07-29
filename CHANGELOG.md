@@ -7,6 +7,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Wire capture: eval logs now record 100% of what the LLM saw. The agent
+  policy captures every request/response attempt at the wire-client
+  serialization point (tool schemas, evicted view, depth composites,
+  `cache_control` breakpoints, retries) into `wire/<run_id>/` sidecars with
+  content-addressed image blobs, on by default (`-P wire_capture=false` to
+  opt out). New core `on_trial_start` policy hook (fail-safe: a raising
+  hook errors the trial, never the eval), HTML report **Wire** section, and
+  `inspect --wire` call-table/dump. Format contract in
+  `inspect_robots_agent._capture`; guide in *Logging & Rerun* (#206, #207).
+
+- Rerun sink: transcript `TextLog` rows at `trial/<scene>/e<epoch>/llm` are now
+  paired with a markdown `TextDocument` at `…/llm/latest` — add a Text Document
+  view for a wrapped, timeline-synced transcript reading pane (#203).
+
+- `OPERATOR_END` termination-reason constant (`"operator_end"`): the standard
+  reason for "a human ended this episode by keypress, verdict pending". Attended
+  runs now prompt for exactly those trials — registered tasks and `eval-set`
+  included (#194).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
@@ -65,8 +86,29 @@ All notable changes to this project are documented here. The format is based on
   (unscored) after three consecutive failures, and each correction turn spends
   one `max_llm_calls` unit.
 
+### Changed
+
+- **Agent plugin:** outgoing requests now retain camera frames only from the
+  newest two image-bearing messages by default, bounding long-episode
+  payloads that previously grew until the API's request-size ceiling (HTTP
+  413). Stored history, transcripts, and frame side-cars are unchanged.
+  Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
 ### Added
 
+- **Public user-defaults API:** `inspect_robots.defaults` lets plugin CLIs read
+  the configuration written by `inspect-robots setup`, including config-file
+  source paths and the args-owner metadata needed to apply hardware settings
+  safely (#197).
+- **Agent plugin:** per-camera metric depth from observation extras now renders
+  as near-bright grayscale beside its RGB camera in automatic observations and
+  `take_pic` reveals. Labels anchor the render with the 2nd–98th percentile
+  bright/dim distances, valid-pixel percentage, and optional center depth;
+  `-P depth=off` is the payload-cost kill-switch (#190).
+- **Agent plugin:** the native Anthropic wire adds automatic prompt-cache
+  breakpoints (system prompt, eviction boundary, final message) and records
+  per-trial token/cache totals in `record.metadata["llm_usage"]`, making
+  cache savings directly observable via `cache_read_input_tokens` (#188).
 - **Seconds-based benchmark horizons:** `Task(max_seconds=...)` gives every
   compatible embodiment the same physical-time budget. `eval()` resolves it
   with `ceil(max_seconds * embodiment.info.control_hz)`, rejects missing or

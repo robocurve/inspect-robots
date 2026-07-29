@@ -12,8 +12,16 @@ import pytest
 
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
-from inspect_robots._defaults import ENV_EMBODIMENT, ENV_POLICY, ENV_SIM_EMBODIMENT
 from inspect_robots.cli import main
+from inspect_robots.defaults import (
+    _ENV_EMBODIMENT as ENV_EMBODIMENT,
+)
+from inspect_robots.defaults import (
+    _ENV_POLICY as ENV_POLICY,
+)
+from inspect_robots.defaults import (
+    _ENV_SIM_EMBODIMENT as ENV_SIM_EMBODIMENT,
+)
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
@@ -676,6 +684,139 @@ def test_cli_eval_set_sim_flag(
     assert f"embodiment: cubepick (--sim, from ${ENV_SIM_EMBODIMENT})" in out
 
 
+def test_eval_set_prompts_when_operator_ends_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", ""] * 4)
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [("y",)] * 4
+    assert [s.operator_notes for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
+def test_eval_set_operator_end_does_not_prompt_without_tty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("non-TTY eval-set must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
+def test_eval_set_operator_end_respects_no_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-eval-set-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("--no-prompt eval-set must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--no-prompt",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert [s.operator_judgements for s in log.samples] == [(None,)] * 4
+    capsys.readouterr()
+
+
 def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1005,6 +1146,34 @@ def _write_log(log: EvalLog, tmp_path: Path, name: str) -> Path:
     return path
 
 
+def _write_wire_log(
+    tmp_path: Path,
+    trials: tuple[list[dict[str, object]], ...],
+    *,
+    pointer_override: str | None = None,
+) -> tuple[Path, Path]:
+    log = _step_limit_log(reasons=tuple("success" for _ in trials))
+    pointers: list[dict[str, object]] = []
+    for epoch, rows in enumerate(trials):
+        pointer = (
+            pointer_override
+            if pointer_override is not None
+            else f"wire/run/s0-e{epoch}/calls.jsonl"
+        )
+        pointers.append({"wire_capture": pointer})
+        if pointer_override is None:
+            calls_path = tmp_path / pointer
+            calls_path.parent.mkdir(parents=True, exist_ok=True)
+            calls_path.write_text(
+                "".join(f"{json.dumps(row)}\n" for row in rows),
+                encoding="utf-8",
+            )
+    scene = dataclasses.replace(log.samples[0], trial_metadata=tuple(pointers))
+    log_path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "wire.json")
+    blob_dir = tmp_path / "wire" / "run" / "blobs"
+    return log_path, blob_dir
+
+
 def _view_frame_log(frames_dir: str) -> EvalLog:
     log = _transcript_log()
     chat = [
@@ -1130,10 +1299,12 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log: EvalLog,
         *,
         title: str,
+        log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
     ) -> str:
         del log, title, frames_dir
+        assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
 
@@ -1539,6 +1710,211 @@ def test_plain_inspect_mentions_recorded_policy_transcripts(
     assert "policy transcripts: recorded (--transcript to print)" in out
     assert f"hint: HTML viewer: inspect-robots view {path}" in out
     assert "scene s0, trial 0:" not in out
+
+
+def test_inspect_wire_table_reports_attempts_images_and_new_blob_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "a" * 64
+    missing_sha = "c" * 64
+    reference = f"data:image/png;base64,$blob:{sha}"
+    rows: list[dict[str, object]] = [
+        {
+            "call": 0,
+            "attempt": 0,
+            "endpoint": "/chat/completions",
+            "duration_s": 0.1251,
+            "status": 429,
+            "request": {
+                "messages": [{"content": [reference, reference, f"$blob:{missing_sha}", 3]}]
+            },
+            "response": {"error": "retry"},
+        },
+        {
+            "call": 0,
+            "attempt": 1,
+            "endpoint": "/chat/completions",
+            "duration_s": True,
+            "status": None,
+            "request": {"messages": [{"content": reference}]},
+            "response": None,
+        },
+    ]
+    path, blob_dir = _write_wire_log(tmp_path, (rows,))
+    blob_dir.mkdir(parents=True)
+    (blob_dir / f"{sha}.png").write_bytes(b"blob")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire calls:" in out
+    assert "trial  call  attempt  endpoint  status  duration  images  new blob bytes" in out
+    assert "s0-e0  0  0  /chat/completions  429  0.125s  3  4" in out
+    assert "s0-e0  0  1  /chat/completions  -  -  1  0" in out
+
+
+def test_inspect_wire_call_dumps_every_retry_with_symbolic_blobs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "b" * 64
+    rows: list[dict[str, object]] = [
+        {
+            "call": 3,
+            "attempt": attempt,
+            "endpoint": "/responses",
+            "duration_s": 0.2,
+            "status": status,
+            "request": {"input": [{"image_url": f"$blob:{sha}"}]},
+            "response": response,
+        }
+        for attempt, status, response in (
+            (0, 500, {"error": "retry"}),
+            (1, 200, "raw response"),
+        )
+    ]
+    rows[0]["error"] = "temporary transport detail"
+    path, _ = _write_wire_log(tmp_path, (rows,))
+
+    assert main(["inspect", str(path), "--wire", "3"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire trial s0-e0, call 3:" in out
+    assert out.count("attempt ") == 2
+    assert f"$blob:{sha}" in out
+    assert '"error": "retry"' in out
+    assert '"raw response"' in out
+    assert "endpoint: /responses" in out
+    assert "status: 500" in out
+    assert "error: temporary transport detail" in out
+
+
+def test_inspect_wire_call_requires_trial_for_multiple_captures(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/messages",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    path, _ = _write_wire_log(tmp_path, ([row], [row]))
+
+    with pytest.raises(
+        SystemExit,
+        match=r"--trial is required.*available trials: s0-e0, s0-e1",
+    ):
+        main(["inspect", str(path), "--wire", "0"])
+
+
+def test_inspect_wire_trial_selects_one_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/first",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    second = {**first, "endpoint": "/second"}
+    path, _ = _write_wire_log(tmp_path, ([first], [second]))
+
+    assert main(["inspect", str(path), "--wire", "0", "--trial", "s0-e1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "wire trial s0-e1, call 0:" in out
+    assert "/first" not in out
+
+
+def test_inspect_wire_missing_capture_is_non_error_for_table_and_error_for_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(reasons=("success",)), tmp_path, "none-wire.json")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit, match="no wire capture recorded"):
+        main(["inspect", str(path), "--wire", "0"])
+
+
+def test_inspect_wire_hostile_pointer_is_treated_as_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _ = _write_wire_log(tmp_path, ([],), pointer_override="../outside/calls.jsonl")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+
+def test_inspect_wire_keeps_rows_before_a_torn_tail_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    row = {"call": 0, "attempt": 0, "endpoint": "/chat/completions", "status": 200}
+    path, _ = _write_wire_log(tmp_path, ([row],))
+    calls_path = tmp_path / "wire/run/s0-e0/calls.jsonl"
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"call": 1, "attempt": 0, "sta')
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    out = capsys.readouterr().out
+    assert "/chat/completions" in out
+
+
+def test_inspect_wire_shallow_pointer_is_treated_as_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "calls.jsonl").write_text('{"call": 0}\n', encoding="utf-8")
+    path, _ = _write_wire_log(tmp_path, ([],), pointer_override="calls.jsonl")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
+
+
+def test_inspect_wire_guides_invalid_trial_call_and_trial_without_dump(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "call": 1,
+        "attempt": 0,
+        "endpoint": "/responses",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {},
+        "response": {},
+    }
+    path, _ = _write_wire_log(tmp_path, ([row],))
+
+    with pytest.raises(SystemExit, match=r"wire trial 'missing' not found.*s0-e0"):
+        main(["inspect", str(path), "--wire", "1", "--trial", "missing"])
+    with pytest.raises(SystemExit, match="wire call 2 not found in trial s0-e0"):
+        main(["inspect", str(path), "--wire", "2"])
+    with pytest.raises(SystemExit, match="--trial requires an integer --wire CALL"):
+        main(["inspect", str(path), "--wire", "--trial", "s0-e0"])
+    with pytest.raises(SystemExit, match="--trial requires --wire CALL"):
+        main(["inspect", str(path), "--trial", "s0-e0"])
+
+
+@pytest.mark.parametrize("contents", [None, "", "[]\n", "{\n"])
+def test_inspect_wire_unreadable_or_invalid_sidecars_are_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    contents: str | None,
+) -> None:
+    path, _ = _write_wire_log(tmp_path, ([{}],))
+    calls_path = tmp_path / "wire" / "run" / "s0-e0" / "calls.jsonl"
+    if contents is None:
+        calls_path.unlink()
+    else:
+        calls_path.write_text(contents, encoding="utf-8")
+
+    assert main(["inspect", str(path), "--wire"]) == 0
+    assert "no wire capture recorded" in capsys.readouterr().out
 
 
 def test_run_summary_adds_agent_conversation_hint_when_recorded(
@@ -2176,7 +2552,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
+def test_registered_task_stays_silent_unless_operator_ends_episode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -2195,7 +2571,8 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
 
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("R6: --task runs must not block")
+        "builtins.input",
+        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -2217,6 +2594,107 @@ def test_registered_task_never_prompts_even_with_operator_scorer_on_tty(
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
     assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+    capsys.readouterr()
+
+
+def test_registered_task_prompts_when_operator_ends_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-for-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", "smooth grasp"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "-T",
+                "num_scenes=1",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                name,
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.samples[0].operator_notes == ("smooth grasp",)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_tty", "no_prompt_flag"])
+def test_registered_task_operator_end_suppressed_without_tty_or_with_no_prompt(
+    suppress: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The run-command twin of the eval-set suppression tests: the gate is
+    # evaluated per command, so each command needs its own negative coverage.
+    from dataclasses import replace as dc_replace
+
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+    from inspect_robots.types import OPERATOR_END, Action, StepResult
+
+    class _OperatorEndsEmbodiment(CubePickEmbodiment):
+        def step(self, action: Action) -> StepResult:  # every step: human ends the episode
+            result = super().step(action)
+            return dc_replace(
+                result, terminated=True, truncated=False, termination_reason=OPERATOR_END
+            )
+
+    name = "operator-ends-cubepick-suppressed-for-test"
+    embodiment_decorator(name)(_OperatorEndsEmbodiment)
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "-T",
+        "num_scenes=1",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    if suppress == "no_tty":
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    else:
+        _tty_stdin(monkeypatch)
+        argv.insert(1, "--no-prompt")
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("suppressed run must not prompt")
+    )
+    try:
+        rc = main(argv)
+    finally:
+        reg._FACTORIES["embodiment"].pop(name, None)
+    assert rc == 0
+    assert _read_only_log(tmp_path / "logs").samples[0].operator_judgements == (None,)
     capsys.readouterr()
 
 
@@ -2511,6 +2989,57 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof(
     assert record.operator_note is None
     (event,) = record.events
     assert event.data == {"verdict": "n", "source": "prompt", "note": None}
+
+
+def test_prompt_on_operator_end_prompts_and_records_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.cli import _prompt_operator_on_operator_end
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    answers = iter(["partial", "left gripper slipped"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason="operator_end",
+    )
+    _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    assert record.operator_judgement == "partial"
+    assert record.operator_note == "left gripper slipped"
+    capsys.readouterr()
+
+
+def test_prompt_on_operator_end_ignores_other_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots.cli import _prompt_operator_on_operator_end
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("must not prompt: not operator_end")
+    )
+    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
+        record = TrialRecord(
+            scene_id="s0",
+            epoch=0,
+            seed=0,
+            terminated=True,
+            truncated=truncated,
+            termination_reason=reason,
+        )
+        _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
+        assert record.operator_judgement is None
+
+
+def test_outcome_phrase_maps_operator_end() -> None:
+    from inspect_robots.cli import _OUTCOME_PHRASES
+
+    assert _OUTCOME_PHRASES["operator_end"] == "ended by operator"
 
 
 # --------------------------------------------------------------------------- #

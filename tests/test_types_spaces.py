@@ -252,3 +252,11 @@ def test_task_validation_and_scorer_names() -> None:
 
     mixed = Task(name="t", scenes=[scene], scorer=[episode_length(), "success_at_end"], max_steps=5)
     assert [s.name for s in mixed.scorers] == ["episode_length", "success_at_end"]
+
+
+def test_operator_end_constant_is_public_vocabulary() -> None:
+    import inspect_robots
+    from inspect_robots.types import OPERATOR_END
+
+    assert OPERATOR_END == "operator_end"
+    assert inspect_robots.OPERATOR_END is OPERATOR_END
