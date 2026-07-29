@@ -219,9 +219,10 @@ def rollout(
             prev_inferences = len(store.get(_INFER_KEY, []))
             approvals = list(store.get(_APPROVALS_KEY, []))
             try:
-                action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t, "approvals": approvals}), t, store
+                obs_with_extra = replace(
+                    obs, extra={**obs.extra, "env_step": t, "approvals": approvals}
                 )
+                action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
