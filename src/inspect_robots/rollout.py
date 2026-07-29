@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
+_APPROVALS_KEY = "_rollout_approvals"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -216,9 +217,10 @@ def rollout(
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
+            approvals = list(store.get(_APPROVALS_KEY, []))
             try:
                 action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                    policy, replace(obs, extra={**obs.extra, "env_step": t, "approvals": approvals}), t, store
                 )
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
@@ -277,6 +279,7 @@ def rollout(
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
+                store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
             try:

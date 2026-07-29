@@ -919,6 +919,16 @@ def _step_label(observation: Observation) -> str:
     return f"step {step}" if isinstance(step, int) else ""
 
 
+def _approvals_line(observation: Observation) -> str | None:
+    approvals = observation.extra.get("approvals")
+    if not isinstance(approvals, list) or not approvals:
+        return None
+    total = len(approvals)
+    details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
+    detail_str = f" ({', '.join(details)})" if details else ""
+    return f"approver: {total} step(s) modified{detail_str}."
+
+
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
@@ -932,6 +942,9 @@ def _observation_content(
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
     lines.extend(_state_lines(observation, state_labels))
+    app_line = _approvals_line(observation)
+    if app_line is not None:
+        lines.append(app_line)
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]

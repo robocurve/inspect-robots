@@ -433,6 +433,32 @@ def test_modified_action_records_approval_event_without_detail() -> None:
     assert approvals[0].data["detail"] is None
 
 
+def test_rollout_surfaces_approvals_in_observation_extra() -> None:
+    class _ObsCapturingPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(name="capturer", action_space=_BOX)
+            self.config = PolicyConfig()
+            self.captured_extras: list[dict[str, object]] = []
+
+        def reset(self, scene: Scene) -> None:
+            self.captured_extras.clear()
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.captured_extras.append(dict(observation.extra))
+            return ActionChunk(actions=[Action(data=np.array([1.0, 1.0]))])
+
+    space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
+    policy = _ObsCapturingPolicy()
+    _run(policy, CubePickEmbodiment(), approver=ClampApprover(space))
+    assert len(policy.captured_extras) > 1
+    # First inference sees empty approvals (step 0 hasn't approved anything yet)
+    assert policy.captured_extras[0]["approvals"] == []
+    # Subsequent inferences see recorded approvals
+    second_approvals = policy.captured_extras[1]["approvals"]
+    assert isinstance(second_approvals, list) and len(second_approvals) > 0
+    assert second_approvals[0] == {"t": 0, "detail": "clamped"}
+
+
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
     task = Task(
         name="t",
