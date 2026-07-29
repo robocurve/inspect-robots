@@ -1,7 +1,8 @@
 # Plan 0031: agent plugin action pre-check (correctable rejection before emission)
 
 Issue: [#210](https://github.com/robocurve/inspect-robots/issues/210)
-Status: draft, pending adversarial critique.
+Status: revised after adversarial critique round 1 (9 findings, all
+addressed below).
 
 ## 1. Problem
 
@@ -56,23 +57,40 @@ well under a millisecond per tool call.
 PreCheck = Callable[[npt.NDArray[np.float64]], str | None]
 ```
 
-- Input: a read-only `(steps, dim)` float64 array of the exact action
-  vectors the toolset is about to emit for one `move` call, in the bound
-  action space's semantics (absolute targets, already clipped to bounds,
-  first row is the first commanded waypoint, last row is the final target).
+- Input: a `(steps, dim)` float64 array of the exact action vectors the
+  toolset is about to emit for one `move` call, in the bound action
+  space's semantics (absolute targets, already clipped to bounds, first
+  row is the first commanded waypoint, last row is the final target). The
+  array is a stacked copy with `writeable=False` set, so a mutating
+  checker fails loudly and can never corrupt the emitted chunk.
 - Return `None` to allow. Return a non-empty human-readable string to
   reject; the string becomes the tool error verbatim, so it should say what
   was wrong and ideally where (the YAM adapter includes the geom pair and
   waypoint index).
-- Exceptions propagate. A crashing pre-check is a broken safety UX
-  component, not a reason to silently allow motion; the rollout wraps the
-  escape as `PolicyError` and fails the trial loudly.
+- Exceptions propagate unchanged, stated precisely: the rollout wraps
+  *generic* exceptions from the policy as `PolicyError` (trial fails,
+  `fail_on_error` applies), while typed Inspect Robots errors keep their
+  own semantics — a pre-check that raises `SafetyAbort` halts the whole
+  eval, exactly as if an approver had raised it. Both are acceptable
+  outcomes for a crashing or hard-vetoing checker; what is not acceptable
+  is a silent allow. The README documents the distinction so adapter
+  authors choose deliberately. (The YAM `CollisionChecker.check` raises
+  `SafetyAbort` only on non-finite input, which cannot occur here: every
+  waypoint is clipped against finite bounds before the hook runs.)
 
 ### 4.2 Plumbing
 
 - `LLMAgentPolicy.__init__` gains keyword `pre_check: PreCheck | None =
-  None`, stored and passed to `build_toolset` in `bind()` alongside the
-  existing space arguments.
+  None`, validated with `callable(pre_check)` and a guided `ConfigError`
+  otherwise (the message states that `-P` flags cannot carry callables and
+  the hook is programmatic-only, following the `prior_learnings` coercion
+  guard precedent), stored, and passed to `build_toolset` in `bind()`
+  alongside the existing space arguments.
+- Recorded config: `AgentPolicyConfig` gains a `pre_check` field carrying
+  the callable's dotted `module.qualname` string (`None` when unset), so
+  two logs from materially different agents are never pooled as identical
+  configs — the same reproducibility rule that made #199 record the
+  `prior_learnings` path and sha256.
 - `build_toolset(...)` gains `pre_check: PreCheck | None = None`, validates
   the displacement-mode refusal (§3) next to its existing mode checks, and
   hands it to `Toolset`.
@@ -94,10 +112,12 @@ PreCheck = Callable[[npt.NDArray[np.float64]], str | None]
 
 ### 4.3 Model-facing text
 
-When `pre_check` is set, the system prompt's guardrail sentence gains one
-clause telling the model a motion pre-check may reject moves with a stated
-reason and that it should adjust the target rather than repeat it. No
-prompt change when unset (byte-identical prompts for existing users).
+When `pre_check` is set, both system prompt templates
+(`_SYSTEM_TEMPLATE` and `_ON_DEMAND_SYSTEM_TEMPLATE`) gain one clause
+telling the model a motion pre-check may reject moves with a stated reason
+and that it should adjust the target rather than repeat it. No prompt
+change when unset (byte-identical prompts for existing users). The §5
+prompt test covers both templates.
 
 ## 5. Testing
 
@@ -110,9 +130,12 @@ existing patterns in `plugins/inspect-robots-agent/tests/`:
 - Reject path: string comes back as `ToolResult.error` with the prefix; the
   scripted model corrects on the next turn and the corrected chunk is
   emitted; failure counter resets.
-- Persistent rejection: scripted model repeats the same bad move;
-  consecutive-failure guard ends the turn the same way repeated bounds
-  errors do today.
+- Persistent rejection: scripted model repeats the same bad move three
+  times; `act()` raises the same `RuntimeError` repeated bounds errors
+  produce today (which the rollout classifies as `PolicyError`, trial
+  error under `fail_on_error`). The test asserts the `RuntimeError` from
+  `act()`, not a graceful give-up: parity with existing tool-error
+  behavior, no better and no worse.
 - Bind-time refusal: displacement-mode space + `pre_check` raises
   `ToolsetError` naming this plan; absolute mode binds fine; no `pre_check`
   + displacement mode still binds (no regression).
@@ -122,16 +145,25 @@ existing patterns in `plugins/inspect-robots-agent/tests/`:
 
 ## 6. Docs and release
 
-- Plugin README: new section with the hook contract and the YAM adapter
-  example (three lines: wrap `CollisionChecker.check` into a
-  waypoint-loop returning the report string). States the layering rule:
-  pre-check for feedback, approver chain for enforcement.
+- Plugin README: new section with the hook contract and the real YAM
+  adapter code (a short function: loop the waypoints through
+  `CollisionChecker.check`, return the geom-pair string with the waypoint
+  index on a hit, `None` otherwise). States the layering rule: pre-check
+  for feedback, approver chain for enforcement. Two documented caveats:
+  (a) pre-check-pass does not imply approver-pass — the approver sweeps
+  interpolated substeps finer than the emitted waypoint spacing at low
+  control rates, so a chunk can clear the pre-check and still be held
+  mid-chunk with no model feedback; adapters wanting parity should
+  interpolate between waypoints themselves; (b) an over-conservative
+  checker (wrong `table_height`, unmeasured base offsets) that rejects
+  three moves in a row errors the trial rather than reaching `give_up`.
 - Root README's agent-plugin blurb: one sentence.
-- Plugin version bump 0.17.0 -> 0.18.0 in its pyproject (static version,
-  publishes with the next core release per repo convention).
-- Core `CHANGELOG.md` entry if the repo records plugin changes there;
-  otherwise the plugin's own changelog section (implementer follows
-  whichever precedent #199/#204 set).
+- Plugin version bump 0.17.0 -> 0.18.0 in its pyproject and in
+  `tests/test_package.py` (which asserts the exact version and is touched
+  by every bump PR).
+- No core `CHANGELOG.md` entry: the resolved precedent (#199) is that
+  pure-plugin changes stay out of the core changelog, and this feature is
+  pure-plugin.
 
 ## 7. File tree
 
@@ -144,8 +176,11 @@ inspect-robots/
     ├── src/inspect_robots_agent/
     │   ├── _tools.py                               (PreCheck alias, build_toolset arg,
     │   │                                            move-path invocation, bind-time refusal)
-    │   └── policy.py                               (pre_check kwarg, prompt clause)
-    └── tests/                                      (new tests per §5)
+    │   └── policy.py                               (pre_check kwarg + ConfigError guard,
+    │                                                AgentPolicyConfig field, both prompt
+    │                                                templates)
+    └── tests/                                      (new tests per §5; test_package.py
+                                                     version assertion updated)
 ```
 
 ## 8. Resolved questions
