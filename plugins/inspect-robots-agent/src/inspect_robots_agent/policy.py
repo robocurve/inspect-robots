@@ -47,7 +47,7 @@ from inspect_robots_agent._llm import (
 )
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
-from inspect_robots_agent._tools import Toolset, build_toolset
+from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 
 from ._capture import WireCapture
 
@@ -100,6 +100,11 @@ observation, after the controller has played the motion; the narration reports \
 how much actually played. Placed alone, it looks before you decide what motion \
 to make. When the goal is achieved call done; if it cannot be achieved call \
 give_up. You have a budget of {budget} LLM calls for the whole trial."""
+
+_PRE_CHECK_PROMPT_CLAUSE = (
+    " A motion pre-check may reject a move with a stated reason. Adjust the target "
+    "rather than repeating a rejected move."
+)
 
 _ON_DEMAND_NUDGE = (
     "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
@@ -202,6 +207,8 @@ class AgentPolicyConfig(PolicyConfig):
     prior_learnings: str | None = None
     #: SHA-256 hexdigest of the injected prior-learnings text.
     prior_learnings_sha256: str | None = None
+    #: Best-effort module and qualified-name identity of the motion pre-check.
+    pre_check: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -247,6 +254,7 @@ class LLMAgentPolicy(PolicyBase):
         prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
+        pre_check: PreCheck | None = None,
     ) -> None:
         prior_learnings_path: str | None = None
         prior_learnings_text: str | None = None
@@ -284,6 +292,24 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings_sha256 = hashlib.sha256(
                 prior_learnings_text.encode("utf-8")
             ).hexdigest()
+
+        pre_check_identity: str | None = None
+        if pre_check is not None:
+            if not callable(pre_check):
+                raise ConfigError(
+                    f"pre_check must be callable or None, got {pre_check!r}.\n"
+                    "fix: -P CLI flags cannot carry callables; the pre_check hook is "
+                    "programmatic-only"
+                )
+            module = getattr(pre_check, "__module__", None)
+            qualname = getattr(pre_check, "__qualname__", None)
+            if module is not None and qualname is not None:
+                pre_check_identity = f"{module}.{qualname}"
+            else:
+                hook_type = type(pre_check)
+                type_module = getattr(hook_type, "__module__", None)
+                type_qualname = getattr(hook_type, "__qualname__", None)
+                pre_check_identity = f"{type_module}.{type_qualname}"
 
         if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
             raise ConfigError("max_speed_frac must be finite and > 0")
@@ -445,6 +471,7 @@ class LLMAgentPolicy(PolicyBase):
         self._depth = depth
         self._image_horizon = image_horizon
         self._prior_learnings_text = prior_learnings_text
+        self._pre_check = pre_check
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -463,6 +490,7 @@ class LLMAgentPolicy(PolicyBase):
             image_horizon=image_horizon,
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
+            pre_check=pre_check_identity,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -487,6 +515,7 @@ class LLMAgentPolicy(PolicyBase):
             embodiment_info.control_hz,
             self._max_speed_frac,
             images=self._images,
+            pre_check=self._pre_check,
         )
         self._toolset = toolset
         self._state_labels = toolset.state_labels()
@@ -503,6 +532,8 @@ class LLMAgentPolicy(PolicyBase):
         """Start a fresh per-trial conversation with the scene goal and call budget."""
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
+        if self._pre_check is not None:
+            formatted += _PRE_CHECK_PROMPT_CLAUSE
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()

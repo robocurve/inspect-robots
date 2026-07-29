@@ -8,6 +8,7 @@ guardrails, policy-stop, budgets, error taxonomy) runs for real.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import io
 import json
@@ -19,6 +20,7 @@ from typing import Any, cast
 
 import httpx
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 import inspect_robots_agent.policy as agent_policy_module
@@ -47,6 +49,7 @@ from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
 from inspect_robots_agent._tools import ToolResult
 from inspect_robots_agent.policy import (
+    _ON_DEMAND_SYSTEM_TEMPLATE,
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _SYSTEM_TEMPLATE,
     AgentPolicyConfig,
@@ -686,6 +689,66 @@ def test_prior_learnings_default_off_preserves_prompt_and_config() -> None:
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.prior_learnings is None
     assert policy.config.prior_learnings_sha256 is None
+
+
+@pytest.mark.parametrize(
+    ("images", "template"),
+    [
+        ("always", _SYSTEM_TEMPLATE),
+        ("on_demand", _ON_DEMAND_SYSTEM_TEMPLATE),
+    ],
+)
+def test_pre_check_prompt_clause_is_present_only_when_configured(
+    images: str,
+    template: str,
+) -> None:
+    def allow(waypoints: npt.NDArray[np.float64]) -> str | None:
+        return None
+
+    without = _policy(_Script([_text_response("unused")]), images=images)
+    without.reset(Scene(id="s0", instruction="reach"))
+    without_transcript = without.transcript()
+    assert without_transcript is not None
+    expected = template.format(name="(unbound)", budget=100)
+    assert without_transcript[0]["content"] == expected
+
+    with_hook = _policy(
+        _Script([_text_response("unused")]),
+        images=images,
+        pre_check=allow,
+    )
+    with_hook.reset(Scene(id="s0", instruction="reach"))
+    with_transcript = with_hook.transcript()
+    assert with_transcript is not None
+    prompt = with_transcript[0]["content"]
+    assert prompt.startswith(expected)
+    assert "pre-check may reject a move with a stated reason" in prompt
+    assert "Adjust the target rather than repeating a rejected move" in prompt
+
+
+def test_pre_check_config_records_function_and_callable_type_identity() -> None:
+    def allow(waypoints: npt.NDArray[np.float64]) -> str | None:
+        return None
+
+    unset = _policy(_Script([_text_response("unused")]))
+    plain = _policy(_Script([_text_response("unused")]), pre_check=allow)
+    partial = functools.partial(allow)
+    wrapped = _policy(_Script([_text_response("unused")]), pre_check=partial)
+
+    assert isinstance(unset.config, AgentPolicyConfig)
+    assert isinstance(plain.config, AgentPolicyConfig)
+    assert isinstance(wrapped.config, AgentPolicyConfig)
+    assert unset.config.pre_check is None
+    assert plain.config.pre_check == f"{allow.__module__}.{allow.__qualname__}"
+    assert wrapped.config.pre_check == (f"{type(partial).__module__}.{type(partial).__qualname__}")
+
+
+def test_pre_check_rejects_non_callables_with_programmatic_guidance() -> None:
+    with pytest.raises(
+        ConfigError,
+        match=r"(?s)pre_check must be callable.*-P CLI flags.*programmatic-only",
+    ):
+        _policy(_Script([_text_response("unused")]), pre_check=cast(Any, "checker"))
 
 
 @pytest.mark.parametrize(
@@ -1329,6 +1392,101 @@ def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> Non
         m for request in script.requests for m in request["messages"] if m.get("role") == "tool"
     ]
     assert any("unknown dimension 'dz'" in str(m["content"]) for m in tool_messages)
+
+
+def test_pre_check_rejection_is_fed_back_and_corrected() -> None:
+    checked_targets: list[float] = []
+
+    def reject_high_target(waypoints: npt.NDArray[np.float64]) -> str | None:
+        target = float(waypoints[-1, 0])
+        checked_targets.append(target)
+        return "joint target enters the keep-out zone" if target > 0.2 else None
+
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.1}}),
+        ]
+    )
+    policy = _policy(script, pre_check=reject_high_target)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move safely"))
+
+    chunk = policy.act(Observation(state={"q": np.array([0.0])}))
+
+    assert checked_targets == [0.5, 0.1]
+    assert chunk.actions[-1].data[0] == 0.1
+    correction = [
+        message for message in script.requests[1]["messages"] if message.get("role") == "tool"
+    ]
+    assert any(
+        message["content"]
+        == "pre-check rejected this motion: joint target enters the keep-out zone"
+        for message in correction
+    )
+
+
+def test_persistent_pre_check_rejections_exhaust_the_failure_budget() -> None:
+    calls = 0
+
+    def reject(waypoints: npt.NDArray[np.float64]) -> str | None:
+        nonlocal calls
+        calls += 1
+        return "joint target enters the keep-out zone"
+
+    script = _Script([_tool_response("move_joints", {"targets": {"joint": 0.5}})])
+    policy = _policy(script, pre_check=reject)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move safely"))
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "LLM tool calls kept failing; last error: pre-check rejected this motion: "
+            "joint target enters the keep-out zone"
+        ),
+    ):
+        policy.act(Observation(state={"q": np.array([0.0])}))
+    assert calls == 3
+
+
+def test_pre_check_exception_propagates_from_act_unchanged() -> None:
+    error = LookupError("collision model unavailable")
+
+    def crash(waypoints: npt.NDArray[np.float64]) -> str | None:
+        raise error
+
+    script = _Script([_tool_response("move_joints", {"targets": {"joint": 0.1}})])
+    policy = _policy(script, pre_check=crash)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move safely"))
+
+    with pytest.raises(LookupError) as caught:
+        policy.act(Observation(state={"q": np.array([0.0])}))
+    assert caught.value is error
+
+
+def test_stop_and_forced_give_up_never_call_pre_check() -> None:
+    calls = 0
+
+    def reject(waypoints: npt.NDArray[np.float64]) -> str | None:
+        nonlocal calls
+        calls += 1
+        return "all motion rejected"
+
+    policy = _policy(
+        _Script([_tool_response("done", {"summary": "stop"})]),
+        max_llm_calls=1,
+        pre_check=reject,
+    )
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+    first = policy.act(Observation(state={"q": np.array([0.0])}))
+    forced = policy.act(Observation(state={"q": np.array([0.0])}))
+
+    assert first.actions[0].meta["stop_reason"] == "done"
+    assert forced.actions[0].meta["stop_reason"] == "give_up"
+    assert calls == 0
 
 
 def test_missing_note_is_fed_back_and_corrected_in_persisted_transcript(

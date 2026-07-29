@@ -7,6 +7,7 @@ from itertools import pairwise
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
@@ -139,6 +140,27 @@ def test_build_refuses_unsupported_configurations() -> None:
     )
     with pytest.raises(ToolsetError, match="rotation_repr"):
         build_toolset(quat, _bimanual_obs_space(), control_hz=10.0)
+
+
+def test_pre_check_refuses_displacement_modes_only_when_configured() -> None:
+    def allow(waypoints: npt.NDArray[np.float64]) -> str | None:
+        return None
+
+    with pytest.raises(ToolsetError, match=r"displacement.*plan 0031"):
+        build_toolset(
+            _delta_space(),
+            ObservationSpace(),
+            control_hz=10.0,
+            pre_check=allow,
+        )
+
+    build_toolset(
+        _absolute_space(),
+        _absolute_obs_space(),
+        control_hz=10.0,
+        pre_check=allow,
+    )
+    build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
 
 
 def test_absolute_mode_requires_exactly_one_aligned_state_field() -> None:
@@ -591,6 +613,66 @@ def test_move_joints_clips_every_interpolant_into_box() -> None:
     assert all(-1.0 <= float(action.data[0]) <= 0.3 for action in result.chunk.actions)
 
 
+def test_pre_check_receives_exact_read_only_clipped_waypoints_once() -> None:
+    low = np.array([-1.0, -0.5])
+    high = np.array([0.3, 0.5])
+    space = Box(
+        shape=(2,),
+        low=low,
+        high=high,
+        semantics=ActionSemantics("joint_pos", dim_labels=("a", "b")),
+    )
+    received: list[npt.NDArray[np.float64]] = []
+
+    def allow(waypoints: npt.NDArray[np.float64]) -> str | None:
+        assert waypoints.dtype == np.float64
+        assert waypoints.ndim == 2
+        assert waypoints.shape[1] == 2
+        assert waypoints.flags.writeable is False
+        assert bool(np.all(waypoints >= low))
+        assert bool(np.all(waypoints <= high))
+        assert np.array_equal(waypoints[-1], np.array([0.3, 0.4]))
+        with pytest.raises(ValueError):
+            waypoints[0, 0] = 0.0
+        received.append(waypoints.copy())
+        return None
+
+    toolset = build_toolset(
+        space,
+        _absolute_obs_space(dim=2),
+        control_hz=10.0,
+        pre_check=allow,
+    )
+    result = toolset.execute(
+        _call("move_joints", targets={"a": 0.3, "b": 0.4}),
+        _obs({"q": np.array([-0.1, 0.0])}),
+    )
+
+    assert result.error is None and result.chunk is not None
+    emitted = np.stack([action.data for action in result.chunk.actions])
+    assert len(received) == 1
+    assert np.array_equal(received[0], emitted)
+
+
+def test_pre_check_rejection_returns_a_tool_error_without_a_chunk() -> None:
+    def reject(waypoints: npt.NDArray[np.float64]) -> str | None:
+        return "left_wrist:table at waypoint 4"
+
+    toolset = build_toolset(
+        _absolute_space(),
+        _absolute_obs_space(),
+        control_hz=10.0,
+        pre_check=reject,
+    )
+    result = toolset.execute(
+        _call("move_joints", targets={"joint": 0.3}),
+        _obs(),
+    )
+
+    assert result.error == ("pre-check rejected this motion: left_wrist:table at waypoint 4")
+    assert result.chunk is None
+
+
 def test_move_joints_headroom_stays_within_default_backstop() -> None:
     current = -0.5
     result = _execute_absolute(1.0, current=current)
@@ -910,17 +992,31 @@ def test_valid_move_note_does_not_change_the_motion_chunk() -> None:
 
 
 def test_done_and_give_up_emit_control_mode_hold() -> None:
-    absolute = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
-    state = np.full(14, 0.3)
-    result = absolute.execute(
-        _call("done", summary="fork placed"),
-        Observation(state={"joint_pos": state}),
+    calls = 0
+
+    def reject(waypoints: npt.NDArray[np.float64]) -> str | None:
+        nonlocal calls
+        calls += 1
+        return "all motion rejected"
+
+    absolute = build_toolset(
+        _bimanual_space(),
+        _bimanual_obs_space(),
+        control_hz=10.0,
+        pre_check=reject,
     )
-    assert result.error is None and result.chunk is not None
-    (action,) = result.chunk.actions
-    assert np.array_equal(action.data, state)
-    assert action.meta["request_stop"] is True
-    assert action.meta["stop_reason"] == "done"
+    state = np.full(14, 0.3)
+    for name, detail_key in (("done", "summary"), ("give_up", "reason")):
+        result = absolute.execute(
+            _call(name, **{detail_key: "fork placed"}),
+            Observation(state={"joint_pos": state}),
+        )
+        assert result.error is None and result.chunk is not None
+        (action,) = result.chunk.actions
+        assert np.array_equal(action.data, state)
+        assert action.meta["request_stop"] is True
+        assert action.meta["stop_reason"] == name
+    assert calls == 0
 
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     result = displacement.execute(_call("give_up", reason="cannot see"), _obs({}))
