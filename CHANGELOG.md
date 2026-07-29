@@ -40,6 +40,12 @@ All notable changes to this project are documented here. The format is based on
   rationale). `compat`'s policy/embodiment rate-mismatch warning is
   unaffected.
 
+### Fixed
+
+- **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
+  now raises `ConfigError` instead of silently converting `True` to a 1-step
+  horizon (`bool` is a subclass of `int` in Python).
+
 ### Changed
 
 - **Task horizon binding now follows compatibility checking.** An

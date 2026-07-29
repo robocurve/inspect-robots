@@ -144,6 +144,21 @@ def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
         _ = seconds_task.envelope
 
 
+@pytest.mark.parametrize("max_steps", [True, 0, -1])
+def test_task_rejects_invalid_steps_horizon(max_steps: int) -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    with pytest.raises(ConfigError, match="max_steps must be >= 1"):
+        Task(
+            name="t",
+            scenes=[Scene(id="s", instruction="x")],
+            scorer="success_at_end",
+            max_steps=max_steps,
+        )
+
+
 @pytest.mark.parametrize("max_seconds", [True, 0.0, -1.0, float("nan"), float("inf")])
 def test_task_rejects_invalid_seconds_horizon(max_seconds: float) -> None:
     from inspect_robots.errors import ConfigError
