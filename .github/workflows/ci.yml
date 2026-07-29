@@ -366,12 +366,45 @@ jobs:
           uv run --no-sync python -m pytest plugins/inspect-robots-capx/tests -q
           --cov=inspect_robots_capx --cov-report=term-missing --cov-fail-under=0
 
+  # Guard against the #208/#212 accident class: eval outputs (or any large
+  # blob) swept into a commit by git add -A. Per-file pre-commit hooks are
+  # local-only and GitHub's own limit is 100 MB per file, so 3 GB of small
+  # files sailed through every gate. This is the server-side backstop.
+  repo-hygiene:
+    name: repo hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: No tracked files under logs/
+        run: |
+          tracked=$(git ls-files logs/)
+          if [ -n "$tracked" ]; then
+            echo "::error::eval outputs must never be committed (see #212):"
+            echo "$tracked" | head -20
+            exit 1
+          fi
+      - name: No tracked file over 5 MB
+        run: |
+          # Filenames are PR-author-controlled: keep them out of shell parsing
+          # (no xargs/sh -c substitution), always quoted.
+          oversize=""
+          while IFS= read -r -d '' f; do
+            if [ "$(wc -c < "$f")" -gt 5242880 ]; then
+              oversize="$oversize$f"$'\n'
+            fi
+          done < <(git ls-files -z)
+          if [ -n "$oversize" ]; then
+            echo "::error::files over 5 MB do not belong in this repo; use a release asset or external storage:"
+            printf '%s' "$oversize"
+            exit 1
+          fi
+
   # Single required status check for branch protection: green iff every job
   # above is green. Add new jobs to 'needs' here or they won't gate merges.
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
