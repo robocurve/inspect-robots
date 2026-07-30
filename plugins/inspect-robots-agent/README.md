@@ -45,6 +45,15 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
+Robotics-tuned models resolve the same way:
+`-P model=google/gemini-robotics-er-2-preview` drives the embodiment with
+Gemini Robotics ER 2, Google's embodied-reasoning VLM, over the compat
+endpoint on the default `chat` wire. Verified against the live API
+(2026-07-30): camera frames, forced tool calls, and every `effort` level work.
+Google documents the Interactions API as the primary surface for the ER
+models, so if the compat endpoint ever stops serving them, that is the wire
+to add here.
+
 The wire format defaults to Chat Completions for broad OpenAI-compatible
 endpoint support:
 
