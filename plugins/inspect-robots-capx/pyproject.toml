@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-capx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Code-as-policy manipulation for Inspect Robots using CaP-X perception and IK servers."
 dynamic = ["readme"]
 requires-python = ">=3.10"
@@ -22,7 +22,7 @@ classifiers = [
 # CaP-X itself is intentionally not a dependency. The research checkout owns
 # the model servers; this adapter speaks their small HTTP protocol directly.
 dependencies = [
-    "inspect-robots>=0.4",
+    "inspect-robots>=0.29",
     "inspect-robots-agent>=0.12",
     "numpy>=1.24",
     "httpx>=0.27",
