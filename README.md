@@ -125,7 +125,8 @@ inspect-robots "place the fork on the plate" --policy agent \
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
-camera frames the model saw.
+camera frames the model saw. Once a few runs have accumulated,
+`inspect-robots view logs/` renders them all and builds a browsable index.
 
 ### Fast Opus 5 streamed to a remote Rerun viewer
 
@@ -222,6 +223,21 @@ Render a saved eval log as a self-contained HTML report:
 ```bash
 inspect-robots view logs/cubepick-reach_*.json
 ```
+
+Browse a whole logs directory: pass the directory instead of a file and every
+log is rendered into `logs/html/` behind a filterable `index.html` — when,
+instruction, policy/model, status, metrics, termination, and error for each
+run, newest first, with rows linking to the per-log reports:
+
+```bash
+inspect-robots view logs/
+```
+
+Re-runs are incremental (only new or changed logs are re-rendered; `--force`
+re-renders everything, e.g. after changing `--no-frames` or
+`--frames-budget`). Open the index directly with `--open`, or serve it to
+another machine with any static file server, e.g.
+`python3 -m http.server -d logs/html`.
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
 `ffmpeg` binary on PATH):
