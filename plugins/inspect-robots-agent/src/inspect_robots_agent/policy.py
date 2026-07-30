@@ -256,20 +256,21 @@ class LLMAgentPolicy(PolicyBase):
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
     ) -> None:
-        # Coerce non-None parameters to str. We use `str(x) if x else ""` so that falsy values
-        # (like False or 0) coerce to the empty string "" instead of "False" or "0".
-        # For example, if api_key_env is False, coercing to "False" would cause env lookup
-        # to search for an env var named literally "False" and bypass default key fallbacks.
-        if model is not None:
-            model = str(model) if model else ""
-        if base_url is not None:
-            base_url = str(base_url) if base_url else ""
-        if api_key_env is not None:
-            api_key_env = str(api_key_env) if api_key_env else ""
-        if effort is not None:
-            effort = str(effort) if effort else ""
-        if speed is not None:
-            speed = str(speed) if speed else ""
+        # Reject non-strings with a guided ConfigError to prevent unquoted CLI
+        # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
+        for name, val in [
+            ("model", model),
+            ("base_url", base_url),
+            ("api_key_env", api_key_env),
+            ("effort", effort),
+            ("speed", speed),
+        ]:
+            if val is not None and not isinstance(val, str):
+                raise ConfigError(
+                    f"{name} must be a string, got {val!r}.\n"
+                    f"fix: the -P parser coerces unquoted values; pass "
+                    f"-P '{name}=\"value\"'"
+                )
 
         prior_learnings_path: str | None = None
         prior_learnings_text: str | None = None
