@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 from typing import IO
 
-from inspect_robots.conformance import DeviceSlot, device_slots
+from inspect_robots.conformance import DeviceSlot, OptionSlot, device_slots, option_slots
 from inspect_robots.defaults import _parse_value, config_path
 
 # Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
@@ -722,6 +722,33 @@ def _device_section(
     return assignments
 
 
+def _options_section(
+    options: tuple[OptionSlot, ...],
+    carried: dict[str, dict[str, str]],
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+) -> dict[str, str]:
+    """Interview plugin-declared behavior toggles as yes/no questions.
+
+    The carried config value (parsed as a bool) is the suggested answer when
+    present and boolean; otherwise the slot's declared default. Answers are
+    written explicitly (``true``/``false``) so declining a previously enabled
+    toggle turns it off rather than silently carrying it forward.
+    """
+    existing_args = carried.get("embodiment.args", {})
+    answers: dict[str, str] = {}
+    for option in options:
+        suggested = option.default
+        if option.arg in existing_args:
+            parsed = _parse_value(existing_args[option.arg])
+            if isinstance(parsed, bool):
+                suggested = parsed
+        enabled = _ask_yes_no(option.label, suggested, input_fn=input_fn, out=out)
+        answers[option.arg] = "true" if enabled else "false"
+    return answers
+
+
 def _v4l2_color_capture(path: Path) -> bool | None:
     """Return whether a node captures color, or ``None`` when probing is inconclusive."""
     try:
@@ -1017,6 +1044,11 @@ def run_setup(
             if configured_embodiment in embodiment_factories
             else ()
         )
+        options = (
+            option_slots(embodiment_factories[configured_embodiment])
+            if configured_embodiment in embodiment_factories
+            else ()
+        )
         if slots:
             managed_args = tuple(slot.arg for slot in slots)
             embodiment_args = _device_section(
@@ -1039,6 +1071,22 @@ def run_setup(
                 by_path_dir,
                 input_fn=input_fn,
                 out=out,
+            )
+        # Options whose arg collides with an already-managed key (a device
+        # slot or camera key) or repeats an earlier option are skipped:
+        # interviewing them would write the key twice, and a duplicate key
+        # makes configparser reject the whole file on the next setup run.
+        interviewed: list[OptionSlot] = []
+        taken = set(managed_args)
+        for option in options:
+            if option.arg in taken:
+                continue
+            taken.add(option.arg)
+            interviewed.append(option)
+        if interviewed:
+            managed_args = managed_args + tuple(option.arg for option in interviewed)
+            embodiment_args.update(
+                _options_section(tuple(interviewed), carried, input_fn=input_fn, out=out)
             )
     except (EOFError, KeyboardInterrupt):
         print(_paint("setup aborted; nothing written", _YELLOW, out), file=out)

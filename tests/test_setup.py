@@ -29,7 +29,7 @@ from inspect_robots._setup import (
     _v4l2_color_capture,
     run_setup,
 )
-from inspect_robots.conformance import DeviceSlot
+from inspect_robots.conformance import DeviceSlot, OptionSlot
 
 
 def _scripted_input(
@@ -133,8 +133,28 @@ def _register_device_slots(
     )
 
 
+def _register_option_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    options: tuple[OptionSlot, ...],
+    name: str = "option-body",
+) -> None:
+    class _Factory:
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = options
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {name: _Factory} if kind == "embodiment" else {},
+    )
+
+
 def _slot_defaults(name: str = "slot-body") -> list[str]:
     return ["", name, "", "", "", ""]
+
+
+AUTO_START = OptionSlot(
+    arg="auto_start",
+    label="Skip the operator start prompts (auto_start)",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2171,6 +2191,271 @@ def test_run_setup_falls_back_to_cameras_without_registered_slots(
     assert result == 0
     assert any(prompt.startswith("Configure cameras?") for prompt in prompts)
     assert not any(prompt.startswith("Configure devices?") for prompt in prompts)
+
+
+def test_run_setup_writes_declared_option_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert AUTO_START.label in prompts[7]
+    assert "auto_start = true" in text
+
+
+def test_run_setup_writes_declared_option_default_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert "auto_start = false" in text
+
+
+def test_run_setup_option_suggestion_comes_from_carried_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = true\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [Y/n] "
+    assert "auto_start = true" in text
+
+
+def test_run_setup_option_carried_garbage_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = banana\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert "auto_start = false" in text
+    assert "banana" not in text
+
+
+def test_run_setup_option_answer_overrides_carried_value_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = true\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input([*_slot_defaults("option-body"), "n", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert text.count("auto_start") == 1
+    assert "auto_start = false" in text
+
+
+def test_run_setup_abort_during_options_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, _ = _scripted_input([*_slot_defaults("option-body"), "n", EOFError()])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 1
+    assert "setup aborted; nothing written" in out.getvalue()
+    assert not _config_path(tmp_path).exists()
+
+
+def test_run_setup_interviews_options_alongside_device_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot("left_channel", "can", "left CAN channel"),
+        )
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (AUTO_START,)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"option-body": _Factory} if kind == "embodiment" else {},
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nleft_channel = can9\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert "Configure devices? [Y/n] " in prompts
+    assert AUTO_START.label in prompts[7]
+    assert text.count("left_channel = can9") == 1
+    assert text.count("auto_start = true") == 1
+
+
+def test_run_setup_option_colliding_with_managed_key_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    colliding = OptionSlot(arg="top_cam_device", label="Replace the top camera")
+    _register_option_slots(monkeypatch, (colliding, AUTO_START))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n"
+        "[embodiment.args]\ntop_cam_device = /dev/old-top\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert not any(colliding.label in prompt for prompt in prompts)
+    assert sum(AUTO_START.label in prompt for prompt in prompts) == 1
+    assert text.count("top_cam_device = /dev/old-top") == 1
+    assert text.count("auto_start = true") == 1
+
+
+def test_run_setup_duplicate_option_arg_uses_first_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duplicate = OptionSlot(arg="auto_start", label="Duplicate auto start", default=True)
+    _register_option_slots(monkeypatch, (AUTO_START, duplicate))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert sum(AUTO_START.label in prompt for prompt in prompts) == 1
+    assert not any(duplicate.label in prompt for prompt in prompts)
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert text.count("auto_start = false") == 1
+
+
+def test_run_setup_no_declared_options_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Factory:
+        pass
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"option-body": _Factory} if kind == "embodiment" else {},
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert len(prompts) == 7
+    assert prompts[6] == "Configure cameras? [y/N] "
+    assert not any(AUTO_START.label in prompt for prompt in prompts)
 
 
 def test_run_setup_device_gate_defaults_no_without_probe_or_existing_arg(
