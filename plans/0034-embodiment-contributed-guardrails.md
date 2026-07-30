@@ -52,8 +52,8 @@ class GuardrailContribution:
 
 Validation in `__post_init__`: display names must be non-empty and contain no
 newline (they land in a one-line banner); approvers must satisfy the
-`Approver` protocol shape (`callable review` attribute), checked with the same
-lenience the chain itself applies. Exported from `inspect_robots.approver`.
+`Approver` protocol shape (a callable `review` attribute). Exported from
+`inspect_robots.approver`.
 
 The docstring also states the **behavioral contract** a contributed approver
 must honor as a chain member (today implicit in core's internals):
@@ -69,6 +69,11 @@ must honor as a chain member (today implicit in core's internals):
   a single-step jump from the real pose far larger than `max_delta`.
 - *Veto = `SafetyAbort`*: rejecting outright means raising `SafetyAbort`;
   any other exception is treated as a bug and propagates.
+- *Validate your own input*: a contribution must reject non-finite values
+  itself (`SafetyAbort`) and must not assume upstream clamping occurred —
+  on a degraded chain (unbounded space, both generic gates skipped) the
+  contribution is the first and only gate between raw policy output and
+  hardware.
 
 ### 1b. Public store seam: `DeltaLimitApprover.rewind_reference`
 
@@ -85,9 +90,10 @@ def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> No
     """Reset the limiter's reference to ``pose`` if a reference exists."""
 ```
 
-documented for exactly this substitution case, with a test pinning the
-store-key/helper coupling so a rename fails loudly. Yam plan 0017 switches
-`CollisionApprover` to call it.
+documented for exactly this substitution case — it **stores a copy** of the
+pose (callers must not end up aliasing the limiter's reference to a live
+array) — with a test pinning the store-key/helper coupling so a rename fails
+loudly. Yam plan 0017 switches `CollisionApprover` to call it.
 
 ### 2. The embodiment method (documented protocol, duck-typed)
 
@@ -99,18 +105,23 @@ def contribute_guardrails(self, action_space: Box) -> GuardrailContribution: ...
   working, zero migration).
 - Instance method, not ClassVar: whether and how to contribute depends on the
   embodiment's runtime config (control interface, user opt-out flag).
-- Follows the `bind_task` precedent exactly (`embodiment.py`): documented in
-  the `Embodiment` Protocol docstring, deliberately **not** a Protocol
-  member, so existing embodiments remain `isinstance(x, Embodiment)`-
-  conformant under `runtime_checkable`.
+- Follows the `bind_task` precedent (`embodiment.py`): documented in the
+  `Embodiment` Protocol docstring, deliberately **not** a Protocol member,
+  so existing embodiments remain `isinstance(x, Embodiment)`-conformant
+  under `runtime_checkable`. Completing the precedent, `EmbodimentBase`
+  gains a default `contribute_guardrails` returning an empty
+  `GuardrailContribution()` (bind_task has a no-op base default too);
+  subclasses override to contribute.
 - Conformance: `check_embodiment` stays purely declarative and untouched (it
   receives an `EmbodimentInfo`, cannot see instance methods, and must never
   execute plugin code — `doctor` runs it against every installed adapter). A
   new opt-in `check_guardrail_contribution(embodiment, action_space)` joins
   `conformance.py` for adapter CI to call with an instance it constructed:
-  documented as allowed to execute plugin code, it asserts the attribute (if
-  present) is callable, the result is a `GuardrailContribution`, and the
-  contribution validates.
+  documented as allowed to execute plugin code, it checks the attribute (if
+  present) is callable and the result is a valid `GuardrailContribution`. It
+  returns a `ConformanceReport` in the `check_embodiment` style, with an
+  `assert_guardrail_contribution_conformant` raising wrapper mirroring the
+  existing pair — so both CI idioms keep working.
 - The contract mirrors `_build_guardrails`' own degrade philosophy: an
   embodiment that cannot contribute in the current mode returns a warning
   entry, never raises for "not applicable". Raising is reserved for actual
@@ -157,10 +168,12 @@ contributions are therefore disabled with everything else, and the
 ### 4. Ordering
 
 Chain order is `clamp → delta-limit → contributions…` (declaration order
-within a contribution). Contributed approvers see targets already clamped and
-rate-limited — the cheap generic gates run first, the expensive
-embodiment-specific ones last, and a contribution can rely on its input being
-in-bounds.
+within a contribution). When the generic gates are active, contributed
+approvers see targets already clamped and rate-limited — cheap generic gates
+first, expensive embodiment-specific ones last. On a degraded chain (both
+generic gates skipped for an unbounded space) the contribution sees raw
+policy output, which is why the §1 contract requires contributions to
+validate their own input.
 
 ## Not in scope
 
@@ -174,7 +187,7 @@ in-bounds.
 ## Tests
 
 In `tests/test_registry_cli.py`, where the existing `_build_guardrails`
-coverage lives, plus `tests/test_approver.py` for the store seam:
+coverage lives, plus `tests/test_approvers.py` for the store seam:
 
 - No method → identical chain and banner to today (regression).
 - Contribution with one approver → appended after delta-limit, name in
@@ -189,13 +202,17 @@ coverage lives, plus `tests/test_approver.py` for the store seam:
   contribution-only, `AutoApprover` fallback not taken.
 - `--disable-guardrails` with a contributing embodiment → no approver, no
   contribution call (method not invoked; assert via spy).
-- `rewind_reference`: rewinds an existing reference; no-op without one; a
-  test pinning it to the limiter's actual store key (rename fails loudly);
-  substitution scenario — approver behind the limiter holds an earlier pose,
-  rewinds, next delta is rated against the held pose.
+- `rewind_reference`: rewinds an existing reference; no-op without one;
+  stores a copy (mutating the caller's array afterward must not move the
+  reference); a test pinning it to the limiter's actual store key (rename
+  fails loudly); substitution scenario — approver behind the limiter holds
+  an earlier pose, rewinds, next delta is rated against the held pose.
+- `EmbodimentBase` default returns an empty `GuardrailContribution()`; the
+  CLI treats it identically to an absent attribute (banner unchanged).
 - Conformance: `check_guardrail_contribution` passes an absent attribute,
-  fails a non-callable one and a wrong return type; `check_embodiment`
-  behavior unchanged.
+  fails a non-callable one and a wrong return type, and the
+  `assert_guardrail_contribution_conformant` wrapper raises on failure;
+  `check_embodiment` behavior unchanged.
 
 A `ValueError` escaping a contribution (e.g. a mis-measured rig model
 rejected at approver construction) intentionally surfaces as a traceback
