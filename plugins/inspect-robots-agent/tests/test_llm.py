@@ -264,6 +264,24 @@ def test_complete_sends_wire_format_and_parses_tool_calls() -> None:
     assert json.loads(call.arguments)["duration_s"] == 1.0
 
 
+def test_parse_message_preserves_tool_call_extra_content() -> None:
+    payload = _tool_call_response()
+    extra_content = {"google": {"thought_signature": "sig-blob"}}
+    payload["choices"][0]["message"]["tool_calls"][0]["extra_content"] = extra_content
+
+    message = llm_module._parse_message(payload)
+
+    (tool_call,) = message.raw()["tool_calls"]
+    assert tool_call["extra_content"] == extra_content
+
+
+def test_parse_message_omits_absent_tool_call_extra_content() -> None:
+    message = llm_module._parse_message(_tool_call_response())
+
+    (tool_call,) = message.raw()["tool_calls"]
+    assert "extra_content" not in tool_call
+
+
 def test_reasoning_effort_is_sent_when_set_and_omitted_when_none() -> None:
     bodies: list[dict[str, Any]] = []
 
