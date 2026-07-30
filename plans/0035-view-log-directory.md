@@ -32,8 +32,9 @@ renders logs to HTML" — with the argument deciding scope.
     `.json.tmp` + `os.replace` write means the glob never sees partials).
   - Per-log pages land in `<dir>/html/<log-stem>.html`; the index at
     `<dir>/html/index.html`. A log whose stem is exactly `index` renders to
-    `html/index_log.html` so it cannot clobber the index (documented in the
-    subcommand help). If `<dir>/html` exists and is not a directory:
+    `html/index_log.html` — suffixed further (`index_log_2.html`, …) until
+    free, so the remap cannot itself clobber another log's page (documented
+    in the subcommand help). If `<dir>/html` exists and is not a directory:
     `SystemExit` with a clear message, before any rendering.
   - `-o PATH` (metavar changes from FILE to PATH): in single-file mode an
     output HTML file, exactly as today; in directory mode an output
@@ -78,8 +79,8 @@ def render_index(entries: Sequence[IndexEntry], *, title: str = "Inspect Robots 
 with a small frozen dataclass `IndexEntry` carrying: `name` (log filename),
 `page` (relative href or None), `created`, `instruction`, `policy`, `model`,
 `status` (display string), `status_class` (badge class), `metrics` (mapping,
-run-level), `termination`, `error`, `size_mb`. The CLI builds entries; the
-module renders. This keeps the module pure (string in, string out) and
+run-level), `errored_trials` (int), `termination`, `error`. The CLI builds
+entries; the module renders. This keeps the module pure (string in, string out) and
 testable without touching the filesystem.
 
 Index page properties:
@@ -91,11 +92,15 @@ Index page properties:
   log is unreadable), columns: When, Instruction, Policy (policy / model
   tail), Status, Metrics, Termination, Error, Log. Instruction and Log cells
   link to the page when one exists.
-- **Status, not verdict guessing.** The badge shows the run status through
-  the existing display mapping (`_display_status`): completed / error /
-  cancelled, with error also when any trial errored. The Metrics column
-  shows the **run-level** `log.results.metrics` (`name=value`, 4 sig figs) —
-  the same aggregate `run`/`inspect` print. No success/failure inference
+- **Status, not verdict guessing.** The badge is strictly
+  `_display_status(log.status)`: completed / error / cancelled — never
+  rewritten by trial errors, matching how `run` and `inspect` keep the
+  persisted status intact and surface trial errors as an annotation
+  (`trials: N (M errored)`). The Metrics column shows the **run-level**
+  `log.results.metrics` (`name=value`, 4 sig figs) — the same aggregate
+  `run`/`inspect` print — followed by an `(M errored)` marker when
+  `errored_trials > 0`, styled as an error accent so mixed runs are visible
+  at a glance without misstating their status. No success/failure inference
   from a 1.0 threshold: reduced values are epoch means (1-of-2 trials is
   0.5) and metrics like `min_distance_to_goal` invert the scale, so any
   threshold badge would contradict the repo's existing outcome vocabulary
@@ -104,7 +109,10 @@ Index page properties:
 - **Multi-scene aware.** Instruction column: the shared instruction when all
   scenes share one (the `shared` logic `_cmd_inspect` already applies);
   otherwise `"<n> scenes"`. Termination column: the union of termination
-  reasons across all scenes, deduplicated, order-preserved. `log.samples`
+  reasons across all scenes, deduplicated, order-preserved, with `None`
+  entries skipped and each reason rendered through the `_OUTCOME_PHRASES`
+  mapping `_outcome_line` already uses (raw token as fallback), so the index
+  speaks the same vocabulary as `run`/`inspect`. `log.samples`
   may be empty (cancelled before the first trial): every per-sample access
   is guarded and such logs still get a row (status badge carries the story).
 - A filter input that hides non-matching rows on substring match across the
@@ -131,11 +139,14 @@ bad file must not sink the index.
 - Post-run block (`hint: render videos with…` neighborhood) gains, last (it
   is the widest-scope hint):
   `hint: browse all logs: inspect-robots view <log_dir>`
-- Eval-set completion block: the existing
+- Eval-set completion block **and** the eval-set `KeyboardInterrupt` path
+  (which prints the same placeholder because it holds no per-task sink
+  paths): the existing
   `hint: HTML viewer: inspect-robots view {log_dir}/<task>_<id>.json`
-  placeholder line (which the user must hand-edit) is **replaced** by
+  placeholder lines (which the user must hand-edit) are **replaced** by
   `hint: browse all logs: inspect-robots view {log_dir}` — the directory form
-  strictly dominates it, and two adjacent view hints would be noise.
+  strictly dominates them; on the interrupt path especially, the user holds a
+  directory of partial logs and knows no filenames.
 
 ## Tests (tests/test_html_index.py + tests/test_registry_cli.py)
 
@@ -150,7 +161,9 @@ bad file must not sink the index.
 - Directory mode end-to-end (tmp_path): two small synthetic logs → pages +
   index exist, index references both; unreadable third file → error row, no
   page, exit 0; multi-scene log shows shared instruction and run-level
-  metrics; empty-samples log gets a row without crashing.
+  metrics; empty-samples log gets a row without crashing; a completed run
+  with an errored trial keeps the completed badge and shows the
+  `(1 errored)` marker.
 - Incremental behavior: second invocation renders nothing; a log made newer
   than its page via explicit `os.utime` (not sleep — same-second mtimes on
   coarse filesystems) re-renders exactly that page; `--force` re-renders all.
@@ -160,8 +173,8 @@ bad file must not sink the index.
   directory mode → clean `SystemExit`; empty directory → clean `SystemExit`;
   `--open` targets `index.html` (monkeypatched webbrowser).
 - Hint lines: post-run output includes the browse-all hint with the right
-  directory; eval-set output includes the directory hint and no longer the
-  placeholder per-file hint.
+  directory; eval-set completion and interrupt outputs include the directory
+  hint and no longer the placeholder per-file hint.
 
 ## Rollout
 
