@@ -2551,4 +2551,5 @@ def test_non_string_param_coercion() -> None:
             LLMAgentPolicy(**kwargs)
 
         assert f"{param} must be a string, got {val!r}." in str(exc_info.value)
-        assert f"fix: the -P parser coerces unquoted values; pass -P '{param}=\"value\"'" in str(exc_info.value)
+        expected_fix = f"fix: the -P parser coerces unquoted values; pass -P '{param}=\"value\"'"
+        assert expected_fix in str(exc_info.value)
