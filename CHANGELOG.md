@@ -56,6 +56,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
+  `tool_calls[].extra_content` (`google.thought_signature`) into conversation
+  history. Dropping it made Gemini reject any request ending on a tool
+  message — e.g. after an `eef_pos` workspace-bounds rejection — with HTTP 400
+  "Function call is missing a thought_signature", erroring the trial (#229,
+  #230). Non-Gemini requests are unchanged.
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
