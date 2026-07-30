@@ -1,9 +1,9 @@
 """Joint-space motion synthesis for model-generated policy code.
 
-The per-step ceiling reproduces ``DeltaLimitApprover``'s native-dtype
-``0.05 * (high - low)`` arithmetic. The speed fraction may make the ceiling
-tighter, but never looser, so actions within one returned chunk are not
-silently rewritten by the CLI's default delta backstop.
+The per-step ceiling reproduces ``DeltaLimitApprover``'s declared limit or
+native-dtype ``0.05 * (high - low)`` arithmetic. The speed fraction may make
+the ceiling tighter, but never looser, so actions within one returned chunk
+are not silently rewritten by the CLI's default delta backstop.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from inspect_robots.spaces import Box
 from inspect_robots.types import Action, ActionChunk
 
 _BACKSTOP_STEP_FRAC = 0.05
+_DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
 
 
@@ -58,17 +59,31 @@ class MotionQueue:
         if not bool(np.all(np.isfinite(native_range)) and np.all(np.isfinite(float64_range))):
             raise ValueError("action-space range (high - low) overflows; bounds are too large")
         movable = high64 > low64
+        semantics = action_space.semantics
+        declared = semantics.max_step if semantics is not None else None
+        max_step = declared or (None,) * action_space.dim
+        declared_mask = np.fromiter(
+            (entry is not None for entry in max_step),
+            dtype=np.bool_,
+            count=action_space.dim,
+        )
+        effective_budget = native_backstop.copy()
+        for index, entry in enumerate(max_step):
+            if entry is not None:
+                effective_budget[index] = entry
         # Interpolants snap to the float grid at the bounds' magnitude; if that
-        # grid is coarse relative to the backstop (offset boxes like
+        # grid is coarse relative to the effective budget (offset boxes like
         # [1e16, 1e16 + 2]), emitted steps can exceed the approver's budget.
         spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
-        if bool(np.any(movable & (spacing > 5e-7 * native_backstop))):
+        if bool(np.any(movable & (spacing > 5e-7 * effective_budget))):
             raise ValueError(
                 "bounds are too coarse at this magnitude for speed-limited "
                 "interpolation (float spacing exceeds the per-step budget)"
             )
         step_frac = min(max_speed_frac / control_hz, _BACKSTOP_STEP_FRAC)
         step_limits = np.minimum(step_frac * float64_range, native_backstop)
+        declared_scale = min(max_speed_frac / _DEFAULT_SPEED_FRAC, 1.0)
+        step_limits[declared_mask] = effective_budget[declared_mask] * declared_scale
         if bool(np.any(movable & (step_limits <= 0))):
             raise ValueError("speed fraction underflows the per-step limit for a movable dimension")
 

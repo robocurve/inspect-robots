@@ -164,6 +164,78 @@ def test_absolute_derived_default_is_five_percent_of_range() -> None:
     assert np.allclose(out.data, [0.1, 0.45])  # 0.05 * (high - low) per dim
 
 
+def test_absolute_derived_default_keeps_the_box_shape_for_multi_d_boxes() -> None:
+    # The derived delta must broadcast against multi-dimensional actions; a
+    # flat (dim,) delta would raise in review() for a (2, 3) box.
+    space = Box(
+        shape=(2, 3),
+        low=np.zeros((2, 3)),
+        high=np.full((2, 3), 2.0),
+        semantics=ActionSemantics("joint_pos", max_step=(None, None, None, None, None, 0.5)),
+    )
+    approver = DeltaLimitApprover(space)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.zeros((2, 3))), store)
+    out = approver.review(Action(data=np.full((2, 3), 2.0)), store)
+    # Undeclared dims clamp to 5% of range (0.1); the flat declaration maps to
+    # the last element of the flattened box (0.5).
+    assert np.allclose(out.data, [[0.1, 0.1, 0.1], [0.1, 0.1, 0.5]])
+
+
+def test_absolute_derived_default_mixes_declared_and_native_range_limits() -> None:
+    low = np.array([-1.0, 0.0], dtype=np.float16)
+    high = np.array([1.0, 1.0], dtype=np.float16)
+    space = Box(
+        shape=(2,),
+        low=low,
+        high=high,
+        semantics=ActionSemantics("joint_pos", max_step=(None, 0.2)),
+    )
+    approver = DeltaLimitApprover(space)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+    out = approver.review(Action(data=np.array([1.0, 1.0])), store)
+    native_default = np.asarray(0.05 * (high - low), dtype=np.float64)
+
+    assert np.array_equal(out.data, np.array([native_default[0], 0.2]))
+
+
+def test_all_declared_absolute_space_needs_no_finite_bounds() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([float("-inf"), float("nan")]),
+        high=np.array([float("inf"), float("nan")]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.1, 0.2)),
+    )
+    DeltaLimitApprover(space)
+
+
+def test_undeclared_absolute_dimension_still_needs_finite_bounds() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([float("-inf"), 0.0]),
+        high=np.array([float("inf"), float("inf")]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.1, None)),
+    )
+    with pytest.raises(ValueError, match="finite low/high bounds"):
+        DeltaLimitApprover(space)
+
+
+def test_explicit_max_delta_overrides_declarations() -> None:
+    space = Box(
+        shape=(1,),
+        low=np.array([0.0]),
+        high=np.array([1.0]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.01,)),
+    )
+    approver = DeltaLimitApprover(space, max_delta=0.5)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0])), store)
+    within_override = Action(data=np.array([0.4]))
+
+    assert approver.review(within_override, store) is within_override
+
+
 def test_stores_are_isolated_per_trial() -> None:
     approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
     trial_a: dict[str, object] = {}
