@@ -41,9 +41,11 @@ class GuardrailContribution:
 
     ``approvers`` pairs a short display name (shown in the ``guardrails:``
     banner, e.g. ``"yam-collision"``) with the approver to append.
-    ``warnings`` name contributions the embodiment declined to make and why
-    (mode unsupported, optional dependency missing) — printed like the
-    builder's own skip warnings, so a declined contribution is always visible.
+    ``warnings`` name contributions the embodiment declined to make or made
+    in a degraded state, and why (mode unsupported, optional dependency
+    missing, unmeasured configuration) — printed like the builder's own skip
+    warnings, so neither a declined nor a degraded contribution is ever
+    invisible. Warnings may accompany active approvers.
     """
 
     approvers: tuple[tuple[str, Approver], ...] = ()
