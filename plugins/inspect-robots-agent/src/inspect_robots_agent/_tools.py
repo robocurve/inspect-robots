@@ -2,8 +2,8 @@
 
 Tools are generated from the embodiment's spaces, so the plugin never needs
 embodiment-specific motion knowledge. Absolute targets are interpolated with a
-per-step limit of ``min(max_speed_frac / hz, 0.05)`` times each dimension's
-range. Displacements are split by the available box side, which the plugin
+declared per-dimension limit where available and a range-derived backstop
+otherwise. Displacements are split by the available box side, which the plugin
 treats as the embodiment author's per-action limit.
 
 Tool mistakes come back as structured error strings the LLM can correct.
@@ -22,10 +22,14 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.spaces import CANONICAL_STATE_UNITS, Box, ObservationSpace
+from inspect_robots.spaces import (
+    ABSOLUTE_CONTROL_MODES,
+    CANONICAL_STATE_UNITS,
+    Box,
+    ObservationSpace,
+)
 from inspect_robots.types import Action, ActionChunk, Observation
 
-_ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
 _DISPLACEMENT_MODES = frozenset({"eef_delta_pos", "eef_delta_pose", "joint_delta"})
 _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 _SAFE_ROT = frozenset({"none", "rot6d"})
@@ -33,6 +37,7 @@ _SAFE_ROT = frozenset({"none", "rot6d"})
 _FALLBACK_HZ = 10.0
 _MAX_DURATION_S = 10.0
 _BACKSTOP_STEP_FRAC = 0.05
+_DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
 
 #: A motion hook over the exact clipped absolute waypoints for one move call.
@@ -534,7 +539,7 @@ def build_toolset(
             f"rotation_repr {semantics.rotation_repr!r} cannot be driven per-dimension; "
             f"only {sorted(_SAFE_ROT)} are supported"
         )
-    if mode not in _ABSOLUTE_MODES | _DISPLACEMENT_MODES:
+    if mode not in ABSOLUTE_CONTROL_MODES | _DISPLACEMENT_MODES:
         raise ToolsetError(f"control_mode {mode!r} is not supported by the agent policy yet")
     if pre_check is not None and mode in _DISPLACEMENT_MODES:
         raise ToolsetError(
@@ -549,7 +554,7 @@ def build_toolset(
     resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
     if not math.isfinite(_MAX_DURATION_S * resolved_hz):
         raise ToolsetError(f"control_hz {control_hz!r} is too large to derive a playout cap")
-    if max_speed_frac / resolved_hz == 0.0:
+    if mode in _DISPLACEMENT_MODES and max_speed_frac / resolved_hz == 0.0:
         raise ToolsetError(
             f"max_speed_frac {max_speed_frac!r} underflows to a zero per-step "
             f"limit at control_hz {resolved_hz!r}"
@@ -559,7 +564,7 @@ def build_toolset(
             f"only 1-D (vector) action spaces are supported, got shape {action_space.shape}"
         )
 
-    absolute = mode in _ABSOLUTE_MODES
+    absolute = mode in ABSOLUTE_CONTROL_MODES
     dim = action_space.dim
     state_key: str | None = None
     state_spec = observation_space.state
@@ -596,19 +601,27 @@ def build_toolset(
         raise ToolsetError("action-space range (high - low) overflows; bounds are too large")
     if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
         raise ToolsetError("displacement control bounds must contain zero in every dimension")
-    # DeltaLimitApprover derives its default limit in the box's native dtype;
-    # reproduce that arithmetic exactly so our ceiling can never exceed it.
+    # DeltaLimitApprover derives undeclared dimensions in the box's native
+    # dtype; reproduce that arithmetic exactly before substituting declarations.
     native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
     step_limits = np.zeros_like(high64)
     if absolute:
+        declared = semantics.max_step or (None,) * dim
+        declared_mask = np.fromiter(
+            (entry is not None for entry in declared), dtype=np.bool_, count=dim
+        )
+        effective_budget = native_backstop.copy()
+        for index, entry in enumerate(declared):
+            if entry is not None:
+                effective_budget[index] = entry
         # Interpolants snap to the float grid at the bounds' magnitude. If that
-        # grid is coarse relative to the backstop (offset boxes like
-        # [1e16, 1e16 + 2], or ranges whose 5% underflows to zero), emitted
-        # steps jump by more than the backstop allows and motions silently
+        # grid is coarse relative to the effective per-dimension budget (offset
+        # boxes like [1e16, 1e16 + 2], or ranges whose 5% underflows to zero),
+        # emitted steps jump by more than the budget allows and motions silently
         # truncate — the exact failure this plugin exists to remove.
         spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
         movable = high64 > low64
-        if bool(np.any(movable & (spacing > 5e-7 * native_backstop))):
+        if bool(np.any(movable & (spacing > 5e-7 * effective_budget))):
             raise ToolsetError(
                 "bounds are too coarse at this magnitude for speed-limited "
                 "interpolation (float spacing exceeds the per-step budget)"
@@ -616,9 +629,11 @@ def build_toolset(
         resolved = control_hz if control_hz is not None else _FALLBACK_HZ
         step_frac = min(max_speed_frac / resolved, _BACKSTOP_STEP_FRAC)
         step_limits = np.minimum(step_frac * (high64 - low64), native_backstop)
+        declared_scale = min(max_speed_frac / _DEFAULT_SPEED_FRAC, 1.0)
+        step_limits[declared_mask] = effective_budget[declared_mask] * declared_scale
         # The frac/hz quotient can be nonzero yet still underflow to a zero
-        # limit once multiplied by a small range; a movable dimension with a
-        # zero limit would be misreported as fixed.
+        # limit once multiplied by a small range or declared max_step; a
+        # movable dimension with a zero limit would be misreported as fixed.
         if bool(np.any(movable & (step_limits == 0))):
             raise ToolsetError(
                 f"max_speed_frac {max_speed_frac!r} underflows the derived "
