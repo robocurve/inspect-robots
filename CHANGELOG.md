@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format is based on
   absolute-control pacing and safety ceilings in native units. Default delta
   approval, agent-tool interpolation, and CaP-X motion queues honor mixed
   declared/range-derived limits while policy compatibility deliberately ignores
-  embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md)).
+  embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
 
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
