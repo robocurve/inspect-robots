@@ -57,39 +57,44 @@ def test_option_slots_defaults_to_false() -> None:
     assert OptionSlot(arg="a", label="A").default is False
 
 
-def test_option_slots_absent_or_malformed_never_crash() -> None:
+def test_option_slots_none_and_absent_return_empty() -> None:
     class _Bare:
         pass
 
+    assert option_slots(None) == ()
+    assert option_slots(_Bare()) == ()
+
+
+def test_option_slots_malformed_never_crash() -> None:
     class _NotIterable:
-        OPTION_SLOTS = 7
+        OPTION_SLOTS: ClassVar[int] = 7
 
     class _MixedEntries:
-        OPTION_SLOTS = (OptionSlot(arg="ok", label="OK"), "junk", None)
+        OPTION_SLOTS: ClassVar[tuple[object, ...]] = (
+            OptionSlot(arg="ok", label="OK"),
+            "junk",
+            None,
+        )
+
+    class _RaisingIteration:
+        def __iter__(self) -> "Iterator[OptionSlot]":
+            raise RuntimeError("boom")
+
+    class _RaisingIterationFactory:
+        OPTION_SLOTS: ClassVar[object] = _RaisingIteration()
 
     class _RaisingGetattr:
         @property
         def OPTION_SLOTS(self) -> tuple[OptionSlot, ...]:
             raise RuntimeError("boom")
 
-    class _RaisingIteration:
-        class _Evil:
-            def __iter__(self) -> "_RaisingIteration._Evil":
-                return self
-
-            def __next__(self) -> OptionSlot:
-                raise RuntimeError("boom")
-
-        OPTION_SLOTS = _Evil()
-
-    assert option_slots(_Bare()) == ()
     assert option_slots(_NotIterable()) == ()
     assert option_slots(_MixedEntries()) == (OptionSlot(arg="ok", label="OK"),)
+    assert option_slots(_RaisingIterationFactory()) == ()
     assert option_slots(_RaisingGetattr()) == ()
-    assert option_slots(_RaisingIteration()) == ()
 ```
 
-Before finalizing, compare with how `tests/test_conformance.py` already exercises `device_slots`' defensive paths and match its idioms (it may already have equivalents of `_RaisingGetattr` etc. to crib; property-on-class raise only fires on instances, hence the instance calls above — keep whichever instantiation style the device_slots tests use).
+Before finalizing, compare with how `tests/test_conformance.py` already exercises `device_slots`' defensive paths (lines ~63-111) and match its idioms exactly: it annotates fixture class attributes with `ClassVar[...]`, breaks iteration by raising in `__iter__`, asserts `device_slots(None) == ()`, and parametrizes whole-value garbage — mirror whichever of those apply, reusing its parametrize lists where they fit, in preference to the sketch above where they differ.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -178,7 +183,9 @@ def _register_option_slots(
     )
 ```
 
-Then tests, following the harness style of `test_run_setup_defaults_and_numbered_cameras_write_golden_config` (env with `XDG_CONFIG_HOME=tmp_path`, scripted answers list, `io.StringIO()` out, read back the written config with the existing raw-read helper or `configparser`). The scripted answer sequences must be derived from the ACTUAL prompt order in the current wizard (defaults prompts first, then the camera/device section, then options) — count the prompts in the existing golden test and extend its answer list; the factory here declares no `DEVICE_SLOTS`, so the camera path (`_camera_section`) runs, and its "Configure cameras?"-style question must be answered "n" (check the real prompt text in `_camera_section` before writing the list).
+Then tests, following the harness style of `test_run_setup_defaults_and_numbered_cameras_write_golden_config` (env with `XDG_CONFIG_HOME=tmp_path` and `DISPLAY: ":0"` — without DISPLAY the headless rerun note fires and flips the rerun suggestion, adding transcript noise; scripted answers via the harness's `_scripted_input`, which RECORDS every prompt string into a `prompts` list; `io.StringIO()` out; read back the written config with the same mechanism the golden test uses). The scripted answer sequences must be derived from the ACTUAL prompt order in the current wizard: `_prompt_defaults` asks exactly 6 questions (the `SUGGESTED` keys), then the camera/device section, then options. The options-only factory declares no `DEVICE_SLOTS`, so `_camera_section` runs and its "Configure cameras?" question must be answered "n" (check the real prompt text before writing the list).
+
+IMPORTANT: prompt strings (including the `[y/N]`/`[Y/n]` suffix) go to `input_fn`, NOT to `out` — all prompt assertions must target the recorded `prompts` list, the way existing tests assert on `prompts[6]` (see `test_setup.py` ~lines 1090-1128). Asserting prompt text "not in out" is vacuously true and guards nothing.
 
 ```python
 AUTO_START = OptionSlot(arg="auto_start", label="Skip the operator start prompts (auto_start)")
@@ -186,41 +193,68 @@ AUTO_START = OptionSlot(arg="auto_start", label="Skip the operator start prompts
 
 def test_run_setup_writes_declared_option_yes(tmp_path, monkeypatch) -> None:
     # embodiment answer must name the registered factory ("option-body");
-    # answer "y" at the option prompt -> auto_start = true in [embodiment.args].
+    # answer "y" at the option prompt -> auto_start = true in [embodiment.args];
+    # the option prompt (prompts[7], after 6 defaults + "Configure cameras?")
+    # contains AUTO_START.label.
     ...
 
 
 def test_run_setup_writes_declared_option_default_no(tmp_path, monkeypatch) -> None:
     # Enter at the option prompt with no carried value -> auto_start = false,
-    # and the prompt suffix shown in `out` is [y/N] (default False).
+    # and the recorded option prompt carries the "[y/N]" suffix (default False).
     ...
 
 
 def test_run_setup_option_suggestion_comes_from_carried_config(tmp_path, monkeypatch) -> None:
     # Pre-write a config with [embodiment.args] auto_start = true (and the
     # matching [defaults] embodiment = option-body so the same factory is
-    # suggested); Enter keeps it -> auto_start = true survives, prompt shows [Y/n].
+    # suggested); Enter keeps it -> auto_start = true survives, and the
+    # recorded option prompt carries "[Y/n]".
 
 
 def test_run_setup_option_carried_garbage_falls_back_to_default(tmp_path, monkeypatch) -> None:
-    # Pre-write auto_start = banana -> suggestion is the slot default (False).
+    # Pre-write auto_start = banana -> recorded option prompt carries "[y/N]"
+    # (the slot default), and Enter writes false.
 
 
 def test_run_setup_option_answer_overrides_carried_value_without_duplicate(tmp_path, monkeypatch) -> None:
-    # Pre-write auto_start = true; answer "n" -> written config contains
-    # exactly one auto_start line and it is false.
+    # Pre-write auto_start = true; answer "n" -> the written config text
+    # contains exactly one "auto_start" occurrence and it is false.
 
 
 def test_run_setup_abort_during_options_writes_nothing(tmp_path, monkeypatch) -> None:
     # input_fn raises EOFError at the option prompt -> exit code 1, no config file.
 
 
-def test_options_section_absent_when_no_declared_options(tmp_path, monkeypatch) -> None:
-    # _empty_registry / a factory without OPTION_SLOTS: no option prompt text
-    # in `out`; this is the regression guard for unchanged wizards.
+def test_run_setup_interviews_options_alongside_device_slots(tmp_path, monkeypatch) -> None:
+    # The real first-consumer shape (yam declares both): register ONE factory
+    # class carrying both DEVICE_SLOTS (a single "can" slot, following
+    # _register_device_slots) and OPTION_SLOTS = (AUTO_START,). Decline the
+    # device section ("n" at "Configure devices?", so _preserve_managed_args
+    # runs; pre-write the device arg in [embodiment.args] to assert it is
+    # preserved), then answer "y" at the option prompt. Assert both keys are
+    # written exactly once: the carried device value and auto_start = true.
+    ...
+
+
+def test_run_setup_option_colliding_with_managed_key_is_skipped(tmp_path, monkeypatch) -> None:
+    # A factory with no DEVICE_SLOTS but OPTION_SLOTS naming a camera key
+    # (OptionSlot(arg="top_cam_device", ...)) plus AUTO_START: the colliding
+    # option is never prompted (no prompt contains its label), only
+    # auto_start is interviewed, and the written config has no duplicate
+    # top_cam_device line. Also cover a duplicate arg WITHIN options
+    # ((AUTO_START, OptionSlot(arg="auto_start", label="dupe"))): one prompt,
+    # first declaration wins.
+
+
+def test_run_setup_no_declared_options_asks_nothing(tmp_path, monkeypatch) -> None:
+    # A factory without OPTION_SLOTS: the recorded prompts list contains no
+    # option-label text and has exactly the same length as before this
+    # feature (6 defaults + camera/device prompts) — the regression guard
+    # for unchanged wizards.
 ```
 
-Flesh each `...` into real code against the actual harness (the plan cannot transcribe the golden test's 30-line env scaffold; copy it from the file). Assert written-file contents via the same mechanism the golden test uses.
+Flesh each `...`/comment into real code against the actual harness (the plan cannot transcribe the golden test's env scaffold; copy it from the file). Assert written-file contents via the same mechanism the golden test uses.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -266,14 +300,25 @@ def _options_section(
 3. In `run_setup`, alongside the `slots = device_slots(...)` computation, add the parallel `options = option_slots(embodiment_factories[configured_embodiment]) if configured_embodiment in embodiment_factories else ()` (keep the existing membership-test style). After the `if slots: ... else: ...` device/camera block, still inside the `try`:
 
 ```python
-        if options:
-            managed_args = managed_args + tuple(option.arg for option in options)
+        # Options whose arg collides with an already-managed key (a device
+        # slot or camera key) or repeats an earlier option are skipped:
+        # interviewing them would write the key twice, and a duplicate key
+        # makes configparser reject the whole file on the next setup run.
+        interviewed: list[OptionSlot] = []
+        taken = set(managed_args)
+        for option in options:
+            if option.arg in taken:
+                continue
+            taken.add(option.arg)
+            interviewed.append(option)
+        if interviewed:
+            managed_args = managed_args + tuple(option.arg for option in interviewed)
             embodiment_args.update(
-                _options_section(options, carried, input_fn=input_fn, out=out)
+                _options_section(tuple(interviewed), carried, input_fn=input_fn, out=out)
             )
 ```
 
-(`embodiment_args` is a plain dict in both branches; if either branch returns a mapping that must not be mutated, use `embodiment_args = {**embodiment_args, **_options_section(...)}` instead — check `_camera_section`/`_device_section`/`_preserve_managed_args` return values; `_preserve_managed_args` builds a fresh dict, so `update` is safe, but verify.)
+(`embodiment_args.update` is safe: `_device_section`, `_camera_section`, and `_preserve_managed_args` all return freshly built dicts, never references into `carried` — verify this still holds before relying on it.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -283,7 +328,7 @@ Expected: all PASS — new option tests and every pre-existing golden/scripted t
 - [ ] **Step 5: Full gate set**
 
 Run: `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest --cov -q`
-Expected: clean, 100% coverage (both suggestion sources, both answers, garbage fallback, abort path, and the no-options fall-through are all exercised above).
+Expected: clean, 100% coverage (both suggestion sources, both answers, garbage fallback, abort path, the collision-skip `continue`, the combined device+option shape, and the no-options fall-through are all exercised above).
 
 - [ ] **Step 6: Commit**
 
@@ -298,13 +343,34 @@ git commit -m "setup: interview plugin-declared option slots (yam#87 auto_start)
 
 **Files:**
 - Modify: `README.md` (wizard description ~line 67)
-- Modify: `CHANGELOG.md` (`## Unreleased` → `### Added`; match the file's existing heading structure)
+- Modify: `CHANGELOG.md` (`## [Unreleased]` → `### Added`; match the file's existing heading structure)
+- Modify: `docs/guide/adapters.md` (the `DEVICE_SLOTS` section, ~lines 42-70)
+- Modify: `src/inspect_robots/CLAUDE.md` (module-map rows for `conformance.py` and `_setup.py`)
 
 - [ ] **Step 1: README**
 
 Extend the wizard sentence ("The wizard picks your defaults and finds your cameras, then writes...") with one clause noting it also asks about behavior toggles the embodiment plugin declares (e.g. yam's `auto_start`). Match the surrounding prose style; no em dashes if the README avoids them (check nearby prose and mirror it).
 
-- [ ] **Step 2: CHANGELOG**
+- [ ] **Step 2: adapters guide (`docs/guide/adapters.md`)**
+
+This is the plugin-author-facing protocol, so it needs the authoring docs. After the `DEVICE_SLOTS` section, add a parallel `OPTION_SLOTS` subsection in the same voice and format, with a minimal declaration example:
+
+```python
+from inspect_robots.conformance import OptionSlot
+
+
+class MyEmbodiment:
+    OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (
+        OptionSlot(
+            arg="auto_start",
+            label="Skip the operator start prompts (auto_start)",
+        ),
+    )
+```
+
+State the contract in prose: each slot is one yes/no question; `arg` is the `[embodiment.args]` key written as `true`/`false`; the carried config value is the suggested answer on re-runs; declarations whose `arg` collides with a device slot, camera key, or earlier option are skipped. Adapt the example to the surrounding doc's actual class/ClassVar conventions.
+
+- [ ] **Step 3: CHANGELOG**
 
 ```markdown
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
@@ -315,12 +381,16 @@ Extend the wizard sentence ("The wizard picks your defaults and finds your camer
 
 Match the existing entry indentation/format exactly.
 
-- [ ] **Step 3: Gates + commit**
+- [ ] **Step 4: Module map (`src/inspect_robots/CLAUDE.md`)**
+
+Extend the `conformance.py` row to mention `OptionSlot`/`option_slots` next to `DeviceSlot`/`device_slots`, and the `_setup.py` row to mention the option interview, matching each row's existing phrasing density.
+
+- [ ] **Step 5: Gates + commit**
 
 Run: `uv run pytest -q` (green tree), then:
 
 ```bash
-git add README.md CHANGELOG.md
+git add README.md CHANGELOG.md docs/guide/adapters.md src/inspect_robots/CLAUDE.md
 git commit -m "docs: describe wizard option-slot interviews"
 ```
 
