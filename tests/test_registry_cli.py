@@ -1752,6 +1752,14 @@ def test_view_directory_out_dir_replaces_html_default(
     assert capsys.readouterr().out.startswith(f"index: {output / 'index.html'} (1 logs, 1 pages, ")
 
 
+def test_unreadable_index_entry_tolerates_vanished_file(tmp_path: Path) -> None:
+    entry = cli._unreadable_index_entry(tmp_path / "gone.json", ValueError("boom"))
+
+    assert entry.created == ""
+    assert entry.error == "unreadable: boom"
+    assert entry.page is None
+
+
 def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
