@@ -9,11 +9,12 @@ requirements into a checkable report so adapter repos can enforce them in CI
 (one test: ``assert_embodiment_conformant(MyEmbodiment().info)``) and users
 can audit an installed adapter via ``inspect-robots doctor``.
 
-The checks are purely declarative — nothing here touches hardware — which is
-also their limit: conformance proves an adapter is *guardrail-ready and
-agent-ready*, not that its declarations are honest (a delta rig declaring
-absolute-sized per-step bounds type-checks fine). The adapter authoring
-guide covers the human half.
+``check_embodiment`` is purely declarative and touches no hardware. The
+separate, opt-in ``check_guardrail_contribution`` executes plugin code to
+validate the optional runtime contribution hook. Conformance proves an
+adapter is *guardrail-ready and agent-ready*, not that its declarations are
+honest (a delta rig declaring absolute-sized per-step bounds type-checks
+fine). The adapter authoring guide covers the human half.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from inspect_robots.embodiment import EmbodimentInfo
-from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES
+from inspect_robots.approver import GuardrailContribution
+from inspect_robots.embodiment import Embodiment, EmbodimentInfo
+from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box
 
 DEVICE_KINDS = ("v4l2", "can", "serial")
 
@@ -246,5 +248,43 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
 def assert_embodiment_conformant(info: EmbodimentInfo) -> None:
     """Pytest-friendly wrapper: raise ``AssertionError`` with the full summary."""
     report = check_embodiment(info)
+    if not report.ok:
+        raise AssertionError(report.summary())
+
+
+def check_guardrail_contribution(embodiment: Embodiment, action_space: Box) -> ConformanceReport:
+    """Validate an optional contribution hook by executing plugin code.
+
+    An absent attribute passes. A present attribute must be callable and must
+    return ``GuardrailContribution``. Exceptions raised by the hook propagate
+    as plugin bugs. Unlike ``check_embodiment``, callers must opt in knowing
+    this check can run arbitrary adapter code.
+    """
+    missing = object()
+    hook = getattr(embodiment, "contribute_guardrails", missing)
+    if hook is missing:
+        return ConformanceReport(embodiment=embodiment.info.name)
+    if not callable(hook):
+        issue = ConformanceIssue(
+            "error",
+            "guardrail_contribution",
+            f"contribute_guardrails is not callable (got {type(hook).__name__})",
+        )
+        return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
+    contribution = hook(action_space)
+    if not isinstance(contribution, GuardrailContribution):
+        issue = ConformanceIssue(
+            "error",
+            "guardrail_contribution",
+            f"contribute_guardrails returned {type(contribution).__name__}, "
+            "expected GuardrailContribution",
+        )
+        return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
+    return ConformanceReport(embodiment=embodiment.info.name)
+
+
+def assert_guardrail_contribution_conformant(embodiment: Embodiment, action_space: Box) -> None:
+    """Raise ``AssertionError`` with the full contribution report on failure."""
+    report = check_guardrail_contribution(embodiment, action_space)
     if not report.ok:
         raise AssertionError(report.summary())

@@ -9,6 +9,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Embodiments can contribute specialized approvers to the CLI's default
+  guardrail chain through the new public `GuardrailContribution` API. Generic
+  clamp and delta-limit gates remain first, contribution warnings stay visible,
+  and `DeltaLimitApprover.rewind_reference` safely supports hold substitutions.
+  The new public API is the rationale for the 0.31.0 minor release
+  ([plan 0034](plans/0034-embodiment-contributed-guardrails.md), #232).
+
 - Per-dimension `ActionSemantics.max_step` declarations let embodiments set
   absolute-control pacing and safety ceilings in native units. Default delta
   approval, agent-tool interpolation, and CaP-X motion queues honor mixed

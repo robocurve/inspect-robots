@@ -388,8 +388,9 @@ camera configuration, and reset behavior are documented in the
 [ROS plugin README](plugins/inspect-robots-ros/).
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
-the embodiment's action space) are wired into every CLI run by default, for
-every policy. Turning them off requires an explicit `--disable-guardrails`.
+the embodiment's action space, followed by any specialized guardrails the
+embodiment contributes) are wired into every CLI run by default, for every
+policy. Turning them off requires an explicit `--disable-guardrails`.
 Persist your usual setup once with `inspect-robots config set embodiment NAME`
 and `inspect-robots config set policy NAME`, then a bare
 `inspect-robots "wipe the table"` does the rest.

@@ -8,10 +8,18 @@ bounds, or unaverageable rotation reps refuse loudly.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
-from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.approver import (
+    AutoApprover,
+    ChainApprover,
+    ClampApprover,
+    DeltaLimitApprover,
+    GuardrailContribution,
+)
 from inspect_robots.errors import SafetyAbort
 from inspect_robots.spaces import ActionSemantics, Box, RotationRepr
 from inspect_robots.types import Action
@@ -156,6 +164,77 @@ def test_absolute_reference_is_the_approved_action_not_the_request() -> None:
     assert np.allclose(out.data, [0.2, 0.0])  # walks, one clamped step at a time
 
 
+def test_rewind_reference_changes_an_existing_reference() -> None:
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+
+    DeltaLimitApprover.rewind_reference(store, np.array([0.5, 0.5]))
+    out = approver.review(Action(data=np.array([0.8, 0.8])), store)
+
+    assert np.allclose(out.data, [0.6, 0.6])
+
+
+def test_rewind_reference_is_a_noop_without_a_limiter_reference() -> None:
+    store: dict[str, object] = {"other": np.array([0.0, 0.0])}
+
+    DeltaLimitApprover.rewind_reference(store, np.array([0.5, 0.5]))
+
+    assert set(store) == {"other"}
+
+
+def test_rewind_reference_stores_a_copy() -> None:
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+    held = np.array([0.4, 0.4])
+
+    DeltaLimitApprover.rewind_reference(store, held)
+    held[:] = 0.9
+    out = approver.review(Action(data=np.array([0.8, 0.8])), store)
+
+    assert np.allclose(out.data, [0.5, 0.5])
+
+
+def test_rewind_reference_uses_the_limiter_store_key() -> None:
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+
+    assert set(store) == {"delta_limit:last"}
+    DeltaLimitApprover.rewind_reference(store, np.array([0.3, 0.4]))
+    reference = store["delta_limit:last"]
+    assert isinstance(reference, np.ndarray)
+    assert np.array_equal(reference, np.array([0.3, 0.4]))
+
+
+def test_substitution_rewinds_the_next_delta_reference() -> None:
+    held = Action(data=np.array([0.0, 0.0]))
+
+    class _HoldSecondTarget:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            self._calls += 1
+            if self._calls == 2:
+                DeltaLimitApprover.rewind_reference(store, np.asarray(held.data, dtype=np.float64))
+                return held
+            return action
+
+    chain = ChainApprover(
+        DeltaLimitApprover(_abs_space(), max_delta=0.1),
+        _HoldSecondTarget(),
+    )
+    store: dict[str, object] = {}
+    assert chain.review(held, store) is held
+    assert chain.review(Action(data=np.array([0.1, 0.0])), store) is held
+
+    out = chain.review(Action(data=np.array([0.2, 0.0])), store)
+
+    assert np.allclose(out.data, [0.1, 0.0])
+
+
 def test_absolute_derived_default_is_five_percent_of_range() -> None:
     approver = DeltaLimitApprover(_abs_space())  # ranges: 2.0 and 1.0
     store: dict[str, object] = {}
@@ -285,6 +364,21 @@ def test_nan_raises_safety_abort_in_both_branches() -> None:
         approver = DeltaLimitApprover(space, max_delta=0.1)
         with pytest.raises(SafetyAbort, match="NaN"):
             approver.review(Action(data=np.array([float("nan"), 0.0])), {})
+
+
+@pytest.mark.parametrize("name", ["", "line\nbreak", "line\rbreak"])
+def test_guardrail_contribution_rejects_invalid_display_names(name: str) -> None:
+    with pytest.raises(ValueError, match="display names"):
+        GuardrailContribution(approvers=((name, AutoApprover()),))
+
+
+def test_guardrail_contribution_requires_callable_review() -> None:
+    class _NotAnApprover:
+        review = 7
+
+    broken: Any = _NotAnApprover()
+    with pytest.raises(ValueError, match="callable review"):
+        GuardrailContribution(approvers=(("broken", broken),))
 
 
 def test_chain_runs_approvers_in_order() -> None:
