@@ -54,9 +54,11 @@ down-server chain from a requests-based client name-matches at the top
 
 Documented scope cuts: `ExceptionGroup` members (py3.11 task groups) are not
 walked — nested connect errors live in `.exceptions`, not the cause chain —
-and bare DNS failures from non-requests clients (`socket.gaierror`,
-`urllib.error.URLError`) do not match; requests/httpx users are covered
-because their top-level wrapper name-matches. Also out of scope: a policy
+and bare DNS failures (`socket.gaierror`) do not match; requests/httpx users
+are covered because their top-level wrapper name-matches, and stdlib
+`urllib.error.URLError` refusals match too (urllib raises inside the
+`except` handling the builtin `ConnectionRefusedError`, so the walk finds it
+via implicit `__context__`). Also out of scope: a policy
 that raises during the `on_trial_start` hook (`eval.py:338` formats that
 into `scene_error` directly, bypassing `PolicyError` wrapping) gets no hint —
 server-backed policies connect at reset/act time, which is the path covered.
