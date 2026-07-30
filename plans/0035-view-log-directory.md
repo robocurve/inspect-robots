@@ -34,7 +34,10 @@ renders logs to HTML" — with the argument deciding scope.
     `<dir>/html/index.html`. A log whose stem is exactly `index` renders to
     `html/index_log.html` — suffixed further (`index_log_2.html`, …) until
     free, so the remap cannot itself clobber another log's page (documented
-    in the subcommand help). If `<dir>/html` exists and is not a directory:
+    in the subcommand help). "Free" is resolved against the computed set of
+    target page names for this run, **not** against the filesystem —
+    probing disk would see run 1's own `index_log.html` as taken and orphan
+    a fresh page every incremental re-run. If `<dir>/html` exists and is not a directory:
     `SystemExit` with a clear message, before any rendering.
   - `-o PATH` (metavar changes from FILE to PATH): in single-file mode an
     output HTML file, exactly as today; in directory mode an output
