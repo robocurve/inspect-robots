@@ -17,8 +17,8 @@ Subcommands:
   saved eval log and optionally append policy conversations or captured wire calls.
 - ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
   into a deterministic digest or model-written learnings file.
-- ``inspect-robots view LOG.json [-o OUT.html] [--open]`` — render a saved eval log
-  as a self-contained HTML report.
+- ``inspect-robots view LOG.json|LOG_DIR [-o PATH] [--open]`` — render one saved
+  eval log or a browsable directory index as self-contained HTML.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
@@ -45,6 +45,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -54,8 +55,10 @@ from inspect_robots._html import (
     _chat_content,
     _display_status,
     _is_chat_transcript,
+    _status_class,
     render_html,
 )
+from inspect_robots._html_index import IndexEntry, render_index
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
@@ -332,14 +335,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="output markdown file (default: LOG_DIR/learnings/LOG_STEM.md; - writes stdout)",
     )
 
-    p_view = sub.add_parser("view", help="render a saved eval log as a self-contained HTML report")
-    p_view.add_argument("log", help="path to an EvalLog JSON file")
+    p_view = sub.add_parser(
+        "view",
+        help="render saved eval logs as self-contained HTML reports",
+        description=(
+            "Render one EvalLog JSON file, or every top-level *.json in a logs "
+            "directory with a browsable index. A directory log named index.json "
+            "uses index_log.html (or the next collision-free suffix)."
+        ),
+    )
+    p_view.add_argument(
+        "log",
+        help="path to an EvalLog JSON file, or a logs directory to render a browsable index",
+    )
     p_view.add_argument(
         "-o",
         "--out",
         default=None,
-        metavar="FILE",
-        help="output HTML file (default: LOG with an .html suffix; - writes to stdout)",
+        metavar="PATH",
+        help=(
+            "output HTML file for one log (default: LOG.html; - writes to stdout), "
+            "or output directory for a logs directory (default: LOG_DIR/html)"
+        ),
     )
     p_view.add_argument(
         "--open",
@@ -356,7 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=50,
         metavar="MB",
-        help="maximum inline frame payload in decimal MB (default: 50; 0 is unlimited)",
+        help=(
+            "maximum inline frame payload in decimal MB, applied to each rendered "
+            "page (default: 50; 0 is unlimited)"
+        ),
+    )
+    p_view.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "re-render existing pages in directory mode; use after changing "
+            "--no-frames or --frames-budget (ignored for one file)"
+        ),
     )
 
     p_video = sub.add_parser(
@@ -1040,6 +1068,8 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
         root = resolve_frames_dir(log.stats.frames_dir, Path(log_path))
         if root is not None and count_frames(root):
             print(_styled(f"hint: render videos with: inspect-robots video {log_path}", _DIM))
+    log_dir = Path(log_path).parent
+    print(_styled(f"hint: browse all logs: inspect-robots view {log_dir}", _DIM))
 
 
 class _ResolvedComponents(NamedTuple):
@@ -1312,12 +1342,7 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
                 _DIM,
             )
         )
-    print(
-        _styled(
-            f"hint: HTML viewer: inspect-robots view {log_dir}/<task>_<id>.json",
-            _DIM,
-        )
-    )
+    print(_styled(f"hint: browse all logs: inspect-robots view {log_dir}", _DIM))
 
 
 def _cmd_eval_set(args: argparse.Namespace) -> int:
@@ -1393,7 +1418,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
             )
             print(
                 _styled(
-                    f"hint: HTML viewer: inspect-robots view {args.log_dir}/<task>_<id>.json",
+                    f"hint: browse all logs: inspect-robots view {args.log_dir}",
                     _DIM,
                 )
             )
@@ -1487,17 +1512,215 @@ def _cmd_inspect(
     return 0 if log.status == "success" else 1
 
 
-def _cmd_view(args: argparse.Namespace) -> int:
-    """Render a saved log to a UTF-8 HTML artifact and optionally open it."""
+def _write_html(document: str, out_path: Path | None) -> int:
+    """Write one document as UTF-8, returning the encoded byte count."""
+    encoded = document.encode("utf-8", errors="replace")
+    if out_path is None:
+        sys.stdout.write(encoded.decode("utf-8"))
+        return len(encoded)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", errors="replace") as handle:
+        handle.write(document)
+    return len(encoded)
+
+
+def _render_log_page(
+    log: EvalLog,
+    log_path: Path,
+    out_path: Path | None,
+    *,
+    no_frames: bool,
+    frames_budget: float,
+) -> int:
+    """Render one already-parsed log through the shared single-page pipeline."""
+    frames_dir = None
+    if not no_frames and log.stats.frames_dir is not None:
+        from inspect_robots._video import resolve_frames_dir
+
+        frames_dir = resolve_frames_dir(log.stats.frames_dir, log_path)
+    document = render_html(
+        log,
+        title=f"{log.eval.task} - {log_path.name}",
+        log_path=log_path,
+        frames_dir=frames_dir,
+        frames_budget_bytes=int(frames_budget * 1_000_000),
+    )
+    return _write_html(document, out_path)
+
+
+def _open_html(path: Path) -> None:
+    """Open one rendered artifact, degrading browser failures to warnings."""
     import webbrowser
 
+    try:
+        opened = webbrowser.open(path.resolve().as_uri())
+    except Exception as exc:
+        print(f"warning: could not open browser for {path}: {exc}", file=sys.stderr)
+    else:
+        if not opened:
+            print(f"warning: could not open browser for {path}", file=sys.stderr)
+
+
+def _index_instruction(log: EvalLog) -> str:
+    """Return the shared instruction or the multi-scene fallback."""
+    instructions = {scene.instruction for scene in log.samples}
+    shared = next(iter(instructions)) if len(instructions) == 1 else None
+    if shared:
+        return shared
+    count = len(log.samples)
+    return f"{count} scene" if count == 1 else f"{count} scenes"
+
+
+def _index_termination(log: EvalLog) -> str:
+    """Return the order-preserved union of human-facing termination reasons."""
+    seen: set[str] = set()
+    phrases: list[str] = []
+    for scene in log.samples:
+        for reason in scene.termination_reasons:
+            if reason is None:
+                continue
+            text = str(reason)
+            if text in seen:
+                continue
+            seen.add(text)
+            phrases.append(_OUTCOME_PHRASES.get(text, text))
+    return ", ".join(phrases)
+
+
+def _index_entry(log: EvalLog, log_path: Path, page: str) -> IndexEntry:
+    """Build one directory-index row from a successfully parsed log."""
+    model = log.eval.policy_config.get("model")
+    return IndexEntry(
+        name=log_path.name,
+        page=page,
+        created=log.eval.created,
+        instruction=_index_instruction(log),
+        policy=log.eval.policy,
+        model=None if model is None else str(model),
+        status=_display_status(log.status),
+        status_class=_status_class(log.status),
+        metrics=log.results.metrics,
+        errored_trials=log.results.errored_trials,
+        termination=_index_termination(log),
+        error=log.error,
+    )
+
+
+def _unreadable_index_entry(log_path: Path, error: Exception) -> IndexEntry:
+    """Build an error row for a file that is not a readable EvalLog."""
+    try:
+        created = datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        created = ""
+    return IndexEntry(
+        name=log_path.name,
+        page=None,
+        created=created,
+        instruction="",
+        policy="",
+        model=None,
+        status="error",
+        status_class="status-error",
+        metrics={},
+        errored_trials=0,
+        termination="",
+        error=f"unreadable: {error}",
+    )
+
+
+def _directory_page_names(log_paths: Sequence[Path]) -> dict[Path, str]:
+    """Assign collision-free report names without consulting existing files."""
+    names = {path: f"{path.stem}.html" for path in log_paths if path.stem != "index"}
+    reserved = set(names.values())
+    for path in log_paths:
+        if path.stem != "index":
+            continue
+        candidate = "index_log.html"
+        suffix = 2
+        while candidate in reserved:
+            candidate = f"index_log_{suffix}.html"
+            suffix += 1
+        names[path] = candidate
+        reserved.add(candidate)
+    return names
+
+
+def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
+    """Render a logs directory incrementally and write its browsable index."""
     from inspect_robots import read_eval_log
+
+    if args.out == "-":
+        raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
+
+    log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
+    if not log_paths:
+        raise SystemExit(f"no top-level *.json logs found in {log_dir}")
+
+    out_dir = log_dir / "html" if args.out is None else Path(args.out)
+    if (out_dir.exists() or out_dir.is_symlink()) and not out_dir.is_dir():
+        if args.out is not None:
+            raise SystemExit(f"--out {out_dir} is not a directory; pass an output directory")
+        raise SystemExit(
+            f"default output path {out_dir} exists and is not a directory; move it or pass -o DIR"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    page_names = _directory_page_names(log_paths)
+    entries: list[IndexEntry] = []
+    pages_written = 0
+    bytes_written = 0
+    total = len(log_paths)
+    # One pass, one parse per log, nothing retained beyond its row: a log that
+    # fails to read or render (e.g. replaced mid-run by a concurrent writer)
+    # becomes an error row instead of sinking the index.
+    for index, log_path in enumerate(log_paths, start=1):
+        page_name = page_names[log_path]
+        page_path = out_dir / page_name
+        try:
+            log = read_eval_log(str(log_path))
+            render_page = (
+                args.force
+                or not page_path.exists()
+                or page_path.stat().st_mtime < log_path.stat().st_mtime
+            )
+            if render_page:
+                print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
+                bytes_written += _render_log_page(
+                    log,
+                    log_path,
+                    page_path,
+                    no_frames=args.no_frames,
+                    frames_budget=args.frames_budget,
+                )
+                pages_written += 1
+            entries.append(_index_entry(log, log_path, page_name))
+        except Exception as exc:
+            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            entries.append(_unreadable_index_entry(log_path, exc))
+
+    index_path = out_dir / "index.html"
+    bytes_written += _write_html(render_index(entries), index_path)
+    print(
+        f"index: {index_path} "
+        f"({total} logs, {pages_written} pages, {bytes_written / 1_000_000:.1f} MB)"
+    )
+    if args.open:
+        _open_html(index_path)
+    return 0
+
+
+def _cmd_view(args: argparse.Namespace) -> int:
+    """Render one saved log or a logs directory to UTF-8 HTML artifacts."""
+    if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
+        raise SystemExit("--frames-budget must be a non-negative finite number")
+
+    log_path = Path(args.log)
+    if log_path.is_dir():
+        return _cmd_view_directory(args, log_path)
 
     stdout_mode = args.out == "-"
     if stdout_mode and args.open:
         raise SystemExit("--open cannot be used with -o -: no file to open")
-
-    log_path = Path(args.log)
     out_path = (
         None
         if stdout_mode
@@ -1509,43 +1732,23 @@ def _cmd_view(args: argparse.Namespace) -> int:
         # The one data-loss path in this command: rendering over the log it reads.
         raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
 
-    log = read_eval_log(args.log)
-    if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
-        raise SystemExit("--frames-budget must be a non-negative finite number")
-    frames_dir = None
-    if not args.no_frames and log.stats.frames_dir is not None:
-        from inspect_robots._video import resolve_frames_dir
+    from inspect_robots import read_eval_log
 
-        frames_dir = resolve_frames_dir(log.stats.frames_dir, log_path)
-    document = render_html(
-        log,
-        title=f"{log.eval.task} - {log_path.name}",
-        log_path=log_path,
-        frames_dir=frames_dir,
-        frames_budget_bytes=int(args.frames_budget * 1_000_000),
+    document_size = _render_log_page(
+        read_eval_log(str(log_path)),
+        log_path,
+        out_path,
+        no_frames=args.no_frames,
+        frames_budget=args.frames_budget,
     )
     if stdout_mode:
-        degraded = document.encode("utf-8", errors="replace").decode("utf-8")
-        sys.stdout.write(degraded)
         return 0
 
     file_path = cast(Path, out_path)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8", errors="replace") as handle:
-        handle.write(document)
-    document_size = len(document.encode("utf-8", errors="replace"))
     size_suffix = f" ({document_size / 1_000_000:.1f} MB)" if document_size > 1_000_000 else ""
     print(f"wrote {file_path}{size_suffix}")
-
     if args.open:
-        uri = file_path.resolve().as_uri()
-        try:
-            opened = webbrowser.open(uri)
-        except Exception as exc:
-            print(f"warning: could not open browser for {file_path}: {exc}", file=sys.stderr)
-        else:
-            if not opened:
-                print(f"warning: could not open browser for {file_path}", file=sys.stderr)
+        _open_html(file_path)
     return 0
 
 

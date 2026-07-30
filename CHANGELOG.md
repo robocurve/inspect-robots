@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `inspect-robots view` now accepts a logs directory and incrementally renders
+  self-contained per-run reports plus a searchable browsable index, with
+  unreadable logs surfaced in place instead of aborting the whole directory
+  ([plan 0035](plans/0035-view-log-directory.md), #234).
+
 - Embodiments can contribute specialized approvers to the CLI's default
   guardrail chain through the new public `GuardrailContribution` API. Generic
   clamp and delta-limit gates remain first, contribution warnings stay visible,
