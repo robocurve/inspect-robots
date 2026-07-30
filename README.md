@@ -127,6 +127,22 @@ Read the recorded agent conversation with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
 camera frames the model saw.
 
+### Fast Opus 5 streamed to a remote Rerun viewer
+
+The same agent policy can run Claude Opus 5 in
+[fast mode](plugins/inspect-robots-agent/README.md#fast-mode-on-claude) at
+high thinking effort, streaming the rollout live to a Rerun viewer on your
+laptop (`rerun` locally, then `ssh -R 9876:localhost:9876 <robot>` for the
+tunnel). The explicit `run --instruction` form keeps the instruction on the
+last line, so the operator only ever edits the end of the command:
+
+```bash
+inspect-robots run --policy agent --rerun-connect \
+    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    -P effort=high \
+    --instruction "place the fork on the plate"
+```
+
 ### Retry with learning
 
 Summarize a failed log into a learnings file, then pass those notes to the
@@ -445,17 +461,3 @@ If you use Inspect Robots in your research, please cite it:
 ## License
 
 [MIT](LICENSE)
-
-## Example: fast Opus 5 streamed to a remote Rerun viewer
-
-Run Claude Opus 5 in
-[fast mode](plugins/inspect-robots-agent/README.md#fast-mode-on-claude) at
-high thinking effort, streaming the rollout live to a Rerun viewer on your
-laptop (`rerun` locally, then `ssh -R 9876:localhost:9876 <robot>` for the
-tunnel):
-
-```bash
-inspect-robots "place the fork on the plate" --policy agent --rerun-connect \
-    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
-    -P effort=high
-```
