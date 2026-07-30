@@ -73,6 +73,7 @@ from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.embodiment import Embodiment
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.rollout import TrialRecord
@@ -533,7 +534,9 @@ def _resolve_or_exit(
 
 
 def _build_guardrails(
-    space: Box, max_action_delta: float | None
+    space: Box,
+    max_action_delta: float | None,
+    embodiment: Embodiment | None = None,
 ) -> tuple[Approver, list[str], list[str]]:
     """The default CLI safety chain for an action space (plan 0008 §3e).
 
@@ -548,6 +551,7 @@ def _build_guardrails(
         ChainApprover,
         ClampApprover,
         DeltaLimitApprover,
+        GuardrailContribution,
     )
 
     parts: list[Approver] = []
@@ -565,6 +569,28 @@ def _build_guardrails(
         active.append("delta-limit")
     except ValueError as exc:
         warnings.append(f"delta limit skipped: {exc}")
+
+    missing = object()
+    hook = getattr(embodiment, "contribute_guardrails", missing)
+    if hook is not missing:
+        if not callable(hook):
+            assert embodiment is not None
+            raise SystemExit(
+                f"embodiment {embodiment.info.name!r} contribute_guardrails is "
+                f"not callable (got {type(hook).__name__})"
+            )
+        contribution = hook(space)
+        if not isinstance(contribution, GuardrailContribution):
+            assert embodiment is not None
+            raise SystemExit(
+                f"embodiment {embodiment.info.name!r} contribute_guardrails returned "
+                f"{type(contribution).__name__}, expected GuardrailContribution"
+            )
+        for name, approver in contribution.approvers:
+            parts.append(approver)
+            active.append(name)
+        warnings.extend(contribution.warnings)
+
     if not parts:
         warnings.append(
             "no guardrails are active for this action space; declare bounds/semantics "
@@ -1103,7 +1129,9 @@ def _announce_components(resolved: _ResolvedComponents) -> None:
     print(f"embodiment: {resolved.embodiment_name} ({resolved.embodiment_source})")
 
 
-def _build_and_announce_guardrails(args: argparse.Namespace, action_space: Box) -> Approver | None:
+def _build_and_announce_guardrails(
+    args: argparse.Namespace, action_space: Box, embodiment: Embodiment
+) -> Approver | None:
     """Build the default guardrail chain for a run, announcing what is active.
 
     Guardrails are on by default (plan 0008 §3e): the approver chain sits below
@@ -1119,7 +1147,9 @@ def _build_and_announce_guardrails(args: argparse.Namespace, action_space: Box) 
         )
         print("guardrails: disabled (--disable-guardrails)")
         return None
-    approver, active, guard_warnings = _build_guardrails(action_space, args.max_action_delta)
+    approver, active, guard_warnings = _build_guardrails(
+        action_space, args.max_action_delta, embodiment
+    )
     for warning in guard_warnings:
         print(f"guardrails warning: {warning}", file=sys.stderr)
     print(f"guardrails: {' + '.join(active) if active else 'none active'}")
@@ -1185,7 +1215,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 raise SystemExit(f"--epochs: {exc}") from exc
 
         _announce_components(resolved)
-        approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
+        approver = _build_and_announce_guardrails(
+            args, embodiment.info.action_space, resolved.embodiment
+        )
 
         before_scoring = None
         if _attended(args):
@@ -1322,7 +1354,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
-        approver = _build_and_announce_guardrails(args, embodiment.info.action_space)
+        approver = _build_and_announce_guardrails(
+            args, embodiment.info.action_space, resolved.embodiment
+        )
         before_scoring = None
         if _attended(args):
             # Registered tasks only here: prompt for exactly the trials a human

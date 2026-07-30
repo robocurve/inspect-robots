@@ -9,7 +9,7 @@ passes everything through; clamping/operator approval land in rollout hardening.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
@@ -31,6 +31,36 @@ class Approver(Protocol):
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Return the action to execute, or raise ``SafetyAbort`` to halt the evaluation."""
         ...
+
+
+@dataclass(frozen=True)
+class GuardrailContribution:
+    """Approvers an embodiment adds to the CLI's default guardrail chain.
+
+    ``approvers`` pairs a short display name (shown in the ``guardrails:``
+    banner) with each approver to append. ``warnings`` names contributions
+    the embodiment declined to make or made in a degraded state, and why, so
+    neither condition is invisible. Warnings may accompany active approvers.
+
+    A contributed approver must preserve the incoming ``Action`` object's
+    identity when approving it unmodified. If it substitutes another target,
+    such as holding an earlier pose, it must call
+    ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
+    deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
+    other exceptions are bugs and propagate. It must validate its own input,
+    rejecting non-finite values with ``SafetyAbort`` rather than assuming an
+    upstream clamp exists, because it may be the only active gate.
+    """
+
+    approvers: tuple[tuple[str, Approver], ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, approver in self.approvers:
+            if not name or "\n" in name or "\r" in name:
+                raise ValueError("guardrail display names must be non-empty and newline-free")
+            if not callable(getattr(approver, "review", None)):
+                raise ValueError(f"guardrail approver {name!r} must have a callable review")
 
 
 class AutoApprover:
@@ -208,6 +238,18 @@ class DeltaLimitApprover:
                 )
             self._low = low if explicit is None else _intersect(low, -explicit, np.maximum)
             self._high = high if explicit is None else _intersect(high, explicit, np.minimum)
+
+    @staticmethod
+    def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
+        """Reset an existing limiter reference to a copy of an executed pose.
+
+        A downstream approver that substitutes a target, such as holding an
+        earlier safe pose, must use this before the next action is reviewed so
+        the limiter measures subsequent deltas from the pose that actually ran.
+        If the limiter has not established a reference, this is a no-op.
+        """
+        if _LAST_APPROVED_KEY in store:
+            store[_LAST_APPROVED_KEY] = pose.copy()
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Limit per-step change, retaining absolute-mode history in trial state."""
