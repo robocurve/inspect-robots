@@ -70,6 +70,40 @@ def device_slots(factory: object) -> tuple[DeviceSlot, ...]:
         return ()
 
 
+@dataclass(frozen=True)
+class OptionSlot:
+    """One boolean behavior toggle the setup wizard interviews.
+
+    ``arg`` is the ``[embodiment.args]`` key to write (``true``/``false``);
+    ``label`` is the yes/no question shown to the operator ("Skip the
+    operator start prompts (auto_start)"); ``default`` is the suggested
+    answer when the key is absent from an existing config.
+    """
+
+    arg: str
+    label: str
+    default: bool = False
+
+
+def option_slots(factory: object) -> tuple[OptionSlot, ...]:
+    """The declared option slots, defensively read.
+
+    Reads ``OPTION_SLOTS`` off ``factory``; anything that is not an iterable
+    of ``OptionSlot`` instances has the offending entries ignored, never
+    crashes the wizard. Returns a tuple in declaration order.
+    """
+    try:
+        slots = getattr(factory, "OPTION_SLOTS", None)
+    except Exception:
+        return ()
+    if not isinstance(slots, Iterable):
+        return ()
+    try:
+        return tuple(slot for slot in slots if isinstance(slot, OptionSlot))
+    except Exception:
+        return ()
+
+
 def missing_runtime_requirements(factory: object) -> dict[str, str]:
     """The declared runtime modules that are not importable here.
 

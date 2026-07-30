@@ -20,7 +20,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
-| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight; `DeviceSlot`/`device_slots` declare and defensively read embodiment device slots |
+| `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight; `DeviceSlot`/`device_slots` and `OptionSlot`/`option_slots` declare and defensively read embodiment device and boolean option slots |
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
 | `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log`, including per-trial policy transcripts parallel to epochs |
@@ -33,7 +33,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `_video.py` | `inspect-robots video`: reunite a log with its `FrameStore` side-cars and pipe them to the ffmpeg binary, one MP4 per (trial, camera) stream (plan 0016: stderr temp file not pipe, per-stream failure isolation, strict uint8) |
 | `defaults.py` | public reader for user default policy/embodiment (+ `--sim` counterpart): env vars > `~/.config/inspect-robots/config.ini` (INI — py3.10 has no tomllib; deliberately no project-local file); `_set_default` backs `config set` |
 | `_dotenv.py` | dependency-free `.env` parsing and working-directory auto-loading with real environment variables taking precedence |
-| `_setup.py` | the `inspect-robots setup` wizard (plans 0009 and 0011): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with unplug-to-identify and CAN udev guidance, fallback camera discovery, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
+| `_setup.py` | the `inspect-robots setup` wizard (plans 0009, 0011, and 0032): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with unplug-to-identify and CAN udev guidance, boolean option interviews, fallback camera discovery, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
 
 ## Key invariants

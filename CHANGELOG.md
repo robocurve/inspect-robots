@@ -9,6 +9,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
+  boolean behavior toggles that `inspect-robots setup` interviews as yes/no
+  questions and writes into `[embodiment.args]`. First consumer:
+  inspect-robots-yam's `auto_start` (yam#87).
+
+- Policy connection failures now include an actionable action-server
+  remediation hint in the recorded error message (#219).
+
 - Wire capture: eval logs now record 100% of what the LLM saw. The agent
   policy captures every request/response attempt at the wire-client
   serialization point (tool schemas, evicted view, depth composites,

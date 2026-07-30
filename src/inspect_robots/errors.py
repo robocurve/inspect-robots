@@ -52,7 +52,10 @@ class CompatibilityError(InspectRobotsError):
 
 
 class PolicyError(InspectRobotsError):
-    """The policy raised during inference. Recorded as a failed trial."""
+    """The policy raised during inference. Recorded as a failed trial.
+
+    Connection-level failures carry a remediation hint in the message.
+    """
 
 
 class EmbodimentFault(InspectRobotsError):
