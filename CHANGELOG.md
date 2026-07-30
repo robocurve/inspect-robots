@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Policy connection failures now include an actionable action-server
+  remediation hint in the recorded error message (#219).
+
 - Wire capture: eval logs now record 100% of what the LLM saw. The agent
   policy captures every request/response attempt at the wire-client
   serialization point (tool schemas, evicted view, depth composites,
