@@ -114,9 +114,10 @@ def contribute_guardrails(self, action_space: Box) -> GuardrailContribution: ...
   gains a default `contribute_guardrails` returning an empty
   `GuardrailContribution()` (bind_task has a no-op base default too);
   subclasses override to contribute.
-- Conformance: `check_embodiment` stays purely declarative and untouched (it
-  receives an `EmbodimentInfo`, cannot see instance methods, and must never
-  execute plugin code — `doctor` runs it against every installed adapter). A
+- Conformance: `check_embodiment` stays purely declarative and untouched: it
+  receives an `EmbodimentInfo` and cannot see instance methods, and `doctor`
+  — which runs it on the resolved adapter after a construct-only step — must
+  never be forced to invoke arbitrary plugin methods. A
   new opt-in `check_guardrail_contribution(embodiment, action_space)` joins
   `conformance.py` for adapter CI to call with an instance it constructed:
   documented as allowed to execute plugin code, it checks the attribute (if
