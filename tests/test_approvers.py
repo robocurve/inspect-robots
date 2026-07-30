@@ -164,6 +164,24 @@ def test_absolute_derived_default_is_five_percent_of_range() -> None:
     assert np.allclose(out.data, [0.1, 0.45])  # 0.05 * (high - low) per dim
 
 
+def test_absolute_derived_default_keeps_the_box_shape_for_multi_d_boxes() -> None:
+    # The derived delta must broadcast against multi-dimensional actions; a
+    # flat (dim,) delta would raise in review() for a (2, 3) box.
+    space = Box(
+        shape=(2, 3),
+        low=np.zeros((2, 3)),
+        high=np.full((2, 3), 2.0),
+        semantics=ActionSemantics("joint_pos", max_step=(None, None, None, None, None, 0.5)),
+    )
+    approver = DeltaLimitApprover(space)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.zeros((2, 3))), store)
+    out = approver.review(Action(data=np.full((2, 3), 2.0)), store)
+    # Undeclared dims clamp to 5% of range (0.1); the flat declaration maps to
+    # the last element of the flattened box (0.5).
+    assert np.allclose(out.data, [[0.1, 0.1, 0.1], [0.1, 0.1, 0.5]])
+
+
 def test_absolute_derived_default_mixes_declared_and_native_range_limits() -> None:
     low = np.array([-1.0, 0.0], dtype=np.float16)
     high = np.array([1.0, 1.0], dtype=np.float16)

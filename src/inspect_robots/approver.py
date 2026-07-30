@@ -197,6 +197,9 @@ class DeltaLimitApprover:
                 for index, entry in enumerate(declared):
                     if entry is not None:
                         self._delta[index] = entry
+                # review() clips against the action's own shape; a flat delta
+                # would fail to broadcast for multi-dimensional boxes.
+                self._delta = self._delta.reshape(action_space.shape)
         else:
             if explicit is None and (low is None or high is None):
                 raise ValueError(
