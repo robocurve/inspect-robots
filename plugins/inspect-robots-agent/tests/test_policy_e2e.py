@@ -2533,7 +2533,7 @@ def test_non_string_param_coercion() -> None:
         ("effort", False),
         ("speed", False),
     ]:
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": "test-model",
             "base_url": "http://localhost:8000",
             "api_key_env": "TEST_KEY",
@@ -2541,7 +2541,7 @@ def test_non_string_param_coercion() -> None:
             "speed": None,
             "wire": "chat",
         }
-        kwargs[param] = val  # type: ignore[misc]
+        kwargs[param] = val
 
         # speed requires wire='anthropic'
         if param == "speed":
