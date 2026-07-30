@@ -55,6 +55,40 @@ newline (they land in a one-line banner); approvers must satisfy the
 `Approver` protocol shape (`callable review` attribute), checked with the same
 lenience the chain itself applies. Exported from `inspect_robots.approver`.
 
+The docstring also states the **behavioral contract** a contributed approver
+must honor as a chain member (today implicit in core's internals):
+
+- *Identity preservation*: return the incoming `Action` object itself when
+  approving unmodified — rollout detects modification by identity
+  (`ChainApprover` docstring); a fresh equal-valued object corrupts approval
+  events.
+- *Reference rewind on substitution*: an approver that substitutes a
+  different target (hold semantics) must rewind the delta limiter's reference
+  via `DeltaLimitApprover.rewind_reference` (below), or the limiter keeps
+  rating subsequent deltas against a target that never executed — permitting
+  a single-step jump from the real pose far larger than `max_delta`.
+- *Veto = `SafetyAbort`*: rejecting outright means raising `SafetyAbort`;
+  any other exception is treated as a bug and propagates.
+
+### 1b. Public store seam: `DeltaLimitApprover.rewind_reference`
+
+The delta limiter's store key is module-private (`_LAST_APPROVED_KEY`), and
+the first real contribution (yam's `CollisionApprover`) currently duplicates
+the string literal to rewind it — a silent-desync hazard: if core renames the
+key, the rewind becomes a no-op with no warning and the jump hazard above
+goes live. Since this plan creates the seam that invites third-party
+approvers behind the limiter, it also makes the interaction point public:
+
+```python
+@staticmethod
+def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
+    """Reset the limiter's reference to ``pose`` if a reference exists."""
+```
+
+documented for exactly this substitution case, with a test pinning the
+store-key/helper coupling so a rename fails loudly. Yam plan 0017 switches
+`CollisionApprover` to call it.
+
 ### 2. The embodiment method (documented protocol, duck-typed)
 
 ```python
@@ -65,9 +99,18 @@ def contribute_guardrails(self, action_space: Box) -> GuardrailContribution: ...
   working, zero migration).
 - Instance method, not ClassVar: whether and how to contribute depends on the
   embodiment's runtime config (control interface, user opt-out flag).
-- Documented on the `Embodiment` protocol in `types.py` alongside `info`, with
-  the conformance suite gaining a shape check: *if* the attribute exists it
-  must be callable, and its result must be a `GuardrailContribution`.
+- Follows the `bind_task` precedent exactly (`embodiment.py`): documented in
+  the `Embodiment` Protocol docstring, deliberately **not** a Protocol
+  member, so existing embodiments remain `isinstance(x, Embodiment)`-
+  conformant under `runtime_checkable`.
+- Conformance: `check_embodiment` stays purely declarative and untouched (it
+  receives an `EmbodimentInfo`, cannot see instance methods, and must never
+  execute plugin code — `doctor` runs it against every installed adapter). A
+  new opt-in `check_guardrail_contribution(embodiment, action_space)` joins
+  `conformance.py` for adapter CI to call with an instance it constructed:
+  documented as allowed to execute plugin code, it asserts the attribute (if
+  present) is callable, the result is a `GuardrailContribution`, and the
+  contribution validates.
 - The contract mirrors `_build_guardrails`' own degrade philosophy: an
   embodiment that cannot contribute in the current mode returns a warning
   entry, never raises for "not applicable". Raising is reserved for actual
@@ -88,11 +131,15 @@ After the existing clamp/delta assembly:
 
 - `hook = getattr(embodiment, "contribute_guardrails", None)`; if absent →
   done (exact current behavior).
-- If present but not callable → warning
-  `"embodiment guardrails skipped: contribute_guardrails is not callable"`.
-- If calling it returns a non-`GuardrailContribution` → warning naming the
-  actual type (defensive: a plugin built against a newer/older core must
-  degrade visibly, not crash the banner).
+- If present but not callable, or if calling it returns anything that is not
+  a `GuardrailContribution` → **hard error** (`SystemExit` naming the
+  embodiment and the actual type). There is no legitimate version skew that
+  produces this: a plugin new enough to define the hook imports
+  `GuardrailContribution` from the installed core (same class object), and a
+  core too old to have the class never calls the hook. The branch catches
+  exactly plugin bugs, and a bug in a safety component halts the run — the
+  same stance as §2's "raising propagates". Degrading here would let a
+  default-on guardrail vanish behind a stderr warning.
 - Otherwise append each contributed approver to `parts`, its display name to
   `active`, and extend `warnings` with the contribution's warnings.
 
@@ -126,21 +173,34 @@ in-bounds.
 
 ## Tests
 
-`tests/test_cli_guardrails.py` (extending the existing `_build_guardrails`
-coverage):
+In `tests/test_registry_cli.py`, where the existing `_build_guardrails`
+coverage lives, plus `tests/test_approver.py` for the store seam:
 
 - No method → identical chain and banner to today (regression).
 - Contribution with one approver → appended after delta-limit, name in
   `active`, banner string exact.
+- Two contributed approvers → declaration order preserved in both chain and
+  banner; a contribution with both `approvers` and `warnings` non-empty
+  surfaces both.
 - Contribution with warnings only → warnings printed, chain unchanged.
-- Non-callable attribute / wrong return type → visible warning, generic chain
-  intact.
+- Non-callable attribute / wrong return type → `SystemExit` naming the
+  embodiment and type.
 - Contribution while clamp+delta are both skipped (unbounded space) → chain is
   contribution-only, `AutoApprover` fallback not taken.
 - `--disable-guardrails` with a contributing embodiment → no approver, no
   contribution call (method not invoked; assert via spy).
-- Conformance: embodiment with `contribute_guardrails` returning a wrong type
-  fails the shape check; absent attribute passes.
+- `rewind_reference`: rewinds an existing reference; no-op without one; a
+  test pinning it to the limiter's actual store key (rename fails loudly);
+  substitution scenario — approver behind the limiter holds an earlier pose,
+  rewinds, next delta is rated against the held pose.
+- Conformance: `check_guardrail_contribution` passes an absent attribute,
+  fails a non-callable one and a wrong return type; `check_embodiment`
+  behavior unchanged.
+
+A `ValueError` escaping a contribution (e.g. a mis-measured rig model
+rejected at approver construction) intentionally surfaces as a traceback
+rather than the friendly `SystemExit` used for embodiment construction
+errors: it is a bug-loudness path, not an operator-input path.
 
 ## Release
 
