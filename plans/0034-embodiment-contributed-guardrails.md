@@ -143,8 +143,11 @@ def _build_guardrails(
 
 After the existing clamp/delta assembly:
 
-- `hook = getattr(embodiment, "contribute_guardrails", None)`; if absent →
-  done (exact current behavior).
+- `hook = getattr(embodiment, "contribute_guardrails", missing)` with a
+  sentinel (not `None`): a genuinely absent attribute → done (exact current
+  behavior), while an attribute explicitly set to `None` is present-and-not-
+  callable and takes the hard-error path below — a default-on guardrail must
+  not vanish because a subclass nulled the hook.
 - If present but not callable, or if calling it returns anything that is not
   a `GuardrailContribution` → **hard error** (`SystemExit` naming the
   embodiment and the actual type). There is no legitimate version skew that
