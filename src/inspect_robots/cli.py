@@ -354,8 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "output HTML file, or output directory in directory mode "
-            "(defaults: LOG.html or LOG_DIR/html; - writes one file to stdout)"
+            "output HTML file for one log (default: LOG.html; - writes to stdout), "
+            "or output directory for a logs directory (default: LOG_DIR/html)"
         ),
     )
     p_view.add_argument(
@@ -374,8 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=50,
         metavar="MB",
         help=(
-            "maximum inline frame payload in decimal MB per page in directory mode "
-            "(default: 50; 0 is unlimited)"
+            "maximum inline frame payload in decimal MB, applied to each rendered "
+            "page (default: 50; 0 is unlimited)"
         ),
     )
     p_view.add_argument(
@@ -1525,16 +1525,14 @@ def _write_html(document: str, out_path: Path | None) -> int:
 
 
 def _render_log_page(
+    log: EvalLog,
     log_path: Path,
     out_path: Path | None,
     *,
     no_frames: bool,
     frames_budget: float,
-) -> tuple[EvalLog, int]:
-    """Read and render one log through the shared single-page pipeline."""
-    from inspect_robots import read_eval_log
-
-    log = read_eval_log(str(log_path))
+) -> int:
+    """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
     if not no_frames and log.stats.frames_dir is not None:
         from inspect_robots._video import resolve_frames_dir
@@ -1547,7 +1545,7 @@ def _render_log_page(
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
     )
-    return log, _write_html(document, out_path)
+    return _write_html(document, out_path)
 
 
 def _open_html(path: Path) -> None:
@@ -1567,7 +1565,10 @@ def _index_instruction(log: EvalLog) -> str:
     """Return the shared instruction or the multi-scene fallback."""
     instructions = {scene.instruction for scene in log.samples}
     shared = next(iter(instructions)) if len(instructions) == 1 else None
-    return shared if shared else f"{len(log.samples)} scenes"
+    if shared:
+        return shared
+    count = len(log.samples)
+    return f"{count} scene" if count == 1 else f"{count} scenes"
 
 
 def _index_termination(log: EvalLog) -> str:
@@ -1651,52 +1652,51 @@ def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
     if args.out == "-":
         raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
 
-    log_paths = sorted(log_dir.glob("*.json"))
+    log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
     if not log_paths:
         raise SystemExit(f"no top-level *.json logs found in {log_dir}")
 
     out_dir = log_dir / "html" if args.out is None else Path(args.out)
     if (out_dir.exists() or out_dir.is_symlink()) and not out_dir.is_dir():
-        raise SystemExit(f"--out {out_dir} is not a directory; pass an output directory")
+        if args.out is not None:
+            raise SystemExit(f"--out {out_dir} is not a directory; pass an output directory")
+        raise SystemExit(
+            f"default output path {out_dir} exists and is not a directory; move it or pass -o DIR"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     page_names = _directory_page_names(log_paths)
-    parsed: dict[Path, EvalLog | Exception] = {}
-    for log_path in log_paths:
-        try:
-            parsed[log_path] = read_eval_log(str(log_path))
-        except Exception as exc:
-            parsed[log_path] = exc
-            print(f"warning: could not read {log_path.name}: {exc}", file=sys.stderr)
-
     entries: list[IndexEntry] = []
     pages_written = 0
     bytes_written = 0
     total = len(log_paths)
+    # One pass, one parse per log, nothing retained beyond its row: a log that
+    # fails to read or render (e.g. replaced mid-run by a concurrent writer)
+    # becomes an error row instead of sinking the index.
     for index, log_path in enumerate(log_paths, start=1):
-        parsed_log = parsed[log_path]
-        if isinstance(parsed_log, Exception):
-            entries.append(_unreadable_index_entry(log_path, parsed_log))
-            continue
-
         page_name = page_names[log_path]
         page_path = out_dir / page_name
-        render_page = (
-            args.force
-            or not page_path.exists()
-            or page_path.stat().st_mtime < log_path.stat().st_mtime
-        )
-        if render_page:
-            print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
-            parsed_log, page_bytes = _render_log_page(
-                log_path,
-                page_path,
-                no_frames=args.no_frames,
-                frames_budget=args.frames_budget,
+        try:
+            log = read_eval_log(str(log_path))
+            render_page = (
+                args.force
+                or not page_path.exists()
+                or page_path.stat().st_mtime < log_path.stat().st_mtime
             )
-            pages_written += 1
-            bytes_written += page_bytes
-        entries.append(_index_entry(parsed_log, log_path, page_name))
+            if render_page:
+                print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
+                bytes_written += _render_log_page(
+                    log,
+                    log_path,
+                    page_path,
+                    no_frames=args.no_frames,
+                    frames_budget=args.frames_budget,
+                )
+                pages_written += 1
+            entries.append(_index_entry(log, log_path, page_name))
+        except Exception as exc:
+            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            entries.append(_unreadable_index_entry(log_path, exc))
 
     index_path = out_dir / "index.html"
     bytes_written += _write_html(render_index(entries), index_path)
@@ -1732,7 +1732,10 @@ def _cmd_view(args: argparse.Namespace) -> int:
         # The one data-loss path in this command: rendering over the log it reads.
         raise SystemExit(f"--out {out_path} would overwrite the input log; pass a different path")
 
-    _log, document_size = _render_log_page(
+    from inspect_robots import read_eval_log
+
+    document_size = _render_log_page(
+        read_eval_log(str(log_path)),
         log_path,
         out_path,
         no_frames=args.no_frames,
@@ -1742,9 +1745,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
         return 0
 
     file_path = cast(Path, out_path)
-    size_suffix = (
-        f" ({document_size / 1_000_000:.1f} MB)" if document_size > 1_000_000 else ""
-    )
+    size_suffix = f" ({document_size / 1_000_000:.1f} MB)" if document_size > 1_000_000 else ""
     print(f"wrote {file_path}{size_suffix}")
     if args.open:
         _open_html(file_path)

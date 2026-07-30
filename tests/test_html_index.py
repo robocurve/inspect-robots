@@ -88,7 +88,7 @@ def test_rows_are_newest_first_and_metrics_use_four_significant_figures() -> Non
     assert "distance=0.01235" in document
     assert "success=0.6667" in document
     assert '<span class="errored">(1 errored)</span>' in document
-    assert "agent <span class=\"muted\">/ claude-test</span>" in document
+    assert 'agent <span class="muted">/ claude-test</span>' in document
 
 
 def test_filter_script_and_persisted_key_are_present() -> None:

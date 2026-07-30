@@ -192,16 +192,14 @@ def _row(entry: IndexEntry) -> str:
     )
 
 
-def render_index(
-    entries: Sequence[IndexEntry], *, title: str = "Inspect Robots runs"
-) -> str:
+def render_index(entries: Sequence[IndexEntry], *, title: str = "Inspect Robots runs") -> str:
     """Return one self-contained HTML document indexing evaluation logs."""
     ordered = sorted(entries, key=lambda entry: entry.created, reverse=True)
     rows = "".join(_row(entry) for entry in ordered)
     empty = (
         ""
         if rows
-        else '<tr><td class="empty" colspan="8">no evaluation logs found</td></tr>'
+        else '<tr class="empty"><td class="empty" colspan="8">no evaluation logs found</td></tr>'
     )
     return f"""<!doctype html>
 <html lang="en">

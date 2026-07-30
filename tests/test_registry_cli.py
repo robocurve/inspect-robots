@@ -1546,7 +1546,7 @@ def test_view_directory_end_to_end_and_unreadable_log(
     assert "foreign.json" in index and "unreadable:" in index
     assert out.out.startswith(f"index: {html_dir / 'index.html'} (3 logs, 2 pages, ")
     assert "[1/3] rendering foreign.json" not in out.err
-    assert "warning: could not read foreign.json" in out.err
+    assert "warning: could not read or render foreign.json" in out.err
     assert out.err.count(" rendering ") == 2
 
 
@@ -1712,7 +1712,7 @@ def test_view_directory_rejects_default_html_regular_file(tmp_path: Path) -> Non
     _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
     (logs / "html").write_text("occupied", encoding="utf-8")
 
-    with pytest.raises(SystemExit, match="is not a directory; pass an output directory"):
+    with pytest.raises(SystemExit, match="exists and is not a directory; move it or pass -o DIR"):
         main(["view", str(logs)])
 
 
@@ -1734,6 +1734,22 @@ def test_view_directory_rejects_existing_output_file(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match="is not a directory; pass an output directory"):
         main(["view", str(logs), "-o", str(output)])
+
+
+def test_view_directory_out_dir_replaces_html_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    output = tmp_path / "reports" / "nested"
+
+    assert main(["view", str(logs), "-o", str(output)]) == 0
+
+    assert (output / "run.html").is_file()
+    assert (output / "index.html").is_file()
+    assert not (logs / "html").exists()
+    assert capsys.readouterr().out.startswith(f"index: {output / 'index.html'} (1 logs, 1 pages, ")
 
 
 def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
