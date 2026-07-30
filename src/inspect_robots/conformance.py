@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from inspect_robots.embodiment import EmbodimentInfo
+from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES
 
-_ABSOLUTE_MODES = frozenset({"joint_pos", "eef_abs_pose"})
 DEVICE_KINDS = ("v4l2", "can", "serial")
 
 
@@ -213,7 +213,7 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
         elif len(set(labels)) != len(labels):
             error("dim_labels", "dim_labels contains duplicates")
 
-        if semantics.control_mode in _ABSOLUTE_MODES:
+        if semantics.control_mode in ABSOLUTE_CONTROL_MODES:
             spec = info.observation_space.state
             matching = [f.key for f in spec.fields if f.shape == (space.dim,)] if spec else []
             if len(matching) != 1:

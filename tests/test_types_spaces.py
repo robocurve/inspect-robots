@@ -10,6 +10,7 @@ import pytest
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import (
+    ABSOLUTE_CONTROL_MODES,
     ActionSemantics,
     Box,
     CameraSpec,
@@ -84,6 +85,8 @@ def test_action_semantics_defaults() -> None:
     assert sem.rotation_repr == "none"
     assert sem.gripper == "none"
     assert sem.frame == "base"
+    assert sem.max_step is None
+    assert {"joint_pos", "eef_abs_pose"} == ABSOLUTE_CONTROL_MODES
 
 
 def test_action_semantics_joint_delta_and_dim_labels() -> None:
@@ -100,6 +103,72 @@ def test_box_validates_dim_labels_length() -> None:
     assert Box(shape=(3,), semantics=labeled).dim == 3
     # No labels: any dim is fine.
     Box(shape=(2,), semantics=ActionSemantics(control_mode="joint_pos"))
+
+
+def test_action_semantics_max_step_round_trips_with_value_semantics() -> None:
+    sem = ActionSemantics(
+        control_mode="joint_pos",
+        dim_labels=("joint", "gripper"),
+        max_step=(None, 0.1),
+    )
+    same = ActionSemantics(
+        control_mode="joint_pos",
+        dim_labels=("joint", "gripper"),
+        max_step=(None, 0.1),
+    )
+    different = dataclasses.replace(sem, max_step=(None, 0.2))
+    box = Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=sem,
+    )
+
+    assert box.semantics is sem
+    assert sem.max_step == (None, 0.1)
+    assert sem == same
+    assert hash(sem) == hash(same)
+    assert sem != different
+
+
+def test_box_validates_max_step_length() -> None:
+    semantics = ActionSemantics(control_mode="joint_pos", max_step=(0.1,))
+    with pytest.raises(ValueError, match=r"max_step has 1 entries.*2 dimensions"):
+        Box(shape=(2,), semantics=semantics)
+    assert Box(shape=(1,), semantics=semantics).dim == 1
+
+
+@pytest.mark.parametrize("entry", [0.0, -0.1, float("nan"), float("inf"), float("-inf")])
+def test_action_semantics_rejects_invalid_max_step_entries(entry: float) -> None:
+    with pytest.raises(ValueError, match="max_step entries must be finite and > 0"):
+        ActionSemantics(control_mode="joint_pos", max_step=(entry,))
+
+
+def test_action_semantics_allows_none_max_step_entries() -> None:
+    assert ActionSemantics(control_mode="joint_pos", max_step=(None, 0.1)).max_step == (
+        None,
+        0.1,
+    )
+    assert ActionSemantics(control_mode="joint_delta", max_step=(None,)).max_step == (None,)
+
+
+def test_action_semantics_rejects_declared_step_for_non_absolute_mode() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"displacement boxes already declare per-step limits via low/high",
+    ):
+        ActionSemantics(control_mode="joint_delta", max_step=(None, 0.1))
+
+
+def test_box_rejects_max_step_on_pinned_dimension() -> None:
+    semantics = ActionSemantics(control_mode="joint_pos", max_step=(None, 0.1))
+    with pytest.raises(ValueError, match=r"pinned dimension.*low == high"):
+        Box(
+            shape=(2,),
+            low=np.array([-1.0, 0.0]),
+            high=np.array([1.0, 0.0]),
+            semantics=semantics,
+        )
 
 
 def test_observation_space_derives_state_keys_from_spec() -> None:

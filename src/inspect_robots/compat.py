@@ -80,6 +80,8 @@ def _check_action_spaces(policy_box: Box, emb_box: Box, issues: list[CompatIssue
             )
         )
         return
+    # max_step is deliberately excluded: motion limits are embodiment-authored,
+    # and policy-side semantics do not need to duplicate them.
     if ps.control_mode != es.control_mode:
         issues.append(
             CompatIssue(

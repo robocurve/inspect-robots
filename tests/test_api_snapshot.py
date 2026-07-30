@@ -42,6 +42,7 @@ EXPECTED = {
     "EmbodimentBase",
     "EmbodimentInfo",
     # types & spaces
+    "ABSOLUTE_CONTROL_MODES",
     "Observation",
     "Action",
     "ActionChunk",
