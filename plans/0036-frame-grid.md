@@ -79,10 +79,11 @@ appending the label text + bare `<img>`:
 
 `auto-fit` + `minmax` handles any camera count and viewport: 3 cameras sit
 3-up at the report's 1120px main width, degrading to fewer columns on
-narrow screens. Stored frames are capped at 448px on their longest side
-(`_FRAME_MAX_SIDE`), so `max-width: 448px` keeps a single-camera row at
-today's natural-size look instead of upscaling a 448px image to the full
-column. The `.wide` expand deliberately lifts that cap: an expanded cell is
+narrow screens. Stored frames are downsampled to at most 448px on their longest side
+(`_FRAME_MAX_SIDE`, never upsampled), so `max-width: 448px` keeps a
+single-camera row at today's capped-size look instead of upscaling to the
+full column (a natively-smaller frame does stretch up to 448px — accepted;
+real frames sit at the cap). The `.wide` expand deliberately lifts that cap: an expanded cell is
 an upscaled (soft) image, same trade the current full-width-on-request
 behavior would make — bigger beats sharper when a human is squinting at a
 gripper. The existing `img.frame` rule (natural size, `max-width: 100%`)
@@ -93,8 +94,9 @@ still governs images outside rows, e.g. wire-blob embeds.
 Frames in a 3-up row are a third of their old size, so one interaction is
 justified: clicking a frame toggles `wide` on its figure (`grid-column: 1 /
 -1` — full row width, in place, no overlay). One small event-delegated
-inline script in the document (the report currently ships zero JS; this adds
-a 4-line click handler on `document`, no per-image listeners). The handler
+inline script in the document `<head>` (active before the multi-MB body
+finishes parsing; the report currently ships zero JS and this adds a 4-line
+delegated click handler on `document`, no per-image listeners). The handler
 matches `event.target.closest('.frame-cell')` and no-ops otherwise —
 wire-blob images (which also carry `img.frame`) and arbitrary clicks are
 untouched. The report stays fully readable with JS disabled (grid and
@@ -129,6 +131,13 @@ directory index page (plan 0035) is untouched.
   alt.
 - The click script (`closest('.frame-cell')` delegation) and
   `.frame-cell.wide` rule are present in the document.
+- **Deliberate invariant replacement:** `test_header_status_metrics_and_scene_content`
+  currently asserts `"<script" not in document` (5-way parametrized) — that
+  zero-JS guarantee is retired, but its injection-guard role is preserved,
+  not dropped: the replacement asserts the document contains **exactly one**
+  `<script` occurrence and that it is the known first-party literal, and the
+  existing escaping test (`<script>alert(1)</script>` appears only escaped)
+  stays green — no foreign script survives unescaped.
 
 ## Rollout
 
