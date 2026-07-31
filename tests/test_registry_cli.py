@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import signal
 import sys
+import threading
+import urllib.request
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
@@ -118,7 +122,9 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # A clean run teaches both terminal and browser read-back commands.
     assert f"hint: inspect it with: inspect-robots inspect {written}" in out
     assert f"hint: HTML viewer: inspect-robots view {written}" in out
-    assert out.count("hint:") == 2
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert out.count("hint:") == 3
+    assert out.rstrip().endswith(f"hint: browse all logs: inspect-robots view {tmp_path}")
 
 
 @pytest.mark.parametrize(
@@ -476,7 +482,8 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert "[completed] kb/a" in out
     assert "[completed] kb/b" in out
     assert out.count("log dir:") == 1  # one shared line, not one per task
-    assert "hint: HTML viewer: inspect-robots view" in out
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert "HTML viewer: inspect-robots view" not in out
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
@@ -980,7 +987,8 @@ def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
     out = capsys.readouterr().out
     assert f"cancelled: partial logs are under {tmp_path}" in out
     assert "inspect-robots inspect" in out
-    assert "inspect-robots view" in out
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert "HTML viewer: inspect-robots view" not in out
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1206,6 +1214,38 @@ def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
     recorded = str(tmp_path / "old-machine" / "run-stamp")
     path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
     return path, frames_dir
+
+
+def _directory_view_log(
+    *,
+    created: str,
+    instruction: str = "pick up the cube",
+    status: str = "success",
+    metrics: dict[str, float] | None = None,
+    errored_trials: int = 0,
+) -> EvalLog:
+    log = _step_limit_log(reasons=("success",))
+    scene = dataclasses.replace(
+        log.samples[0],
+        status=status,
+        instruction=instruction,
+        termination_reasons=("success",),
+    )
+    return dataclasses.replace(
+        log,
+        status=status,
+        eval=dataclasses.replace(
+            log.eval,
+            created=created,
+            policy_config={"model": "provider/models/claude-test"},
+        ),
+        results=dataclasses.replace(
+            log.results,
+            metrics={"success_at_end": 1.0} if metrics is None else metrics,
+            errored_trials=errored_trials,
+        ),
+        samples=(scene,),
+    )
 
 
 @pytest.mark.parametrize("name", ["run.json", "run"])
@@ -1474,6 +1514,617 @@ def test_view_exit_code_reports_artifact_production_not_eval_status(
 
     assert main(["view", str(path)]) == 0
     capsys.readouterr()
+
+
+def test_view_directory_end_to_end_and_unreadable_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "older.json",
+    )
+    _write_log(
+        _directory_view_log(
+            created="2026-07-30T12:00:00Z",
+            instruction="place the cube",
+        ),
+        logs,
+        "newer.json",
+    )
+    (logs / "foreign.json").write_text("{not json", encoding="utf-8")
+
+    assert main(["view", str(logs)]) == 0
+
+    out = capsys.readouterr()
+    html_dir = logs / "html"
+    assert (html_dir / "older.html").is_file()
+    assert (html_dir / "newer.html").is_file()
+    assert not (html_dir / "foreign.html").exists()
+    index = (html_dir / "index.html").read_text(encoding="utf-8")
+    assert index.index("newer.json") < index.index("older.json")
+    assert 'href="newer.html"' in index and 'href="older.html"' in index
+    assert "foreign.json" in index and "unreadable:" in index
+    assert out.out.startswith(f"index: {html_dir / 'index.html'} (3 logs, 2 pages, ")
+    assert "[1/3] rendering foreign.json" not in out.err
+    assert "warning: could not read or render foreign.json" in out.err
+    assert out.err.count(" rendering ") == 2
+
+
+def test_view_directory_multi_scene_metrics_empty_samples_and_errored_trials(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    base = _directory_view_log(
+        created="2026-07-30T12:00:00Z",
+        metrics={"mean_score": 0.333333},
+        errored_trials=1,
+    )
+    first = dataclasses.replace(
+        base.samples[0],
+        scene_id="first",
+        instruction="shared instruction",
+        termination_reasons=("success", None),
+    )
+    second = dataclasses.replace(
+        base.samples[0],
+        scene_id="second",
+        instruction="shared instruction",
+        termination_reasons=("max_steps", "success"),
+    )
+    multi = dataclasses.replace(
+        base,
+        results=dataclasses.replace(base.results, total_scenes=2, total_trials=4),
+        samples=(first, second),
+    )
+    empty = dataclasses.replace(
+        _directory_view_log(
+            created="2026-07-29T12:00:00Z",
+            status="cancelled",
+            metrics={},
+        ),
+        results=EvalResults(total_scenes=0, total_trials=0, metrics={}),
+        samples=(),
+    )
+    _write_log(multi, logs, "multi.json")
+    _write_log(empty, logs, "empty.json")
+
+    assert main(["view", str(logs)]) == 0
+
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "shared instruction" in index
+    assert "mean_score=0.3333" in index
+    assert "succeeded, hit step limit" in index
+    assert '<span class="badge status-completed">completed</span>' in index
+    assert '<span class="errored">(1 errored)</span>' in index
+    assert "0 scenes" in index
+    assert '<span class="badge status-cancelled">cancelled</span>' in index
+
+
+def test_view_directory_incremental_mtime_and_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    first = _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "a.json",
+    )
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "b.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+    capsys.readouterr()
+
+    assert main(["view", str(logs)]) == 0
+    second = capsys.readouterr()
+    assert " rendering " not in second.err
+    assert "(2 logs, 0 pages, " in second.out
+
+    from inspect_robots._html import render_html
+
+    calls: list[str] = []
+
+    def record_render(
+        log: EvalLog,
+        *,
+        title: str,
+        log_path: Path,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+    ) -> str:
+        calls.append(log.eval.created)
+        return render_html(
+            log,
+            title=title,
+            log_path=log_path,
+            frames_dir=frames_dir,
+            frames_budget_bytes=frames_budget_bytes,
+        )
+
+    monkeypatch.setattr(cli, "render_html", record_render)
+    page_mtime = (logs / "html" / "a.html").stat().st_mtime
+    os.utime(first, (page_mtime + 10, page_mtime + 10))
+
+    assert main(["view", str(logs)]) == 0
+    refreshed = capsys.readouterr()
+    assert calls == ["2026-07-29T12:00:00Z"]
+    assert refreshed.err.count(" rendering ") == 1
+    assert "rendering a.json" in refreshed.err
+
+    calls.clear()
+    assert main(["view", str(logs), "--force"]) == 0
+    forced = capsys.readouterr()
+    assert len(calls) == 2
+    assert forced.err.count(" rendering ") == 2
+    assert "(2 logs, 2 pages, " in forced.out
+
+
+def test_view_directory_index_log_uses_collision_free_page(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "index.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+
+    html_dir = logs / "html"
+    assert (html_dir / "index.html").is_file()
+    assert (html_dir / "index_log.html").is_file()
+    assert 'href="index_log.html"' in (html_dir / "index.html").read_text(encoding="utf-8")
+
+
+def test_view_directory_index_log_suffix_uses_run_targets_not_filesystem(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "index.json",
+    )
+    _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "index_log.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+    assert (logs / "html" / "index_log_2.html").is_file()
+
+    assert main(["view", str(logs)]) == 0
+    assert not (logs / "html" / "index_log_3.html").exists()
+
+
+def test_view_directory_rejects_default_html_regular_file(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    (logs / "html").write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="exists and is not a directory; move it or pass -o DIR"):
+        main(["view", str(logs)])
+
+
+def test_view_directory_rejects_stdout_output(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit, match="cannot be used with a logs directory"):
+        main(["view", str(logs), "-o", "-"])
+
+
+def test_view_directory_rejects_existing_output_file(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    output = tmp_path / "reports"
+    output.write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="is not a directory; pass an output directory"):
+        main(["view", str(logs), "-o", str(output)])
+
+
+def test_view_directory_out_dir_replaces_html_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    output = tmp_path / "reports" / "nested"
+
+    assert main(["view", str(logs), "-o", str(output)]) == 0
+
+    assert (output / "run.html").is_file()
+    assert (output / "index.html").is_file()
+    assert not (logs / "html").exists()
+    assert capsys.readouterr().out.startswith(f"index: {output / 'index.html'} (1 logs, 1 pages, ")
+
+
+def test_unreadable_index_entry_tolerates_vanished_file(tmp_path: Path) -> None:
+    entry = cli._unreadable_index_entry(tmp_path / "gone.json", ValueError("boom"))
+
+    assert entry.created == ""
+    assert entry.error == "unreadable: boom"
+    assert entry.page is None
+
+
+def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    with pytest.raises(SystemExit, match=r"no top-level \*\.json") as excinfo:
+        main(["view", str(logs)])
+
+    assert excinfo.value.code
+    assert not (logs / "html" / "index.html").exists()
+
+
+def test_view_directory_open_targets_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    assert main(["view", str(logs), "--open"]) == 0
+
+    assert opened == [(logs / "html" / "index.html").resolve().as_uri()]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--port", "8300"),
+        ("--host", "127.0.0.1"),
+    ],
+)
+def test_view_serve_options_require_serve(
+    flag: str,
+    value: str,
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit, match=rf"{flag} requires --serve"):
+        main(["view", str(logs), flag, value])
+
+
+def test_view_serve_requires_logs_directory(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="--serve requires a logs directory"):
+        main(["view", str(path), "--serve"])
+
+
+def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    response_status: list[int] = []
+    response_bodies: list[str] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def probe_server(seconds: float) -> None:
+        assert seconds == cli._SERVE_RERENDER_SECONDS
+        url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+        with urllib.request.urlopen(url, timeout=2) as response:
+            response_status.append(response.status)
+            response_bodies.append(response.read().decode())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_serve_sleep", probe_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert response_status == [200]
+    assert '<meta http-equiv="refresh" content="60">' in response_bodies[0]
+    assert bound_ports[0] != 0
+    assert f"serving logs at: http://127.0.0.1:{bound_ports[0]}/" in out.out
+    assert "serving to this machine only; pass --host 0.0.0.0" in out.out
+    assert out.out.index("index: ") < out.out.index("serving logs at: ")
+
+
+@pytest.mark.parametrize(
+    "rerender_error",
+    [
+        RuntimeError("directory changing"),
+        SystemExit("no logs left"),
+    ],
+)
+def test_view_serve_rerender_failure_warns_and_continues(
+    rerender_error: BaseException,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    sleep_calls = 0
+    quiet_calls = 0
+    pass_force_values: list[bool] = []
+    render_directory = cli._render_view_directory
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def flaky_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        nonlocal quiet_calls
+        pass_force_values.append(force)
+        if quiet:
+            quiet_calls += 1
+            if quiet_calls == 1:
+                raise rerender_error
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    def advance_loop(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                assert response.status == 200
+        elif sleep_calls == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_render_view_directory", flaky_render)
+    monkeypatch.setattr(cli, "_serve_sleep", advance_loop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--force"]) == 0
+
+    out = capsys.readouterr()
+    assert f"warning: re-render failed: {rerender_error}" in out.err
+    assert quiet_calls == 2
+    assert pass_force_values == [True, False, False]
+    assert out.out.count("index: ") == 1
+
+
+def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    render_directory = cli._render_view_directory
+
+    def interrupted_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        if quiet:
+            raise KeyboardInterrupt
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    monkeypatch.setattr(cli, "_render_view_directory", interrupted_render)
+    monkeypatch.setattr(cli, "_serve_sleep", lambda _seconds: None)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert "re-render failed" not in out.err
+
+
+def test_view_serve_interrupt_before_thread_start_skips_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    class InterruptedThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def start(self) -> None:
+            # Interrupt delivered before serve_forever ever runs: shutdown()
+            # must be skipped or this test hangs forever.
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading, "Thread", InterruptedThread)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+
+def test_view_serve_localhost_bind_prints_loopback_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", interrupt)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--host", "localhost"]) == 0
+
+    out = capsys.readouterr()
+    assert "serving to this machine only" in out.out
+    assert "serving to your network" not in out.out
+
+
+def test_view_serve_wildcard_prints_hostname_localhost_and_exposure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    result = main(["view", str(logs), "--serve", "--host", "0.0.0.0", "--port", "0"])
+
+    assert result == 0
+
+    out = capsys.readouterr().out
+    assert f"serving logs at: http://robot-host:{bound_ports[0]}/" in out
+    assert f"http://localhost:{bound_ports[0]}/" in out
+    assert "serving to your network: anyone who can reach this machine can view these logs" in out
+
+
+def test_view_serve_url_helpers_follow_bind_address_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert cli._serve_display_urls("127.0.0.1", 8300) == ("http://127.0.0.1:8300/",)
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    assert cli._serve_display_urls("0.0.0.0", 8300) == (
+        "http://robot-host:8300/",
+        "http://localhost:8300/",
+    )
+    assert cli._serve_open_url("127.0.0.1", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("0.0.0.0", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("192.0.2.10", 8300) == "http://192.0.2.10:8300/"
+
+
+def test_view_serve_sigterm_handler_is_scoped_to_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    original_handler = signal.getsignal(signal.SIGTERM)
+    serving_handlers: list[object] = []
+
+    def record_handler_and_stop(_seconds: float) -> None:
+        serving_handlers.append(signal.getsignal(signal.SIGTERM))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", record_handler_and_stop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    assert serving_handlers == [cli._raise_keyboard_interrupt]
+    assert signal.getsignal(signal.SIGTERM) == original_handler
+    with pytest.raises(KeyboardInterrupt):
+        cli._raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+def test_view_serve_bind_failure_is_clean_system_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def fail_to_bind(_address: tuple[str, int], _handler: object) -> None:
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", fail_to_bind)
+
+    with pytest.raises(SystemExit, match="address already in use"):
+        main(["view", str(logs), "--serve"])
+
+
+def test_view_serve_open_url_rules_and_loopback_browser_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--open"]) == 0
+
+    assert len(opened) == 1
+    assert opened[0].startswith("http://127.0.0.1:")
+    assert opened[0].endswith("/")
 
 
 def test_run_outcome_shows_timeout_without_a_count(
@@ -3421,6 +4072,282 @@ def test_build_guardrails_full_chain_on_bounded_displacement_space() -> None:
     assert warnings == []
     out = approver.review(Action(data=np.array([5.0, 5.0])), {})
     assert out.meta.get("clamped") is True  # box bounds enforced
+
+
+def test_contributed_guardrail_follows_delta_limit_and_has_exact_banner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    seen: list[float] = []
+
+    class _Observer:
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            seen.append(float(action.data[0]))
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(approvers=(("collision", _Observer()),))
+
+    embodiment = _ContributingEmbodiment()
+    args = argparse.Namespace(disable_guardrails=False, max_action_delta=0.05)
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is not None
+    approver.review(Action(data=np.array([0.08, 0.0])), {})
+
+    assert seen == [0.05]
+    assert capsys.readouterr().out == "guardrails: clamp + delta-limit + collision\n"
+
+
+def test_contributed_approvers_keep_declaration_order_and_warnings() -> None:
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    calls: list[str] = []
+
+    class _Recorder:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            calls.append(self._name)
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(
+                approvers=(
+                    ("first", _Recorder("first")),
+                    ("second", _Recorder("second")),
+                ),
+                warnings=("collision model is running without table geometry",),
+            )
+
+    embodiment = _ContributingEmbodiment()
+    approver, active, warnings = _build_guardrails(embodiment.info.action_space, None, embodiment)
+    approver.review(Action(data=np.array([0.01, 0.01])), {})
+
+    assert calls == ["first", "second"]
+    assert active == ["clamp", "delta-limit", "first", "second"]
+    assert warnings == ["collision model is running without table geometry"]
+
+
+def test_warnings_only_contribution_keeps_the_generic_chain(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    class _WarningEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(warnings=("collision guardrail unavailable",))
+
+    embodiment = _WarningEmbodiment()
+    args = argparse.Namespace(disable_guardrails=False, max_action_delta=None)
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is not None
+    action = Action(data=np.array([0.01, 0.01]))
+
+    assert approver.review(action, {}) is action
+    captured = capsys.readouterr()
+    assert captured.out == "guardrails: clamp + delta-limit\n"
+    assert captured.err == "guardrails warning: collision guardrail unavailable\n"
+
+
+def test_non_callable_guardrail_hook_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = 7
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*int"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_none_guardrail_hook_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = None
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*NoneType"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_wrong_guardrail_contribution_type_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> object:
+            return "not a contribution"
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*str"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_contribution_is_the_only_gate_for_an_unbounded_space() -> None:
+    import numpy as np
+
+    from inspect_robots.approver import ChainApprover, GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    calls: list[Action] = []
+
+    class _OnlyGate:
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            calls.append(action)
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(approvers=(("only-gate", _OnlyGate()),))
+
+    embodiment = _ContributingEmbodiment()
+    space = Box(shape=(2,))
+    approver, active, warnings = _build_guardrails(space, None, embodiment)
+    action = Action(data=np.array([4.0, 5.0]))
+
+    assert isinstance(approver, ChainApprover)
+    assert approver.review(action, {}) is action
+    assert calls == [action]
+    assert active == ["only-gate"]
+    assert not any("no guardrails" in warning for warning in warnings)
+
+
+def test_disable_guardrails_does_not_invoke_contribution(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    calls: list[Box] = []
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            calls.append(action_space)
+            return GuardrailContribution()
+
+    embodiment = _ContributingEmbodiment()
+    args = argparse.Namespace(disable_guardrails=True, max_action_delta=None)
+
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is None
+    assert calls == []
+    assert "guardrails: disabled" in capsys.readouterr().out
+
+
+def test_embodiment_base_default_matches_an_absent_hook() -> None:
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.embodiment import EmbodimentBase
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Action, Observation, StepResult
+
+    class _BaseEmbodiment(EmbodimentBase):
+        def __init__(self) -> None:
+            self._delegate = CubePickEmbodiment()
+            self.info = self._delegate.info
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return self._delegate.reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            return self._delegate.step(action)
+
+    absent = CubePickEmbodiment()
+    base = _BaseEmbodiment()
+
+    _, absent_active, absent_warnings = _build_guardrails(absent.info.action_space, None, absent)
+    _, base_active, base_warnings = _build_guardrails(base.info.action_space, None, base)
+
+    assert base.contribute_guardrails(base.info.action_space) == GuardrailContribution()
+    assert (base_active, base_warnings) == (absent_active, absent_warnings)
+
+
+def test_guardrail_contribution_conformance_passes_absent_and_valid_hooks() -> None:
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.conformance import (
+        assert_guardrail_contribution_conformant,
+        check_guardrail_contribution,
+    )
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _ValidEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution()
+
+    absent = CubePickEmbodiment()
+    valid = _ValidEmbodiment()
+
+    assert check_guardrail_contribution(absent, absent.info.action_space).ok
+    assert check_guardrail_contribution(valid, valid.info.action_space).ok
+    assert_guardrail_contribution_conformant(valid, valid.info.action_space)
+
+
+def test_guardrail_contribution_conformance_reports_bad_hooks() -> None:
+    from inspect_robots.conformance import (
+        assert_guardrail_contribution_conformant,
+        check_guardrail_contribution,
+    )
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _NonCallableEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = 7
+
+    class _WrongTypeEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> object:
+            return "not a contribution"
+
+    non_callable = _NonCallableEmbodiment()
+    wrong_type = _WrongTypeEmbodiment()
+
+    report = check_guardrail_contribution(non_callable, non_callable.info.action_space)
+    assert not report.ok
+    assert "int" in report.summary()
+
+    report = check_guardrail_contribution(wrong_type, wrong_type.info.action_space)
+    assert not report.ok
+    assert "str" in report.summary()
+    with pytest.raises(AssertionError, match="GuardrailContribution"):
+        assert_guardrail_contribution_conformant(wrong_type, wrong_type.info.action_space)
 
 
 def test_build_guardrails_threads_max_action_delta() -> None:

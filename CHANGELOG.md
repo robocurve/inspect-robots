@@ -9,6 +9,28 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `inspect-robots view --serve` now serves a rendered logs directory, refreshes
+  it incrementally as new runs arrive, and supports explicit host/port binding
+  for local or remote browsing (plan 0037, #241)
+
+- `inspect-robots view` now accepts a logs directory and incrementally renders
+  self-contained per-run reports plus a searchable browsable index, with
+  unreadable logs surfaced in place instead of aborting the whole directory
+  ([plan 0035](plans/0035-view-log-directory.md), #234).
+
+- Embodiments can contribute specialized approvers to the CLI's default
+  guardrail chain through the new public `GuardrailContribution` API. Generic
+  clamp and delta-limit gates remain first, contribution warnings stay visible,
+  and `DeltaLimitApprover.rewind_reference` safely supports hold substitutions.
+  The new public API is the rationale for the 0.31.0 minor release
+  ([plan 0034](plans/0034-embodiment-contributed-guardrails.md), #232).
+
+- Per-dimension `ActionSemantics.max_step` declarations let embodiments set
+  absolute-control pacing and safety ceilings in native units. Default delta
+  approval, agent-tool interpolation, and CaP-X motion queues honor mixed
+  declared/range-derived limits while policy compatibility deliberately ignores
+  embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
+
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
@@ -36,6 +58,12 @@ All notable changes to this project are documented here. The format is based on
   runs now prompt for exactly those trials — registered tasks and `eval-set`
   included (#194).
 
+### Changed
+
+- The `llm/latest` Rerun pane now shows only the step's assistant message(s);
+  the full conversation remains in the `llm` TextLog stream
+  ([plan 0037](plans/0037-rerun-latest-assistant-only.md), #243).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
@@ -50,12 +78,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
+  `tool_calls[].extra_content` (`google.thought_signature`) into conversation
+  history. Dropping it made Gemini reject any request ending on a tool
+  message — e.g. after an `eef_pos` workspace-bounds rejection — with HTTP 400
+  "Function call is missing a thought_signature", erroring the trial (#229,
+  #230). Non-Gemini requests are unchanged.
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
 
 ### Changed
 
+- Camera frames in HTML reports now render as captioned responsive grid rows,
+  with click-to-expand cells for closer inspection (plan 0036, #239).
 - **Task horizon binding now follows compatibility checking.** An
   embodiment's optional `bind_task()` hook receives the resolved step envelope
   only after the policy/embodiment/task triple is known to be compatible. This

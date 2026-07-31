@@ -31,6 +31,11 @@ _BLOB_SENTINEL_RE = re.compile(r"\$blob:([^\s]+)")
 _BLOB_SHA_RE = re.compile(r"[0-9a-f]{64}")
 _MISSING = object()
 
+_FRAME_CLICK_SCRIPT = """document.addEventListener('click', (event) => {
+  const cell = event.target.closest('.frame-cell');
+  if (cell) cell.classList.toggle('wide');
+});"""
+
 
 @dataclass
 class _FrameBudget:
@@ -179,6 +184,17 @@ img.frame {
   display: block; max-width: 100%; height: auto; margin: 6px 0;
   border: 1px solid var(--line); border-radius: 6px;
 }
+.frame-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px; margin: 6px 0;
+}
+.frame-cell { margin: 0; min-width: 0; }
+.frame-cell figcaption {
+  font-size: 12px; color: var(--muted); margin-bottom: 2px; overflow-wrap: anywhere;
+}
+.frame-cell img.frame { width: 100%; max-width: 448px; margin: 0; cursor: zoom-in; }
+.frame-cell.wide { grid-column: 1 / -1; }
+.frame-cell.wide img.frame { max-width: none; cursor: zoom-out; }
 .system-message {
   margin: 13px 0; padding: 0 0 0 13px; border: 0;
   border-left: 3px solid var(--system);
@@ -369,8 +385,9 @@ def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
     """Render user content parts as text runs split only by successful frame embeds."""
     runs: list[str] = []
     buffered: list[str] = []
-    pending: tuple[str, int] | None = None
+    pending: tuple[str, int, int] | None = None
     embedded = 0
+    row_open = False
     for part in parts:
         if isinstance(part, dict) and part.get("type") == "text":
             raw_text = part.get("text", "")
@@ -378,15 +395,35 @@ def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
             if isinstance(raw_text, str):
                 label = _FRAME_LABEL_RE.fullmatch(raw_text)
                 if label is not None:
-                    pending = (label.group("name"), int(label.group("step")))
+                    label_index = len(buffered)
+                    buffered.append(part_text)
+                    pending = (
+                        label.group("name"),
+                        int(label.group("step")),
+                        label_index,
+                    )
+                    continue
                 elif raw_text == _FRAME_PLACEHOLDER and pending is not None:
-                    name, step = pending
+                    name, step, label_index = pending
                     pending = None
                     image = _frame_image(frame_ctx, name, step)
                     if image is not None:
-                        text = _escape("\n".join(buffered))
-                        runs.append(f'<div class="content">{text}</div>')
-                        runs.append(image)
+                        caption = buffered[label_index][:-1]
+                        del buffered[label_index]
+                        joined = "\n".join(buffered)
+                        if joined:
+                            if row_open:
+                                runs.append("</div>")
+                                row_open = False
+                            runs.append(f'<div class="content">{_escape(joined)}</div>')
+                        if not row_open:
+                            runs.append('<div class="frame-row">')
+                            row_open = True
+                        runs.append(
+                            '<figure class="frame-cell">'
+                            f"<figcaption>{_escape(caption)}</figcaption>"
+                            f"{image}</figure>"
+                        )
                         buffered = []
                         embedded += 1
                         continue
@@ -394,8 +431,14 @@ def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
         else:
             buffered.append("[image]")
     if embedded == 0 or buffered:
-        text = _escape("\n".join(buffered))
-        runs.append(f'<div class="content">{text}</div>')
+        joined = "\n".join(buffered)
+        if embedded == 0 or joined:
+            if row_open:
+                runs.append("</div>")
+                row_open = False
+            runs.append(f'<div class="content">{_escape(joined)}</div>')
+    if row_open:
+        runs.append("</div>")
     return "".join(runs)
 
 
@@ -888,6 +931,7 @@ def render_html(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
 <style>{_STYLES}</style>
+<script>{_FRAME_CLICK_SCRIPT}</script>
 </head>
 <body>
 <header><div class="header-inner">

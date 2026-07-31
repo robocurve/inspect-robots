@@ -48,6 +48,7 @@ from inspect_robots.scorer import (
     success_at_end,
 )
 from inspect_robots.spaces import (
+    ABSOLUTE_CONTROL_MODES,
     ActionSemantics,
     Box,
     CameraSpec,
@@ -62,6 +63,7 @@ from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation,
 # with ``_``) is private. Authoring a benchmark, policy, or embodiment should only
 # need these names.
 __all__ = [
+    "ABSOLUTE_CONTROL_MODES",
     "OPERATOR_END",
     "Action",
     "ActionChunk",

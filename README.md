@@ -125,7 +125,24 @@ inspect-robots "place the fork on the plate" --policy agent \
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
-camera frames the model saw.
+camera frames the model saw. Once a few runs have accumulated,
+`inspect-robots view logs/` renders them all and builds a browsable index.
+
+### Fast Opus 5 streamed to a remote Rerun viewer
+
+The same agent policy can run Claude Opus 5 in
+[fast mode](plugins/inspect-robots-agent/README.md#fast-mode-on-claude) at
+high thinking effort, streaming the rollout live to a Rerun viewer on your
+laptop (`rerun` locally, then `ssh -R 9876:localhost:9876 <robot>` for the
+tunnel). The explicit `run --instruction` form keeps the instruction on the
+last line, so the operator only ever edits the end of the command:
+
+```bash
+inspect-robots run --policy agent --rerun-connect \
+    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    -P effort=high \
+    --instruction "place the fork on the plate"
+```
 
 ### Retry with learning
 
@@ -168,6 +185,38 @@ real robot:
 inspect-robots "place the fork on the plate" --sim
 ```
 
+### Browse your runs
+
+Every run writes an eval log; pass the whole directory to `view` and each log
+is rendered into `logs/html/` behind a filterable `index.html` — when,
+instruction, policy/model, status, metrics, termination, and error for each
+run, newest first, with rows linking to the per-log HTML reports:
+
+```bash
+inspect-robots view logs/
+```
+
+Re-runs are incremental (only new or changed logs are re-rendered; `--force`
+re-renders everything, e.g. after changing `--no-frames` or
+`--frames-budget`). Open the statically rendered index directly with `--open`.
+
+To render, serve, and open the index locally, leave this running:
+
+```bash
+inspect-robots view logs/ --serve --open
+```
+
+New runs appear automatically while the index is served. On a headless robot
+host, bind to the network and open the printed URL from your laptop:
+
+```bash
+inspect-robots view logs/ --serve --host 0.0.0.0
+```
+
+`--host 0.0.0.0` exposes the viewer to anyone who can reach the machine; they
+can view the logs, including embedded camera frames. The served index
+auto-refreshes as new runs arrive.
+
 ### More CLI commands
 
 The full command line resolves any registered task/policy/embodiment
@@ -201,10 +250,12 @@ model, it sends the digest and bounded transcript tails to an OpenAI-compatible
 chat endpoint. Output defaults to `logs/learnings/<log-stem>.md`; use `-o FILE`
 to choose a path or `-o -` for stdout.
 
-Render a saved eval log as a self-contained HTML report:
+Render a saved eval log as a self-contained HTML report, or a whole logs
+directory as a browsable index (see [Browse your runs](#browse-your-runs)):
 
 ```bash
 inspect-robots view logs/cubepick-reach_*.json
+inspect-robots view logs/
 ```
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
@@ -372,8 +423,9 @@ camera configuration, and reset behavior are documented in the
 [ROS plugin README](plugins/inspect-robots-ros/).
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
-the embodiment's action space) are wired into every CLI run by default, for
-every policy. Turning them off requires an explicit `--disable-guardrails`.
+the embodiment's action space, followed by any specialized guardrails the
+embodiment contributes) are wired into every CLI run by default, for every
+policy. Turning them off requires an explicit `--disable-guardrails`.
 Persist your usual setup once with `inspect-robots config set embodiment NAME`
 and `inspect-robots config set policy NAME`, then a bare
 `inspect-robots "wipe the table"` does the rest.
@@ -445,17 +497,3 @@ If you use Inspect Robots in your research, please cite it:
 ## License
 
 [MIT](LICENSE)
-
-## Example: fast Opus 5 streamed to a remote Rerun viewer
-
-Run Claude Opus 5 in
-[fast mode](plugins/inspect-robots-agent/README.md#fast-mode-on-claude) at
-high thinking effort, streaming the rollout live to a Rerun viewer on your
-laptop (`rerun` locally, then `ssh -R 9876:localhost:9876 <robot>` for the
-tunnel):
-
-```bash
-inspect-robots "place the fork on the plate" --policy agent --rerun-connect \
-    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
-    -P effort=high
-```
