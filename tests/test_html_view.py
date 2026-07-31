@@ -16,7 +16,11 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from inspect_robots._html import _JSON_STRING_LIMIT, _render_chat_transcript, render_html
+from inspect_robots._html import (
+    _JSON_STRING_LIMIT,
+    _render_chat_transcript,
+    render_html,
+)
 from inspect_robots._pngenc import png_data_url
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
@@ -171,7 +175,15 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     assert document.count(">n/a</span>") == 2
     assert "prefers-color-scheme: light" in document
     assert "prefers-color-scheme: dark" in document
-    assert "<script" not in document
+    assert document.count("<script") == 1
+    # The literal is duplicated here on purpose: an independent copy is what
+    # makes this an injection guard rather than a tautology.
+    assert (
+        "<script>document.addEventListener('click', (event) => {\n"
+        "  const cell = event.target.closest('.frame-cell');\n"
+        "  if (cell) cell.classList.toggle('wide');\n"
+        "});</script>" in document
+    )
 
 
 def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
@@ -483,9 +495,12 @@ def test_stored_frame_embeds_between_escaped_text_runs(tmp_path: Path) -> None:
     document = render_html(_frame_log(parts), title="frames", frames_dir=tmp_path)
 
     assert document.count('<img class="frame"') == 1
+    assert document.count('<div class="frame-row">') == 1
+    assert document.count('<figure class="frame-cell">') == 1
     assert 'loading="lazy"' in document
     assert 'src="data:image/png;base64,' in document
     assert 'alt="camera cam &lt;wide&gt; step 7"' in document
+    assert "<figcaption>camera &#x27;cam &lt;wide&gt;&#x27; (step 7)</figcaption>" in document
     assert document.index("caption &lt;before&gt;") < document.index('<img class="frame"')
     assert document.index('<img class="frame"') < document.index("after frame")
     assert "[image omitted: streamed camera frame]" not in document
@@ -703,9 +718,146 @@ def test_three_camera_pairs_embed_in_part_order(tmp_path: Path) -> None:
 
     document = render_html(_frame_log(parts), title="three", frames_dir=tmp_path)
 
+    assert document.count('<div class="frame-row">') == 1
+    assert document.count('<figure class="frame-cell">') == 3
     assert document.count('<img class="frame"') == 3
+    assert document.count("<figcaption>") == 3
+    assert "<figcaption>camera &#x27;left&#x27; (step 1)</figcaption>" in document
+    assert "<figcaption>camera &#x27;top&#x27; (step 2)</figcaption>" in document
+    assert "<figcaption>camera &#x27;right&#x27; (step 3)</figcaption>" in document
     assert document.index("camera left step 1") < document.index("camera top step 2")
     assert document.index("camera top step 2") < document.index("camera right step 3")
+    assert "camera &#x27;left&#x27; (step 1):" not in document
+    assert "camera &#x27;top&#x27; (step 2):" not in document
+    assert "camera &#x27;right&#x27; (step 3):" not in document
+    assert document.count('<div class="content"></div>') == 0
+
+
+def test_separate_user_observations_render_separate_frame_rows(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "first", 1, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "second", 2, np.ones((2, 2, 3), dtype=np.uint8))
+    transcript = _chat(
+        {"role": "user", "content": _parts("first", 1)},
+        {"role": "user", "content": _parts("second", 2)},
+    )
+
+    document = render_html(_log(transcripts=(transcript,)), title="two rows", frames_dir=tmp_path)
+
+    assert document.count('<div class="frame-row">') == 2
+    assert document.count('<figure class="frame-cell">') == 2
+
+
+def test_non_empty_text_between_frames_splits_rows(tmp_path: Path) -> None:
+    parts = [*_parts("first", 1), {"type": "text", "text": "between"}, *_parts("second", 2)]
+    _save_frame(tmp_path, "first", 1, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "second", 2, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="split rows", frames_dir=tmp_path)
+
+    assert document.count('<div class="frame-row">') == 2
+    assert document.count('<figure class="frame-cell">') == 2
+    assert '</div><div class="content">between</div><div class="frame-row">' in document
+
+
+def test_empty_text_between_frames_does_not_split_row(tmp_path: Path) -> None:
+    parts = [*_parts("first", 1), {"type": "text", "text": ""}, *_parts("second", 2)]
+    _save_frame(tmp_path, "first", 1, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "second", 2, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="one row", frames_dir=tmp_path)
+
+    assert document.count('<div class="frame-row">') == 1
+    assert document.count('<figure class="frame-cell">') == 2
+    assert document.count('<div class="content"></div>') == 0
+
+
+def test_trailing_empty_text_after_embed_emits_no_div(tmp_path: Path) -> None:
+    parts = [*_parts("solo", 3), {"type": "text", "text": ""}]
+    _save_frame(tmp_path, "solo", 3, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="trailing", frames_dir=tmp_path)
+
+    assert document.count('<figure class="frame-cell">') == 1
+    assert document.count('<div class="content"></div>') == 0
+
+
+def test_text_between_label_and_placeholder_precedes_captioned_frame(tmp_path: Path) -> None:
+    parts = [
+        {"type": "text", "text": "camera 'top_cam' (step 4):"},
+        {"type": "text", "text": "intervening text"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="intervening", frames_dir=tmp_path)
+
+    content = '<div class="content">intervening text</div>'
+    caption = "<figcaption>camera &#x27;top_cam&#x27; (step 4)</figcaption>"
+    assert document.index(content) < document.index(caption)
+    assert document.count('<figure class="frame-cell">') == 1
+    assert "camera &#x27;top_cam&#x27; (step 4):" not in document
+
+
+def test_later_label_captions_frame_and_earlier_label_stays_in_text(tmp_path: Path) -> None:
+    parts = [
+        {"type": "text", "text": "camera 'first' (step 1):"},
+        {"type": "text", "text": "camera 'second' (step 2):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+    _save_frame(tmp_path, "second", 2, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(parts), title="later label", frames_dir=tmp_path)
+
+    assert '<div class="content">camera &#x27;first&#x27; (step 1):</div>' in document
+    assert "<figcaption>camera &#x27;second&#x27; (step 2)</figcaption>" in document
+    assert "camera &#x27;second&#x27; (step 2):" not in document
+    assert document.count('<figure class="frame-cell">') == 1
+
+
+def test_single_frame_renders_one_row_and_one_cell(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts()), title="single", frames_dir=tmp_path)
+
+    assert document.count('<div class="frame-row">') == 1
+    assert document.count('<figure class="frame-cell">') == 1
+    assert document.count('<div class="content"></div>') == 0
+
+
+def test_budget_truncation_keeps_exact_frame_text_fallback(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _frame_log(_parts()),
+        title="truncated",
+        frames_dir=tmp_path,
+        frames_budget_bytes=1,
+    )
+
+    assert (
+        '<div class="content">camera &#x27;top_cam&#x27; (step 4):\n'
+        "[image omitted: streamed camera frame]</div>"
+    ) in document
+    assert '<figure class="frame-cell">' not in document
+    assert '<div class="frame-row">' not in document
+
+
+def test_camera_name_is_escaped_in_frame_caption_and_alt(tmp_path: Path) -> None:
+    name = "<b>"
+    _save_frame(tmp_path, name, 4, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_frame_log(_parts(name)), title="escaped", frames_dir=tmp_path)
+
+    assert "<figcaption>camera &#x27;&lt;b&gt;&#x27; (step 4)</figcaption>" in document
+    assert 'alt="camera &lt;b&gt; step 4"' in document
+    assert "<b>" not in document
+
+
+def test_frame_expand_script_and_wide_cell_rule_ship_without_frames() -> None:
+    document = render_html(_log(), title="no frames")
+
+    assert "event.target.closest('.frame-cell')" in document
+    assert ".frame-cell.wide { grid-column: 1 / -1; }" in document
 
 
 def test_transcript_index_is_used_as_epoch_for_frame_lookup(tmp_path: Path) -> None:
