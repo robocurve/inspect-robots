@@ -42,8 +42,8 @@ no ``flush`` method. A new sink in the same process can still hang in
 Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
 successive trials never overwrite one another on the shared step timeline.
 Transcripts are emitted as ``TextLog`` rows at ``{prefix}/llm`` paired with a
-markdown ``TextDocument`` at ``{prefix}/llm/latest`` for a wrapped,
-timeline-synced reading pane.
+markdown ``TextDocument`` at ``{prefix}/llm/latest`` holding the step's
+assistant message(s) for a wrapped, timeline-synced reading pane.
 
 Install with ``pip install "inspect-robots[rerun]"``.
 """
@@ -69,9 +69,9 @@ if TYPE_CHECKING:
     from inspect_robots.types import Action, Observation, StepResult
 
 
-def _render_message(message: Any) -> tuple[str, str]:
+def _render_message(message: Any) -> tuple[str, str, str]:
     if not isinstance(message, dict):
-        return "INFO", str(message)
+        return "", "INFO", str(message)
 
     role = str(message.get("role", "unknown"))
     level = {
@@ -103,7 +103,7 @@ def _render_message(message: Any) -> tuple[str, str]:
             name = function.get("name", "")
             arguments = function.get("arguments", "")
             lines.append(f"tool_call {name}({arguments})")
-    return level, f"{role}: " + "\n".join(lines)
+    return role, level, f"{role}: " + "\n".join(lines)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -122,11 +122,11 @@ class _StepPayload:
 
 @dataclasses.dataclass(frozen=True)
 class _TranscriptPayload:
-    """Rendered conversation rows snapshotted for one control step."""
+    """Rendered (role, level, text) rows snapshotted for one control step."""
 
     prefix: str
     t: int
-    entries: tuple[tuple[str, str], ...]
+    entries: tuple[tuple[str, str, str], ...]
 
 
 @dataclasses.dataclass
@@ -280,7 +280,7 @@ class RerunSink:
 
     def _emit_transcript(self, rr: Any, payload: _TranscriptPayload) -> None:
         self._set_step(rr, payload.t)
-        for level, text in payload.entries:
+        for _role, level, text in payload.entries:
             rr.log(f"{payload.prefix}/llm", rr.TextLog(text, level=level))
         self._emit_transcript_document(rr, payload)
 
@@ -288,8 +288,13 @@ class RerunSink:
         text_document = getattr(rr, "TextDocument", None)
         if text_document is None or not payload.entries:
             return
+        assistant_entries = [
+            (level, text) for role, level, text in payload.entries if role == "assistant"
+        ]
+        if not assistant_entries:
+            return
         body = "\n\n---\n\n".join(
-            f"**[{level}]** " + text.replace("\n", "  \n") for level, text in payload.entries
+            f"**[{level}]** " + text.replace("\n", "  \n") for level, text in assistant_entries
         )
         rr.log(
             f"{payload.prefix}/llm/latest",
