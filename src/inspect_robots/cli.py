@@ -1761,6 +1761,9 @@ class _QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
         return None
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
 def _serve_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
     """Return the URLs shown for one bound address and socket-derived port."""
     display_host = socket.gethostname() if bind_host == "0.0.0.0" else bind_host
@@ -1772,7 +1775,7 @@ def _serve_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
 
 def _serve_open_url(bind_host: str, port: int) -> str:
     """Return the reachable URL that ``--open`` should target."""
-    open_host = "127.0.0.1" if bind_host in {"127.0.0.1", "0.0.0.0"} else bind_host
+    open_host = "127.0.0.1" if bind_host in _LOOPBACK_HOSTS | {"0.0.0.0"} else bind_host
     return f"http://{open_host}:{port}/"
 
 
@@ -1802,7 +1805,7 @@ def _serve_view_directory(
     print(f"serving logs at: {urls[0]}")
     for url in urls[1:]:
         print(f"                 {url}")
-    if bind_host == "127.0.0.1":
+    if bind_host in _LOOPBACK_HOSTS:
         print(
             _styled(
                 "serving to this machine only; pass --host 0.0.0.0 to serve to your network",
@@ -1818,10 +1821,15 @@ def _serve_view_directory(
         )
     print("press Ctrl-C to stop")
 
-    previous_sigterm = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    sigterm_installed = False
+    server_thread_started = False
     try:
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        sigterm_installed = True
         server_thread.start()
+        server_thread_started = True
         if args.open:
             open_url = _serve_open_url(bind_host, actual_port)
             _open_browser(open_url, open_url)
@@ -1841,12 +1849,19 @@ def _serve_view_directory(
         return 0
     finally:
         try:
-            server.shutdown()
+            # shutdown() waits on an event only serve_forever sets; calling it
+            # when the serve thread never started would hang forever.
+            if server_thread_started:
+                server.shutdown()
         finally:
             try:
                 server.server_close()
             finally:
-                signal.signal(signal.SIGTERM, previous_sigterm)
+                if sigterm_installed:
+                    # A non-Python-installed prior handler reads back as None,
+                    # which signal.signal rejects; SIG_DFL is the sane restore.
+                    restore = signal.SIG_DFL if previous_sigterm is None else previous_sigterm
+                    signal.signal(signal.SIGTERM, restore)
 
 
 def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:

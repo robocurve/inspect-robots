@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Any, ClassVar
@@ -1929,6 +1930,86 @@ def test_view_serve_rerender_failure_warns_and_continues(
     assert quiet_calls == 2
     assert pass_force_values == [True, False, False]
     assert out.out.count("index: ") == 1
+
+
+def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    render_directory = cli._render_view_directory
+
+    def interrupted_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        if quiet:
+            raise KeyboardInterrupt
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    monkeypatch.setattr(cli, "_render_view_directory", interrupted_render)
+    monkeypatch.setattr(cli, "_serve_sleep", lambda _seconds: None)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert "re-render failed" not in out.err
+
+
+def test_view_serve_interrupt_before_thread_start_skips_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    class InterruptedThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def start(self) -> None:
+            # Interrupt delivered before serve_forever ever runs: shutdown()
+            # must be skipped or this test hangs forever.
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading, "Thread", InterruptedThread)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+
+def test_view_serve_localhost_bind_prints_loopback_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", interrupt)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--host", "localhost"]) == 0
+
+    out = capsys.readouterr()
+    assert "serving to this machine only" in out.out
+    assert "serving to your network" not in out.out
 
 
 def test_view_serve_wildcard_prints_hostname_localhost_and_exposure(
