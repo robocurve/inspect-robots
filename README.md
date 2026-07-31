@@ -185,6 +185,23 @@ real robot:
 inspect-robots "place the fork on the plate" --sim
 ```
 
+### Browse your runs
+
+Every run writes an eval log; pass the whole directory to `view` and each log
+is rendered into `logs/html/` behind a filterable `index.html` — when,
+instruction, policy/model, status, metrics, termination, and error for each
+run, newest first, with rows linking to the per-log HTML reports:
+
+```bash
+inspect-robots view logs/
+```
+
+Re-runs are incremental (only new or changed logs are re-rendered; `--force`
+re-renders everything, e.g. after changing `--no-frames` or
+`--frames-budget`). Open the index directly with `--open`, or serve it to
+another machine with any static file server, e.g.
+`python3 -m http.server -d logs/html`.
+
 ### More CLI commands
 
 The full command line resolves any registered task/policy/embodiment
@@ -218,26 +235,13 @@ model, it sends the digest and bounded transcript tails to an OpenAI-compatible
 chat endpoint. Output defaults to `logs/learnings/<log-stem>.md`; use `-o FILE`
 to choose a path or `-o -` for stdout.
 
-Render a saved eval log as a self-contained HTML report:
+Render a saved eval log as a self-contained HTML report, or a whole logs
+directory as a browsable index (see [Browse your runs](#browse-your-runs)):
 
 ```bash
 inspect-robots view logs/cubepick-reach_*.json
-```
-
-Browse a whole logs directory: pass the directory instead of a file and every
-log is rendered into `logs/html/` behind a filterable `index.html` — when,
-instruction, policy/model, status, metrics, termination, and error for each
-run, newest first, with rows linking to the per-log reports:
-
-```bash
 inspect-robots view logs/
 ```
-
-Re-runs are incremental (only new or changed logs are re-rendered; `--force`
-re-renders everything, e.g. after changing `--no-frames` or
-`--frames-budget`). Open the index directly with `--open`, or serve it to
-another machine with any static file server, e.g.
-`python3 -m http.server -d logs/html`.
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
 `ffmpeg` binary on PATH):
