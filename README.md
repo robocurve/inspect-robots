@@ -198,9 +198,24 @@ inspect-robots view logs/
 
 Re-runs are incremental (only new or changed logs are re-rendered; `--force`
 re-renders everything, e.g. after changing `--no-frames` or
-`--frames-budget`). Open the index directly with `--open`, or serve it to
-another machine with any static file server, e.g.
-`python3 -m http.server -d logs/html`.
+`--frames-budget`). Open the statically rendered index directly with `--open`.
+
+To render, serve, and open the index locally, leave this running:
+
+```bash
+inspect-robots view logs/ --serve --open
+```
+
+New runs appear automatically while the index is served. On a headless robot
+host, bind to the network and open the printed URL from your laptop:
+
+```bash
+inspect-robots view logs/ --serve --host 0.0.0.0
+```
+
+`--host 0.0.0.0` exposes the viewer to anyone who can reach the machine; they
+can view the logs, including embedded camera frames. The served index
+auto-refreshes as new runs arrive.
 
 ### More CLI commands
 

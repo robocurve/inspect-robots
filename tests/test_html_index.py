@@ -101,6 +101,18 @@ def test_filter_script_and_persisted_key_are_present() -> None:
     assert "inspect-robots-index-filter" in document
 
 
+def test_static_index_has_no_meta_refresh() -> None:
+    document = render_index([_entry("run.json")], refresh_seconds=None)
+
+    assert '<meta http-equiv="refresh"' not in document
+
+
+def test_served_index_has_exact_meta_refresh() -> None:
+    document = render_index([_entry("run.json")], refresh_seconds=60)
+
+    assert '<meta http-equiv="refresh" content="60">' in document
+
+
 def test_long_error_is_truncated_with_full_escaped_tooltip() -> None:
     error = 'failed <badly> "' + "x" * 200
     entry = replace(
