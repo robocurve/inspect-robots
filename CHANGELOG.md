@@ -81,6 +81,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Camera frames in HTML reports now render as captioned responsive grid rows,
+  with click-to-expand cells for closer inspection (plan 0036, #239).
 - **Task horizon binding now follows compatibility checking.** An
   embodiment's optional `bind_task()` hook receives the resolved step envelope
   only after the policy/embodiment/task triple is known to be compatible. This
