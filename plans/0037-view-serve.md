@@ -22,8 +22,12 @@ command.
     stopped. Directory mode only — with a single-file log argument,
     `SystemExit` (`--serve requires a logs directory`).
   - `--port N` (default 8300): listen port. `SystemExit` if given without
-    `--serve` (a silently ignored flag is worse than an error).
-  - `--host HOST` (default `127.0.0.1`): bind address. Same guard.
+    `--serve` (a silently ignored flag is worse than an error). To make
+    that guard detectable, both flags use argparse `default=None`
+    sentinels, with 8300/loopback filled in after the guard — otherwise an
+    explicit `--port 8300` is indistinguishable from the default.
+  - `--host HOST` (default `127.0.0.1`): bind address. Same guard. IPv6
+    literals are out of scope (documented; no bracketing logic).
     **Loopback by default**: rendered pages embed stored camera frames —
     images of the user's physical space — with no auth and no TLS, and the
     tools this repo's audience already knows (`inspect view`, Jupyter)
@@ -61,17 +65,23 @@ command.
      matters and gets a comment: the socket is already bound and listening
      from step 2 (`__init__` binds; the backlog holds early requests), so
      printing/`--open` before `serve_forever` cannot race — invoke
-     `--open` on the localhost-form URL if requested.
-  5. Main thread runs the re-render loop: sleep `_SERVE_RERENDER_SECONDS
-     = 60` (module-level seam, monkeypatchable), then an incremental
-     render pass.
+     `--open` if requested, on a URL derived from the bind address: the
+     loopback form when bound to `127.0.0.1` or the wildcard (which
+     accepts loopback), the literal bind address otherwise (a socket
+     bound to a specific interface refuses loopback connections).
+  5. Main thread runs the re-render loop: `_serve_sleep(
+     _SERVE_RERENDER_SECONDS)` — the seam is a module-level sleep
+     *callable* (default `time.sleep`, 60s constant), so tests can patch
+     it to raise — then an incremental render pass.
   6. Shutdown, spelled out: `KeyboardInterrupt` (which may land in the
      sleep *or* mid-render) is caught in the main thread →
      `server.shutdown()` (blocks until the serve loop exits) →
      `server.server_close()` in a `finally` (releases the listening
      socket even on unexpected errors) → exit 0. `SIGTERM` is mapped to
      raise `KeyboardInterrupt` via `signal.signal` before serving starts,
-     so `kill`/process managers get the same clean path as Ctrl-C.
+     so `kill`/process managers get the same clean path as Ctrl-C; the
+     prior handler is restored in the same `finally` (`main()` is an
+     importable function — a leaked handler must not outlive the call).
 
 ### 2. Re-render loop (cli.py)
 
@@ -134,9 +144,14 @@ index-usability change; its own small PR).
   loopback-audience hint; bound `0.0.0.0` (monkeypatched
   `socket.gethostname` for determinism) prints the hostname URL, the
   localhost URL, and the loud exposure line.
-- SIGTERM: handler registered (assert via `signal.getsignal`) — the full
-  kill-delivery path is covered by construction through the
-  KeyboardInterrupt tests.
+- SIGTERM: registration observed from *inside* the serve window (the
+  patched sleep records `signal.getsignal(SIGTERM)` before raising — after
+  `main()` returns the handler is already restored, so an outside probe
+  sees nothing) and restoration asserted after return; kill-delivery is
+  covered by construction through the KeyboardInterrupt tests.
+- `--open` with a specific non-loopback bind targets the literal bind
+  address, not the loopback form (monkeypatched webbrowser records the
+  URL).
 
 ## README
 
