@@ -487,7 +487,13 @@ def test_transcript_payload_emits_exactly_one_document_for_multiple_entries(
 
     RerunSink()._emit_transcript(rr, payload)
 
-    assert [path for path, _ in logged].count("trial/scene/e0/llm/latest") == 1
+    documents = [value for path, value in logged if path == "trial/scene/e0/llm/latest"]
+    assert documents == [
+        _TextDocument(
+            "**[INFO]** assistant: first\n\n---\n\n**[INFO]** assistant: third",
+            media_type="text/markdown",
+        )
+    ]
 
 
 def test_tool_only_transcript_delta_emits_row_without_document(
