@@ -131,6 +131,7 @@ a { color: var(--link); }
 .errored { color: var(--red); font-weight: 650; white-space: nowrap; }
 .muted, .empty { color: var(--muted); }
 .empty { padding: 28px 12px; text-align: center; }
+tbody tr[data-href] { cursor: pointer; }
 """.strip()
 
 _ERROR_LIMIT = 160
@@ -177,8 +178,8 @@ def _row(entry: IndexEntry) -> str:
         metrics = f"{metrics} {marker}" if metrics else marker
     instruction = _link(entry.page, _escape(entry.instruction))
     log_name = _link(entry.page, _escape(entry.name))
-    return (
-        "<tr>"
+    row_start = "<tr>" if entry.page is None else f'<tr data-href="{_escape(entry.page)}">'
+    return row_start + (
         f'<td class="when"><time>{_escape(entry.created)}</time></td>'
         f'<td class="instruction">{instruction}</td>'
         f'<td class="policy">{policy}</td>'
@@ -248,6 +249,17 @@ function applyFilter() {{
 try {{ input.value = localStorage.getItem(key) || ""; }} catch (_) {{}}
 input.addEventListener("input", applyFilter);
 applyFilter();
+document.querySelector("tbody").addEventListener("click", event => {{
+  const row = event.target.closest("tr[data-href]");
+  if (!row || event.target.closest("a") || getSelection().toString()) return;
+  if (event.shiftKey || event.altKey) return;
+  if (event.metaKey || event.ctrlKey) {{
+    const opened = window.open(row.dataset.href, "_blank");
+    if (opened) opened.opener = null;
+  }} else {{
+    location.href = row.dataset.href;
+  }}
+}});
 </script>
 </body>
 </html>
