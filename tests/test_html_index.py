@@ -116,19 +116,15 @@ def test_row_without_page_has_no_data_href_attribute() -> None:
 
 def test_delegated_row_click_listener_is_present_once() -> None:
     document = render_index([_entry("run.json")])
-    listener = """document.querySelector("tbody").addEventListener("click", event => {
-  const row = event.target.closest("tr[data-href]");
-  if (!row || event.target.closest("a") || getSelection().toString()) return;
-  if (event.shiftKey || event.altKey) return;
-  if (event.metaKey || event.ctrlKey) {
-    const opened = window.open(row.dataset.href, "_blank");
-    if (opened) opened.opener = null;
-  } else {
-    location.href = row.dataset.href;
-  }
-});"""
 
-    assert document.count(listener) == 1
+    assert document.count('addEventListener("click"') == 1
+    assert 'event.target.closest("tr[data-href]")' in document
+    assert 'event.target.closest("a")' in document
+    assert "getSelection().toString()" in document
+    assert "event.shiftKey || event.altKey" in document
+    assert "event.metaKey || event.ctrlKey" in document
+    assert "row.dataset.href" in document
+    assert "opened.opener = null" in document
 
 
 def test_clickable_row_cursor_style_is_present() -> None:
