@@ -402,11 +402,7 @@ def test_policy_messages_emit_ordered_levels_on_the_step_timeline(
         (
             "trial/scene/e2/llm/latest",
             _TextDocument(
-                "**[INFO]** assistant: answer\n\n---\n\n"
-                "**[INFO]** user: question\n\n---\n\n"
-                "**[DEBUG]** tool: result\n\n---\n\n"
-                "**[TRACE]** system: prompt\n\n---\n\n"
-                "**[TRACE]** critic: other",
+                "**[INFO]** assistant: answer",
                 media_type="text/markdown",
             ),
         ),
@@ -422,7 +418,10 @@ def test_transcript_emission_logs_rows_and_markdown_document(
     payload = _TranscriptPayload(
         "trial/scene/e0",
         3,
-        (("INFO", "assistant: answer"), ("DEBUG", "tool: result")),
+        (
+            ("assistant", "INFO", "assistant: answer"),
+            ("tool", "DEBUG", "tool: result"),
+        ),
     )
 
     RerunSink()._emit_transcript(rr, payload)
@@ -434,7 +433,7 @@ def test_transcript_emission_logs_rows_and_markdown_document(
         (
             "trial/scene/e0/llm/latest",
             _TextDocument(
-                "**[INFO]** assistant: answer\n\n---\n\n**[DEBUG]** tool: result",
+                "**[INFO]** assistant: answer",
                 media_type="text/markdown",
             ),
         ),
@@ -447,7 +446,7 @@ def test_transcript_document_composes_multiline_entries_with_hard_breaks(
     logged = _install_fake_rerun(monkeypatch)
     rr = sys.modules["rerun"]
     message = {
-        "role": "user",
+        "role": "assistant",
         "content": [
             {"type": "text", "text": "camera 'top':"},
             {"type": "image_url", "image_url": {"url": "elided"}},
@@ -457,7 +456,7 @@ def test_transcript_document_composes_multiline_entries_with_hard_breaks(
     payload = _TranscriptPayload(
         "trial/scene/e0",
         4,
-        (_render_message(message), ("DEBUG", "tool: result")),
+        (_render_message(message), ("tool", "DEBUG", "tool: result")),
     )
 
     RerunSink()._emit_transcript(rr, payload)
@@ -465,10 +464,7 @@ def test_transcript_document_composes_multiline_entries_with_hard_breaks(
     documents = [value for path, value in logged if path == "trial/scene/e0/llm/latest"]
     assert documents == [
         _TextDocument(
-            "**[INFO]** user: camera 'top':  \n"
-            "[image_url part]  \n"
-            "after\n\n---\n\n"
-            "**[DEBUG]** tool: result",
+            "**[INFO]** assistant: camera 'top':  \n[image_url part]  \nafter",
             media_type="text/markdown",
         )
     ]
@@ -482,12 +478,61 @@ def test_transcript_payload_emits_exactly_one_document_for_multiple_entries(
     payload = _TranscriptPayload(
         "trial/scene/e0",
         5,
-        (("INFO", "first"), ("DEBUG", "second"), ("TRACE", "third")),
+        (
+            ("assistant", "INFO", "assistant: first"),
+            ("tool", "DEBUG", "tool: second"),
+            ("assistant", "INFO", "assistant: third"),
+        ),
     )
 
     RerunSink()._emit_transcript(rr, payload)
 
     assert [path for path, _ in logged].count("trial/scene/e0/llm/latest") == 1
+
+
+def test_tool_only_transcript_delta_emits_row_without_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool-only delta preserves its row without replacing the reading pane."""
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        6,
+        (("tool", "DEBUG", "tool: result"),),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    assert ("trial/scene/e0/llm", ("TextLog", "tool: result", "DEBUG")) in logged
+    assert all(path != "trial/scene/e0/llm/latest" for path, _ in logged)
+
+
+def test_mixed_transcript_delta_document_contains_only_assistant_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mixed delta limits the reading pane to assistant content."""
+    logged = _install_fake_rerun(monkeypatch)
+    rr = sys.modules["rerun"]
+    payload = _TranscriptPayload(
+        "trial/scene/e0",
+        6,
+        (
+            ("user", "INFO", "user: question"),
+            ("assistant", "INFO", "assistant: answer"),
+            ("tool", "DEBUG", "tool: result"),
+        ),
+    )
+
+    RerunSink()._emit_transcript(rr, payload)
+
+    documents = [value for path, value in logged if path == "trial/scene/e0/llm/latest"]
+    assert documents == [
+        _TextDocument(
+            "**[INFO]** assistant: answer",
+            media_type="text/markdown",
+        )
+    ]
 
 
 def test_empty_transcript_payload_emits_no_document(
@@ -509,7 +554,10 @@ def test_sdk_without_text_document_keeps_transcript_rows(
     payload = _TranscriptPayload(
         "trial/scene/e0",
         7,
-        (("INFO", "assistant: answer"), ("DEBUG", "tool: result")),
+        (
+            ("assistant", "INFO", "assistant: answer"),
+            ("tool", "DEBUG", "tool: result"),
+        ),
     )
 
     RerunSink()._emit_transcript(rr, payload)
@@ -524,7 +572,10 @@ def test_sdk_without_text_document_keeps_transcript_rows(
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ({"role": "assistant", "content": "hello"}, ("INFO", "assistant: hello")),
+        (
+            {"role": "assistant", "content": "hello"},
+            ("assistant", "INFO", "assistant: hello"),
+        ),
         (
             {
                 "role": "user",
@@ -535,7 +586,11 @@ def test_sdk_without_text_document_keeps_transcript_rows(
                     7,
                 ],
             },
-            ("INFO", "user: camera 'top':\n[image_url part]\nafter\n[unknown part]"),
+            (
+                "user",
+                "INFO",
+                "user: camera 'top':\n[image_url part]\nafter\n[unknown part]",
+            ),
         ),
         (
             {
@@ -549,34 +604,40 @@ def test_sdk_without_text_document_keeps_transcript_rows(
                     }
                 ],
             },
-            ("INFO", 'assistant: tool_call move_by({"dx": 0.1})'),
+            ("assistant", "INFO", 'assistant: tool_call move_by({"dx": 0.1})'),
         ),
-        ("plain row", ("INFO", "plain row")),
-        ({"content": "orphan"}, ("TRACE", "unknown: orphan")),
-        ({"role": "tool", "content": "result"}, ("DEBUG", "tool: result")),
-        ({"role": "system", "content": "prompt"}, ("TRACE", "system: prompt")),
-        ({"role": "assistant", "content": ""}, ("INFO", "assistant: ")),
+        ("plain row", ("", "INFO", "plain row")),
+        ({"content": "orphan"}, ("unknown", "TRACE", "unknown: orphan")),
+        ({"role": "tool", "content": "result"}, ("tool", "DEBUG", "tool: result")),
+        (
+            {"role": "system", "content": "prompt"},
+            ("system", "TRACE", "system: prompt"),
+        ),
+        (
+            {"role": "assistant", "content": ""},
+            ("assistant", "INFO", "assistant: "),
+        ),
         (
             {
                 "role": "assistant",
                 "content": [],
                 "tool_calls": [{"function": "malformed"}, "malformed"],
             },
-            ("INFO", "assistant: tool_call ()\ntool_call ()"),
+            ("assistant", "INFO", "assistant: tool_call ()\ntool_call ()"),
         ),
     ],
 )
-def test_policy_message_rendering_table(message: Any, expected: tuple[str, str]) -> None:
+def test_policy_message_rendering_table(message: Any, expected: tuple[str, str, str]) -> None:
     assert _render_message(message) == expected
 
 
 def test_mixed_queue_eviction_counts_transcripts_steps_and_images() -> None:
     sink = RerunSink(queue_size=2)
     sink._image_watermark = 99
-    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("INFO", "first"),)))
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("", "INFO", "first"),)))
     sink._enqueue(_step_payload(1))
 
-    sink._enqueue(_TranscriptPayload("trial/scene/e0", 2, (("INFO", "second"),)))
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 2, (("", "INFO", "second"),)))
     assert sink._dropped_transcripts == 1
     assert sink._dropped_steps == 0
     assert sink._dropped_frames == 0
@@ -595,8 +656,8 @@ def test_mixed_queue_eviction_counts_transcripts_steps_and_images() -> None:
 
 def test_transcript_only_drops_warn_and_reset_all_counters() -> None:
     sink = RerunSink(queue_size=1)
-    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("INFO", "first"),)))
-    sink._enqueue(_TranscriptPayload("trial/scene/e0", 1, (("INFO", "second"),)))
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 0, (("", "INFO", "first"),)))
+    sink._enqueue(_TranscriptPayload("trial/scene/e0", 1, (("", "INFO", "second"),)))
     with sink._cond:
         sink._queue.clear()
     _arm_completed_worker(sink)
@@ -636,7 +697,7 @@ def test_wedged_shutdown_accounts_for_mixed_backlog(
         worker = sink._worker
         assert worker is not None
         with sink._cond:
-            sink._queue.append(_TranscriptPayload("trial/scene/e0", 1, (("INFO", "queued"),)))
+            sink._queue.append(_TranscriptPayload("trial/scene/e0", 1, (("", "INFO", "queued"),)))
             sink._queue.append(_step_payload(2))
         with pytest.warns(RuntimeWarning) as caught:
             sink.on_eval_end(None)  # type: ignore[arg-type]
