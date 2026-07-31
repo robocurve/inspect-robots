@@ -54,6 +54,12 @@ All notable changes to this project are documented here. The format is based on
   runs now prompt for exactly those trials — registered tasks and `eval-set`
   included (#194).
 
+### Changed
+
+- The `llm/latest` Rerun pane now shows only the step's assistant message(s);
+  the full conversation remains in the `llm` TextLog stream
+  ([plan 0037](plans/0037-rerun-latest-assistant-only.md), #243).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
