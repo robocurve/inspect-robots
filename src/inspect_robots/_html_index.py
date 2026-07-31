@@ -192,7 +192,12 @@ def _row(entry: IndexEntry) -> str:
     )
 
 
-def render_index(entries: Sequence[IndexEntry], *, title: str = "Inspect Robots runs") -> str:
+def render_index(
+    entries: Sequence[IndexEntry],
+    *,
+    title: str = "Inspect Robots runs",
+    refresh_seconds: int | None = None,
+) -> str:
     """Return one self-contained HTML document indexing evaluation logs."""
     ordered = sorted(entries, key=lambda entry: entry.created, reverse=True)
     rows = "".join(_row(entry) for entry in ordered)
@@ -201,11 +206,16 @@ def render_index(entries: Sequence[IndexEntry], *, title: str = "Inspect Robots 
         if rows
         else '<tr class="empty"><td class="empty" colspan="8">no evaluation logs found</td></tr>'
     )
+    refresh = ""
+    if refresh_seconds is not None:
+        # A full refresh resets filter focus/caret once a minute; accepted for
+        # v1 over the extra complexity of a fetch-and-swap index update.
+        refresh = f'<meta http-equiv="refresh" content="{refresh_seconds}">\n'
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{refresh}<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
 <style>{_STYLES}</style>
 </head>

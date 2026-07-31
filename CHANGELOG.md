@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `inspect-robots view --serve` now serves a rendered logs directory, refreshes
+  it incrementally as new runs arrive, and supports explicit host/port binding
+  for local or remote browsing (plan 0037, #241)
+
 - `inspect-robots view` now accepts a logs directory and incrementally renders
   self-contained per-run reports plus a searchable browsable index, with
   unreadable logs surfaced in place instead of aborting the whole directory

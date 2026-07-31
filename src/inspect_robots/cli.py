@@ -17,8 +17,9 @@ Subcommands:
   saved eval log and optionally append policy conversations or captured wire calls.
 - ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
   into a deterministic digest or model-written learnings file.
-- ``inspect-robots view LOG.json|LOG_DIR [-o PATH] [--open]`` — render one saved
-  eval log or a browsable directory index as self-contained HTML.
+- ``inspect-robots view LOG.json|LOG_DIR [-o PATH] [--open] [--serve]`` — render
+  one saved eval log or a browsable directory index as self-contained HTML,
+  optionally serving a directory until stopped.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
@@ -41,13 +42,20 @@ import math
 import os
 import re
 import shutil
+import signal
+import socket
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from types import FrameType
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
 from inspect_robots import __version__
 from inspect_robots._dotenv import init_dotenv
@@ -140,6 +148,8 @@ _SUBCOMMANDS = (
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
+_SERVE_RERENDER_SECONDS = 60
+_serve_sleep = time.sleep
 
 
 def _parse_kvs(pairs: Sequence[str] | None) -> dict[str, Any]:
@@ -385,6 +395,24 @@ def build_parser() -> argparse.ArgumentParser:
             "re-render existing pages in directory mode; use after changing "
             "--no-frames or --frames-budget (ignored for one file)"
         ),
+    )
+    p_view.add_argument(
+        "--serve",
+        action="store_true",
+        help="serve a rendered logs directory over HTTP until stopped",
+    )
+    p_view.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="N",
+        help="listen port for --serve (default: 8300)",
+    )
+    p_view.add_argument(
+        "--host",
+        default=None,
+        metavar="HOST",
+        help="bind address for --serve (default: 127.0.0.1)",
     )
 
     p_video = sub.add_parser(
@@ -1548,17 +1576,17 @@ def _render_log_page(
     return _write_html(document, out_path)
 
 
-def _open_html(path: Path) -> None:
+def _open_browser(uri: str, display: str | Path) -> None:
     """Open one rendered artifact, degrading browser failures to warnings."""
     import webbrowser
 
     try:
-        opened = webbrowser.open(path.resolve().as_uri())
+        opened = webbrowser.open(uri)
     except Exception as exc:
-        print(f"warning: could not open browser for {path}: {exc}", file=sys.stderr)
+        print(f"warning: could not open browser for {display}: {exc}", file=sys.stderr)
     else:
         if not opened:
-            print(f"warning: could not open browser for {path}", file=sys.stderr)
+            print(f"warning: could not open browser for {display}", file=sys.stderr)
 
 
 def _index_instruction(log: EvalLog) -> str:
@@ -1645,8 +1673,22 @@ def _directory_page_names(log_paths: Sequence[Path]) -> dict[Path, str]:
     return names
 
 
-def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
-    """Render a logs directory incrementally and write its browsable index."""
+class _DirectoryRenderResult(NamedTuple):
+    """Paths produced by one logs-directory render pass."""
+
+    out_dir: Path
+    index_path: Path
+
+
+def _render_view_directory(
+    args: argparse.Namespace,
+    log_dir: Path,
+    *,
+    force: bool,
+    quiet: bool,
+    refresh_seconds: int | None,
+) -> _DirectoryRenderResult:
+    """Render one incremental logs-directory pass and return its output paths."""
     from inspect_robots import read_eval_log
 
     if args.out == "-":
@@ -1679,7 +1721,7 @@ def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
         try:
             log = read_eval_log(str(log_path))
             render_page = (
-                args.force
+                force
                 or not page_path.exists()
                 or page_path.stat().st_mtime < log_path.stat().st_mtime
             )
@@ -1699,24 +1741,163 @@ def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
             entries.append(_unreadable_index_entry(log_path, exc))
 
     index_path = out_dir / "index.html"
-    bytes_written += _write_html(render_index(entries), index_path)
-    print(
-        f"index: {index_path} "
-        f"({total} logs, {pages_written} pages, {bytes_written / 1_000_000:.1f} MB)"
+    bytes_written += _write_html(
+        render_index(entries, refresh_seconds=refresh_seconds),
+        index_path,
     )
+    if not quiet:
+        print(
+            f"index: {index_path} "
+            f"({total} logs, {pages_written} pages, {bytes_written / 1_000_000:.1f} MB)"
+        )
+    return _DirectoryRenderResult(out_dir=out_dir, index_path=index_path)
+
+
+class _QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
+    """Serve static reports without per-request stderr logging."""
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Suppress the standard request log."""
+        return None
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def _serve_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+    """Return the URLs shown for one bound address and socket-derived port."""
+    display_host = socket.gethostname() if bind_host == "0.0.0.0" else bind_host
+    primary = f"http://{display_host}:{port}/"
+    if bind_host == "0.0.0.0":
+        return primary, f"http://localhost:{port}/"
+    return (primary,)
+
+
+def _serve_open_url(bind_host: str, port: int) -> str:
+    """Return the reachable URL that ``--open`` should target."""
+    open_host = "127.0.0.1" if bind_host in _LOOPBACK_HOSTS | {"0.0.0.0"} else bind_host
+    return f"http://{open_host}:{port}/"
+
+
+def _raise_keyboard_interrupt(_signum: int, _frame: FrameType | None) -> NoReturn:
+    """Map a termination signal onto the normal Ctrl-C shutdown path."""
+    raise KeyboardInterrupt
+
+
+def _serve_view_directory(
+    args: argparse.Namespace,
+    log_dir: Path,
+    render_result: _DirectoryRenderResult,
+) -> int:
+    """Serve rendered logs and refresh the artifacts incrementally until stopped."""
+    bind_host = cast(str, args.host)
+    port = cast(int, args.port)
+    handler = partial(_QuietHTTPRequestHandler, directory=str(render_result.out_dir))
+    try:
+        server = ThreadingHTTPServer((bind_host, port), handler)
+    except OSError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    actual_port = int(server.server_address[1])
+    urls = _serve_display_urls(bind_host, actual_port)
+    # ThreadingHTTPServer.__init__ has already bound and started listening, so
+    # printing the URLs and opening one before serve_forever cannot race a request.
+    print(f"serving logs at: {urls[0]}")
+    for url in urls[1:]:
+        print(f"                 {url}")
+    if bind_host in _LOOPBACK_HOSTS:
+        print(
+            _styled(
+                "serving to this machine only; pass --host 0.0.0.0 to serve to your network",
+                _DIM,
+            )
+        )
+    else:
+        print(
+            _styled(
+                "serving to your network: anyone who can reach this machine can view these logs",
+                _YELLOW,
+            )
+        )
+    print("press Ctrl-C to stop")
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    sigterm_installed = False
+    server_thread_started = False
+    try:
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        sigterm_installed = True
+        server_thread.start()
+        server_thread_started = True
+        if args.open:
+            open_url = _serve_open_url(bind_host, actual_port)
+            _open_browser(open_url, open_url)
+        while True:
+            _serve_sleep(_SERVE_RERENDER_SECONDS)
+            try:
+                _render_view_directory(
+                    args,
+                    log_dir,
+                    force=False,
+                    quiet=True,
+                    refresh_seconds=_SERVE_RERENDER_SECONDS,
+                )
+            except (Exception, SystemExit) as exc:
+                print(f"warning: re-render failed: {exc}", file=sys.stderr)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        try:
+            # shutdown() waits on an event only serve_forever sets; calling it
+            # when the serve thread never started would hang forever.
+            if server_thread_started:
+                server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                if sigterm_installed:
+                    # A non-Python-installed prior handler reads back as None,
+                    # which signal.signal rejects; SIG_DFL is the sane restore.
+                    restore = signal.SIG_DFL if previous_sigterm is None else previous_sigterm
+                    signal.signal(signal.SIGTERM, restore)
+
+
+def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
+    """Render a logs directory and optionally serve it until stopped."""
+    render_result = _render_view_directory(
+        args,
+        log_dir,
+        force=args.force,
+        quiet=False,
+        refresh_seconds=_SERVE_RERENDER_SECONDS if args.serve else None,
+    )
+    if args.serve:
+        return _serve_view_directory(args, log_dir, render_result)
     if args.open:
-        _open_html(index_path)
+        index_uri = render_result.index_path.resolve().as_uri()
+        _open_browser(index_uri, render_result.index_path)
     return 0
 
 
 def _cmd_view(args: argparse.Namespace) -> int:
     """Render one saved log or a logs directory to UTF-8 HTML artifacts."""
+    if args.port is not None and not args.serve:
+        raise SystemExit("--port requires --serve")
+    if args.host is not None and not args.serve:
+        raise SystemExit("--host requires --serve")
+    args.port = 8300 if args.port is None else args.port
+    args.host = "127.0.0.1" if args.host is None else args.host
+
     if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
         raise SystemExit("--frames-budget must be a non-negative finite number")
 
     log_path = Path(args.log)
     if log_path.is_dir():
         return _cmd_view_directory(args, log_path)
+    if args.serve:
+        raise SystemExit("--serve requires a logs directory")
 
     stdout_mode = args.out == "-"
     if stdout_mode and args.open:
@@ -1748,7 +1929,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
     size_suffix = f" ({document_size / 1_000_000:.1f} MB)" if document_size > 1_000_000 else ""
     print(f"wrote {file_path}{size_suffix}")
     if args.open:
-        _open_html(file_path)
+        _open_browser(file_path.resolve().as_uri(), file_path)
     return 0
 
 

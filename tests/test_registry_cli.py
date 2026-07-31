@@ -5,7 +5,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import signal
 import sys
+import threading
+import urllib.request
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -1789,6 +1792,339 @@ def test_view_directory_open_targets_index(
     assert main(["view", str(logs), "--open"]) == 0
 
     assert opened == [(logs / "html" / "index.html").resolve().as_uri()]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--port", "8300"),
+        ("--host", "127.0.0.1"),
+    ],
+)
+def test_view_serve_options_require_serve(
+    flag: str,
+    value: str,
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit, match=rf"{flag} requires --serve"):
+        main(["view", str(logs), flag, value])
+
+
+def test_view_serve_requires_logs_directory(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="--serve requires a logs directory"):
+        main(["view", str(path), "--serve"])
+
+
+def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    response_status: list[int] = []
+    response_bodies: list[str] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def probe_server(seconds: float) -> None:
+        assert seconds == cli._SERVE_RERENDER_SECONDS
+        url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+        with urllib.request.urlopen(url, timeout=2) as response:
+            response_status.append(response.status)
+            response_bodies.append(response.read().decode())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_serve_sleep", probe_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert response_status == [200]
+    assert '<meta http-equiv="refresh" content="60">' in response_bodies[0]
+    assert bound_ports[0] != 0
+    assert f"serving logs at: http://127.0.0.1:{bound_ports[0]}/" in out.out
+    assert "serving to this machine only; pass --host 0.0.0.0" in out.out
+    assert out.out.index("index: ") < out.out.index("serving logs at: ")
+
+
+@pytest.mark.parametrize(
+    "rerender_error",
+    [
+        RuntimeError("directory changing"),
+        SystemExit("no logs left"),
+    ],
+)
+def test_view_serve_rerender_failure_warns_and_continues(
+    rerender_error: BaseException,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    sleep_calls = 0
+    quiet_calls = 0
+    pass_force_values: list[bool] = []
+    render_directory = cli._render_view_directory
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def flaky_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        nonlocal quiet_calls
+        pass_force_values.append(force)
+        if quiet:
+            quiet_calls += 1
+            if quiet_calls == 1:
+                raise rerender_error
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    def advance_loop(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                assert response.status == 200
+        elif sleep_calls == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_render_view_directory", flaky_render)
+    monkeypatch.setattr(cli, "_serve_sleep", advance_loop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--force"]) == 0
+
+    out = capsys.readouterr()
+    assert f"warning: re-render failed: {rerender_error}" in out.err
+    assert quiet_calls == 2
+    assert pass_force_values == [True, False, False]
+    assert out.out.count("index: ") == 1
+
+
+def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    render_directory = cli._render_view_directory
+
+    def interrupted_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        if quiet:
+            raise KeyboardInterrupt
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    monkeypatch.setattr(cli, "_render_view_directory", interrupted_render)
+    monkeypatch.setattr(cli, "_serve_sleep", lambda _seconds: None)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert "re-render failed" not in out.err
+
+
+def test_view_serve_interrupt_before_thread_start_skips_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    class InterruptedThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def start(self) -> None:
+            # Interrupt delivered before serve_forever ever runs: shutdown()
+            # must be skipped or this test hangs forever.
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading, "Thread", InterruptedThread)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+
+def test_view_serve_localhost_bind_prints_loopback_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", interrupt)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--host", "localhost"]) == 0
+
+    out = capsys.readouterr()
+    assert "serving to this machine only" in out.out
+    assert "serving to your network" not in out.out
+
+
+def test_view_serve_wildcard_prints_hostname_localhost_and_exposure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    result = main(["view", str(logs), "--serve", "--host", "0.0.0.0", "--port", "0"])
+
+    assert result == 0
+
+    out = capsys.readouterr().out
+    assert f"serving logs at: http://robot-host:{bound_ports[0]}/" in out
+    assert f"http://localhost:{bound_ports[0]}/" in out
+    assert "serving to your network: anyone who can reach this machine can view these logs" in out
+
+
+def test_view_serve_url_helpers_follow_bind_address_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert cli._serve_display_urls("127.0.0.1", 8300) == ("http://127.0.0.1:8300/",)
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    assert cli._serve_display_urls("0.0.0.0", 8300) == (
+        "http://robot-host:8300/",
+        "http://localhost:8300/",
+    )
+    assert cli._serve_open_url("127.0.0.1", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("0.0.0.0", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("192.0.2.10", 8300) == "http://192.0.2.10:8300/"
+
+
+def test_view_serve_sigterm_handler_is_scoped_to_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    original_handler = signal.getsignal(signal.SIGTERM)
+    serving_handlers: list[object] = []
+
+    def record_handler_and_stop(_seconds: float) -> None:
+        serving_handlers.append(signal.getsignal(signal.SIGTERM))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", record_handler_and_stop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    assert serving_handlers == [cli._raise_keyboard_interrupt]
+    assert signal.getsignal(signal.SIGTERM) == original_handler
+    with pytest.raises(KeyboardInterrupt):
+        cli._raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+def test_view_serve_bind_failure_is_clean_system_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def fail_to_bind(_address: tuple[str, int], _handler: object) -> None:
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", fail_to_bind)
+
+    with pytest.raises(SystemExit, match="address already in use"):
+        main(["view", str(logs), "--serve"])
+
+
+def test_view_serve_open_url_rules_and_loopback_browser_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--open"]) == 0
+
+    assert len(opened) == 1
+    assert opened[0].startswith("http://127.0.0.1:")
+    assert opened[0].endswith("/")
 
 
 def test_run_outcome_shows_timeout_without_a_count(
