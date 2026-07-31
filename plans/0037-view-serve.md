@@ -19,110 +19,139 @@ command.
 
 - New `view` flags:
   - `--serve`: after rendering, serve the output directory over HTTP until
-    interrupted. Directory mode only — with a single-file log argument,
+    stopped. Directory mode only — with a single-file log argument,
     `SystemExit` (`--serve requires a logs directory`).
-  - `--port N` (default 8300): listen port. Only meaningful with `--serve`;
-    silently ignored otherwise is unacceptable — `SystemExit` if given
-    without `--serve`.
-  - `--host HOST` (default `0.0.0.0`): bind address. Same guard as
-    `--port`. The default is deliberately non-loopback: the whole point of
-    the flag is browsing from another machine, the served content is the
-    user's own local files, and the printed URL warns exactly what is
-    exposed. `--host 127.0.0.1` opts into loopback-only.
-- Composition with existing flags: `--open` opens the served URL (not the
-  file path). `--force`, `--no-frames`, `--frames-budget`, `-o DIR` apply
-  to the render pass as today. `-o -` remains rejected in directory mode.
+  - `--port N` (default 8300): listen port. `SystemExit` if given without
+    `--serve` (a silently ignored flag is worse than an error).
+  - `--host HOST` (default `127.0.0.1`): bind address. Same guard.
+    **Loopback by default**: rendered pages embed stored camera frames —
+    images of the user's physical space — with no auth and no TLS, and the
+    tools this repo's audience already knows (`inspect view`, Jupyter)
+    bind loopback. Remote browsing is one documented flag away
+    (`--host 0.0.0.0`), and the printed hint teaches it:
+    when bound to loopback, a dim line reads
+    `serving to this machine only; pass --host 0.0.0.0 to serve to your network`.
+    When bound non-loopback, the exposure note is the **loud** line:
+    `serving to your network: anyone who can reach this machine can view these logs`.
+- Composition with existing flags: `--open` opens the served URL (not a
+  file path). `--no-frames`, `--frames-budget`, `-o DIR` apply to every
+  render pass. `--force` applies to the **initial pass only** — loop
+  passes are always incremental, otherwise `--serve --force` would rewrite
+  every page every minute forever. `-o -` remains rejected in directory
+  mode (transitively covers `--serve`).
 - Flow of `--serve`:
-  1. Render pass, exactly today's incremental directory render.
-  2. Bind an `http.server.ThreadingHTTPServer` with
-     `SimpleHTTPRequestHandler` rooted at the output directory (via the
-     handler's `directory` parameter — no `os.chdir`). Bind failures
-     (port taken) surface as `SystemExit` with the OS error text.
-  3. Print, to stdout, the URL block after the render totals line:
-     `serving logs at: http://<display-host>:<port>/` where
-     `<display-host>` is the machine's hostname when bound to `0.0.0.0`
-     (falling back to the literal bind address if hostname resolution
-     fails), or the bind address otherwise. A second dim line notes
-     `serving to your network; use --host 127.0.0.1 for this machine only`
-     when bound non-loopback, and `press Ctrl-C to stop` in either case.
-  4. Serve forever; a re-render loop re-runs the incremental render every
-     `_SERVE_RERENDER_SECONDS = 60` in the main thread while the server
-     runs in a daemon thread (`serve_forever` + threading — the render
-     loop stays in the main thread so `KeyboardInterrupt` lands there,
-     shuts the server down cleanly, and exits 0).
-  5. Request logging is suppressed (`log_message` no-op override): render
-     progress belongs on stderr, per-request noise helps nobody.
+  1. Initial render pass, exactly today's incremental directory render,
+     including the totals line.
+  2. Bind `http.server.ThreadingHTTPServer` with a
+     `SimpleHTTPRequestHandler` subclass rooted at the output directory
+     (the handler's `directory` parameter — no `os.chdir`) and
+     `log_message` overridden to a no-op (per-request noise helps nobody).
+     Bind failure (port taken) is `SystemExit` with the OS error text.
+  3. Print the URL block to stdout after the totals line:
+     `serving logs at: http://<display-host>:<actual-port>/`.
+     `<actual-port>` always comes from the bound socket
+     (`server.server_address[1]`), never the flag — `--port 0` works and
+     the test pins it. `<display-host>` is the bind address, except for
+     `0.0.0.0`, where it is `socket.gethostname()` and a second line also
+     prints the `http://localhost:<port>/` form (hostnames like Debian's
+     `127.0.1.1` pattern may not resolve from other machines; giving both
+     never strands the user). Then the audience line from above, then
+     `press Ctrl-C to stop`.
+  4. Start the server thread (`serve_forever`, daemon), then — order
+     matters and gets a comment: the socket is already bound and listening
+     from step 2 (`__init__` binds; the backlog holds early requests), so
+     printing/`--open` before `serve_forever` cannot race — invoke
+     `--open` on the localhost-form URL if requested.
+  5. Main thread runs the re-render loop: sleep `_SERVE_RERENDER_SECONDS
+     = 60` (module-level seam, monkeypatchable), then an incremental
+     render pass.
+  6. Shutdown, spelled out: `KeyboardInterrupt` (which may land in the
+     sleep *or* mid-render) is caught in the main thread →
+     `server.shutdown()` (blocks until the serve loop exits) →
+     `server.server_close()` in a `finally` (releases the listening
+     socket even on unexpected errors) → exit 0. `SIGTERM` is mapped to
+     raise `KeyboardInterrupt` via `signal.signal` before serving starts,
+     so `kill`/process managers get the same clean path as Ctrl-C.
 
-### 2. Browser auto-refresh while served (`_html_index.py`)
+### 2. Re-render loop (cli.py)
+
+- The initial pass and loop passes share one factored render core. Loop
+  passes are **quiet**: no stdout totals; stderr `[i/N] rendering` lines
+  only when a page is actually rendered. A quiet no-change pass costs one
+  `read_eval_log` per log (acknowledged O(parse); an mtime-keyed entry
+  cache is a named follow-up, not v1).
+- Loop exception policy, explicit because the render path raises
+  `SystemExit` for conditions that can arise mid-serve (all logs deleted,
+  output dir replaced): the loop catches `(Exception, SystemExit)`,
+  prints `warning: re-render failed: <exc>` to stderr, and continues —
+  the viewer must not die because a directory was mid-mutation.
+  `KeyboardInterrupt` propagates (it is neither).
+- Each pass rewrites `index.html`; per-log pages are touched only for
+  new/changed logs, so a page being viewed is not rewritten in the steady
+  state (`index.html` mid-request rewrite is the same benign race any
+  static server has; accepted).
+
+### 3. Browser auto-refresh while served (`_html_index.py`)
 
 `render_index` gains `refresh_seconds: int | None = None`; when set, the
 document includes `<meta http-equiv="refresh" content="{refresh_seconds}">`.
 The CLI passes `_SERVE_RERENDER_SECONDS` in serve mode and `None`
-otherwise — a statically rendered index stays static (plan 0035's non-goal
-unchanged), but a served one tracks new runs in an open tab with no user
-action. The existing localStorage filter persistence (plan 0035) already
-makes the refresh non-destructive to a typed filter.
-
-The index page also gains row-click navigation, proven downstream: rows
-with a report carry `data-href`; a click anywhere on the row (delegated
-handler in the existing inline script) navigates unless the click hit the
-in-row anchor or text is selected; ctrl/cmd-click opens a new tab. Rows
-without a page are unaffected. This is an index-usability change that
-serves both static and served modes; it rides along because the serve
-workflow makes the index the primary browsing surface.
-
-### 3. Re-render loop details (cli.py)
-
-- The loop calls the same internal render function as the initial pass
-  (incremental: unchanged logs cost one parse each, no page writes), then
-  sleeps. Render errors in a loop iteration must not kill the server: the
-  iteration logs `warning: re-render failed: <exc>` to stderr and the loop
-  continues (a transient half-written foreign file must not take the
-  viewer down; per-log unreadability is already an error row).
-- Each re-render pass rewrites `index.html`; per-log pages are only
-  touched for new/changed logs, so a page being viewed is never rewritten
-  mid-request in the steady state. (`index.html` rewrite during a request
-  is the same benign race any static server has; accepted.)
+otherwise — a statically rendered index stays static (plan 0035's
+non-goal unchanged), but a served one tracks new runs in an open tab. The
+existing localStorage filter persistence makes the refresh non-destructive
+to the typed filter *value*; focus/caret do reset once a minute — accepted
+for v1 over a fetch-and-swap (code comment says so).
 
 ## Non-goals
 
-WebSockets/live push, TLS, auth (the printed warning line plus `--host`
-is the boundary — same posture as `python3 -m http.server`, which this
-replaces), daemonization (foreground process is the feature: Ctrl-C is
-the lifecycle), and any change to single-file mode.
+WebSockets/live push, TLS, auth (loopback default + the explicit
+`--host 0.0.0.0` opt-in and its loud exposure line are the boundary),
+daemonization (foreground is the feature: Ctrl-C/SIGTERM is the
+lifecycle), entry caching across loop passes (named follow-up), any
+change to single-file mode, and index row-click navigation (separable
+index-usability change; its own small PR).
 
 ## Tests
 
 `tests/test_html_index.py`:
 - `refresh_seconds=None` → no meta refresh tag; `refresh_seconds=60` →
   exact tag present.
-- Row-click: `data-href` present exactly on rows with pages; delegation
-  script present; rows without pages carry no `data-href`.
 
 `tests/test_registry_cli.py`:
-- `--serve` with a single-file argument, `--port`/`--host` without
-  `--serve`: clean `SystemExit`s.
-- End-to-end serve test: run `main(["view", dir, "--serve", "--port", "0",
-  "--host", "127.0.0.1"])` in a thread? No — inverted: monkeypatch the
-  serve loop's sleep to raise `KeyboardInterrupt` after the first
-  iteration, bind port 0 (ephemeral), and in that first iteration fetch
-  `http://127.0.0.1:<bound-port>/index.html` with `urllib` asserting 200
-  and the refresh tag — then the injected interrupt exercises clean
-  shutdown and exit 0. (Port 0 requires printing the *bound* port, which
-  the URL construction takes from the socket, not the flag — test pins
-  that.)
-- Re-render loop resilience: monkeypatched render function that raises
-  once then succeeds; loop continues (warning on stderr, server still
-  answering).
-- URL display: bound `127.0.0.1` prints that literal; bound `0.0.0.0`
-  prints a hostname-based URL (monkeypatch hostname lookup for
-  determinism) plus the network-exposure note.
+- Guards: `--serve` with a single-file argument; `--port`/`--host`
+  without `--serve` — clean `SystemExit`s.
+- End-to-end serve: monkeypatch the sleep seam to raise
+  `KeyboardInterrupt` on its first call after performing one
+  `urllib.request.urlopen` (with `timeout=`, so a dead server fails
+  instead of hanging) against `http://127.0.0.1:<bound-port>/index.html`
+  — asserts 200, the refresh tag, the socket-derived port in the printed
+  URL (invoked with `--port 0`), and exit 0 through the clean-shutdown
+  path.
+- Loop resilience: monkeypatched render core raising once then
+  succeeding, sleep seam allowing two iterations before interrupting —
+  warning on stderr, server still answering, exit 0.
+- URL display: bound `127.0.0.1` prints that literal and the
+  loopback-audience hint; bound `0.0.0.0` (monkeypatched
+  `socket.gethostname` for determinism) prints the hostname URL, the
+  localhost URL, and the loud exposure line.
+- SIGTERM: handler registered (assert via `signal.getsignal`) — the full
+  kill-delivery path is covered by construction through the
+  KeyboardInterrupt tests.
 
 ## README
 
-The **Browse your runs** section replaces the `python3 -m http.server` tip
-with `--serve`: one command, shows the URL, new runs appear while it runs.
-Static usage (no `--serve`) stays documented first.
+The **Browse your runs** section makes the serve workflow the headline
+and spells out the remote case explicitly, since that is the whole point:
+
+- Local: `inspect-robots view logs/ --serve --open` — renders, serves,
+  opens the browser; leave it running and new runs appear on their own.
+- From another machine (headless robot host): run
+  `inspect-robots view logs/ --serve --host 0.0.0.0` on the host, open
+  the URL it prints from your laptop. State plainly what `--host 0.0.0.0`
+  exposes (anyone who can reach the machine can view the logs, camera
+  frames included) and that the index auto-refreshes while served.
+- The `python3 -m http.server` tip is deleted — `--serve` replaces it.
+- Static rendering (no `--serve`) stays documented first.
 
 ## Rollout
 
