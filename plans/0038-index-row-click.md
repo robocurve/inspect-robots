@@ -15,8 +15,11 @@ no changes to per-run report rendering (`_html.py`).
 1. A row whose entry has `page is not None` carries
    `data-href="<escaped page>"` on its `<tr>` and shows `cursor: pointer`.
 2. Clicking such a row navigates to `data-href` (same tab). Cmd/ctrl-click
-   opens it via `window.open(..., "_blank")`, matching platform link
-   conventions.
+   opens it in a new tab via `window.open(..., "_blank")` with
+   `window.opener` neutralized on the opened page. Shift-click and
+   alt-click do nothing (early return): their native meanings (new
+   window, download) belong to real links, and the in-cell links remain
+   available for them.
 3. Clicks that land on an `<a>` (or inside one) are left entirely to the
    browser — no double navigation, native modifier handling preserved.
 4. A click that concludes a text selection (`getSelection().toString()`
@@ -44,32 +47,49 @@ no changes to per-run report rendering (`_html.py`).
   document.querySelector("tbody").addEventListener("click", event => {
     const row = event.target.closest("tr[data-href]");
     if (!row || event.target.closest("a") || getSelection().toString()) return;
-    if (event.metaKey || event.ctrlKey) window.open(row.dataset.href, "_blank");
-    else location.href = row.dataset.href;
+    if (event.shiftKey || event.altKey) return;
+    if (event.metaKey || event.ctrlKey) {
+      const opened = window.open(row.dataset.href, "_blank");
+      if (opened) opened.opener = null;
+    } else {
+      location.href = row.dataset.href;
+    }
   });
   ```
+
+  (`opener = null` rather than a `"noopener"` features string: the
+  features form demotes the tab to a window in some browsers.)
 
   Inside `render_index`'s f-string this needs `{{ }}` brace doubling,
   same as the filter code above it.
 
 ## Tests (tests/test_html_index.py)
 
-- Row with a page: `data-href="<page>"` present on the `<tr>`, value
-  escaped (page name containing `"` and `&` round-trips escaped, no raw
-  quote in the attribute).
-- Row without a page: rendered `<tr>` has no `data-href` anywhere.
+The strings `data-href` and `tr[data-href]` appear in EVERY document via
+the listener's selector and the CSS rule, so document-level substring
+checks on those are vacuous or unsatisfiable. All assertions below target
+the attribute form `<tr data-href="` specifically:
+
+- Row with a page: `<tr data-href="<escaped page>">` present, value
+  escaped (a page name containing `"` and `&` round-trips escaped — no
+  raw quote inside the attribute value).
+- Row without a page: the substring `<tr data-href="` does not appear in
+  a document whose only entry lacks a page.
 - Document contains the delegated listener exactly once, asserted against
   an independent hardcoded literal (not a constant imported from the
   module — the injection guard must not be self-referential; same lesson
   as plan 0036).
-- CSS rule `tr[data-href]` present.
-- Empty index: document renders, no `data-href` present.
+- The full CSS rule text `tbody tr[data-href] { cursor: pointer; }` is
+  present (substring `tr[data-href]` alone would pass via the JS
+  selector even with the style missing).
+- Empty index: document renders, substring `<tr data-href="` absent.
 
 ## Non-goals
 
 - No keyboard focusability for rows (links already serve keyboard users).
-- No middle-click/auxclick handling: middle-click paste/scroll semantics
-  vary by platform and the in-cell links already provide open-in-new-tab.
+- No middle-click/auxclick, shift-click, or alt-click handling: their
+  semantics vary by platform and the in-cell links already provide every
+  native link behavior.
 - No visual affordance beyond the cursor (the existing row hover
   highlight already signals interactivity).
 
