@@ -101,6 +101,49 @@ def test_filter_script_and_persisted_key_are_present() -> None:
     assert "inspect-robots-index-filter" in document
 
 
+def test_row_with_page_has_escaped_data_href() -> None:
+    document = render_index([_entry("run.json", page='run"&report.html')])
+
+    assert '<tr data-href="run&quot;&amp;report.html">' in document
+    assert '<tr data-href="run"&amp;report.html">' not in document
+
+
+def test_row_without_page_has_no_data_href_attribute() -> None:
+    document = render_index([_entry("run.json", page=None)])
+
+    assert '<tr data-href="' not in document
+
+
+def test_delegated_row_click_listener_is_present_once() -> None:
+    document = render_index([_entry("run.json")])
+    listener = """document.querySelector("tbody").addEventListener("click", event => {
+  const row = event.target.closest("tr[data-href]");
+  if (!row || event.target.closest("a") || getSelection().toString()) return;
+  if (event.shiftKey || event.altKey) return;
+  if (event.metaKey || event.ctrlKey) {
+    const opened = window.open(row.dataset.href, "_blank");
+    if (opened) opened.opener = null;
+  } else {
+    location.href = row.dataset.href;
+  }
+});"""
+
+    assert document.count(listener) == 1
+
+
+def test_clickable_row_cursor_style_is_present() -> None:
+    document = render_index([_entry("run.json")])
+
+    assert "tbody tr[data-href] { cursor: pointer; }" in document
+
+
+def test_empty_index_has_no_data_href_attribute() -> None:
+    document = render_index([])
+
+    assert "<!doctype html>" in document
+    assert '<tr data-href="' not in document
+
+
 def test_static_index_has_no_meta_refresh() -> None:
     document = render_index([_entry("run.json")], refresh_seconds=None)
 
