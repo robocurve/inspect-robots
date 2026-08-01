@@ -9,6 +9,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.20.0):** `-P wire=gemini-live` now serves
+  `google/gemini-robotics-er-2-streaming-preview` through Google's stateful
+  v1beta Live API. The sync websocket client streams only new observations,
+  preserves exact tool-response ordering, recovers expired or dropped
+  sessions from the image-free transcript, and captures each socket attempt
+  with content-addressed frame blobs (plan 0039, #252).
+
 - `inspect-robots view --serve` now serves a rendered logs directory, refreshes
   it incrementally as new runs arrive, and supports explicit host/port binding
   for local or remote browsing (plan 0037, #241)
