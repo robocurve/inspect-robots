@@ -4,7 +4,7 @@
 
 **Goal:** The Rerun viewer shows one time-series plot per labeled action-dim group (YAM: "left" with dims 0-6, "right" with dims 7-13, commanded and measured series together) instead of the heuristic subset it picks today, by sending an explicit blueprint at eval start (#265).
 
-**Architecture:** A new duck-typed sink hook (`bind_spaces`, mirroring the existing `bind_task`/`log_policy_messages` getattr precedents) hands sinks the resolved `Box` action space and `ObservationSpace` before `on_eval_start`. `RerunSink` distills them into plain fields (dim labels, action dim count, camera names, 1-D state field lengths), derives groups by first-underscore label prefix, and sends one blueprint right after `init`/`spawn`/`connect_grpc`/`save` in `on_eval_start` (caller thread — blueprint sends are timeline-independent, so the worker-thread rule is untouched). View contents use `trial/**/...` wildcard expressions so a single send covers every trial namespace. Every failure mode (hook never called, unlabeled dims, SDK without blueprint support, build/send exception) degrades to today's heuristic layout.
+**Architecture:** A new duck-typed sink hook (`bind_spaces`, mirroring the existing `bind_task`/`log_policy_messages` getattr precedents) hands sinks the resolved `Box` action space and `ObservationSpace` before `on_eval_start`. `RerunSink` distills them into plain fields (dim labels, action dim count, camera names, state keys and 1-D state field lengths), derives groups by first-underscore label prefix, and sends one blueprint per trial namespace FROM THE WORKER THREAD: `_emit` notices the first payload of each new prefix and sends a blueprint whose views use concrete exact paths under that prefix (rerun's entity-query grammar supports `/**` ONLY as a suffix — mid-path wildcards like `trial/**/action/0` are accepted silently but match nothing, so per-prefix sends with exact paths are the only correct shape). The existing threading contract ("all SDK calls after startup happen on the worker") is preserved untouched. Every failure mode (hook never called, unlabeled dims, SDK without blueprint support, build/send exception) degrades to today's heuristic layout with at most one warning.
 
 **Tech Stack:** Python 3.10+, stdlib + numpy only in core; rerun-sdk stays a lazy optional import; pytest with the existing fake-SDK conventions in tests/test_rerun_sink.py.
 
@@ -65,7 +65,8 @@ Call site in `eval()` (directly before `bus.on_eval_start(spec)`): `bus.bind_spa
 - Test: `tests/test_rerun_sink.py`
 
 **Interfaces:**
-- Produces on `RerunSink`: `bind_spaces(action_space: Box, observation_space: ObservationSpace) -> None` (stores distilled fields), module-level `_joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, list[int]]]`, and private `_send_blueprint(rr: Any) -> None` invoked at the end of `on_eval_start`'s `try` block.
+- Produces on `RerunSink`: `bind_spaces(action_space: Box, observation_space: ObservationSpace) -> None` (stores distilled fields; needs `Box`/`ObservationSpace` added to the `TYPE_CHECKING` imports of rerun_sink.py), module-level `_joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, list[int]]]`, and private `_send_blueprint(rr: Any, prefix: str) -> None` invoked from `_emit` on the worker whenever a payload's prefix differs from `self._blueprint_prefix` (new `__init__` field, `str | None = None`). The module docstring gains one sentence describing the per-trial blueprint send in `_emit`; the threading-contract paragraph needs NO exception added.
+- Grouping semantics (`_joint_groups`): collapse to a single `("joints", all)` group unless labels are present, their count equals `dim`, EVERY label contains an underscore, and there are at least two distinct first-underscore prefixes. This keeps CubePick's `("dx","dy")` and eef-style `("x","y","z","grip")` labels in one plot instead of one clutter-view per dim.
 
 - [ ] **Step 1: failing tests** (fake `rr` namespace per existing conventions, extended with a fake `blueprint` submodule whose view/container classes record their kwargs, plus a recording `send_blueprint`):
 
@@ -75,36 +76,59 @@ def test_joint_groups_split_on_label_prefix() -> None:
     assert _joint_groups(labels, 6) == [("left", [0, 1, 2]), ("right", [3, 4, 5])]
     assert _joint_groups(None, 3) == [("joints", [0, 1, 2])]
     assert _joint_groups(("a_x", "a_y"), 2) == [("joints", [0, 1])]  # single prefix
-    assert _joint_groups(("ax", "by"), 2) == [("joints", [0, 1])]  # no underscore
+    assert _joint_groups(("ax", "by"), 2) == [("joints", [0, 1])]  # no underscore anywhere
+    assert _joint_groups(("l_a", "up", "r_b"), 3) == [("joints", [0, 1, 2])]  # mixed labels
     assert _joint_groups(("l_a", "r_b"), 3) == [("joints", [0, 1, 2])]  # label/dim mismatch
 
 
-def test_blueprint_sent_with_per_group_views(...) -> None:
+def test_blueprint_sent_per_trial_prefix_with_per_group_views(...) -> None:
     # bind_spaces with a 4-dim Box labeled left_j0,left_gripper,right_j0,right_gripper,
-    # an ObservationSpace with one camera "top" and StateSpec field joint_pos shape (4,);
-    # on_eval_start must call send_blueprint exactly once, after init; the recorded
-    # TimeSeriesView kwargs must include a "left" view whose contents contain
-    # "+ trial/**/action/0", "+ trial/**/action/1", "+ trial/**/state/joint_pos/0",
-    # "+ trial/**/state/joint_pos/1" and a "right" view with dims 2,3; a camera view
-    # for "top"; llm and llm/latest views; a reward view.
+    # an ObservationSpace with one camera "top" and StateSpec field joint_pos shape (4,).
+    # Drive: on_eval_start(fake) -> on_trial_start("s0", 0) -> log_step -> flush.
+    # send_blueprint called exactly once; recorded TimeSeriesView kwargs include a
+    # "left" view whose contents contain "+ trial/s0/e0/action/0", ".../action/1",
+    # "+ trial/s0/e0/state/joint_pos/0", ".../joint_pos/1" and a "right" view with
+    # dims 2,3; a camera view for "top" ("+ trial/s0/e0/camera/top"); a TextLogView
+    # whose contents include BOTH "+ trial/s0/e0/llm" and "+ trial/s0/e0/event/**"
+    # (the terminated marker must stay visible); an llm/latest TextDocumentView; a
+    # reward view. Then on_trial_start("s1", 0) -> log_step -> flush: a SECOND send
+    # with trial/s1/e0 paths. A further log_step in the same trial: still two sends.
+    # Also assert the FIRST payload being a transcript (log_policy_messages before
+    # any log_step) triggers the send too, in a small separate test or parametrize.
 
 
-def test_blueprint_state_key_length_mismatch_gets_own_view(...) -> None:
-    # StateSpec fields: joint_pos shape (4,) aligned; eef_pose shape (7,) NOT aligned
-    # with the 4-dim action box -> eef_pose appears as its own TimeSeriesView with
-    # contents "+ trial/**/state/eef_pose/**" and NOT inside left/right views.
+def test_blueprint_state_keys_without_statespec_get_own_views(...) -> None:
+    # ObservationSpace with state_keys={"eef_pos","cube_pos"} and state=None (the
+    # CubePick shape): per-key TimeSeriesViews with contents
+    # "+ trial/s0/e0/state/eef_pos/**" (suffix wildcard is legal) and no aligned
+    # overlay inside the joints view. Camera-less space here -> no camera grid
+    # (covers the zero-cameras arm). StateSpec fields: joint_pos (4,) aligned;
+    # eef_pose (7,) NOT aligned -> own view; a (2,2)-shaped field is ignored for
+    # alignment but still gets a per-key view (cover in this or a sibling test).
 
 
 def test_blueprint_skipped_without_bind_spaces_or_blueprint_api(...) -> None:
-    # (a) on_eval_start without any bind_spaces call -> send_blueprint never called;
+    # (a) full drive without any bind_spaces call -> send_blueprint never called
+    #     (existing startup fakes prove no attribute is even probed);
     # (b) bind_spaces called but fake rr lacks the blueprint attr -> no crash, no send;
-    # (c) fake rr lacks send_blueprint -> no crash, no send.
+    # (c) fake rr has blueprint but lacks send_blueprint -> no crash, no send.
 
 
 def test_blueprint_build_failure_warns_once_and_run_continues(...) -> None:
-    # Fake blueprint class raises in __init__ -> exactly one RuntimeWarning mentioning
-    # the automatic layout fallback; init/connect calls still recorded; log_step still
-    # enqueues afterwards (sink not disabled).
+    # Fake blueprint view class raises in __init__ -> exactly one RuntimeWarning
+    # mentioning the automatic layout fallback ACROSS TWO TRIALS (the second prefix
+    # must not re-warn), and scalar log calls still happen afterwards.
+
+
+@pytest.mark.skipif(not _RERUN_INSTALLED, reason="rerun-sdk not installed")
+def test_real_rerun_accepts_the_blueprint(...) -> None:
+    # Mirror test_real_rerun_accepts_the_transcript_document_call: real SDK, save to
+    # tmp .rrd; bind_spaces with the labeled Box + camera + StateSpec space, then call
+    # sink._send_blueprint(rr, "trial/s0/e0") directly under
+    # warnings.simplefilter("error") -> no fallback warning means every constructor
+    # kwarg and send_blueprint call is real. (Viewer-side content matching cannot be
+    # asserted in-process; the exact-path design is what makes it correct by
+    # construction.)
 ```
 
 - [ ] **Step 2: run, confirm FAIL.**
@@ -116,34 +140,36 @@ def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, l
 
     YAM-style labels (``left_j0`` .. ``right_gripper``) yield one group per
     side, in first-appearance order. Missing labels, a label count that does
-    not match the dim count, or fewer than two distinct prefixes all collapse
-    to a single "joints" group so unlabeled embodiments keep one plot.
+    not match the dim count, any label without an underscore (CubePick's
+    ``dx``/``dy``, eef-style ``x``/``y``/``grip``), or fewer than two distinct
+    prefixes all collapse to a single "joints" group: one plot beats one
+    clutter-view per dim.
     """
-    if labels is None or len(labels) != dim:
+    if labels is None or len(labels) != dim or not all("_" in label for label in labels):
         return [("joints", list(range(dim)))]
     groups: dict[str, list[int]] = {}
     for index, label in enumerate(labels):
-        prefix = label.split("_", 1)[0] if "_" in label else label
-        groups.setdefault(prefix, []).append(index)
+        groups.setdefault(label.split("_", 1)[0], []).append(index)
     if len(groups) < 2:
         return [("joints", list(range(dim)))]
     return list(groups.items())
 ```
 
-`bind_spaces` stores plain derived state (set in `__init__` defaults: `self._dim_labels: tuple[str, ...] | None = None`, `self._action_dim: int | None = None`, `self._camera_names: tuple[str, ...] = ()`, `self._state_lengths: dict[str, int] = {}`):
+`bind_spaces` stores plain derived state (set in `__init__` defaults: `self._dim_labels: tuple[str, ...] | None = None`, `self._action_dim: int | None = None`, `self._camera_names: tuple[str, ...] = ()`, `self._state_keys: tuple[str, ...] = ()`, `self._state_lengths: dict[str, int] = {}`, `self._blueprint_prefix: str | None = None`, `self._blueprint_warned = False`):
 
 ```python
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Distill the resolved spaces into the fields the blueprint needs.
 
-        Called by ``eval()`` before ``on_eval_start``; storing plain tuples
-        (never the space objects) keeps the worker thread free of shared
-        mutable state.
+        Called by ``eval()`` before ``on_eval_start`` (and therefore before
+        the worker thread exists); storing plain tuples rather than the space
+        objects keeps the worker free of shared mutable state.
         """
-        self._action_dim = action_space.size
+        self._action_dim = action_space.dim
         semantics = action_space.semantics
         self._dim_labels = None if semantics is None else semantics.dim_labels
         self._camera_names = tuple(c.name for c in observation_space.cameras)
+        self._state_keys = tuple(sorted(observation_space.state_keys))
         state = observation_space.state
         self._state_lengths = (
             {f.key: f.shape[0] for f in state.fields if len(f.shape) == 1}
@@ -152,16 +178,26 @@ def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, l
         )
 ```
 
-`_send_blueprint(rr)` — called as the last statement inside `on_eval_start`'s existing `try` block? NO: a blueprint failure must not disable the sink like a connect failure does. Call it AFTER the `try/except`, guarded by its own `try` and by `if self._rr is None or self._disabled: return`:
+(Verify `Box.dim` is the dim-count property in spaces.py:127-133 — `Box.size` does NOT exist.)
+
+`_send_blueprint(rr, prefix)` runs on the worker. Trigger at the top of `_emit` (before the transcript `isinstance` branch, so a transcript-first trial still gets its layout):
 
 ```python
-    def _send_blueprint(self, rr: Any) -> None:
-        """Send an explicit layout once, if spaces were bound and the SDK can.
+        if payload.prefix != self._blueprint_prefix:
+            self._blueprint_prefix = payload.prefix
+            self._send_blueprint(rr, payload.prefix)
+```
 
-        Wildcard ``trial/**`` contents cover every trial namespace, so one
-        send at eval start is enough and later trials never stomp operator
-        layout tweaks. Any failure degrades to the viewer's automatic layout
-        with a single warning; the data stream is unaffected.
+```python
+    def _send_blueprint(self, rr: Any, prefix: str) -> None:
+        """Send an explicit layout for one trial namespace, if the SDK can.
+
+        Rerun's entity queries support ``/**`` only as a suffix, so the views
+        name each trial's entities with concrete paths and the layout is
+        re-sent when a new trial namespace begins (the viewer follows the
+        live trial; a single-trial ``run`` sends exactly once). Skipped when
+        spaces were never bound or the SDK predates blueprints; any build or
+        send failure degrades to the automatic layout with a single warning.
         """
         if self._action_dim is None:
             return
@@ -172,45 +208,53 @@ def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, l
         try:
             plots = []
             for name, indices in _joint_groups(self._dim_labels, self._action_dim):
-                contents = [f"+ trial/**/action/{i}" for i in indices]
+                contents = [f"+ {prefix}/action/{i}" for i in indices]
                 for key, length in self._state_lengths.items():
                     if length == self._action_dim:
-                        contents += [f"+ trial/**/state/{key}/{i}" for i in indices]
+                        contents += [f"+ {prefix}/state/{key}/{i}" for i in indices]
                 plots.append(rrb.TimeSeriesView(name=name, origin="/", contents=contents))
-            for key, length in self._state_lengths.items():
-                if length != self._action_dim:
+            aligned = {
+                key for key, length in self._state_lengths.items()
+                if length == self._action_dim
+            }
+            for key in self._state_keys:
+                if key not in aligned:
                     plots.append(
                         rrb.TimeSeriesView(
-                            name=key, origin="/", contents=[f"+ trial/**/state/{key}/**"]
+                            name=key, origin="/", contents=[f"+ {prefix}/state/{key}/**"]
                         )
                     )
             plots.append(
-                rrb.TimeSeriesView(name="reward", origin="/", contents=["+ trial/**/reward"])
+                rrb.TimeSeriesView(name="reward", origin="/", contents=[f"+ {prefix}/reward"])
             )
             cameras = [
-                rrb.Spatial2DView(name=cam, origin="/", contents=[f"+ trial/**/camera/{cam}"])
+                rrb.Spatial2DView(name=cam, origin="/", contents=[f"+ {prefix}/camera/{cam}"])
                 for cam in self._camera_names
             ]
             text = rrb.Vertical(
-                rrb.TextDocumentView(name="latest", contents=["+ trial/**/llm/latest"]),
-                rrb.TextLogView(name="llm", contents=["+ trial/**/llm"]),
+                rrb.TextDocumentView(name="latest", contents=[f"+ {prefix}/llm/latest"]),
+                rrb.TextLogView(
+                    name="llm", contents=[f"+ {prefix}/llm", f"+ {prefix}/event/**"]
+                ),
             )
             columns = [rrb.Vertical(*plots), text]
             if cameras:
                 columns.insert(0, rrb.Grid(*cameras))
             send(rrb.Blueprint(rrb.Horizontal(*columns)))
         except Exception as exc:
-            warnings.warn(
-                f"RerunSink could not send the blueprint layout ({exc}); "
-                "the viewer will use its automatic layout",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if not self._blueprint_warned:
+                self._blueprint_warned = True
+                warnings.warn(
+                    f"RerunSink could not send the blueprint layout ({exc}); "
+                    "the viewer will use its automatic layout",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 ```
 
-In `on_eval_start`, after the existing `except Exception` block (sink still enabled path only): `if not self._disabled: self._send_blueprint(rr)`. Guard ordering: the existing failure path sets `self._rr = None` and `self._disabled = True`, so the call is skipped after startup failure.
+Notes: keys in `_state_keys` without a 1-D declared length (StateSpec absent, or a non-1-D field) get suffix-wildcard views so nothing the run logs is hidden — an explicit blueprint hides unmatched entities, which is also why `event/**` rides in the TextLogView (the `event/terminated` marker must survive). `on_eval_start` is NOT touched beyond the docstring sentence; all sends happen on the worker, so the module threading contract holds verbatim.
 
-Coverage note: every branch above is reachable from the tests in Step 1 (labels/no-labels/mismatch groups; aligned + unaligned state; zero cameras via `columns.insert` skip; missing rrb/send; exception path; `_action_dim is None`). If a branch cannot be reached, delete the branch rather than excluding it.
+Coverage note: every branch above is reachable from the tests in Step 1 (labels/no-labels/no-underscore/mismatch groups; aligned + unaligned + undeclared state; zero cameras; missing rrb vs missing send; `_action_dim is None` via the no-bind drive; warn-once across two prefixes; prefix-change true/false arcs via the second log_step). If a branch cannot be reached, delete the branch rather than excluding it.
 
 - [ ] **Step 4: run to green, full gates; Step 5: commit** `rerun: send per-arm blueprint from bound spaces (#265)`
 
@@ -230,7 +274,7 @@ Coverage note: every branch above is reachable from the tests in Step 1 (labels/
 
 ## Out of scope
 
-- Per-trial blueprint re-sends or `make_active` juggling: wildcard contents make one send sufficient; re-sending would stomp operator layout tweaks between trials.
+- Preserving operator layout tweaks across trial boundaries: rerun has no mid-path wildcards, so the layout must be re-sent per trial namespace and each re-send resets viewer tweaks. Accepted: the layout follows the live trial, and the motivating single-instruction `run` flow sends exactly once. `make_active`/`make_default` juggling stays at SDK defaults until someone needs it.
 - A declaration protocol for plot grouping (PLOT_GROUPS-style): `dim_labels` already carries the grouping and is conformance-checked; a dedicated protocol is YAGNI until an embodiment needs groups that labels cannot express.
 - Splitting commanded vs measured into separate views, styling (colors, line styles), and gripper-vs-joint separation: the per-side overlay is the requested "one plot per hand"; refinements are viewer-side tweaks operators can make live, and the sent layout never overwrites them.
 - The `run --policy agent` CLI path needs no change: it reaches `eval()` and the bus like every other run.
