@@ -143,9 +143,9 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _number(value: int | float) -> str:
+def _number(value: int | float | None) -> str:
     """Format numeric log values compactly before their interpolation boundary."""
-    return f"{value:.4g}"
+    return "n/a" if value is None else f"{value:.4g}"
 
 
 def _link(page: str | None, content: str) -> str:
