@@ -32,7 +32,7 @@ function titleFromMarkdown(markdown, file) {
 }
 
 function siteUrl(file) {
-  return `https://inspectrobots.org/${file.replace(/\.md$/, '/')}`;
+  return `https://docs.inspectrobots.org/${file.replace(/\.md$/, '/')}`;
 }
 
 const guides = await Promise.all(
