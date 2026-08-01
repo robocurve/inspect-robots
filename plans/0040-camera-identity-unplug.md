@@ -13,7 +13,7 @@
 - Gates (all blocking): `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` (strict, covers `src` and `tests`), `uv run pytest --cov` at **100% coverage**.
 - Every public module/class/function needs a docstring; state the contract (ruff D1).
 - Repo root is the `ir-wt-unplug-identify` worktree at `~/robocurve/ir-wt-unplug-identify`; run everything via `uv run ...` there.
-- Wizard behavior for rigs whose cameras all have healthy, unique by-id links must be byte-for-byte unchanged: every existing golden-config test in `tests/test_setup.py` must pass untouched, EXCEPT tests that specifically pin the old broken behavior (the by-path-extra "press 'p'" hint wording and any direct `_scan_cameras`/`_identify_by_replug` call sites); those are updated deliberately and called out in Task 4.
+- Wizard behavior for rigs whose cameras all have healthy, unique by-id links must be byte-for-byte unchanged: every existing golden-config test in `tests/test_setup.py` must pass untouched, EXCEPT direct-call tests of `_scan_cameras` (deleted), `_identify_by_replug` (dropped `devices` param), and `_prompt_device_slot` (new params); those are updated deliberately and called out in Tasks 3-5. The run_setup-level hint/toggle/fallback tests all run in the legacy regime and stay untouched (Task 4 pins the list).
 - Non-Linux / no-sysfs environments (Windows workstations editing rig configs, CI) must keep working via one crisp regime rule: **an empty inventory (no node probed color-capable) means legacy behavior everywhere** — raw per-directory listings, the old `active_is_by_id` and `advertise_path_toggle` formulas, the old `_print_camera_path_hint` (kept, not deleted), and 'u' delegating to the legacy string-diff `_identify_by_replug` with its historical message copy. Every existing test whose fixtures probe `None` (touch()-ed files) therefore passes byte-for-byte, including the run_setup 'u'-flow tests at tests/test_setup.py:1378 and :1412. A non-empty inventory switches to the new device-identity behavior.
 - Commit messages: imperative, scoped; reference #261 as motivation where apt.
 
@@ -544,6 +544,12 @@ def test_identify_camera_not_reappearing_warns_and_keeps_assignment(...) -> None
     # trust-ladder name is still returned (assignment kept).
 
 
+def test_identify_camera_reappears_on_retry_rescan(...) -> None:
+    # The camera is still absent at "Plug it back in" but present after the
+    # "press Enter to rescan" retry (restore the tree inside that input
+    # callback): no warning, and the name comes from the retry's fresh scan.
+
+
 def test_identify_camera_late_arrival_is_detectable(...) -> None:
     # A camera plugged in AFTER the wizard's listing was printed (i.e. absent
     # from any earlier snapshot) is still identified: the flow's "before" set
@@ -681,7 +687,7 @@ git commit -m "setup: identify cameras by USB device, re-derive name after replu
   - `_prompt_device_slot` replaces `rescan_by_id`/`rescan_by_path` with one `identify: Callable[[bool], str | None]` (the bool is the live `active_is_by_id`); its `nouns` dict moves into the CAN/serial identify closure as a per-kind dict LOOKUP (data, not an if/else — a serial-slot branch would otherwise need its own 'u' test to satisfy branch coverage).
   - `_camera_identify(role, unplug_label, *, input_fn, out, rescan, by_id_dir, by_path_dir) -> Callable[[bool], str | None]` — module-level (both sections call the SAME helper; a per-section closure would leave the `_device_section` copy's body uncovered since no existing test presses 'u' on a v4l2 device slot).
   - `_print_camera_name_hint(inventory, active_is_by_id, out)` — used when the inventory is non-empty; the legacy `_print_camera_path_hint` is KEPT and still used in the empty-inventory regime, so its existing tests pass untouched.
-  - `advertise_path_toggle` and `active_is_by_id`: records-based formulas when the inventory is non-empty, the historical row-count/row-emptiness formulas otherwise (see Step 3 code — the empty-inventory arm is exactly today's lines 519/522 semantics).
+  - `_camera_view_state(inventory, by_id_rows, by_path_rows) -> tuple[bool, bool]` — module-level, computes `(active_is_by_id, advertise_path_toggle)`: records-based formulas when the inventory is non-empty, the historical row-count/row-emptiness formulas otherwise (the empty-inventory arm is exactly today's lines 519/522 semantics). Shared by both sections so its short-circuit continuation lines are covered once.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -750,14 +756,21 @@ Expected: new tests FAIL (rows missing, 'u' cannot find the D435); existing test
 
 - [ ] **Step 3: Implement**
 
-In `_camera_section` (and symmetrically in `_device_section` for its v4l2 arm) — note the regime split; the empty-inventory arm reproduces today's lines 519/522 exactly, because in that regime the rows ARE the raw per-directory listings:
+The regime-dependent view state lives in ONE module-level helper — both sections call it, for the same single-shared-function reason as `_camera_identify`: inline copies would leave the `_device_section` copy's short-circuit continuation lines uncovered (the `_rig` fixture's first record makes both `any(...)` calls decide early):
 
 ```python
-    inventory = _camera_inventory(by_id_dir, by_path_dir, sysfs_video)
-    duplicated = _duplicated_serials(inventory)
-    by_id_devices = _camera_rows(inventory, by_id_dir, by_id=True)
-    by_path_devices = _camera_rows(inventory, by_path_dir, by_id=False)
+def _camera_view_state(
+    inventory: list[_CameraNode], by_id_rows: list[str], by_path_rows: list[str]
+) -> tuple[bool, bool]:
+    """The listing view to start in and whether to advertise the 'p' toggle.
+
+    Non-empty inventory: start in the by-id view when any camera has a by-id
+    name (else port view), and advertise 'p' exactly when some camera's
+    by-id name is missing or ambiguous (a fallback row exists). Empty
+    inventory (legacy regime): today's row-count formulas, unchanged.
+    """
     if inventory:
+        duplicated = _duplicated_serials(inventory)
         active_is_by_id = any(record.by_id for record in inventory) or not any(
             record.by_path for record in inventory
         )
@@ -766,9 +779,19 @@ In `_camera_section` (and symmetrically in `_device_section` for its v4l2 arm) �
             or (record.serial is not None and record.serial in duplicated)
             for record in inventory
         )
-    else:
-        active_is_by_id = bool(by_id_devices) or not by_path_devices
-        advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
+        return active_is_by_id, advertise_path_toggle
+    return bool(by_id_rows) or not by_path_rows, len(by_path_rows) > len(by_id_rows)
+```
+
+In `_camera_section` (and identically in `_device_section` for its v4l2 arm):
+
+```python
+    inventory = _camera_inventory(by_id_dir, by_path_dir, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id_dir, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path_dir, by_id=False)
+    active_is_by_id, advertise_path_toggle = _camera_view_state(
+        inventory, by_id_devices, by_path_devices
+    )
     rescan_inventory = partial(_camera_inventory, by_id_dir, by_path_dir, sysfs_video)
 ```
 
@@ -1035,7 +1058,7 @@ Rewrite the two camera paragraphs: the wizard lists every color-capable camera, 
 - [ ] **Step 2: CHANGELOG**
 
 ```markdown
-- `inspect-robots setup` camera slots (#261, plan 0039): the wizard now lists
+- `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
   and unplug-identifies cameras as physical USB devices. A camera whose color
   node lost udev's by-id name race (multi-interface cameras such as the
   RealSense D435) or whose by-path name is duplicated by systemd
@@ -1049,7 +1072,7 @@ Match the existing entry indentation/format exactly.
 
 - [ ] **Step 3: Module map**
 
-Extend the `_setup.py` row's plan list with 0039 and swap "fallback camera discovery" phrasing for the new inventory summary (color-probed camera inventory grouped by sysfs USB device; trust-ladder naming; device-level unplug identify), matching the row's phrasing density.
+Extend the `_setup.py` row's plan list with 0040 and swap "fallback camera discovery" phrasing for the new inventory summary (color-probed camera inventory grouped by sysfs USB device; trust-ladder naming; device-level unplug identify), matching the row's phrasing density.
 
 - [ ] **Step 4: Gates + commit**
 
