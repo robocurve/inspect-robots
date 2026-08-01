@@ -28,6 +28,7 @@ from inspect_robots._setup import (
     _preferred_name,
     _prompt_device_slot,
     _read_raw_config,
+    _reconcile_missing_current,
     _render_config,
     _scan_can,
     _scan_serial,
@@ -76,6 +77,7 @@ def _prompt_current_device(
         current,
         {},
         False,
+        [],
         input_fn=input_fn,
         out=out,
         identify=lambda _prefer_by_id: None,
@@ -507,6 +509,28 @@ def test_preferred_name_ladder() -> None:
     assert _preferred_name([raceless], set(), prefer_by_id=True) == "/p/b"
     assert _preferred_name([bare], set(), prefer_by_id=True) == "/dev/video3"
     assert _preferred_name([raceless, trusted], set(), prefer_by_id=True) == "/i/a"
+
+
+def test_reconcile_missing_current_matches_serial_from_by_id_name() -> None:
+    record = _CameraNode(
+        node="/dev/video10",
+        camera="/sys/devices/4-9",
+        serial="310323023943",
+        by_id=None,
+        by_path="/dev/v4l/by-path/pci-0000:80:14.0-usb-0:9:1.3-video-index0",
+    )
+    saved = "/dev/v4l/by-id/usb-Intel_..._435_310323023943-video-index0"
+    assert _reconcile_missing_current(saved, [record], prefer_by_id=True) == record.by_path
+    assert _reconcile_missing_current("/dev/video99", [record], prefer_by_id=True) is None
+    assert _reconcile_missing_current(saved, [], prefer_by_id=True) is None
+    twin = _CameraNode(
+        node="/dev/video12",
+        camera="/sys/devices/3-4",
+        serial="310323023943",
+        by_id=None,
+        by_path="/dev/v4l/by-path/pci-0000:80:14.0-usb-0:3.4:1.0-video-index0",
+    )
+    assert _reconcile_missing_current(saved, [record, twin], prefer_by_id=True) is None
 
 
 _V4L2_CAP_VIDEO_CAPTURE = 0x00000001
@@ -1074,6 +1098,42 @@ def test_run_setup_device_slot_camera_uses_inventory(
     assert f"inspection_camera = {race_loser}" in _config_path(tmp_path).read_text(encoding="utf-8")
     assert "no usable by-id entry" in out.getvalue()
     assert "Unplug the inspection camera now, then press Enter..." in prompts
+
+
+def test_run_setup_missing_current_prints_reconciliation_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    saved = "/dev/v4l/by-id/usb-Intel_RealSense_435_310323023943-video-index0"
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        f"[embodiment.args]\ntop_cam_device = {saved}\n",
+        encoding="utf-8",
+    )
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "", "2", "1", "1", "y"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    replacement = str(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert f"warning: {saved} does not exist here" in out.getvalue()
+    assert (
+        f"a camera with that serial is connected; its stable path is now {replacement}"
+        in out.getvalue()
+    )
+    assert f"top_cam_device = {replacement}" in text
 
 
 def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:

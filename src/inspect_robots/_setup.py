@@ -522,6 +522,7 @@ def _prompt_device_slot(
     current: str | None,
     assigned: dict[str, tuple[str, str, str]],
     advertise_path_toggle: bool,
+    inventory: list[_CameraNode],
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
@@ -576,6 +577,19 @@ def _prompt_device_slot(
                     )
                 if warning is not None:
                     print(_paint(warning, _YELLOW, out), file=out)
+                    replacement = _reconcile_missing_current(
+                        current, inventory, prefer_by_id=active_is_by_id
+                    )
+                    if replacement is not None:
+                        print(
+                            _paint(
+                                "a camera with that serial is connected; its "
+                                f"stable path is now {replacement}",
+                                _YELLOW,
+                                out,
+                            ),
+                            file=out,
+                        )
                     warned_current = True
                     continue
             selected = current
@@ -708,6 +722,7 @@ def _camera_section(
                 existing_args.get(key),
                 assigned_devices,
                 advertise_path_toggle,
+                inventory,
                 input_fn=input_fn,
                 out=out,
                 identify=_camera_identify(
@@ -878,6 +893,7 @@ def _device_section(
             existing_args.get(slot.arg),
             assigned_devices,
             advertise_path_toggle,
+            inventory if slot.kind == "v4l2" else [],
             input_fn=input_fn,
             out=out,
             identify=identify,
@@ -1134,6 +1150,31 @@ def _camera_rows(inventory: list[_CameraNode], directory: Path, *, by_id: bool) 
         return [str(entry) for entry in sorted(directory.iterdir())]
     except OSError:
         return []
+
+
+_BY_ID_SERIAL = re.compile(r"_([A-Za-z0-9]+)-video-index\d+$")
+
+
+def _reconcile_missing_current(
+    current: str, inventory: list[_CameraNode], *, prefer_by_id: bool
+) -> str | None:
+    """Return the scanned camera matching a dead by-id name's embedded serial.
+
+    udev by-id names end ``_<serial>-video-index<n>``; when the saved link
+    is gone but a camera with that serial is on the bus, the operator should
+    be told where it lives now instead of just "not detected".
+    """
+    match = _BY_ID_SERIAL.search(Path(current).name)
+    if match is None:
+        return None
+    serial = match.group(1)
+    records = [record for record in inventory if record.serial == serial]
+    if not records:
+        return None
+    if len({record.camera or record.node for record in records}) > 1:
+        # Two cameras carry this serial: pointing at either would be a guess.
+        return None
+    return _preferred_name(records, _duplicated_serials(inventory), prefer_by_id=prefer_by_id)
 
 
 def _scan_can(sysfs_net: Path) -> list[str]:
