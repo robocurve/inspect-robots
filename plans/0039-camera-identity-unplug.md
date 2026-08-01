@@ -37,7 +37,7 @@
 ### Task 1: inventory primitives (`_CameraNode`, sysfs walk, alias preference, `_camera_inventory`)
 
 **Files:**
-- Modify: `src/inspect_robots/_setup.py` (new block between `_v4l2_color_capture` and `_scan_cameras`; add `from collections import Counter`, `from dataclasses import dataclass` imports; `re` is already imported)
+- Modify: `src/inspect_robots/_setup.py` (new block between `_v4l2_color_capture` and `_scan_cameras`; add the `from dataclasses import dataclass` import; `re` is already imported. `from collections import Counter` is added in Task 2 where its first use lands — adding it here would fail Task 1's ruff F401 pre-commit hook)
 - Test: `tests/test_setup.py`
 
 **Interfaces:**
@@ -191,8 +191,12 @@ def test_prefer_plain_alias_picks_usb_over_usbv_variants() -> None:
 def test_camera_inventory_missing_directories_and_serial_are_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # by_id dir absent entirely + a camera whose sysfs USB dir has no serial
-    # file: inventory still returns the by-path record with serial None.
+    # Three degradations in one fixture: (a) by_id dir absent entirely;
+    # (b) a color camera whose sysfs USB dir has no serial file -> record
+    # with serial None; (c) a color node with NO sysfs entry at all ->
+    # record with camera=None AND serial None (the usb_dir-is-None arc;
+    # this record is also what the `record.camera or record.node` grouping
+    # fallback sees). All three still yield full records.
     ...
 ```
 
@@ -259,7 +263,11 @@ def _prefer_plain_alias(candidates: list[Path]) -> Path:
     next to the plain ``usb-`` by-path name; prefer the plain name, then
     tie-break lexicographically for determinism.
     """
-    return min(candidates, key=lambda path: (bool(_USB_SPEED_ALIAS.search(path.name)), path.name))
+
+    def rank(path: Path) -> tuple[bool, str]:
+        return bool(_USB_SPEED_ALIAS.search(path.name)), path.name
+
+    return min(candidates, key=rank)
 
 
 def _camera_inventory(
@@ -323,7 +331,7 @@ git commit -m "setup: camera inventory grouped by resolved target and sysfs USB 
 ### Task 2: trust-ladder naming (`_duplicated_serials`, `_preferred_name`, `_camera_rows`)
 
 **Files:**
-- Modify: `src/inspect_robots/_setup.py` (directly after `_camera_inventory`)
+- Modify: `src/inspect_robots/_setup.py` (directly after `_camera_inventory`; add `from collections import Counter`)
 - Test: `tests/test_setup.py`
 
 **Interfaces:**
@@ -502,7 +510,7 @@ def test_identify_camera_finds_by_id_invisible_camera(
     selected = _identify_camera_by_replug(
         "top", input_fn=script, out=out,
         rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
-        prefer_by_id=True,
+        prefer_by_id=True, by_id_dir=by_id, by_path_dir=by_path,
     )
     assert selected is not None
     assert Path(selected).name == "pci-0000:80:14.0-usb-0:9:1.3-video-index0"
@@ -559,7 +567,7 @@ Expected: FAIL at import (`_identify_camera_by_replug` undefined).
 
 - [ ] **Step 3: Implement**
 
-Change `_identify_by_replug`'s signature from `(role, devices, *, ...)` to `(role, *, ...)` and open the body with `devices = rescan()` before the unplug prompt (docstring: the before snapshot is taken fresh so devices attached after the listing printed still diff). Then add:
+Change `_identify_by_replug`'s signature from `(role, devices, *, ...)` to `(role, *, ...)` and open the body with `devices = rescan()` before the unplug prompt (docstring: the before snapshot is taken fresh so devices attached after the listing printed still diff). Update its one production call site in `_prompt_device_slot` (`_setup.py:396-398`) to stop passing `devices` — a minimal same-behavior edit here; Task 4 replaces that whole branch — so this task's full-suite gate stays green. Then add:
 
 ```python
 def _identify_camera_by_replug(
@@ -713,15 +721,27 @@ def test_run_setup_healthy_rig_prompts_and_config_unchanged(...) -> None:
     # written config as the equivalent pre-change fixture. Mirror an
     # existing golden test's fixture shape and assert its exact expectations
     # still hold with sysfs present.
+
+
+def test_run_setup_device_slot_camera_uses_inventory(...) -> None:
+    # The _device_section arm of the regime split (its `if inventory:`
+    # branches are otherwise uncovered): register a v4l2 DeviceSlot via
+    # _register_device_slots, drive run_setup with the _rig fixture +
+    # _color_by_node. Assert the device-section listing shows the D435's
+    # by-path row and the new hint copy, then answer 'u' and assert the
+    # unplug prompt says "Unplug the <slot.label> now" (the
+    # _camera_identify(slot.label, slot.label) path) and the config stores
+    # the by-path name.
 ```
 
-Update deliberately-changed existing tests, and ONLY these kinds:
-- tests pinning the old hint copy ("by-path camera nodes have no by-id entry") — new copy is asserted in the first test above;
-- tests pinning `advertise_path_toggle` purely on row counts;
-- direct `_scan_cameras` unit tests — fold their fallback/missing-dir cases into `_camera_rows` tests (Task 2 already covers them; delete the leftovers);
-- direct `_prompt_device_slot` calls, for the new `identify` parameter.
+Camera-section tests and the three-or-none rule: `_camera_section` refuses partial assignments (`_setup.py:563-574` — all `CAM_ROLES` or none get written). Every camera-section test above must therefore resolve all three roles: assign the asserted camera to its role, fill the remaining roles with the other fixture camera via a confirmed duplicate ("y" at the already-assigned prompt) or an absolute path answer, or skip all-but-none deliberately and assert on prompts/out instead of the written file. State the chosen filling per test when fleshing.
 
-Every other existing test must pass byte-for-byte. If one fails, treat it as a bug in the new code, not a test to update (the Global Constraints exception list is exhaustive).
+Update deliberately-changed existing tests, and ONLY these kinds:
+- direct `_scan_cameras` unit tests and the test file's import block — fold their fallback/missing-dir cases into `_camera_rows` tests (Task 2 already covers them; delete the leftovers);
+- direct `_identify_by_replug` call tests (already adjusted in Task 3);
+- direct `_prompt_device_slot` calls (the `_prompt_current_device`-style helpers), for the new `identify` parameter.
+
+IMPORTANT: the run_setup-level hint-copy, by-path-fallback, and advertise-toggle tests (tests/test_setup.py:1228, 1481, 1512, 2771 and friends) run in the EMPTY-INVENTORY regime (their fixtures probe None) and must pass BYTE-FOR-BYTE UNTOUCHED — the legacy arm exists precisely for them. Every other existing test must also pass byte-for-byte. If one fails, treat it as a bug in the new code, not a test to update (this list is exhaustive).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -794,29 +814,38 @@ def _camera_identify(
 CAN/serial identify closure in `_device_section.prompt_slot` (replacing the `nouns` dict that lived in `_prompt_device_slot`). The per-kind nouns stay a dict LOOKUP so no untested branch appears, and the rescan is the existing `rescan_primary` callable already built per kind in `prompt_slot` (`_setup.py:659/665`):
 
 ```python
-        _NOUNS = {
-            "can": ("CAN interface", "CAN interfaces", "CAN interface"),
-            "serial": ("serial device", "serial devices", "serial device"),
-        }
-        ...
-        noun, plural_noun, retry_noun = _NOUNS[slot.kind]
-
-        def identify(_prefer_by_id: bool) -> str | None:
-            return _identify_by_replug(
+        identify: Callable[[bool], str | None]
+        if slot.kind == "v4l2":
+            identify = _camera_identify(
+                slot.label,
                 slot.label,
                 input_fn=input_fn,
                 out=out,
-                rescan=rescan_primary,
-                noun=noun,
-                plural_noun=plural_noun,
-                retry_noun=retry_noun,
-                unplug_label=slot.label,
+                rescan=rescan_inventory,
+                by_id_dir=by_id_dir,
+                by_path_dir=by_path_dir,
             )
+        else:
+            noun, plural_noun, retry_noun = _NOUNS[slot.kind]
+
+            def _identify(_prefer_by_id: bool) -> str | None:
+                return _identify_by_replug(
+                    slot.label,
+                    input_fn=input_fn,
+                    out=out,
+                    rescan=rescan_primary,
+                    noun=noun,
+                    plural_noun=plural_noun,
+                    retry_noun=retry_noun,
+                    unplug_label=slot.label,
+                )
+
+            identify = _identify
 ```
 
-(Place `_NOUNS` at module level next to the other constants; the closure body is exercised by the existing CAN 'u' run_setup test.)
+(One shared non-v4l2 arm — do NOT duplicate the closure per kind, or the serial copy's body is unreachable (no serial 'u' test exists) and the branch gate fails; the dict lookup keeps can-vs-serial as data. `_NOUNS` lives at module level next to the other constants. The pre-annotated `identify` plus assigning a named inner function keeps mypy-strict happy about the two arms. The closure body is exercised by the existing CAN 'u' run_setup test; closing over the loop-free `noun`/`retry_noun` locals is safe because `identify` is consumed within the same `prompt_slot` call.)
 
-For v4l2 slots, `prompt_slot` passes `_camera_identify(slot.label, slot.label, input_fn=input_fn, out=out, rescan=rescan_inventory, by_id_dir=by_id_dir, by_path_dir=by_path_dir)` (device-slot labels name the camera in the unplug prompt, exactly like today's `unplug_label=label` path), while `_camera_section` passes `_camera_identify(role, None, ...)` so the prompt renders the historical `f"{role} camera"`.
+Device-slot labels name the camera in the unplug prompt (`_camera_identify(slot.label, slot.label, ...)` above), exactly like today's `unplug_label=label` path; `_camera_section` instead passes `_camera_identify(role, None, ...)` so the prompt renders the historical `f"{role} camera"`.
 
 `_prompt_device_slot`'s 'u' branch shrinks to:
 
@@ -849,8 +878,8 @@ def _print_camera_name_hint(
     message = (
         f"{len(fallback)} camera node(s) have no usable by-id entry "
         "(udev name race between USB interfaces, or a serial shared by "
-        f"two cameras): {names}; their port-stable by-path names are "
-        "listed instead"
+        f"two cameras): {names}; by-path names, stable per physical USB "
+        "port, are used where available"
     )
     if active_is_by_id:
         message += "; press 'p' to see every camera by port name"
@@ -879,12 +908,12 @@ git commit -m "setup: list and identify cameras through the device inventory (#2
 ### Task 5: reconcile a saved-but-missing camera path by serial
 
 **Files:**
-- Modify: `src/inspect_robots/_setup.py` (the `warned_current` branch of `_prompt_device_slot`, lines 409-430)
-- Test: `tests/test_setup.py`
+- Modify: `src/inspect_robots/_setup.py` (the `warned_current` branch of `_prompt_device_slot`, lines 409-430; its signature; BOTH call sites — `_camera_section` ~543 and `_device_section.prompt_slot` ~673)
+- Test: `tests/test_setup.py` (new tests; plus a second pass over the direct `_prompt_device_slot` call helpers just updated in Task 4, for the added parameter)
 
 **Interfaces:**
 - Consumes: `_CameraNode`, `_preferred_name`, `_duplicated_serials`.
-- Produces: `_reconcile_missing_current(current: str, inventory: list[_CameraNode], *, prefer_by_id: bool) -> str | None` — a hint path for a saved by-id name whose serial matches a scanned camera. `_prompt_device_slot` gains an `inventory: list[_CameraNode]` parameter (empty for CAN/serial callers).
+- Produces: `_reconcile_missing_current(current: str, inventory: list[_CameraNode], *, prefer_by_id: bool) -> str | None` — a hint path for a saved by-id name whose serial matches a scanned camera. `_prompt_device_slot` gains an `inventory: list[_CameraNode]` parameter (the sections pass their scanned inventory for v4l2 slots and `[]` for CAN/serial slots).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -918,6 +947,9 @@ def test_run_setup_missing_current_prints_reconciliation_hint(...) -> None:
     # existing "does not exist here" warning PLUS a hint naming the by-path
     # row; entering that row's number then writes it. Assert both messages
     # arrive on `out` and the final config carries the by-path name.
+    # Three-or-none rule applies: fill the left/right roles too (see Task 4's
+    # note), e.g. assign the D405 to one and confirm it as a duplicate for
+    # the other.
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1036,3 +1068,4 @@ git commit -m "docs: describe device-identity camera listing and unplug flow (#2
 - A udev rule generator for stable camera names (the CAN pinning suggestion's analogue): worth a follow-up issue if by-path names prove insufficient on rigs where cameras move between ports.
 - Fixing udev's multi-interface by-id collision itself (systemd upstream) or the `realsense_capture` serial-based open path in inspect-robots-yam: unaffected by this change.
 - CAN/serial identify improvements beyond the fresh-before rescan (their single-name-per-device model does not have the camera problem).
+- Three deliberate narrowings of #261's proposal wording: (a) listings stay one row per color-capable NODE, not per camera — every camera in the fleet has exactly one color node, and per-camera rows would force a display-name-vs-selection-name split for no observed hardware; (b) the trust ladder's last rung (raw node) emits no extra warning — the hint line already flags every fallback record, and a raw-node row is itself the signal; (c) the inventory scans the two symlink directories rather than `/sys/class/video4linux/*` as the source of truth — udev's by-path generation is per-interface and does not race, so a USB color node always has a by-path name; a node with no symlink in either directory (non-udev system) was equally invisible before this change.
