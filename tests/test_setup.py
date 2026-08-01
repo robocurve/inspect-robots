@@ -203,7 +203,10 @@ def _usb_device(
     (usb_dir / "serial").write_text(serial + "\n", encoding="utf-8")
     for node, suffix in nodes.items():
         interface = usb_dir / f"{port}:{suffix}"
-        interface.mkdir(exist_ok=True)
+        try:
+            interface.mkdir(exist_ok=True)
+        except OSError:  # pragma: no cover - Windows rejects ':' in paths
+            pytest.skip("sysfs-style interface names unavailable")
         entry = sysfs_video / node
         entry.mkdir()
         _symlink(entry / "device", interface)
