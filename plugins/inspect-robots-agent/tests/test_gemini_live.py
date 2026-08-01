@@ -20,10 +20,6 @@ from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots_agent import GeminiLiveClient, LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
-from inspect_robots_agent._gemini_live import (
-    _RECOVERY_CONTINUATION,
-    _RECOVERY_PROLOGUE,
-)
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent.policy import _GEMINI_LIVE_BASE, AgentPolicyConfig
 
@@ -536,8 +532,8 @@ def test_mid_step_drop_recovers_with_sanitized_jsonl_and_one_anchor_image(
     content = _content_messages(server, 1)
     prologue = content[0]["clientContent"]["turns"][0]["parts"][0]["text"]
     lines = prologue.splitlines()
-    assert lines[0] == _RECOVERY_PROLOGUE
-    assert lines[-1] == _RECOVERY_CONTINUATION
+    assert lines[0] == live_module._RECOVERY_PROLOGUE
+    assert lines[-1] == live_module._RECOVERY_CONTINUATION
     assert all(isinstance(json.loads(line), dict) for line in lines[1:-1])
     # The fresh session re-sends the system prompt as systemInstruction;
     # folding it into the prologue too would duplicate it.
@@ -624,7 +620,7 @@ def test_first_call_transient_failure_retries_without_recovery_prologue(
     assert result.tool_calls[0].id == "fc_1"
     assert len(server.connections) == 2
     retry_wire = json.dumps(server.connections[1])
-    assert _RECOVERY_PROLOGUE not in retry_wire
+    assert live_module._RECOVERY_PROLOGUE not in retry_wire
     tail = _content_messages(server, 1)[-1]["clientContent"]
     assert tail["turnComplete"] is True
 
