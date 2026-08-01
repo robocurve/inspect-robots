@@ -7,6 +7,7 @@ import os
 import re
 import struct
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import IO
@@ -45,6 +46,7 @@ CAM_ROLES: tuple[str, ...] = ("top", "left", "right")  # -> {role}_cam_device in
 CAMERA_KEYS: tuple[str, ...] = tuple(f"{role}_cam_device" for role in CAM_ROLES)
 V4L_BY_ID: Path = Path("/dev/v4l/by-id")
 V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
+SYSFS_VIDEO: Path = Path("/sys/class/video4linux")
 SYSFS_NET: Path = Path("/sys/class/net")
 SERIAL_BY_ID: Path = Path("/dev/serial/by-id")
 
@@ -788,6 +790,101 @@ def _v4l2_color_capture(path: Path) -> bool | None:
         return False
     finally:
         os.close(fd)
+
+
+_USB_SPEED_ALIAS = re.compile(r"-usbv\d+-")
+
+
+@dataclass(frozen=True)
+class _CameraNode:
+    """One color-capable camera node and every name that reaches it.
+
+    ``node`` is the resolved real device path and the diffing identity when
+    sysfs cannot group nodes into physical cameras; ``camera`` is the sysfs
+    USB device directory owning the node (one per physical camera) or
+    ``None`` where sysfs is unavailable; ``serial`` is the USB serial when
+    readable; ``by_id``/``by_path`` are the preferred symlinks resolving to
+    the node in each listing directory, when any exist.
+    """
+
+    node: str
+    camera: str | None
+    serial: str | None
+    by_id: str | None
+    by_path: str | None
+
+
+def _usb_device_dir(node_name: str, sysfs_video: Path) -> Path | None:
+    """Sysfs USB device directory owning a video node, if resolvable.
+
+    Walks from ``<sysfs_video>/<node>/device`` up to the first ancestor
+    holding an ``idVendor`` file, the USB device (not interface) dir,
+    which is the physical-camera identity shared by all the device's nodes.
+    """
+    try:
+        device = (sysfs_video / node_name / "device").resolve(strict=True)
+    except OSError:
+        return None
+    for ancestor in (device, *device.parents):
+        if (ancestor / "idVendor").is_file():
+            return ancestor
+    return None
+
+
+def _prefer_plain_alias(candidates: list[Path]) -> Path:
+    """Return the canonical name among symlinks to one node.
+
+    Newer systemd publishes ``usbv2-``/``usbv3-`` speed-qualified aliases
+    next to the plain ``usb-`` by-path name; prefer the plain name, then
+    tie-break lexicographically for determinism.
+    """
+
+    def rank(path: Path) -> tuple[bool, str]:
+        return bool(_USB_SPEED_ALIAS.search(path.name)), path.name
+
+    return min(candidates, key=rank)
+
+
+def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> list[_CameraNode]:
+    """Return color-capable camera nodes with physical identity and names.
+
+    Symlinks from both listing directories are resolved and grouped by
+    target, each target is probed once, and each color-capable target
+    becomes one record. Grouping by resolved target rather than by name is
+    what lets udev alias duplicates and missing by-id links be survivable.
+    """
+    names: dict[Path, dict[str, list[Path]]] = {}
+    for directory, kind in ((by_id_dir, "by_id"), (by_path_dir, "by_path")):
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            target = entry.resolve(strict=False)
+            names.setdefault(target, {"by_id": [], "by_path": []})[kind].append(entry)
+    records: list[_CameraNode] = []
+    for target in sorted(names):
+        if _v4l2_color_capture(target) is not True:
+            continue
+        usb_dir = _usb_device_dir(target.name, sysfs_video)
+        serial: str | None = None
+        if usb_dir is not None:
+            try:
+                serial = (usb_dir / "serial").read_text(encoding="utf-8").strip() or None
+            except OSError:
+                serial = None
+        by_id = names[target]["by_id"]
+        by_path = names[target]["by_path"]
+        records.append(
+            _CameraNode(
+                node=str(target),
+                camera=None if usb_dir is None else str(usb_dir),
+                serial=serial,
+                by_id=str(_prefer_plain_alias(by_id)) if by_id else None,
+                by_path=str(_prefer_plain_alias(by_path)) if by_path else None,
+            )
+        )
+    return records
 
 
 def _scan_cameras(v4l_dir: Path) -> list[str]:

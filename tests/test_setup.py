@@ -17,8 +17,11 @@ from inspect_robots._setup import (
     _VIDIOC_ENUM_FMT,
     _VIDIOC_QUERYCAP,
     SUGGESTED,
+    _camera_inventory,
+    _CameraNode,
     _can_serial,
     _identify_by_replug,
+    _prefer_plain_alias,
     _prompt_device_slot,
     _read_raw_config,
     _render_config,
@@ -26,6 +29,7 @@ from inspect_robots._setup import (
     _scan_can,
     _scan_serial,
     _suggest_can_pinning,
+    _usb_device_dir,
     _v4l2_color_capture,
     run_setup,
 )
@@ -89,6 +93,80 @@ def _make_devices(directory: Path, count: int = 3) -> list[str]:
         path.touch()
         devices.append(str(path))
     return devices
+
+
+def _rig(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """A fake /dev + /sys tree reproducing the #261 D435 rig.
+
+    dev/video10 is the D435's only color node; its by-id link is MISSING
+    (lost udev's name race) while by-id index0/index1 point at the depth
+    node (video0, no color) and metadata node (video11). by-path has the
+    plain usb- name AND a usbv3- alias for video10. dev/video8 is a D405
+    with a healthy by-id link. Returns (by_id, by_path, sysfs_video, dev).
+    """
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node in ("video0", "video8", "video10", "video11"):
+        (dev / node).touch()
+    _symlink(by_id / "usb-D435_310323023943-video-index0", dev / "video0")
+    _symlink(by_id / "usb-D435_310323023943-video-index1", dev / "video11")
+    _symlink(by_id / "usb-D405_429423070256-video-index4", dev / "video8")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0", dev / "video10")
+    _symlink(by_path / "pci-0000:80:14.0-usbv3-0:9:1.3-video-index0", dev / "video10")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:9:1.0-video-index0", dev / "video0")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:1.4:1.0-video-index4", dev / "video8")
+    _usb_device(
+        devices,
+        "4-9",
+        "310323023943",
+        sysfs_video,
+        {"video0": "1.0", "video10": "1.3", "video11": "1.3"},
+    )
+    _usb_device(devices, "1-4", "429423070256", sysfs_video, {"video8": "1.0"})
+    return by_id, by_path, sysfs_video, dev
+
+
+def _symlink(link: Path, target: Path) -> None:
+    """A symlink helper that skips where symlinks are unavailable (Windows)."""
+    try:
+        link.symlink_to(target)
+    except OSError:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip("symlinks unavailable")
+
+
+def _usb_device(
+    devices: Path, port: str, serial: str, sysfs_video: Path, nodes: dict[str, str]
+) -> None:
+    """One fake sysfs USB device mirroring real sysfs shape.
+
+    ``nodes`` maps video-node name to USB interface suffix ("video10": "1.3");
+    each node's ``device`` link points at the interface directory itself
+    (``<port>/<port>:1.3``), exactly like real sysfs, and the USB device dir
+    above it holds ``idVendor`` + ``serial``.
+    """
+    usb_dir = devices / port
+    usb_dir.mkdir(parents=True, exist_ok=True)
+    (usb_dir / "idVendor").write_text("8086", encoding="utf-8")
+    (usb_dir / "serial").write_text(serial + "\n", encoding="utf-8")
+    for node, suffix in nodes.items():
+        interface = usb_dir / f"{port}:{suffix}"
+        interface.mkdir(exist_ok=True)
+        entry = sysfs_video / node
+        entry.mkdir()
+        _symlink(entry / "device", interface)
+
+
+def _color_by_node(monkeypatch: pytest.MonkeyPatch, color: set[str]) -> None:
+    """Fake _v4l2_color_capture: True iff the path's basename is in ``color``."""
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture",
+        lambda path: Path(path).name in color,
+    )
 
 
 def _make_can_interfaces(sysfs_net: Path, *names: str) -> None:
@@ -160,6 +238,95 @@ AUTO_START = OptionSlot(
 @pytest.fixture(autouse=True)
 def _empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("inspect_robots.registry.registered", lambda _kind: {})
+
+
+def test_camera_inventory_groups_names_by_resolved_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_node = {Path(record.node).name: record for record in inventory}
+    assert set(by_node) == {"video10", "video8"}
+    d435 = by_node["video10"]
+    assert isinstance(d435, _CameraNode)
+    assert d435.by_id is None
+    assert d435.by_path is not None and "-usbv" not in Path(d435.by_path).name
+    assert d435.serial == "310323023943"
+    assert d435.camera is not None and d435.camera.endswith("4-9")
+    d405 = by_node["video8"]
+    assert d405.by_id is not None and Path(d405.by_id).name.startswith("usb-D405")
+
+
+def test_camera_inventory_probes_each_target_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    calls: dict[str, int] = {}
+
+    def probe(path: Path) -> bool:
+        name = path.name
+        calls[name] = calls.get(name, 0) + 1
+        return name in {"video8", "video10"}
+
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", probe)
+    _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert calls == {"video0": 1, "video10": 1, "video11": 1, "video8": 1}
+
+
+def test_usb_device_dir_walks_to_idvendor_and_survives_missing_sysfs(
+    tmp_path: Path,
+) -> None:
+    _by_id, _by_path, sysfs_video, _dev = _rig(tmp_path)
+    assert _usb_device_dir("video10", sysfs_video) is not None
+    assert _usb_device_dir("video10", tmp_path / "absent") is None
+    assert _usb_device_dir("nonexistent-node", sysfs_video) is None
+
+
+def test_usb_device_dir_exhausted_walk_returns_none(tmp_path: Path) -> None:
+    sysfs_video = tmp_path / "sys-video"
+    platform = tmp_path / "sys-devices" / "platform" / "csi0"
+    platform.mkdir(parents=True)
+    entry = sysfs_video / "video99"
+    entry.mkdir(parents=True)
+    _symlink(entry / "device", platform)
+    assert _usb_device_dir("video99", sysfs_video) is None
+
+
+def test_prefer_plain_alias_picks_usb_over_usbv_variants() -> None:
+    plain = Path("pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    v2 = Path("pci-0000:80:14.0-usbv2-0:9:1.3-video-index0")
+    v3 = Path("pci-0000:80:14.0-usbv3-0:9:1.3-video-index0")
+    assert _prefer_plain_alias([v3, plain, v2]) == plain
+    assert _prefer_plain_alias([v3, v2]) == v2
+
+
+def test_camera_inventory_missing_directories_and_serial_are_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    for node in ("video20", "video21"):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{node}", dev / node)
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    (devices / "2-1" / "serial").unlink()
+    _color_by_node(monkeypatch, {"video20", "video21"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+    by_node = {Path(record.node).name: record for record in inventory}
+
+    assert set(by_node) == {"video20", "video21"}
+    assert by_node["video20"].by_id is None
+    assert by_node["video20"].camera is not None
+    assert by_node["video20"].serial is None
+    assert by_node["video21"].camera is None
+    assert by_node["video21"].serial is None
 
 
 def test_scan_cameras_prefers_color_capture_entries(
