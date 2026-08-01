@@ -92,7 +92,10 @@ All notable changes to this project are documented here. The format is based on
   `usbv2-`/`usbv3-` aliases no longer vanishes from the listing or defeats
   `u`; shared-serial cameras are listed by port-stable by-path names, and a
   saved-but-dead by-id path now points the operator at the camera's current
-  location by serial.
+  location by serial. Unplug-to-identify for CAN and serial slots now also
+  takes its before snapshot at the moment `u` is answered instead of when
+  the section listing was printed, so a device attached mid-wizard is still
+  identifiable.
 
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation

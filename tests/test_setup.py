@@ -410,6 +410,28 @@ def test_camera_inventory_missing_directories_and_serial_are_none(
     assert by_node["video21"].serial is None
 
 
+def test_camera_inventory_undecodable_serial_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    (devices / "2-1" / "serial").write_bytes(b"\xff\xfe garbage")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].camera is not None
+    assert inventory[0].serial is None
+
+
 def test_camera_rows_by_id_falls_back_to_by_path_for_race_losers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1887,6 +1909,39 @@ def test_identify_camera_alias_pair_counts_as_one_camera(
     assert selected is not None
     assert "-usbv" not in Path(selected).name
     assert "2 camera" not in out.getvalue()
+
+
+def test_identify_camera_shared_serial_twin_returns_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unplugging one SN0001 twin identifies it alone and distrusts its by-id name."""
+    by_id, by_path, sysfs_video, dev = _shared_serial_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video15", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video15", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "left",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-usb-3-4-video-index0"
+    assert "cameras disappeared" not in out.getvalue()
 
 
 def test_identify_camera_rederives_name_after_replug_reroll(

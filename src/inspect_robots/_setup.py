@@ -1081,7 +1081,7 @@ def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> 
         if usb_dir is not None:
             try:
                 serial = (usb_dir / "serial").read_text(encoding="utf-8").strip() or None
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 serial = None
         by_id = names[target]["by_id"]
         by_path = names[target]["by_path"]

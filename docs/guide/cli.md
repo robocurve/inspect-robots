@@ -116,7 +116,8 @@ failure with "no operator judgement recorded".
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
 policy or embodiment is not registered in the current environment, and then
-helps assign camera devices. It lists every color-capable camera, preferring
+helps assign camera devices. It lists every color-capable camera that udev
+names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
 names when a by-id link is missing or when two cameras share one serial.
 Multi-interface cameras such as the RealSense D435 can lose udev's name race
