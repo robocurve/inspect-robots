@@ -116,12 +116,16 @@ failure with "no operator judgement recorded".
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
 policy or embodiment is not registered in the current environment, and then
-helps assign camera devices by listing `/dev/v4l/by-id`. If you do not know
-which physical camera a device path belongs to, answer `u` and unplug that
-camera when asked: the wizard rescans and identifies it from the entry that
-disappeared. When identical cameras without serial numbers collide in the
-by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
-per physical USB port.
+helps assign camera devices. It lists every color-capable camera, preferring
+`/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
+names when a by-id link is missing or when two cameras share one serial.
+Multi-interface cameras such as the RealSense D435 can lose udev's name race
+between their depth and RGB interfaces.
+
+Answer `u` and unplug the camera when asked to identify the physical USB
+device that disappeared, including cameras the by-id listing cannot name. The
+wizard chooses the stored path after replug because udev reassigns links on
+every plug. Answer `p` to switch the listing to port names.
 
 When the selected registered embodiment declares device slots, those slots
 drive one device interview for cameras, CAN interfaces, and serial devices.
