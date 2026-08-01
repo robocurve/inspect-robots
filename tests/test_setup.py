@@ -18,10 +18,13 @@ from inspect_robots._setup import (
     _VIDIOC_QUERYCAP,
     SUGGESTED,
     _camera_inventory,
+    _camera_rows,
     _CameraNode,
     _can_serial,
+    _duplicated_serials,
     _identify_by_replug,
     _prefer_plain_alias,
+    _preferred_name,
     _prompt_device_slot,
     _read_raw_config,
     _render_config,
@@ -327,6 +330,107 @@ def test_camera_inventory_missing_directories_and_serial_are_none(
     assert by_node["video20"].serial is None
     assert by_node["video21"].camera is None
     assert by_node["video21"].serial is None
+
+
+def test_camera_rows_by_id_falls_back_to_by_path_for_race_losers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    rows = _camera_rows(inventory, by_id, by_id=True)
+    names = [Path(row).name for row in rows]
+    assert "pci-0000:80:14.0-usb-0:9:1.3-video-index0" in names
+    assert "usb-D405_429423070256-video-index4" in names
+    assert len(rows) == 2
+
+
+def test_camera_rows_by_path_view_dedupes_usbv_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    rows = _camera_rows(inventory, by_path, by_id=False)
+    names = [Path(row).name for row in rows]
+
+    assert names == [
+        "pci-0000:80:14.0-usb-0:1.4:1.0-video-index4",
+        "pci-0000:80:14.0-usb-0:9:1.3-video-index0",
+    ]
+    assert all("-usbv" not in name for name in names)
+
+
+def test_camera_rows_shared_serial_distrusts_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node, port in (("video13", "3-2"), ("video15", "3-4")):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(devices, port, "SN0001", sysfs_video, {node: "1.0"})
+    _symlink(by_id / "usb-Innomaker_SN0001-video-index0", dev / "video15")
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    rows = _camera_rows(inventory, by_id, by_id=True)
+
+    assert _duplicated_serials(inventory) == {"SN0001"}
+    assert [Path(row).name for row in rows] == [
+        "pci-usb-3-2-video-index0",
+        "pci-usb-3-4-video-index0",
+    ]
+
+
+def test_camera_rows_raw_fallback_when_no_color_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id = tmp_path / "by-id"
+    by_id.mkdir()
+    for name in ("camera-z", "camera-a", "camera-m"):
+        (by_id / name).touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+
+    inventory = _camera_inventory(by_id, tmp_path / "missing-by-path", tmp_path / "sys")
+
+    assert inventory == []
+    assert _camera_rows(inventory, by_id, by_id=True) == [
+        str(by_id / "camera-a"),
+        str(by_id / "camera-m"),
+        str(by_id / "camera-z"),
+    ]
+    assert _camera_rows(inventory, tmp_path / "missing", by_id=False) == []
+
+
+def test_preferred_name_ladder() -> None:
+    trusted = _CameraNode(
+        node="/dev/video8",
+        camera="c1",
+        serial="A",
+        by_id="/i/a",
+        by_path="/p/a",
+    )
+    raceless = _CameraNode(
+        node="/dev/video10",
+        camera="c2",
+        serial="B",
+        by_id=None,
+        by_path="/p/b",
+    )
+    bare = _CameraNode(node="/dev/video3", camera=None, serial=None, by_id=None, by_path=None)
+    assert _preferred_name([trusted], set(), prefer_by_id=True) == "/i/a"
+    assert _preferred_name([trusted], {"A"}, prefer_by_id=True) == "/p/a"
+    assert _preferred_name([trusted], set(), prefer_by_id=False) == "/p/a"
+    assert _preferred_name([raceless], set(), prefer_by_id=True) == "/p/b"
+    assert _preferred_name([bare], set(), prefer_by_id=True) == "/dev/video3"
+    assert _preferred_name([raceless, trusted], set(), prefer_by_id=True) == "/i/a"
 
 
 def test_scan_cameras_prefers_color_capture_entries(

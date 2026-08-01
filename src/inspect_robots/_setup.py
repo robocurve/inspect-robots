@@ -6,6 +6,7 @@ import configparser
 import os
 import re
 import struct
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -885,6 +886,61 @@ def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> 
             )
         )
     return records
+
+
+def _duplicated_serials(inventory: list[_CameraNode]) -> set[str]:
+    """Return serials shared by more than one physical camera.
+
+    A by-id name embedding such a serial is ambiguous: udev lets the two
+    devices overwrite each other's links on every replug, so the name can
+    silently swap cameras.
+    """
+    per_camera = {record.camera or record.node: record for record in inventory}
+    counts = Counter(record.serial for record in per_camera.values() if record.serial is not None)
+    return {serial for serial, count in counts.items() if count > 1}
+
+
+def _preferred_name(records: list[_CameraNode], duplicated: set[str], *, prefer_by_id: bool) -> str:
+    """Return the trust-ladder name for one camera's color nodes.
+
+    Ladder: a by-id name whose serial is not shared by another camera (it
+    survives port moves), else the plain by-path name (stable per physical
+    USB port), else the raw node path. ``prefer_by_id=False`` (the 'p'
+    port-name view) skips the first rung.
+    """
+    ranked: list[tuple[int, str]] = []
+    for record in records:
+        by_id = record.by_id
+        trusted = by_id is not None and (record.serial is None or record.serial not in duplicated)
+        # The explicit by_id check narrows the optional string for mypy.
+        if prefer_by_id and by_id is not None and trusted:
+            ranked.append((0, by_id))
+        elif record.by_path is not None:
+            ranked.append((1, record.by_path))
+        else:
+            ranked.append((2, record.node))
+    return min(ranked)[1]
+
+
+def _camera_rows(inventory: list[_CameraNode], directory: Path, *, by_id: bool) -> list[str]:
+    """Return listing rows for one view, one per color-capable node.
+
+    Every camera is always listed: a node whose by-id link is missing or
+    ambiguous shows its port-stable by-path name instead of vanishing. When
+    no color-capable node is confirmed at all (non-Linux, or probing
+    unavailable) the raw directory listing is offered unfiltered, matching
+    the historical ``_scan_cameras`` fallback.
+    """
+    duplicated = _duplicated_serials(inventory)
+    rows = sorted(
+        {_preferred_name([record], duplicated, prefer_by_id=by_id) for record in inventory}
+    )
+    if rows:
+        return rows
+    try:
+        return [str(entry) for entry in sorted(directory.iterdir())]
+    except OSError:
+        return []
 
 
 def _scan_cameras(v4l_dir: Path) -> list[str]:
