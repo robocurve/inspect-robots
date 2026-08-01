@@ -45,14 +45,25 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
-Robotics-tuned models resolve the same way:
-`-P model=google/gemini-robotics-er-2-preview` drives the embodiment with
-Gemini Robotics ER 2, Google's embodied-reasoning VLM, over the compat
-endpoint on the default `chat` wire. Verified against the live API
-(2026-07-30): camera frames, forced tool calls, and every `effort` level work.
-Google documents the Interactions API as the primary surface for the ER
-models, so if the compat endpoint ever stops serving them, that is the wire
-to add here.
+### Gemini Robotics ER 2:
+
+Google serves two Gemini Robotics ER 2 model ids. Use
+`google/gemini-robotics-er-2-preview` on the default `chat` wire. The
+latency-oriented `google/gemini-robotics-er-2-streaming-preview` id requires
+the stateful Live API wire:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=google/gemini-robotics-er-2-streaming-preview \
+    -P wire=gemini-live --embodiment cubepick
+```
+
+The Live wire does not accept `effort` and does not use `image_horizon`.
+Leave both unset. Google's own Live context-window compression is the
+equivalent history mechanism because frames already streamed into a session
+cannot be evicted by the client. Live usage counts include the empty resumed
+generation and the observation-triggered generation on a normal step, so
+input token totals cover two generations per step.
 
 The wire format defaults to Chat Completions for broad OpenAI-compatible
 endpoint support:
@@ -62,6 +73,7 @@ endpoint support:
 | `chat` (default) | `/chat/completions` | Anything OpenAI-compatible: OpenRouter, vLLM, Ollama, the Anthropic and Gemini compat endpoints |
 | `responses` | `/responses` | A direct OpenAI or compatible endpoint requires the Responses API |
 | `anthropic` | `/messages` | Driving Claude natively, which is what fast mode needs |
+| `gemini-live` | `BidiGenerateContent` (WSS) | Google's Live API: required for the `-streaming-` robotics model ids |
 
 ## How it works
 
@@ -236,15 +248,15 @@ either on another wire is an error rather than a silent no-op.
 | Image option | Default | Behavior |
 |---|---|---|
 | `-P images=` | `always` | Attach every observation's frames; use `on_demand` for model-requested frames |
-| `-P image_horizon=` | `2` | Keep frames from the newest two image-bearing messages in each outgoing request |
+| `-P image_horizon=` | `2` on HTTP wires | Keep frames from the newest two image-bearing messages in each outgoing request; unset on `gemini-live` |
 
-Set `-P image_horizon=none` to send the full image history. Do not use a bare
-`-P image_horizon=`: the CLI parses it as an empty string, which the policy
-rejects. Full history grows request bodies by about 420 KB per observation
-with three cameras and can reach a 413 response around 85 observations. The
-default replaces older outgoing camera parts with deterministic text stubs;
-the saved conversation, transcript, and separately stored frames remain
-complete and unchanged.
+On the HTTP wires, set `-P image_horizon=none` to send the full image history.
+Do not use a bare `-P image_horizon=`: the CLI parses it as an empty string,
+which the policy rejects. Full history grows request bodies by about 420 KB
+per observation with three cameras and can reach a 413 response around 85
+observations. The HTTP default replaces older outgoing camera parts with
+deterministic text stubs; the saved conversation, transcript, and separately
+stored frames remain complete and unchanged.
 
 Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
 file to the system prompt after any embodiment notes. The file is read once
@@ -261,8 +273,8 @@ Camera labels such as `camera 'top_cam' (step 480):` provide the join key from a
 Live Rerun transcript streaming happens automatically when a Rerun sink is attached.
 
 Wire capture is on by default (`-P wire_capture=false` to disable): every
-request attempt each wire client posts — tool schemas, evicted view, depth
-composites, cache breakpoints — and every response land in
+request attempt each wire client sends (tool schemas, evicted view, depth
+composites, and cache breakpoints) and every response land in
 `wire/<run_id>/<trial_id>/calls.jsonl` under the log directory, with image
 payloads deduplicated as `$blob:<sha256>` references into
 `wire/<run_id>/blobs/`. The format contract lives in the
@@ -275,16 +287,17 @@ integer token counters returned by the wire. The native Anthropic wire
 includes input, output, cache-creation, and cache-read tokens; other wires
 currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
-Reasoning effort defaults to `low`: robot control is latency-sensitive (the
-arm stands still while the model thinks), safety guardrails sit below the
-model either way, and frontier models at low effort remain strong at this
-task shape. Raise it for hard manipulation problems (`-P effort=high`) or
-pass `-P effort=none` to omit the parameter for endpoints that reject it
-(the CLI reads a bare `none` as null). To send the literal wire value
-`none` and disable reasoning, quote it: `-P effort="'none'"`. GPT-5.x on
-chat completions requires the literal `none` when function tools are in
-play (any other value, or omitting the field, is a 400). In Python,
-`effort=None` omits the field and `effort="none"` sends the wire value.
+Reasoning effort defaults to `low` on the HTTP wires: robot control is
+latency-sensitive (the arm stands still while the model thinks), safety
+guardrails sit below the model either way, and frontier models at low effort
+remain strong at this task shape. Raise it for hard manipulation problems
+(`-P effort=high`) or pass `-P effort=none` to omit the parameter for
+endpoints that reject it (the CLI reads a bare `none` as null). To send the
+literal wire value `none` and disable reasoning, quote it:
+`-P effort="'none'"`. GPT-5.x on chat completions requires the literal `none`
+when function tools are in play (any other value, or omitting the field, is a
+400). In Python, `effort=None` omits the field and `effort="none"` sends the
+wire value. Gemini Live has no effort field, so leave it unset on that wire.
 
 ## Depth rendering
 
