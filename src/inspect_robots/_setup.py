@@ -50,6 +50,10 @@ V4L_BY_PATH: Path = Path("/dev/v4l/by-path")
 SYSFS_VIDEO: Path = Path("/sys/class/video4linux")
 SYSFS_NET: Path = Path("/sys/class/net")
 SERIAL_BY_ID: Path = Path("/dev/serial/by-id")
+_NOUNS: dict[str, tuple[str, str, str]] = {
+    "can": ("CAN interface", "CAN interfaces", "CAN interface"),
+    "serial": ("serial device", "serial devices", "serial device"),
+}
 
 # Kernel V4L2 ABI: ioctl request numbers and the byte offsets used below
 # (capabilities at 84 in struct v4l2_capability, pixelformat at 44 in
@@ -275,6 +279,52 @@ def _print_camera_path_hint(
     print(_paint(message, _YELLOW, out), file=out)
 
 
+def _print_camera_name_hint(
+    inventory: list[_CameraNode], active_is_by_id: bool, out: IO[str]
+) -> None:
+    """Explain fallback rows: cameras whose by-id name is missing or ambiguous."""
+    duplicated = _duplicated_serials(inventory)
+    fallback = [
+        record
+        for record in inventory
+        if record.by_id is None or (record.serial is not None and record.serial in duplicated)
+    ]
+    if not fallback:
+        return
+    names = ", ".join(Path(record.by_path or record.node).name for record in fallback)
+    message = (
+        f"{len(fallback)} camera node(s) have no usable by-id entry "
+        "(udev name race between USB interfaces, or a serial shared by "
+        f"two cameras): {names}; by-path names, stable per physical USB "
+        "port, are used where available"
+    )
+    if active_is_by_id:
+        message += "; press 'p' to see every camera by port name"
+    print(_paint(message, _YELLOW, out), file=out)
+
+
+def _camera_view_state(
+    inventory: list[_CameraNode], by_id_rows: list[str], by_path_rows: list[str]
+) -> tuple[bool, bool]:
+    """Return the initial listing view and whether to advertise the 'p' toggle.
+
+    Non-empty inventory starts in the by-id view when any camera has a by-id
+    name (else port view), and advertises 'p' exactly when some camera's by-id
+    name is missing or ambiguous. Empty inventory uses the historical formulas.
+    """
+    if inventory:
+        duplicated = _duplicated_serials(inventory)
+        active_is_by_id = any(record.by_id for record in inventory) or not any(
+            record.by_path for record in inventory
+        )
+        advertise_path_toggle = any(
+            record.by_id is None or (record.serial is not None and record.serial in duplicated)
+            for record in inventory
+        )
+        return active_is_by_id, advertise_path_toggle
+    return bool(by_id_rows) or not by_path_rows, len(by_path_rows) > len(by_id_rows)
+
+
 def _identify_by_replug(
     role: str,
     *,
@@ -411,6 +461,33 @@ def _identify_camera_by_replug(
     return name_of(final, key)
 
 
+def _camera_identify(
+    role: str,
+    unplug_label: str | None,
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+    rescan: Callable[[], list[_CameraNode]],
+    by_id_dir: Path,
+    by_path_dir: Path,
+) -> Callable[[bool], str | None]:
+    """Bind one camera slot's 'u' handler over the shared inventory rescan."""
+
+    def identify(prefer_by_id: bool) -> str | None:
+        return _identify_camera_by_replug(
+            role,
+            input_fn=input_fn,
+            out=out,
+            rescan=rescan,
+            prefer_by_id=prefer_by_id,
+            by_id_dir=by_id_dir,
+            by_path_dir=by_path_dir,
+            unplug_label=unplug_label,
+        )
+
+    return identify
+
+
 def _device_slot_prompt(
     label: str,
     kind: str,
@@ -448,8 +525,7 @@ def _prompt_device_slot(
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
-    rescan_by_id: Callable[[], list[str]],
-    rescan_by_path: Callable[[], list[str]],
+    identify: Callable[[bool], str | None],
     camera_role: str | None = None,
 ) -> tuple[str | None, bool]:
     """Prompt for one slot and return its device plus active listing state."""
@@ -477,21 +553,7 @@ def _prompt_device_slot(
             _print_camera_listing(devices, device_dir, out)
             continue
         if entered.lower() == "u":
-            nouns = {
-                "v4l2": ("camera device", "camera devices", "camera"),
-                "can": ("CAN interface", "CAN interfaces", "CAN interface"),
-                "serial": ("serial device", "serial devices", "serial device"),
-            }
-            selected = _identify_by_replug(
-                camera_role or label,
-                input_fn=input_fn,
-                out=out,
-                rescan=rescan_by_id if active_is_by_id else rescan_by_path,
-                noun=nouns[kind][0],
-                plural_noun=nouns[kind][1],
-                retry_noun=nouns[kind][2],
-                unplug_label=None if camera_role is not None else label,
-            )
+            selected = identify(active_is_by_id)
             if selected is None:
                 continue
         elif not entered and current is not None:
@@ -597,17 +659,21 @@ def _camera_section(
     carried: dict[str, dict[str, str]],
     by_id_dir: Path,
     by_path_dir: Path,
+    sysfs_video: Path,
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
 ) -> dict[str, str]:
     """Offer and collect camera assignments from both stable V4L listings."""
-    by_id_devices = _scan_cameras(by_id_dir)
-    by_path_devices = _scan_cameras(by_path_dir)
-    active_is_by_id = bool(by_id_devices) or not by_path_devices
+    inventory = _camera_inventory(by_id_dir, by_path_dir, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id_dir, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path_dir, by_id=False)
+    active_is_by_id, advertise_path_toggle = _camera_view_state(
+        inventory, by_id_devices, by_path_devices
+    )
+    rescan_inventory = partial(_camera_inventory, by_id_dir, by_path_dir, sysfs_video)
     devices = by_id_devices if active_is_by_id else by_path_devices
     device_dir = by_id_dir if active_is_by_id else by_path_dir
-    advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
 
     existing_args = carried.get("embodiment.args", {})
     default_enabled = bool(devices) or any(key in existing_args for key in CAMERA_KEYS)
@@ -621,7 +687,10 @@ def _camera_section(
             _paint("no /dev/v4l devices found (not Linux, or no cameras attached)", _YELLOW, out),
             file=out,
         )
-    _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
+    if inventory:
+        _print_camera_name_hint(inventory, active_is_by_id, out)
+    else:
+        _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
         assignments: dict[str, str] = {}
@@ -641,8 +710,15 @@ def _camera_section(
                 advertise_path_toggle,
                 input_fn=input_fn,
                 out=out,
-                rescan_by_id=partial(_scan_cameras, by_id_dir),
-                rescan_by_path=partial(_scan_cameras, by_path_dir),
+                identify=_camera_identify(
+                    role,
+                    None,
+                    input_fn=input_fn,
+                    out=out,
+                    rescan=rescan_inventory,
+                    by_id_dir=by_id_dir,
+                    by_path_dir=by_path_dir,
+                ),
                 camera_role=role,
             )
             if selected is not None:
@@ -699,18 +775,22 @@ def _device_section(
     by_path_dir: Path,
     sysfs_net: Path,
     serial_by_id_dir: Path,
+    sysfs_video: Path,
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
 ) -> dict[str, str]:
     """Offer and collect assignments for plugin-declared device slots."""
     kinds = {slot.kind for slot in slots}
-    by_id_devices = _scan_cameras(by_id_dir) if "v4l2" in kinds else []
-    by_path_devices = _scan_cameras(by_path_dir) if "v4l2" in kinds else []
+    inventory = _camera_inventory(by_id_dir, by_path_dir, sysfs_video) if "v4l2" in kinds else []
+    by_id_devices = _camera_rows(inventory, by_id_dir, by_id=True) if "v4l2" in kinds else []
+    by_path_devices = _camera_rows(inventory, by_path_dir, by_id=False) if "v4l2" in kinds else []
     can_devices = _scan_can(sysfs_net) if "can" in kinds else []
     serial_devices = _scan_serial(serial_by_id_dir) if "serial" in kinds else []
-    active_is_by_id = bool(by_id_devices) or not by_path_devices
-    advertise_path_toggle = len(by_path_devices) > len(by_id_devices)
+    active_is_by_id, advertise_path_toggle = _camera_view_state(
+        inventory, by_id_devices, by_path_devices
+    )
+    rescan_inventory = partial(_camera_inventory, by_id_dir, by_path_dir, sysfs_video)
     devices_by_kind = {
         "v4l2": by_id_devices if active_is_by_id else by_path_devices,
         "can": can_devices,
@@ -737,26 +817,55 @@ def _device_section(
             secondary_dir = by_path_dir
             current_devices = primary_devices if active_is_by_id else secondary_devices
             current_dir = primary_dir if active_is_by_id else secondary_dir
-            rescan_primary = partial(_scan_cameras, primary_dir)
-            rescan_secondary = partial(_scan_cameras, secondary_dir)
         elif slot.kind == "can":
             primary_devices = secondary_devices = can_devices
             primary_dir = secondary_dir = SYSFS_NET
             current_devices = can_devices
             current_dir = SYSFS_NET
-            rescan_primary = rescan_secondary = partial(_scan_can, sysfs_net)
+            rescan_primary = partial(_scan_can, sysfs_net)
         else:
             primary_devices = secondary_devices = serial_devices
             primary_dir = secondary_dir = SERIAL_BY_ID
             current_devices = serial_devices
             current_dir = SERIAL_BY_ID
-            rescan_primary = rescan_secondary = partial(_scan_serial, serial_by_id_dir)
+            rescan_primary = partial(_scan_serial, serial_by_id_dir)
 
         if slot.kind not in listed_kinds:
             _print_slot_listing(slot.kind, current_devices, current_dir, out)
             listed_kinds.add(slot.kind)
             if slot.kind == "v4l2":
-                _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
+                if inventory:
+                    _print_camera_name_hint(inventory, active_is_by_id, out)
+                else:
+                    _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
+
+        identify: Callable[[bool], str | None]
+        if slot.kind == "v4l2":
+            identify = _camera_identify(
+                slot.label,
+                slot.label,
+                input_fn=input_fn,
+                out=out,
+                rescan=rescan_inventory,
+                by_id_dir=by_id_dir,
+                by_path_dir=by_path_dir,
+            )
+        else:
+            noun, plural_noun, retry_noun = _NOUNS[slot.kind]
+
+            def _identify(_prefer_by_id: bool) -> str | None:
+                return _identify_by_replug(
+                    slot.label,
+                    input_fn=input_fn,
+                    out=out,
+                    rescan=rescan_primary,
+                    noun=noun,
+                    plural_noun=plural_noun,
+                    retry_noun=retry_noun,
+                    unplug_label=slot.label,
+                )
+
+            identify = _identify
 
         selected, active_is_by_id = _prompt_device_slot(
             slot.label,
@@ -771,8 +880,7 @@ def _device_section(
             advertise_path_toggle,
             input_fn=input_fn,
             out=out,
-            rescan_by_id=rescan_primary,
-            rescan_by_path=rescan_secondary,
+            identify=identify,
         )
         assignments.pop(slot.arg, None)
         assigned_devices.pop(slot.arg, None)
@@ -1028,16 +1136,6 @@ def _camera_rows(inventory: list[_CameraNode], directory: Path, *, by_id: bool) 
         return []
 
 
-def _scan_cameras(v4l_dir: Path) -> list[str]:
-    """Return V4L2-probed color paths, or all sorted entries when none are confirmed."""
-    try:
-        entries = sorted(v4l_dir.iterdir())
-    except FileNotFoundError:
-        return []
-    color_entries = [entry for entry in entries if _v4l2_color_capture(entry) is True]
-    return [str(entry) for entry in color_entries or entries]
-
-
 def _scan_can(sysfs_net: Path) -> list[str]:
     """Return sorted SocketCAN interface names from a sysfs net directory."""
     try:
@@ -1217,6 +1315,7 @@ def run_setup(
     interactive: bool,
     by_id_dir: Path = V4L_BY_ID,
     by_path_dir: Path = V4L_BY_PATH,
+    sysfs_video: Path = SYSFS_VIDEO,
     sysfs_net: Path = SYSFS_NET,
     serial_by_id_dir: Path = SERIAL_BY_ID,
 ) -> int:
@@ -1297,6 +1396,7 @@ def run_setup(
                 by_path_dir,
                 sysfs_net,
                 serial_by_id_dir,
+                sysfs_video,
                 input_fn=input_fn,
                 out=out,
             )
@@ -1307,6 +1407,7 @@ def run_setup(
                 carried,
                 by_id_dir,
                 by_path_dir,
+                sysfs_video,
                 input_fn=input_fn,
                 out=out,
             )
