@@ -277,7 +277,6 @@ def _print_camera_path_hint(
 
 def _identify_by_replug(
     role: str,
-    devices: list[str],
     *,
     input_fn: Callable[[str], str],
     out: IO[str],
@@ -287,7 +286,8 @@ def _identify_by_replug(
     retry_noun: str = "camera",
     unplug_label: str | None = None,
 ) -> str | None:
-    """Identify one device by diffing the listing while it is unplugged."""
+    """Identify one device using a fresh listing diff while it is unplugged."""
+    devices = rescan()
     label = unplug_label if unplug_label is not None else f"{role} camera"
     input_fn(f"Unplug the {label} now, then press Enter...")
     unplugged_devices = rescan()
@@ -323,6 +323,92 @@ def _identify_by_replug(
                 file=out,
             )
     return identified
+
+
+def _identify_camera_by_replug(
+    role: str,
+    *,
+    input_fn: Callable[[str], str],
+    out: IO[str],
+    rescan: Callable[[], list[_CameraNode]],
+    prefer_by_id: bool,
+    by_id_dir: Path,
+    by_path_dir: Path,
+    unplug_label: str | None = None,
+) -> str | None:
+    """Identify one physical camera by diffing USB devices while unplugged.
+
+    Diffs cameras (sysfs USB device, falling back to the resolved node)
+    rather than listing rows, so a camera invisible in the by-id view or
+    duplicated by by-path aliases is still identified by a single unplug.
+    The stored name is re-derived from the post-replug scan because udev
+    re-rolls symlinks on every plug event. With an empty inventory (no node
+    probed color-capable: non-Linux, or probing unavailable) the legacy
+    row-diff flow runs instead, over the active directory's raw listing.
+    """
+
+    def grouped(inventory: list[_CameraNode]) -> dict[str, list[_CameraNode]]:
+        cameras: dict[str, list[_CameraNode]] = {}
+        for record in inventory:
+            cameras.setdefault(record.camera or record.node, []).append(record)
+        return cameras
+
+    def name_of(cameras: dict[str, list[_CameraNode]], key: str) -> str:
+        flat = [record for records in cameras.values() for record in records]
+        return _preferred_name(cameras[key], _duplicated_serials(flat), prefer_by_id=prefer_by_id)
+
+    before_inventory = rescan()
+    if not before_inventory:
+        directory = by_id_dir if prefer_by_id else by_path_dir
+        return _identify_by_replug(
+            role,
+            input_fn=input_fn,
+            out=out,
+            rescan=lambda: _camera_rows(rescan(), directory, by_id=prefer_by_id),
+            unplug_label=unplug_label,
+        )
+
+    label = unplug_label if unplug_label is not None else f"{role} camera"
+    before = grouped(before_inventory)
+    input_fn(f"Unplug the {label} now, then press Enter...")
+    after = grouped(rescan())
+    gone = [key for key in before if key not in after]
+    if not gone:
+        print(
+            _paint("no camera disappeared; unplug one camera and try again", _YELLOW, out),
+            file=out,
+        )
+        return None
+    if len(gone) > 1:
+        print(
+            _paint(
+                f"{len(gone)} cameras disappeared; unplug only one and try again",
+                _YELLOW,
+                out,
+            ),
+            file=out,
+        )
+        return None
+
+    key = gone[0]
+    display = Path(name_of(before, key)).name
+    print(f"That was: {_paint(display, _GREEN, out)}", file=out)
+    input_fn("Plug it back in, then press Enter...")
+    final = grouped(rescan())
+    if key not in final:
+        input_fn(f"{display} was not detected; press Enter to rescan...")
+        final = grouped(rescan())
+    if key not in final:
+        print(
+            _paint(
+                f"warning: {display} was still not detected; keeping the assignment",
+                _YELLOW,
+                out,
+            ),
+            file=out,
+        )
+        return name_of(before, key)
+    return name_of(final, key)
 
 
 def _device_slot_prompt(
@@ -398,7 +484,6 @@ def _prompt_device_slot(
             }
             selected = _identify_by_replug(
                 camera_role or label,
-                devices,
                 input_fn=input_fn,
                 out=out,
                 rescan=rescan_by_id if active_is_by_id else rescan_by_path,

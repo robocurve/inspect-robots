@@ -23,6 +23,7 @@ from inspect_robots._setup import (
     _can_serial,
     _duplicated_serials,
     _identify_by_replug,
+    _identify_camera_by_replug,
     _prefer_plain_alias,
     _preferred_name,
     _prompt_device_slot,
@@ -170,6 +171,39 @@ def _color_by_node(monkeypatch: pytest.MonkeyPatch, color: set[str]) -> None:
         "inspect_robots._setup._v4l2_color_capture",
         lambda path: Path(path).name in color,
     )
+
+
+def _unplug_camera_node(
+    node: Path, by_id: Path, by_path: Path, sysfs_video: Path
+) -> tuple[list[tuple[Path, Path]], Path]:
+    """Remove one fake camera's color node, names, and sysfs class entry."""
+    links: list[tuple[Path, Path]] = []
+    for directory in (by_id, by_path):
+        for entry in directory.iterdir():
+            if entry.resolve(strict=False) == node:
+                links.append((entry, entry.readlink()))
+                entry.unlink()
+    device_link = sysfs_video / node.name / "device"
+    device_target = device_link.resolve(strict=True)
+    device_link.unlink()
+    device_link.parent.rmdir()
+    node.unlink()
+    return links, device_target
+
+
+def _replug_camera_node(
+    node: Path,
+    links: list[tuple[Path, Path]],
+    device_target: Path,
+    sysfs_video: Path,
+) -> None:
+    """Restore one fake camera color node after `_unplug_camera_node`."""
+    node.touch()
+    entry = sysfs_video / node.name
+    entry.mkdir()
+    _symlink(entry / "device", device_target)
+    for link, target in links:
+        _symlink(link, target)
 
 
 def _make_can_interfaces(sysfs_net: Path, *names: str) -> None:
@@ -1557,10 +1591,295 @@ def test_run_setup_yes_no_prompts_reprompt_invalid_answers(tmp_path: Path) -> No
     assert "please answer yes or no" in out.getvalue()
 
 
+def test_identify_camera_finds_by_id_invisible_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find the #261 D435 despite its absent by-id color-node name."""
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+    prompts: list[str] = []
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        prompts.append(prompt)
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-0000:80:14.0-usb-0:9:1.3-video-index0"
+    assert prompts == [
+        "Unplug the top camera now, then press Enter...",
+        "Plug it back in, then press Enter...",
+    ]
+
+
+def test_identify_camera_alias_pair_counts_as_one_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=False,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert "-usbv" not in Path(selected).name
+    assert "2 camera" not in out.getvalue()
+
+
+def test_identify_camera_rederives_name_after_replug_reroll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+    fresh_name = by_id / "usb-D435_310323023943-video-index0"
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+            fresh_name.unlink()
+            _symlink(fresh_name, dev / "video10")
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected == str(fresh_name)
+
+
+def test_identify_camera_two_cameras_unplugged_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+            _unplug_camera_node(dev / "video8", by_id, by_path, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is None
+    assert "2 cameras disappeared; unplug only one" in out.getvalue()
+
+
+def test_identify_camera_nothing_unplugged_reports_and_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    out = io.StringIO()
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=lambda _prompt: "",
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is None
+    assert "no camera disappeared" in out.getvalue()
+
+
+def test_identify_camera_not_reappearing_warns_and_keeps_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-0000:80:14.0-usb-0:9:1.3-video-index0"
+    assert "was still not detected; keeping the assignment" in out.getvalue()
+
+
+def test_identify_camera_reappears_on_retry_rescan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif "was not detected" in prompt:
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert "was still not detected" not in out.getvalue()
+
+
+def test_identify_camera_late_arrival_is_detectable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+    earlier = _camera_inventory(by_id, by_path, sysfs_video)
+    _replug_camera_node(dev / "video10", *detached, sysfs_video)
+
+    detached_again: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached_again
+        if prompt.startswith("Unplug"):
+            detached_again = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached_again is not None
+            _replug_camera_node(dev / "video10", *detached_again, sysfs_video)
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert all(Path(record.node).name != "video10" for record in earlier)
+    assert selected is not None and Path(selected).name.endswith("video-index0")
+
+
+@pytest.mark.parametrize("prefer_by_id", [True, False])
+def test_identify_camera_empty_inventory_delegates_to_legacy_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefer_by_id: bool
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+    directory = by_id if prefer_by_id else by_path
+    selected_entry = next(iter(sorted(directory.iterdir())))
+    target = selected_entry.readlink()
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            selected_entry.unlink()
+        elif prompt.startswith("Plug"):
+            _symlink(selected_entry, target)
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=prefer_by_id,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+    assert selected == str(selected_entry)
+
+    out = io.StringIO()
+    no_op = _identify_camera_by_replug(
+        "top",
+        input_fn=lambda _prompt: "",
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=prefer_by_id,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+    assert no_op is None
+    assert "no camera device disappeared" in out.getvalue()
+
+
 def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
     devices = ["/dev/camera-top", "/dev/camera-left", "/dev/camera-right"]
     scans = iter(
         [
+            devices,
             [devices[0], devices[2]],
             devices,
         ]
@@ -1570,7 +1889,6 @@ def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
 
     identified = _identify_by_replug(
         "left",
-        devices,
         input_fn=input_fn,
         out=out,
         rescan=lambda: next(scans),
@@ -1602,7 +1920,6 @@ def test_identify_by_replug_parameterizes_non_camera_nouns(
 
     identified = _identify_by_replug(
         label,
-        ["device0"],
         input_fn=input_fn,
         out=out,
         rescan=lambda: ["device0"],
@@ -1624,6 +1941,7 @@ def test_identify_by_replug_retries_replug_scan_once(
     without_top = [devices[1]]
     scans = iter(
         [
+            devices,
             without_top,
             without_top,
             devices if detected_on_retry else without_top,
@@ -1634,7 +1952,6 @@ def test_identify_by_replug_retries_replug_scan_once(
 
     identified = _identify_by_replug(
         "top",
-        devices,
         input_fn=input_fn,
         out=out,
         rescan=lambda: next(scans),
