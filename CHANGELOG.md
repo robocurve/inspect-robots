@@ -85,6 +85,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
+  and unplug-identifies cameras as physical USB devices. A camera whose color
+  node lost udev's by-id name race (multi-interface cameras such as the
+  RealSense D435) or whose by-path name is duplicated by systemd
+  `usbv2-`/`usbv3-` aliases no longer vanishes from the listing or defeats
+  `u`; shared-serial cameras are listed by port-stable by-path names, and a
+  saved-but-dead by-id path now points the operator at the camera's current
+  location by serial. Unplug-to-identify for CAN and serial slots now also
+  takes its before snapshot at the moment `u` is answered instead of when
+  the section listing was printed, so a device attached mid-wizard is still
+  identifiable.
+
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation
   history. Dropping it made Gemini reject any request ending on a tool
