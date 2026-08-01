@@ -189,8 +189,9 @@ def test_normal_step_orders_observation_before_tool_response_and_empty_trigger(
         ]
     )
 
-    client.complete(history, [])
+    second = client.complete(history, [])
 
+    assert second.tool_calls[0].id == "fc_2"
     tail = _content_messages(server)[-3:]
     assert tail[0]["clientContent"]["turnComplete"] is False
     assert tail[0]["clientContent"]["turns"][0]["parts"] == [{"text": "fresh"}]
@@ -272,8 +273,9 @@ def test_on_demand_tool_and_image_message_use_three_part_sequence(
         ]
     )
 
-    client.complete(history, [])
+    second = client.complete(history, [])
 
+    assert second.tool_calls[0].id == "move"
     tail = _content_messages(server)[-3:]
     assert tail[0]["clientContent"]["turnComplete"] is False
     assert "inlineData" in tail[0]["clientContent"]["turns"][0]["parts"][-1]
@@ -537,6 +539,9 @@ def test_mid_step_drop_recovers_with_sanitized_jsonl_and_one_anchor_image(
     assert lines[0] == _RECOVERY_PROLOGUE
     assert lines[-1] == _RECOVERY_CONTINUATION
     assert all(isinstance(json.loads(line), dict) for line in lines[1:-1])
+    # The fresh session re-sends the system prompt as systemInstruction;
+    # folding it into the prologue too would duplicate it.
+    assert all(json.loads(line).get("role") != "system" for line in lines[1:-1])
     anchor = content[1]["clientContent"]
     assert anchor["turnComplete"] is True
     assert "newest observation" in json.dumps(anchor)
@@ -561,6 +566,67 @@ def test_go_away_finishes_exchange_then_recovers_at_next_boundary(
     assert result.tool_calls[0].id == "new"
     assert len(server.connections) == 2
     assert all("toolResponse" not in message for message in server.connections[1])
+
+
+def test_go_away_then_drop_recovers_once_without_stale_flag(
+    server_factory: Callable[..., StubBidiServer],
+) -> None:
+    def hook(
+        server: StubBidiServer,
+        ws: ServerConnection,
+        connection: int,
+        message: dict[str, Any],
+    ) -> bool:
+        if connection == 0 and message.get("clientContent", {}).get("turnComplete") is True:
+            server.send(ws, {"goAway": {"timeLeft": "1s"}})
+            ws.close()
+            return True
+        return False
+
+    server = server_factory([[tool_call("recovered")], [tool_call("next")]], hook=hook)
+    client = _client(server)
+    history = _messages(_observation("first observation"))
+
+    first = client.complete(history, [])
+
+    assert first.tool_calls[0].id == "recovered"
+    history.extend(
+        [first.raw(), _tool_message("recovered", "played"), _observation("second observation")]
+    )
+
+    second = client.complete(history, [])
+
+    # The goAway died with its socket: the recovered session must survive the
+    # next boundary instead of being torn down by the stale flag.
+    assert second.tool_calls[0].id == "next"
+    assert len(server.connections) == 2
+
+
+def test_first_call_transient_failure_retries_without_recovery_prologue(
+    server_factory: Callable[..., StubBidiServer],
+) -> None:
+    def hook(
+        server: StubBidiServer,
+        ws: ServerConnection,
+        connection: int,
+        message: dict[str, Any],
+    ) -> bool:
+        del server
+        if connection == 0 and "setup" in message:
+            ws.close()
+            return True
+        return False
+
+    server = server_factory([[tool_call("fc_1")]], hook=hook)
+
+    result = _client(server).complete(_messages(_observation()), [])
+
+    assert result.tool_calls[0].id == "fc_1"
+    assert len(server.connections) == 2
+    retry_wire = json.dumps(server.connections[1])
+    assert _RECOVERY_PROLOGUE not in retry_wire
+    tail = _content_messages(server, 1)[-1]["clientContent"]
+    assert tail["turnComplete"] is True
 
 
 def test_persistent_drop_exhausts_retries(

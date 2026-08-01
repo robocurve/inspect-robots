@@ -105,10 +105,14 @@ class GeminiLiveClient:
                     attempt, sent, received, last_error, t_start, time.time() - t_start
                 )
                 self._abandon()
-                self._needs_recovery = True
+                # A first-call failure has no absorbed state to fold: retry as
+                # a plain suffix send. A pending goAway died with the socket.
+                self._needs_recovery = bool(self._streamed)
+                self._go_away = False
             except Exception as exc:
                 error = _redact_query(str(exc), self._provider.base_url)
                 self._record_attempt(attempt, sent, received, error, t_start, time.time() - t_start)
+                self._abandon()
                 raise
             else:
                 self._record_attempt(attempt, sent, received, None, t_start, time.time() - t_start)
@@ -273,7 +277,10 @@ class GeminiLiveClient:
         # Deferred to avoid policy.py -> _gemini_live.py -> policy.py at import.
         from inspect_robots_agent.policy import _sanitize
 
-        folded = _sanitize(messages[:anchor_index] + messages[anchor_index + 1 :])
+        # The fresh session already carries a leading system message as its
+        # systemInstruction; folding it again would duplicate the prompt.
+        start = 1 if messages[0].get("role") == "system" else 0
+        folded = _sanitize(messages[start:anchor_index] + messages[anchor_index + 1 :])
         lines = [
             _RECOVERY_PROLOGUE,
             *(json.dumps(message) for message in folded),

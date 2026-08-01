@@ -45,7 +45,7 @@ Providers resolved directly by prefix:
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
 
-### Gemini Robotics ER 2:
+### Gemini Robotics ER 2
 
 Google serves two Gemini Robotics ER 2 model ids. Use
 `google/gemini-robotics-er-2-preview` on the default `chat` wire. The
