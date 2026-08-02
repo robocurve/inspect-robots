@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `FrameStore` now persists each post-action observation once and exposes it
+  through `StepRecord.result_image_refs`. Stored records strip camera arrays
+  from both pre-action and post-action observations, and the terminal visual
+  state is recoverable for offline scoring.
+
 - The Rerun sink now sends a per-trial blueprint that groups labeled action
   dimensions by arm, overlays aligned measured state, and lays out cameras,
   transcript, events, and reward alongside the joint plots
@@ -168,6 +173,11 @@ All notable changes to this project are documented here. The format is based on
   payloads that previously grew until the API's request-size ceiling (HTTP
   413). Stored history, transcripts, and frame side-cars are unchanged.
   Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
+### Fixed
+
+- **Agent plugin:** `images=on_demand` mode now permits re-requesting a camera with `take_pic` if its frame was elided by `image_horizon`, preventing untrue "already shown" refusals (#192).
+
 
 ### Added
 

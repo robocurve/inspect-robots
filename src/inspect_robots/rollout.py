@@ -64,8 +64,10 @@ def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> in
 class StepRecord:
     """One step of a recorded trajectory.
 
-    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, ``observation`` has its
-    images stripped and ``image_refs`` holds on-disk handles instead (R5).
+    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, both
+    ``observation`` and ``result.observation`` have their images stripped.
+    ``image_refs`` and ``result_image_refs`` hold the corresponding on-disk
+    handles instead (R5).
     """
 
     t: int
@@ -73,6 +75,7 @@ class StepRecord:
     action: Action
     result: StepResult
     image_refs: Mapping[str, FrameRef] | None = None
+    result_image_refs: Mapping[str, FrameRef] | None = None
 
 
 @dataclass
@@ -264,6 +267,7 @@ def rollout(
         except Exception as exc:
             raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
 
+        obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
@@ -345,9 +349,23 @@ def rollout(
                 raise _record_failure(record, EmbodimentFault(str(exc)), t) from exc
 
             sink.log_step(t, obs, action, result)
-            obs_rec, refs = _store_frames(frame_store, trial_id, t, obs)
+            result_obs_rec, result_refs = _store_frames(
+                frame_store, trial_id, t + 1, result.observation
+            )
+            result_rec = (
+                result
+                if result_obs_rec is result.observation
+                else replace(result, observation=result_obs_rec)
+            )
             record.steps.append(
-                StepRecord(t=t, observation=obs_rec, action=action, result=result, image_refs=refs)
+                StepRecord(
+                    t=t,
+                    observation=obs_rec,
+                    action=action,
+                    result=result_rec,
+                    image_refs=refs,
+                    result_image_refs=result_refs,
+                )
             )
             record.events.append(
                 step_event(t, result.terminated, result.truncated, result.termination_reason)
@@ -370,6 +388,8 @@ def rollout(
                 record.termination_reason = stop_reason
                 break
             obs = result.observation
+            obs_rec = result_obs_rec
+            refs = result_refs
         else:
             record.truncated = True
             record.termination_reason = "max_steps"
