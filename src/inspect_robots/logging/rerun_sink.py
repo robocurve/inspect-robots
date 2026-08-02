@@ -41,6 +41,7 @@ no ``flush`` method. A new sink in the same process can still hang in
 
 Each trial's entities are namespaced under ``trial/<scene_id>/e<epoch>`` so
 successive trials never overwrite one another on the shared step timeline.
+The worker sends an explicit per-trial blueprint from ``_emit`` for the live namespace.
 Transcripts are emitted as ``TextLog`` rows at ``{prefix}/llm`` paired with a
 markdown ``TextDocument`` at ``{prefix}/llm/latest`` holding the step's
 assistant message(s) for a wrapped, timeline-synced reading pane.
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
 
     from inspect_robots.log import EvalLog, EvalSpec
     from inspect_robots.rollout import TrialRecord
+    from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -104,6 +106,26 @@ def _render_message(message: Any) -> tuple[str, str, str]:
             arguments = function.get("arguments", "")
             lines.append(f"tool_call {name}({arguments})")
     return role, level, f"{role}: " + "\n".join(lines)
+
+
+def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, list[int]]]:
+    """Group action dims by their label's first-underscore prefix.
+
+    YAM-style labels (``left_j0`` .. ``right_gripper``) yield one group per
+    side, in first-appearance order. Missing labels, a label count that does
+    not match the dim count, any label without an underscore (CubePick's
+    ``dx``/``dy``, eef-style ``x``/``y``/``grip``), or fewer than two distinct
+    prefixes all collapse to a single "joints" group: one plot beats one
+    clutter-view per dim.
+    """
+    if labels is None or len(labels) != dim or not all("_" in label for label in labels):
+        return [("joints", list(range(dim)))]
+    groups: dict[str, list[int]] = {}
+    for index, label in enumerate(labels):
+        groups.setdefault(label.split("_", 1)[0], []).append(index)
+    if len(groups) < 2:
+        return [("joints", list(range(dim)))]
+    return list(groups.items())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,6 +214,32 @@ class RerunSink:
         self._image_watermark = max(1, queue_size // 4)
         self._emit_warned = False
         self._compress_warned = False
+        self._dim_labels: tuple[str, ...] | None = None
+        self._action_dim: int | None = None
+        self._camera_names: tuple[str, ...] = ()
+        self._state_keys: tuple[str, ...] = ()
+        self._state_lengths: dict[str, int] = {}
+        self._blueprint_prefix: str | None = None
+        self._blueprint_warned = False
+
+    def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
+        """Distill the resolved spaces into the fields the blueprint needs.
+
+        Called by ``eval()`` before ``on_eval_start`` (and therefore before
+        the worker thread exists); storing plain tuples rather than the space
+        objects keeps the worker free of shared mutable state.
+        """
+        self._action_dim = action_space.dim
+        semantics = action_space.semantics
+        self._dim_labels = None if semantics is None else semantics.dim_labels
+        self._camera_names = tuple(camera.name for camera in observation_space.cameras)
+        self._state_keys = tuple(sorted(observation_space.state_keys))
+        state = observation_space.state
+        self._state_lengths = (
+            {field.key: field.shape[0] for field in state.fields if len(field.shape) == 1}
+            if state is not None
+            else {}
+        )
 
     def _ensure_rerun(self) -> Any | None:
         if self._disabled:
@@ -257,7 +305,84 @@ class RerunSink:
             stacklevel=2,
         )
 
+    def _send_blueprint(self, rr: Any, prefix: str) -> None:
+        """Send an explicit layout for one trial namespace, if the SDK can.
+
+        Rerun's entity queries support ``/**`` only as a suffix, so the views
+        name each trial's entities with concrete paths and the layout is
+        re-sent when a new trial namespace begins (the viewer follows the
+        live trial; a single-trial ``run`` sends exactly once). Skipped when
+        spaces were never bound or the SDK predates blueprints; any build or
+        send failure degrades to the automatic layout with a single warning.
+        """
+        # Falsy covers both "never bound" (None) and a 0-dim action space,
+        # which would otherwise build empty-content views.
+        if not self._action_dim:
+            return
+        rrb = getattr(rr, "blueprint", None)
+        send = getattr(rr, "send_blueprint", None)
+        if rrb is None or send is None:
+            return
+        try:
+            plots = []
+            for name, indices in _joint_groups(self._dim_labels, self._action_dim):
+                contents = [f"+ {prefix}/action/{index}" for index in indices]
+                for key, length in self._state_lengths.items():
+                    if length == self._action_dim:
+                        contents += [f"+ {prefix}/state/{key}/{index}" for index in indices]
+                plots.append(rrb.TimeSeriesView(name=name, origin="/", contents=contents))
+            aligned = {
+                key for key, length in self._state_lengths.items() if length == self._action_dim
+            }
+            for key in self._state_keys:
+                if key not in aligned:
+                    plots.append(
+                        rrb.TimeSeriesView(
+                            name=key,
+                            origin="/",
+                            contents=[f"+ {prefix}/state/{key}/**"],
+                        )
+                    )
+            plots.append(
+                rrb.TimeSeriesView(
+                    name="reward",
+                    origin="/",
+                    contents=[f"+ {prefix}/reward"],
+                )
+            )
+            cameras = [
+                rrb.Spatial2DView(
+                    name=camera,
+                    origin="/",
+                    contents=[f"+ {prefix}/camera/{camera}"],
+                )
+                for camera in self._camera_names
+            ]
+            text = rrb.Vertical(
+                rrb.TextDocumentView(name="latest", contents=[f"+ {prefix}/llm/latest"]),
+                rrb.TextLogView(
+                    name="llm",
+                    contents=[f"+ {prefix}/llm", f"+ {prefix}/event/**"],
+                ),
+            )
+            columns = [rrb.Vertical(*plots), text]
+            if cameras:
+                columns.insert(0, rrb.Grid(*cameras))
+            send(rrb.Blueprint(rrb.Horizontal(*columns)))
+        except Exception as exc:
+            if not self._blueprint_warned:
+                self._blueprint_warned = True
+                warnings.warn(
+                    f"RerunSink could not send the blueprint layout ({exc}); "
+                    "the viewer will use its automatic layout",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
     def _emit(self, rr: Any, payload: _StepPayload | _TranscriptPayload) -> None:
+        if payload.prefix != self._blueprint_prefix:
+            self._blueprint_prefix = payload.prefix
+            self._send_blueprint(rr, payload.prefix)
         if isinstance(payload, _TranscriptPayload):
             self._emit_transcript(rr, payload)
             return
@@ -469,6 +594,8 @@ class RerunSink:
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Initialize recording, disabling this noncritical sink after startup failure."""
+        self._blueprint_prefix = None
+        self._blueprint_warned = False
         rr = self._ensure_rerun()
         if rr is None:
             return

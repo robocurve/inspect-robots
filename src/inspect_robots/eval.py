@@ -42,6 +42,7 @@ from inspect_robots.task import Task
 
 if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
+    from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -96,6 +97,17 @@ class _Broadcast:
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         for hook in self._policy_message_hooks:
             hook(t, messages)
+
+    def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
+        """Offer the resolved spaces to sinks that declare a bind_spaces hook.
+
+        Duck-typed like ``log_policy_messages``: sinks without the attribute
+        are unaffected, so the sink Protocol is unchanged.
+        """
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_spaces", None)
+            if callable(hook):
+                hook(action_space, observation_space)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
@@ -298,6 +310,7 @@ def _run_eval(
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
     )
+    bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
