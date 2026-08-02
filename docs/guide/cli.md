@@ -116,17 +116,12 @@ failure with "no operator judgement recorded".
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
 policy or embodiment is not registered in the current environment, and then
-helps assign camera devices. It lists every color-capable camera that udev
-names under `/dev/v4l`, preferring
-`/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
-names when a by-id link is missing or when two cameras share one serial.
-Multi-interface cameras such as the RealSense D435 can lose udev's name race
-between their depth and RGB interfaces.
-
-Answer `u` and unplug the camera when asked to identify the physical USB
-device that disappeared, including cameras the by-id listing cannot name. The
-wizard chooses the stored path after replug because udev reassigns links on
-every plug. Answer `p` to switch the listing to port names.
+helps assign camera devices by listing `/dev/v4l/by-id`. If you do not know
+which physical camera a device path belongs to, answer `u` and unplug that
+camera when asked: the wizard rescans and identifies it from the entry that
+disappeared. When identical cameras without serial numbers collide in the
+by-id listing, `p` switches to `/dev/v4l/by-path` names, which are stable
+per physical USB port.
 
 When the selected registered embodiment declares device slots, those slots
 drive one device interview for cameras, CAN interfaces, and serial devices.
@@ -344,8 +339,7 @@ details and limits live in the plugin READMEs linked above.
 
 ## `inspect-robots view`
 
-Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
-report:
+Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as an HTML report:
 
 ```bash
 inspect-robots view logs/cubepick-reach_xxxx.json
@@ -355,9 +349,14 @@ The report puts the run status, configuration, metrics, scene results, and
 recorded policy conversations on one page. Agent notes from tool calls are
 highlighted above their call lines. For runs captured with `--store-frames`,
 the report also embeds the stored camera frames at the exact observation turns
-where the model saw them. The file contains its stylesheet and frame data
-inline and uses native browser controls to collapse transcripts, so it has no
-network or JavaScript dependency.
+where the model saw them.
+
+When rendered MP4s are available, each trial also has a synchronized
+multicamera player above its transcript. All camera panes share play, pause,
+and scrub controls. The message at the current rollout step is highlighted,
+the transcript follows playback by default, and clicking a message seeks every
+camera to that step. Player controls use the embodiment's recorded
+`control_hz`, with a 10 Hz fallback.
 
 By default, `view` replaces the log path's suffix with `.html` and prints the
 written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
@@ -371,6 +370,19 @@ Use `--no-frames` to keep the transcript placeholders, or
 `--frames-budget MB` to change the default 50 MB inline-frame payload limit.
 `--frames-budget 0` removes the limit. Inlined frames make the HTML document
 larger, so use a smaller budget or `--no-frames` when page size matters.
+
+For a file output, discovered videos are linked or copied beside the report:
+
+```text
+reports/run.html
+reports/media/<stamp>/scene-0-e0_top_cam.mp4
+reports/media/<stamp>/scene-0-e0_wrist_cam.mp4
+```
+
+Directory mode uses the same `media/<stamp>/` layout under its output
+directory. Keep the HTML page and its `media/` directory together when moving
+a report. `-o -` emits no player or media directory, so stdout remains one
+self-contained document.
 
 ## `inspect-robots video`
 
@@ -395,6 +407,16 @@ overrides). The playback rate defaults to the log's `control_hz` and can be
 overridden with `--fps N`. A stream that fails to encode is reported on
 stderr and the remaining streams still encode; the exit code is 1 if any
 stream failed.
+
+If raw frames are deleted or archived, rendered videos can instead be kept at
+`<log-dir>/videos/<stamp>/`, where `<stamp>` is the basename of the log's
+recorded frames directory. `inspect-robots view` searches that convention after
+the original frames directory. For example:
+
+```text
+logs/adhoc_xxxx.json
+logs/videos/20260715_184213_deadbeef/scene-0-e0_top_cam.mp4
+```
 
 ## `inspect-robots --version`
 

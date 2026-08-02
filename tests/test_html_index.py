@@ -6,6 +6,70 @@ from dataclasses import replace
 
 from inspect_robots._html_index import IndexEntry, render_index
 
+_EXPECTED_INDEX_SCRIPT = """const key = "inspect-robots-index-filter",
+  sortKey = "inspect-robots-index-sort-key",
+  sortDirectionKey = "inspect-robots-index-sort-direction",
+  input = document.querySelector("#filter");
+const rows = document.querySelectorAll("tbody tr:not(.empty)");
+function applyFilter() {
+  const query = input.value.toLocaleLowerCase();
+  rows.forEach(row => {
+    const searchable = `${row.textContent} ${row.dataset.id} ${row.dataset.stamp}`;
+    row.hidden = !searchable.toLocaleLowerCase().includes(query);
+  });
+  try { localStorage.setItem(key, input.value); } catch (_) {}
+}
+try { input.value = localStorage.getItem(key) || ""; } catch (_) {}
+input.addEventListener("input", applyFilter);
+applyFilter();
+const head = document.querySelector("thead"), body = document.querySelector("tbody");
+function sortRows(column, direction, persist = true) {
+  const index = column.cellIndex, dataKey = column.dataset.key;
+  const ordered = Array.from(body.querySelectorAll("tr:not(.empty)"));
+  ordered.sort((left, right) => {
+    const a = left.cells[index].dataset.sort ?? left.cells[index].textContent.trim();
+    const b = right.cells[index].dataset.sort ?? right.cells[index].textContent.trim();
+    if (dataKey === "number" && (!a || !b)) return !a && !b ? 0 : (!a ? 1 : -1);
+    const compared = a.localeCompare(b, undefined, { numeric: dataKey === "number" });
+    return direction === "asc" ? compared : -compared;
+  });
+  ordered.forEach(row => body.append(row));
+  head.querySelectorAll("th.sorted").forEach(th => th.classList.remove("sorted", "asc", "desc"));
+  column.classList.add("sorted", direction);
+  if (persist) {
+    try {
+      localStorage.setItem(sortKey, dataKey);
+      localStorage.setItem(sortDirectionKey, direction);
+    } catch (_) {}
+  }
+}
+head.addEventListener("click", event => {
+  const column = event.target.closest('th[data-key]:not([data-key=""])');
+  if (!column) return;
+  const direction = column.classList.contains("sorted") && column.classList.contains("asc")
+    ? "desc" : "asc";
+  sortRows(column, direction);
+});
+try {
+  const savedKey = localStorage.getItem(sortKey);
+  const savedDirection = localStorage.getItem(sortDirectionKey);
+  const column = savedKey && head.querySelector(`th[data-key="${savedKey}"]`);
+  if (column && (savedDirection === "asc" || savedDirection === "desc")) {
+    sortRows(column, savedDirection, false);
+  }
+} catch (_) {}
+document.querySelector("tbody").addEventListener("click", event => {
+  const row = event.target.closest("tr[data-href]");
+  if (!row || event.target.closest("a") || getSelection().toString()) return;
+  if (event.shiftKey || event.altKey) return;
+  if (event.metaKey || event.ctrlKey) {
+    const opened = window.open(row.dataset.href, "_blank");
+    if (opened) opened.opener = null;
+  } else {
+    location.href = row.dataset.href;
+  }
+});"""
+
 
 def _entry(
     name: str,
@@ -17,6 +81,8 @@ def _entry(
     status_class: str = "status-completed",
     metrics: dict[str, float] | None = None,
     errored_trials: int = 0,
+    number: int | None = 1,
+    stamp: str | None = "20260730_120000_deadbeef",
 ) -> IndexEntry:
     return IndexEntry(
         name=name,
@@ -31,6 +97,8 @@ def _entry(
         errored_trials=errored_trials,
         termination="succeeded",
         error=None,
+        number=number,
+        stamp=stamp,
     )
 
 
@@ -95,7 +163,8 @@ def test_filter_script_and_persisted_key_are_present() -> None:
     document = render_index([_entry("run.json")])
 
     assert 'id="filter"' in document
-    assert "row.textContent.toLocaleLowerCase().includes(query)" in document
+    assert "row.dataset.id" in document
+    assert "row.dataset.stamp" in document
     assert "localStorage.setItem" in document
     assert "localStorage.getItem" in document
     assert "inspect-robots-index-filter" in document
@@ -104,20 +173,21 @@ def test_filter_script_and_persisted_key_are_present() -> None:
 def test_row_with_page_has_escaped_data_href() -> None:
     document = render_index([_entry("run.json", page='run"&report.html')])
 
-    assert '<tr data-href="run&quot;&amp;report.html">' in document
-    assert '<tr data-href="run"&amp;report.html">' not in document
+    assert 'data-href="run&quot;&amp;report.html"' in document
+    assert 'data-href="run"&amp;report.html"' not in document
 
 
 def test_row_without_page_has_no_data_href_attribute() -> None:
     document = render_index([_entry("run.json", page=None)])
 
     assert '<tr data-href="' not in document
+    assert ' data-href="' not in document
 
 
 def test_delegated_row_click_listener_is_present_once() -> None:
     document = render_index([_entry("run.json")])
 
-    assert document.count('addEventListener("click"') == 1
+    assert document.count('document.querySelector("tbody").addEventListener("click"') == 1
     assert 'event.target.closest("tr[data-href]")' in document
     assert 'event.target.closest("a")' in document
     assert "getSelection().toString()" in document
@@ -138,6 +208,45 @@ def test_empty_index_has_no_data_href_attribute() -> None:
 
     assert "<!doctype html>" in document
     assert '<tr data-href="' not in document
+
+
+def test_number_column_sort_values_and_missing_number_are_exact() -> None:
+    """Run numbers are zero-padded, sortable, and missing numbers use an em dash."""
+    document = render_index(
+        [
+            _entry("numbered.json", number=12),
+            _entry("unreadable.json", page=None, number=None),
+        ]
+    )
+
+    assert '<th data-key="number">Run Id</th>' in document
+    assert '<td class="number" data-sort="0012">0012</td>' in document
+    assert '<td class="number" data-sort="">—</td>' in document
+    assert 'class="when" data-sort="2026-07-30T12:00:00Z"' in document
+    assert '<span class="date">2026-07-30</span>' in document
+    assert '<span class="time">T12:00:00Z</span>' in document
+
+
+def test_rows_expose_escaped_log_id_and_stamp_for_filtering() -> None:
+    """Each row carries its filename stem and run stamp as escaped search data."""
+    document = render_index([_entry("run<&>.json", stamp="stamp<&>")])
+
+    assert 'data-id="run&lt;&amp;&gt;"' in document
+    assert 'data-stamp="stamp&lt;&amp;&gt;"' in document
+
+
+def test_sort_headers_persistence_and_empty_row_skip_ship_in_one_script() -> None:
+    """The sortable-index script persists both fields and excludes placeholder rows."""
+    document = render_index([_entry("run.json")])
+
+    assert document.count("<script>") == 1
+    assert "inspect-robots-index-sort-key" in document
+    assert "inspect-robots-index-sort-direction" in document
+    assert 'body.querySelectorAll("tr:not(.empty)")' in document
+    assert 'head.addEventListener("click"' in document
+    assert 'th[data-key]:not([data-key=""])' in document
+    assert "localStorage.setItem(sortKey, dataKey)" in document
+    assert f"<script>\n{_EXPECTED_INDEX_SCRIPT}\n</script>" in document
 
 
 def test_static_index_has_no_meta_refresh() -> None:

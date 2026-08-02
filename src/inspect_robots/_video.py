@@ -74,6 +74,46 @@ def resolve_frames_dir(frames_dir: str, log_path: Path) -> Path | None:
     return None
 
 
+def trial_videos(
+    frames_dir: str | None,
+    log_path: Path,
+    trial_prefixes: Sequence[str],
+) -> dict[str, list[tuple[str, Path]]]:
+    """Locate per-camera MP4s per trial, keyed by trial prefix.
+
+    The resolved raw-frames directory wins per trial when it contains a
+    matching video. Otherwise the log-adjacent ``videos/<stamp>`` convention
+    is searched. Matching the longest known prefix keeps scene ids containing
+    underscores distinct from the camera label suffix.
+    """
+    if frames_dir is None:
+        return {}
+    stamp = PureWindowsPath(frames_dir).name if "\\" in frames_dir else Path(frames_dir).name
+    roots = [
+        root
+        for root in (
+            resolve_frames_dir(frames_dir, log_path),
+            log_path.parent / "videos" / stamp,
+        )
+        if root is not None
+    ]
+    prefixes = sorted(set(trial_prefixes), key=lambda prefix: (-len(prefix), prefix))
+    found: dict[str, list[tuple[str, Path]]] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        by_trial: dict[str, list[tuple[str, Path]]] = {}
+        for path in sorted(root.glob("*.mp4")):
+            for prefix in prefixes:
+                marker = f"{prefix}_"
+                if path.stem.startswith(marker):
+                    by_trial.setdefault(prefix, []).append((path.stem[len(marker) :], path))
+                    break
+        for prefix, videos in by_trial.items():
+            found.setdefault(prefix, videos)
+    return found
+
+
 def discover_streams(root: Path) -> tuple[dict[str, list[tuple[int, Path]]], list[Path]]:
     """Group ``root``'s frame files into per-stream step-ordered lists.
 
@@ -189,6 +229,8 @@ def _ffmpeg_argv(ffmpeg: str, width: int, height: int, fps: float, out_path: Pat
         "libx264",
         "-pix_fmt",
         "yuv420p",
+        "-movflags",
+        "+faststart",
         str(out_path),
     ]
 

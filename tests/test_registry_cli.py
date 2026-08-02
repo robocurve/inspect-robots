@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -1216,6 +1217,14 @@ def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return path, frames_dir
 
 
+def _write_view_video_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """Write one view log with a discoverable trial video beside its frames."""
+    log_path, frames_dir = _write_view_frame_fixture(tmp_path)
+    video = frames_dir / "s0-e0_top_cam.mp4"
+    video.write_bytes(b"multicam-video")
+    return log_path, video
+
+
 def _directory_view_log(
     *,
     created: str,
@@ -1285,6 +1294,88 @@ def test_view_stdout_contains_only_the_document(
     assert "wrote " not in out
 
 
+def test_view_single_file_links_media_next_to_output(tmp_path: Path) -> None:
+    """A single-file report links discovered video under its sibling media tree."""
+    log_path, video = _write_view_video_fixture(tmp_path)
+    output = tmp_path / "reports" / "run.html"
+
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+
+    linked = output.parent / "media" / "run-stamp" / video.name
+    assert linked.is_symlink()
+    assert linked.resolve() == video.resolve()
+    document = output.read_text(encoding="utf-8")
+    assert f'src="media/run-stamp/{video.name}"' in document
+    assert document.count('<section class="player"') == 1
+
+
+def test_view_stdout_omits_player_and_does_not_create_media(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stdout stays self-contained and never creates a sidecar media directory."""
+    log_path, _video = _write_view_video_fixture(tmp_path)
+
+    assert main(["view", str(log_path), "-o", "-"]) == 0
+
+    document = capsys.readouterr().out
+    assert '<section class="player"' not in document
+    assert not (tmp_path / "media").exists()
+
+
+def test_view_replaces_mismatched_media_symlink(tmp_path: Path) -> None:
+    """An existing symlink pointing anywhere else is atomically corrected."""
+    log_path, video = _write_view_video_fixture(tmp_path)
+    output = tmp_path / "report.html"
+    target = tmp_path / "media" / "run-stamp" / video.name
+    target.parent.mkdir(parents=True)
+    target.symlink_to("wrong.mp4")
+
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+
+    assert target.is_symlink()
+    assert os.readlink(target) == os.path.relpath(video, target.parent)
+    assert target.resolve() == video.resolve()
+
+
+def test_view_media_copy_fallback_and_idempotency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copy fallback skips fresh equal copies and refreshes stale or changed ones."""
+    log_path, video = _write_view_video_fixture(tmp_path)
+    output = tmp_path / "report.html"
+    real_copy2 = shutil.copy2
+    copies: list[tuple[Path, Path]] = []
+
+    def no_symlink(_source: str, _target: Path) -> None:
+        raise OSError("symlinks unavailable")
+
+    def record_copy(source: Path, target: Path) -> Path:
+        copies.append((source, target))
+        return Path(real_copy2(source, target))
+
+    monkeypatch.setattr("inspect_robots.cli.os.symlink", no_symlink)
+    monkeypatch.setattr("inspect_robots.cli.shutil.copy2", record_copy)
+
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+    target = tmp_path / "media" / "run-stamp" / video.name
+    assert target.read_bytes() == video.read_bytes()
+    assert len(copies) == 1
+
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+    assert len(copies) == 1
+
+    source_mtime = video.stat().st_mtime + 10
+    os.utime(video, (source_mtime, source_mtime))
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+    assert len(copies) == 2
+
+    video.write_bytes(b"different-sized-video")
+    assert main(["view", str(log_path), "-o", str(output)]) == 0
+    assert len(copies) == 3
+
+
 def test_view_embeds_frames_resolved_from_log_relative_fallback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1342,8 +1433,9 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        trial_media: dict[str, list[tuple[str, str]]] | None,
     ) -> str:
-        del log, title, frames_dir
+        del log, title, frames_dir, trial_media
         assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
@@ -1553,6 +1645,55 @@ def test_view_directory_end_to_end_and_unreadable_log(
     assert out.err.count(" rendering ") == 2
 
 
+def test_view_directory_numbers_readable_logs_by_created_then_stem(tmp_path: Path) -> None:
+    """Presentation numbers ignore filename discovery order and exclude bad logs."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-29T00:00:00Z"), logs, "z-old.json")
+    _write_log(_directory_view_log(created="2026-07-30T00:00:00Z"), logs, "b-tie.json")
+    _write_log(_directory_view_log(created="2026-07-30T00:00:00Z"), logs, "a-tie.json")
+    (logs / "00-unreadable.json").write_text("{", encoding="utf-8")
+
+    assert main(["view", str(logs)]) == 0
+
+    document = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    rows = {}
+    for name in ("z-old.json", "a-tie.json", "b-tie.json", "00-unreadable.json"):
+        name_index = document.index(name)
+        row_start = document.rfind("<tr", 0, name_index)
+        row_end = document.index("</tr>", name_index)
+        rows[name] = document[row_start:row_end]
+    assert ">0001</td>" in rows["z-old.json"]
+    assert ">0002</td>" in rows["a-tie.json"]
+    assert ">0003</td>" in rows["b-tie.json"]
+    assert ">—</td>" in rows["00-unreadable.json"]
+
+
+def test_view_directory_links_media_and_video_mtime_invalidates_page(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Directory pages link videos and rerender when newly encoded media changes."""
+    log_path, video = _write_view_video_fixture(tmp_path)
+    logs = log_path.parent
+
+    assert main(["view", str(logs)]) == 0
+    capsys.readouterr()
+
+    linked = logs / "html" / "media" / "run-stamp" / video.name
+    assert linked.is_symlink()
+    assert linked.resolve() == video.resolve()
+    page = logs / "html" / "run.html"
+    page_mtime = page.stat().st_mtime
+    os.utime(video, (page_mtime + 10, page_mtime + 10))
+
+    assert main(["view", str(logs)]) == 0
+
+    captured = capsys.readouterr()
+    assert "rendering run.json" in captured.err
+    assert page.stat().st_mtime >= page_mtime
+
+
 def test_view_directory_multi_scene_metrics_empty_samples_and_errored_trials(
     tmp_path: Path,
 ) -> None:
@@ -1641,6 +1782,7 @@ def test_view_directory_incremental_mtime_and_force(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        trial_media: dict[str, list[tuple[str, str]]] | None,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -1649,6 +1791,7 @@ def test_view_directory_incremental_mtime_and_force(
             log_path=log_path,
             frames_dir=frames_dir,
             frames_budget_bytes=frames_budget_bytes,
+            trial_media=trial_media,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)
@@ -1858,6 +2001,35 @@ def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
     assert f"serving logs at: http://127.0.0.1:{bound_ports[0]}/" in out.out
     assert "serving to this machine only; pass --host 0.0.0.0" in out.out
     assert out.out.index("index: ") < out.out.index("serving logs at: ")
+
+
+def test_view_serve_serves_linked_video_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The static server follows report media links to the discovered MP4."""
+    log_path, video = _write_view_video_fixture(tmp_path)
+    logs = log_path.parent
+    bound_ports: list[int] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def probe_video(_seconds: float) -> None:
+        root = f"http://127.0.0.1:{bound_ports[0]}"
+        with urllib.request.urlopen(f"{root}/index.html", timeout=2) as response:
+            assert response.status == 200
+        with urllib.request.urlopen(f"{root}/media/run-stamp/{video.name}", timeout=2) as response:
+            assert response.status == 200
+            assert response.read() == video.read_bytes()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_serve_sleep", probe_video)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,130 @@ from inspect_robots._pngenc import png_data_url
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
+_EXPECTED_VIEW_SCRIPT = """document.addEventListener('click', (event) => {
+  const cell = event.target.closest('.frame-cell');
+  if (cell) cell.classList.toggle('wide');
+});
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll(".trial.has-player").forEach(trial => {
+    const player = trial.querySelector(".player");
+    const videos = Array.from(player.querySelectorAll("video"));
+    const playpause = player.querySelector(".playpause");
+    const scrub = player.querySelector(".scrub");
+    const clock = player.querySelector(".clock");
+    const follow = player.querySelector(".follow");
+    const rail = trial.querySelector(".transcript");
+    const fps = Number(player.dataset.fps);
+    let master = null, settled = 0, frameRequest = null, autoScrolling = false;
+
+    function setFollow(on) {
+      follow.classList.toggle("on", on);
+      follow.textContent = on ? "Follow" : "Follow off";
+    }
+    function disableFollow() {
+      if (!autoScrolling) setFollow(false);
+    }
+    function update(time) {
+      if (!master) return;
+      const step = Math.round(time * fps);
+      scrub.value = String(Math.round(1000 * time / master.duration));
+      clock.textContent = `step ${step} · ${time.toFixed(1)}s`;
+      if (!rail) return;
+      let live = null;
+      rail.querySelectorAll(".message[data-step]").forEach(message => {
+        if (Number(message.dataset.step) <= step) live = message;
+      });
+      rail.querySelectorAll(".message.live").forEach(message => {
+        if (message !== live) message.classList.remove("live");
+      });
+      if (live) {
+        live.classList.add("live");
+        if (follow.classList.contains("on")) {
+          autoScrolling = true;
+          rail.scrollTop = live.offsetTop - rail.offsetTop - 16;
+          requestAnimationFrame(() => { autoScrolling = false; });
+        }
+      }
+    }
+    function seek(time) {
+      videos.forEach(video => {
+        if (video.readyState >= 1 && Number.isFinite(video.duration)) {
+          video.currentTime = Math.min(time, video.duration);
+        }
+      });
+      update(Math.min(time, master.duration));
+    }
+    function animate() {
+      update(master.currentTime);
+      if (!master.paused && !master.ended) {
+        frameRequest = requestAnimationFrame(animate);
+      }
+    }
+    function pauseAll() {
+      videos.forEach(video => video.pause());
+      playpause.textContent = "Play";
+      if (frameRequest !== null) cancelAnimationFrame(frameRequest);
+      frameRequest = null;
+      update(master.currentTime);
+    }
+    function elect() {
+      const playable = videos.filter(video => video.dataset.playable === "yes");
+      if (!playable.length) return;
+      master = playable.reduce((longest, video) =>
+        video.duration > longest.duration ? video : longest
+      );
+      playpause.disabled = false;
+      scrub.disabled = false;
+      follow.disabled = false;
+      master.addEventListener("ended", pauseAll);
+      update(0);
+    }
+    function settle(video, playable) {
+      if (video.dataset.settled) return;
+      video.dataset.settled = "yes";
+      if (playable && Number.isFinite(video.duration)) video.dataset.playable = "yes";
+      settled += 1;
+      if (settled === videos.length) elect();
+    }
+    videos.forEach(video => {
+      if (video.readyState >= 1) settle(video, true);
+      else {
+        video.addEventListener("loadedmetadata", () => settle(video, true), { once: true });
+        video.addEventListener("error", () => settle(video, false), { once: true });
+      }
+    });
+    playpause.addEventListener("click", () => {
+      if (!master) return;
+      if (!master.paused && !master.ended) {
+        pauseAll();
+        return;
+      }
+      seek(master.ended ? 0 : master.currentTime);
+      videos.forEach(video => {
+        const started = video.play();
+        if (started) started.catch(() => {});
+      });
+      playpause.textContent = "Pause";
+      frameRequest = requestAnimationFrame(animate);
+    });
+    scrub.addEventListener("input", () => {
+      if (master) seek(Number(scrub.value) * master.duration / 1000);
+    });
+    follow.addEventListener("click", () => setFollow(!follow.classList.contains("on")));
+    if (rail) {
+      rail.addEventListener("scroll", disableFollow);
+      rail.addEventListener("wheel", () => setFollow(false));
+      rail.addEventListener("touchstart", () => setFollow(false));
+      rail.addEventListener("click", event => {
+        const message = event.target.closest(".message[data-step]");
+        if (!message || event.target.closest(".frame-cell") || event.target.closest("a")) return;
+        if (getSelection().toString() || !master) return;
+        seek(Number(message.dataset.step) / fps);
+      });
+    }
+  });
+});"""
+
 
 def _chat(*messages: object) -> list[object]:
     return list(messages)
@@ -34,6 +158,7 @@ def _log(
     *,
     status: str = "success",
     transcripts: tuple[Any, ...] = (),
+    control_hz: object = None,
 ) -> EvalLog:
     return EvalLog(
         version=1,
@@ -46,6 +171,7 @@ def _log(
             inspect_robots_version="0.7.0",
             git_commit="abc123",
             policy_config={"effort": "low", "temperature": 0.2},
+            embodiment_info={} if control_hz is None else {"control_hz": control_hz},
             seed=7,
             max_steps=120,
         ),
@@ -178,12 +304,7 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     assert document.count("<script") == 1
     # The literal is duplicated here on purpose: an independent copy is what
     # makes this an injection guard rather than a tautology.
-    assert (
-        "<script>document.addEventListener('click', (event) => {\n"
-        "  const cell = event.target.closest('.frame-cell');\n"
-        "  if (cell) cell.classList.toggle('wide');\n"
-        "});</script>" in document
-    )
+    assert f"<script>{_EXPECTED_VIEW_SCRIPT}</script>" in document
 
 
 def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
@@ -308,9 +429,9 @@ def test_chat_roles_system_details_tool_call_and_result_are_rendered() -> None:
 
     assert '<details class="system-message"><summary>system</summary>' in document
     assert '<details class="system-message" open>' not in document
-    assert '<div class="message user">' in document
-    assert '<div class="message assistant">' in document
-    assert '<div class="message tool">' in document
+    assert '<div class="message user" data-step="0">' in document
+    assert '<div class="message assistant" data-step="0">' in document
+    assert '<div class="message tool" data-step="0">' in document
     assert "where is the cube?" in document and "moving now" in document
     assert "move_by({&quot;dx&quot;: 0.1})" in document
     assert "moved 2 steps" in document
@@ -394,7 +515,7 @@ def test_chat_defensive_guards_skip_malformed_calls_and_role_only_content() -> N
 
     document = render_html(_log(transcripts=(transcript,)), title="defensive")
 
-    assert document.count('<div class="message assistant">') == 2
+    assert document.count('<div class="message assistant" data-step="0">') == 2
     assert "not a list" not in document
     assert "not a call" not in document
     assert "not a function" not in document
@@ -481,6 +602,101 @@ def test_transcript_free_log_reports_none_recorded() -> None:
 
     assert "no policy transcripts recorded" in document
     assert '<details class="transcript"' not in document
+
+
+def test_trial_wrappers_are_uniform_and_players_follow_trial_media() -> None:
+    """Every trial is wrapped, while only mapped trials receive one player."""
+    transcript = _chat({"role": "user", "content": "hello"})
+    document = render_html(
+        _log(transcripts=(transcript, None)),
+        title="players",
+        trial_media={"scene-0-e0": [("top_cam", "media/stamp/top.mp4")]},
+    )
+
+    assert '<div class="trial has-player" id="trial-scene-0-e0">' in document
+    assert '<div class="trial" id="trial-scene-0-e1">' in document
+    assert document.count('<section class="player"') == 1
+    assert document.count('class="follow on"') == 1
+    assert document.count('<details class="transcript"') == 1
+
+
+def test_player_can_render_without_transcript_and_is_absent_for_none_media() -> None:
+    """Video-only trials render, while explicit None leaves every trial player-free."""
+    log = _log(transcripts=())
+    with_player = render_html(
+        log,
+        title="video only",
+        trial_media={"scene-0-e1": [("wrist", "media/stamp/wrist.mp4")]},
+    )
+    without_player = render_html(log, title="stdout", trial_media=None)
+
+    assert '<div class="trial has-player" id="trial-scene-0-e1">' in with_player
+    assert '<section class="player"' in with_player
+    assert '<details class="transcript"' not in with_player
+    assert '<section class="player"' not in without_player
+    assert 'class="follow on"' not in without_player
+    assert without_player.count('class="trial"') == 2
+
+
+def test_player_labels_hrefs_and_trial_ids_are_escaped_exactly() -> None:
+    """Foreign media labels and hrefs cross the HTML boundary escaped once."""
+    log = _log(transcripts=(None,))
+    scene = dataclasses.replace(log.samples[0], scene_id='scene <"x">')
+    prefix = _safe(f"{scene.scene_id}-e0")
+    document = render_html(
+        dataclasses.replace(log, samples=(scene,)),
+        title="escape media",
+        trial_media={prefix: [('<top & "wide">', 'media/a&b/"cam".mp4')]},
+    )
+
+    assert f'id="trial-{prefix}"' in document
+    assert "<figcaption>&lt;top &amp; &quot;wide&quot;&gt;</figcaption>" in document
+    assert 'src="media/a&amp;b/&quot;cam&quot;.mp4"' in document
+    assert '<top & "wide">' not in document
+
+
+@pytest.mark.parametrize(
+    ("control_hz", "expected"),
+    [(30, "30"), (12.5, "12.5"), (None, "10"), (True, "10")],
+)
+def test_player_data_fps_uses_log_rate_with_default_fallback(
+    control_hz: object,
+    expected: str,
+) -> None:
+    """Player step timing uses default_fps, including its guarded fallback."""
+    document = render_html(
+        _log(control_hz=control_hz),
+        title="fps",
+        trial_media={"scene-0-e0": [("cam", "media/stamp/cam.mp4")]},
+    )
+
+    assert f'<section class="player" data-fps="{expected}">' in document
+
+
+def test_message_step_anchors_use_minimum_and_running_inheritance_without_frames() -> None:
+    """Camera labels anchor every non-system message independently of frame rendering."""
+    transcript = _chat(
+        {"role": "system", "content": "camera 'ignored' (step 99):"},
+        {"role": "assistant", "content": "leading"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "camera 'late' (step 7):"},
+                {"type": "text", "text": "camera 'early' (step 3):"},
+            ],
+        },
+        {"role": "assistant", "content": "inherits"},
+        {"role": "tool", "content": "executing move over 22 steps"},
+        {"role": "user", "content": "no camera label"},
+    )
+
+    document = render_html(_log(transcripts=(transcript,)), title="anchors", frames_dir=None)
+
+    assert 'class="system-message"' in document
+    assert 'class="system-message" data-step=' not in document
+    assert document.count('data-step="0"') == 1
+    assert document.count('data-step="3"') == 4
+    assert 'data-step="7"' not in document
 
 
 def test_stored_frame_embeds_between_escaped_text_runs(tmp_path: Path) -> None:

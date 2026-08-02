@@ -397,14 +397,13 @@ provides-extras = ["all", "dev", "docs", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-agent"
-version = "0.20.0"
+version = "0.19.1"
 source = { editable = "plugins/inspect-robots-agent" }
 dependencies = [
     { name = "httpx" },
     { name = "inspect-robots" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -424,7 +423,6 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "websockets", specifier = ">=12" },
 ]
 provides-extras = ["dev"]
 

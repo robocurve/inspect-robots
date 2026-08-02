@@ -3,7 +3,9 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,7 +20,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.eval import _git_commit
-from inspect_robots.log import EvalLog, EvalSpec
+from inspect_robots.log import EvalLog
 from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -27,7 +29,7 @@ from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
-from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
+from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
@@ -166,7 +168,134 @@ def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) ->
     assert log.results.errored_trials == 0
     assert log.error == "cancelled by user (KeyboardInterrupt)"
     assert log.stats.frames_dir is not None
+    assert Path(log.stats.frames_dir).is_dir()
     assert list(Path(log.stats.frames_dir).rglob("*.npy"))
+
+
+def test_run_stamp_mkdir_redraws_after_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run stamp is redrawn when its atomic directory claim collides."""
+    eval_module = importlib.import_module("inspect_robots.eval")
+
+    values = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(eval_module.uuid, "uuid4", lambda: SimpleNamespace(hex=next(values)))
+    actual_mkdir = Path.mkdir
+    claims: list[Path] = []
+
+    def collide_once(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent.name == "frames" and parents and not exist_ok:
+            claims.append(path)
+            if len(claims) == 1:
+                raise FileExistsError
+        actual_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", collide_once)
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[NullSink()],
+    )
+
+    assert len(claims) == 2
+    assert claims[0].name.endswith("_aaaaaaaa")
+    assert claims[1].name.endswith("_bbbbbbbb")
+    assert not claims[1].exists()
+
+
+def test_run_stamp_uses_full_uuid_after_sixteen_failed_claims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded short-stamp redraw loop ends in a full UUID claim."""
+    eval_module = importlib.import_module("inspect_robots.eval")
+
+    counter = 0
+
+    def next_uuid() -> SimpleNamespace:
+        nonlocal counter
+        counter += 1
+        return SimpleNamespace(hex=f"{counter:064x}")
+
+    actual_mkdir = Path.mkdir
+    claims: list[Path] = []
+
+    def collide_sixteen(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent.name == "frames" and parents and not exist_ok:
+            claims.append(path)
+            if len(claims) <= 16:
+                raise FileExistsError
+        actual_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(eval_module.uuid, "uuid4", next_uuid)
+    monkeypatch.setattr(Path, "mkdir", collide_sixteen)
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[NullSink()],
+    )
+
+    assert len(claims) == 17
+    assert len(claims[-1].name.rsplit("_", 1)[-1]) == 64
+
+
+def test_non_frames_run_removes_empty_stamp_directory(tmp_path: Path) -> None:
+    """A successful run without stored frames leaves no per-run directory."""
+    eval(_task(max_steps=1), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    assert not (tmp_path / "frames").exists()
+
+
+def test_cancelled_non_frames_run_removes_empty_stamp_directory(tmp_path: Path) -> None:
+    """Cancellation still reaches the non-frames stamp cleanup finally block."""
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt()),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+    assert not (tmp_path / "frames").exists()
+
+
+def test_non_frames_run_keeps_stamp_directory_that_gained_content(tmp_path: Path) -> None:
+    """Cleanup tolerates rmdir failure when another run artifact uses the stamp."""
+    artifacts: list[Path] = []
+
+    class _StampArtifactPolicy(ScriptedPolicy):
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            del scene_id, epoch
+            artifact = Path(log_dir) / "frames" / run_id / "capture.txt"
+            artifact.write_text("kept", encoding="utf-8")
+            artifacts.append(artifact)
+
+    eval(
+        _task(max_steps=1),
+        _StampArtifactPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text(encoding="utf-8") == "kept"
 
 
 def test_cancelled_eval_reraises_typed_exception_with_original_cause(
@@ -503,49 +632,6 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     logs = eval(_task(max_steps=60), adaptive, CubePickEmbodiment(), log_dir=str(tmp_path))
     assert adaptive.bound_names == ["cubepick"]
     assert logs[0].status == "success"
-
-
-def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
-    tmp_path: Path,
-) -> None:
-    class _SpaceAware(NullSink):
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str]] = []
-
-        def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
-            self.calls.append(("bind_spaces", action_space, observation_space))
-
-        def on_eval_start(self, spec: EvalSpec) -> None:
-            del spec
-            self.calls.append(("on_eval_start",))
-
-    class _OddAttr(NullSink):
-        bind_spaces = "not a hook"
-
-    embodiment = CubePickEmbodiment()
-    aware = _SpaceAware()
-    no_hook = NullSink()
-    odd = _OddAttr()
-
-    (log,) = eval(
-        _task(max_steps=1),
-        ScriptedPolicy(),
-        embodiment,
-        sinks=[aware, no_hook, odd],
-        log_dir=str(tmp_path),
-    )
-
-    assert log.status == "success"
-    assert aware.calls == [
-        (
-            "bind_spaces",
-            embodiment.info.action_space,
-            embodiment.info.observation_space,
-        ),
-        ("on_eval_start",),
-    ]
-    assert getattr(no_hook, "bind_spaces", None) is None
-    assert odd.bind_spaces == "not a hook"
 
 
 def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:

@@ -26,7 +26,6 @@ from __future__ import annotations
 from importlib.metadata import version
 
 from inspect_robots_agent._anthropic import AnthropicClient
-from inspect_robots_agent._gemini_live import GeminiLiveClient
 from inspect_robots_agent._llm import (
     ENV_MODEL,
     AssistantMessage,
@@ -44,7 +43,6 @@ __all__ = [
     "AnthropicClient",
     "AssistantMessage",
     "ChatClient",
-    "GeminiLiveClient",
     "LLMAgentPolicy",
     "Provider",
     "ResponsesClient",

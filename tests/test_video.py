@@ -24,6 +24,7 @@ from inspect_robots._video import (
     encode_stream,
     frames_dir_candidates,
     resolve_frames_dir,
+    trial_videos,
 )
 from inspect_robots.cli import main
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
@@ -215,6 +216,77 @@ def test_frames_dir_resolution_as_is_fallback_miss_and_backslashes(tmp_path: Pat
     assert fallback == stamp_dir
 
 
+def test_trial_videos_prefers_frames_dir_and_falls_back_per_trial(tmp_path: Path) -> None:
+    """Discovery uses the first root containing media for each individual trial."""
+    log_path = tmp_path / "logs" / "run.json"
+    frames = tmp_path / "logs" / "frames" / "stamp"
+    videos = tmp_path / "logs" / "videos" / "stamp"
+    frames.mkdir(parents=True)
+    videos.mkdir(parents=True)
+    preferred = frames / "scene_one-e0_top_cam.mp4"
+    ignored_duplicate = videos / preferred.name
+    fallback = videos / "scene_two-e0_wrist.mp4"
+    preferred.write_bytes(b"frames")
+    ignored_duplicate.write_bytes(b"videos")
+    fallback.write_bytes(b"fallback")
+
+    found = trial_videos(str(frames), log_path, ["scene_one-e0", "scene_two-e0"])
+
+    assert found == {
+        "scene_one-e0": [("top_cam", preferred)],
+        "scene_two-e0": [("wrist", fallback)],
+    }
+
+
+def test_trial_videos_uses_log_adjacent_videos_and_windows_stamp(tmp_path: Path) -> None:
+    """Archived footage resolves via videos/stamp with Windows path splitting."""
+    log_path = tmp_path / "logs" / "run.json"
+    videos = tmp_path / "logs" / "videos" / "run-stamp"
+    videos.mkdir(parents=True)
+    path = videos / "scene-0-e0_left_cam.mp4"
+    path.write_bytes(b"video")
+
+    assert trial_videos(r"old\frames\run-stamp", log_path, ["scene-0-e0"]) == {
+        "scene-0-e0": [("left_cam", path)]
+    }
+
+
+def test_trial_videos_longest_prefix_wins_and_unknown_files_are_ignored(
+    tmp_path: Path,
+) -> None:
+    """Known underscored scene prefixes are disambiguated by longest match."""
+    log_path = tmp_path / "run.json"
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    longest = frames / "scene_with_parts-e0_top_cam.mp4"
+    shorter = frames / "scene-e0_wrist.mp4"
+    unknown = frames / "unknown-e0_cam.mp4"
+    for path in (longest, shorter, unknown):
+        path.write_bytes(b"video")
+
+    found = trial_videos(
+        str(frames),
+        log_path,
+        ["scene-e0", "scene_with_parts-e0"],
+    )
+
+    assert found == {
+        "scene-e0": [("wrist", shorter)],
+        "scene_with_parts-e0": [("top_cam", longest)],
+    }
+
+
+def test_trial_videos_empty_missing_and_frames_dir_none_return_nothing(tmp_path: Path) -> None:
+    """Missing media roots, empty roots, and absent frame metadata are harmless."""
+    log_path = tmp_path / "run.json"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    assert trial_videos(str(empty), log_path, ["scene-0-e0"]) == {}
+    assert trial_videos(str(tmp_path / "missing"), log_path, ["scene-0-e0"]) == {}
+    assert trial_videos(None, log_path, ["scene-0-e0"]) == {}
+
+
 @pytest.mark.parametrize(
     ("control_hz", "expected"),
     [
@@ -262,7 +334,9 @@ def test_encode_pins_argv_and_pipes_exact_bytes(
     ]:
         assert argv[argv.index(flag) + 1] == value
     assert argv[argv.index("-pix_fmt") + 1] == "rgb24"  # input pix_fmt
-    assert argv[-3:-1] == ["-pix_fmt", "yuv420p"]  # output pix_fmt
+    assert argv[argv.index("-movflags") + 1] == "+faststart"
+    output_pixel_format = max(index for index, value in enumerate(argv) if value == "-pix_fmt")
+    assert argv[output_pixel_format + 1] == "yuv420p"
     assert proc.stdout is subprocess.DEVNULL
     expected = np.load(frames[0][1]).tobytes() + np.load(frames[1][1]).tobytes()
     assert bytes(proc.stdin.piped) == expected

@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class IndexEntry:
     errored_trials: int
     termination: str
     error: str | None
+    number: int | None = None
+    stamp: str | None = None
 
 
 _STYLES = """
@@ -99,8 +102,24 @@ input {
   border-radius: 8px;
   background: var(--panel);
 }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 10px 12px; text-align: left; vertical-align: top; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td {
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+col.number { width: 5%; }
+col.when { width: 10%; }
+col.instruction { width: 24%; }
+col.policy { width: 12%; }
+col.status { width: 7%; }
+col.metrics { width: 12%; }
+col.termination { width: 11%; }
+col.error { width: 13%; }
+col.log { width: 6%; }
 th {
   color: var(--muted);
   border-bottom: 1px solid var(--line);
@@ -110,13 +129,25 @@ th {
   text-transform: uppercase;
   white-space: nowrap;
 }
+th[data-key]:not([data-key=""]) { cursor: pointer; user-select: none; }
+th.sorted::after { margin-left: 5px; }
+th.sorted.asc::after { content: "▲"; }
+th.sorted.desc::after { content: "▼"; }
 td { border-top: 1px solid var(--line); }
 tbody tr:first-child td { border-top: 0; }
 tbody tr:hover { background: var(--bg); }
 a { color: var(--link); }
 .when, .policy, .metrics, .termination, .log { white-space: nowrap; }
-.instruction { min-width: 230px; max-width: 440px; }
-.error-cell { color: var(--red); min-width: 150px; max-width: 280px; overflow-wrap: anywhere; }
+tbody td { height: 2.7em; }
+.when .date { display: block; }
+.when .time {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted, #6b6b6b);
+}
+.instruction { }
+.error-cell { color: var(--red); }
 .badge {
   display: inline-block;
   border-radius: 999px;
@@ -134,8 +165,10 @@ a { color: var(--link); }
 tbody tr[data-href] { cursor: pointer; }
 """.strip()
 
-_ERROR_LIMIT = 160
+_ERROR_LIMIT = 60
 _FILTER_KEY = "inspect-robots-index-filter"
+_SORT_KEY = "inspect-robots-index-sort-key"
+_SORT_DIRECTION_KEY = "inspect-robots-index-sort-direction"
 
 
 def _escape(value: object) -> str:
@@ -178,10 +211,27 @@ def _row(entry: IndexEntry) -> str:
         metrics = f"{metrics} {marker}" if metrics else marker
     instruction = _link(entry.page, _escape(entry.instruction))
     log_name = _link(entry.page, _escape(entry.name))
-    row_start = "<tr>" if entry.page is None else f'<tr data-href="{_escape(entry.page)}">'
+    date_part, t_sep, time_part = entry.created.partition("T")
+    if t_sep:
+        when = (
+            f'<span class="date">{_escape(date_part)}</span>'
+            f'<span class="time">{_escape(t_sep + time_part)}</span>'
+        )
+    else:
+        when = _escape(entry.created)
+    number = "—" if entry.number is None else f"{entry.number:04d}"
+    number_sort = "" if entry.number is None else number
+    attributes = (
+        f' data-id="{_escape(Path(entry.name).stem)}" data-stamp="{_escape(entry.stamp or "")}"'
+    )
+    if entry.page is not None:
+        attributes += f' data-href="{_escape(entry.page)}"'
+    row_start = f"<tr{attributes}>"
     return row_start + (
-        f'<td class="when"><time>{_escape(entry.created)}</time></td>'
-        f'<td class="instruction">{instruction}</td>'
+        f'<td class="number" data-sort="{number_sort}">{number}</td>'
+        f'<td class="when" data-sort="{_escape(entry.created)}">'
+        f"<time>{when}</time></td>"
+        f'<td class="instruction" title="{_escape(entry.instruction)}">{instruction}</td>'
         f'<td class="policy">{policy}</td>'
         f'<td><span class="badge {_escape(entry.status_class)}">'
         f"{_escape(entry.status)}</span></td>"
@@ -205,7 +255,7 @@ def render_index(
     empty = (
         ""
         if rows
-        else '<tr class="empty"><td class="empty" colspan="8">no evaluation logs found</td></tr>'
+        else '<tr class="empty"><td class="empty" colspan="9">no evaluation logs found</td></tr>'
     )
     refresh = ""
     if refresh_seconds is not None:
@@ -231,24 +281,74 @@ def render_index(
     <input id="filter" type="search" placeholder="instruction, policy, status, metric…">
   </div>
   <div class="table-wrap"><table>
+    <colgroup>
+      <col class="number"><col class="when"><col class="instruction">
+      <col class="policy"><col class="status"><col class="metrics">
+      <col class="termination"><col class="error"><col class="log">
+    </colgroup>
     <thead><tr>
-      <th>When</th><th>Instruction</th><th>Policy</th><th>Status</th>
-      <th>Metrics</th><th>Termination</th><th>Error</th><th>Log</th>
+      <th data-key="number">Run Id</th><th data-key="when">When</th>
+      <th data-key="instruction">Instruction</th><th data-key="policy">Policy</th>
+      <th data-key="status">Status</th><th data-key="">Metrics</th>
+      <th data-key="termination">Termination</th><th data-key="">Error</th>
+      <th data-key="">Log</th>
     </tr></thead>
     <tbody>{rows}{empty}</tbody>
   </table></div>
 </main>
 <script>
-const key = "{_FILTER_KEY}", input = document.querySelector("#filter");
+const key = "{_FILTER_KEY}",
+  sortKey = "{_SORT_KEY}",
+  sortDirectionKey = "{_SORT_DIRECTION_KEY}",
+  input = document.querySelector("#filter");
 const rows = document.querySelectorAll("tbody tr:not(.empty)");
 function applyFilter() {{
   const query = input.value.toLocaleLowerCase();
-  rows.forEach(row => row.hidden = !row.textContent.toLocaleLowerCase().includes(query));
+  rows.forEach(row => {{
+    const searchable = `${{row.textContent}} ${{row.dataset.id}} ${{row.dataset.stamp}}`;
+    row.hidden = !searchable.toLocaleLowerCase().includes(query);
+  }});
   try {{ localStorage.setItem(key, input.value); }} catch (_) {{}}
 }}
 try {{ input.value = localStorage.getItem(key) || ""; }} catch (_) {{}}
 input.addEventListener("input", applyFilter);
 applyFilter();
+const head = document.querySelector("thead"), body = document.querySelector("tbody");
+function sortRows(column, direction, persist = true) {{
+  const index = column.cellIndex, dataKey = column.dataset.key;
+  const ordered = Array.from(body.querySelectorAll("tr:not(.empty)"));
+  ordered.sort((left, right) => {{
+    const a = left.cells[index].dataset.sort ?? left.cells[index].textContent.trim();
+    const b = right.cells[index].dataset.sort ?? right.cells[index].textContent.trim();
+    if (dataKey === "number" && (!a || !b)) return !a && !b ? 0 : (!a ? 1 : -1);
+    const compared = a.localeCompare(b, undefined, {{ numeric: dataKey === "number" }});
+    return direction === "asc" ? compared : -compared;
+  }});
+  ordered.forEach(row => body.append(row));
+  head.querySelectorAll("th.sorted").forEach(th => th.classList.remove("sorted", "asc", "desc"));
+  column.classList.add("sorted", direction);
+  if (persist) {{
+    try {{
+      localStorage.setItem(sortKey, dataKey);
+      localStorage.setItem(sortDirectionKey, direction);
+    }} catch (_) {{}}
+  }}
+}}
+head.addEventListener("click", event => {{
+  const column = event.target.closest('th[data-key]:not([data-key=""])');
+  if (!column) return;
+  const direction = column.classList.contains("sorted") && column.classList.contains("asc")
+    ? "desc" : "asc";
+  sortRows(column, direction);
+}});
+try {{
+  const savedKey = localStorage.getItem(sortKey);
+  const savedDirection = localStorage.getItem(sortDirectionKey);
+  const column = savedKey && head.querySelector(`th[data-key="${{savedKey}}"]`);
+  if (column && (savedDirection === "asc" || savedDirection === "desc")) {{
+    sortRows(column, savedDirection, false);
+  }}
+}} catch (_) {{}}
 document.querySelector("tbody").addEventListener("click", event => {{
   const row = event.target.closest("tr[data-href]");
   if (!row || event.target.closest("a") || getSelection().toString()) return;

@@ -27,6 +27,10 @@ All notable changes to this project are documented here. The format is based on
   sessions from the image-free transcript, and captures each socket attempt
   with content-addressed frame blobs (plan 0039, #252).
 
+- `inspect-robots view` now provides a multicamera player with a synchronized
+  transcript rail, presentation run numbers, and a sortable, id-searchable
+  directory index (plan 0039, #247)
+
 - `inspect-robots view --serve` now serves a rendered logs directory, refreshes
   it incrementally as new runs arrive, and supports explicit host/port binding
   for local or remote browsing (plan 0037, #241)
@@ -78,6 +82,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Log filenames and run stamps are now collision-proof under concurrent
+  writers, and newly rendered MP4s use faststart metadata placement
+  (plan 0039, #247)
+
 - The `llm/latest` Rerun pane now shows only the step's assistant message(s);
   the full conversation remains in the `llm` TextLog stream
   ([plan 0037](plans/0037-rerun-latest-assistant-only.md), #243).
@@ -95,18 +103,6 @@ All notable changes to this project are documented here. The format is based on
   unaffected.
 
 ### Fixed
-
-- `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
-  and unplug-identifies cameras as physical USB devices. A camera whose color
-  node lost udev's by-id name race (multi-interface cameras such as the
-  RealSense D435) or whose by-path name is duplicated by systemd
-  `usbv2-`/`usbv3-` aliases no longer vanishes from the listing or defeats
-  `u`; shared-serial cameras are listed by port-stable by-path names, and a
-  saved-but-dead by-id path now points the operator at the camera's current
-  location by serial. Unplug-to-identify for CAN and serial slots now also
-  takes its before snapshot at the moment `u` is answered instead of when
-  the section listing was printed, so a device attached mid-wizard is still
-  identifiable.
 
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation

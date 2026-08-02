@@ -11,12 +11,12 @@ that parses as a JSON object is stored as that object at any HTTP status;
 non-object or invalid JSON is stored as its first 2000 text characters, and a
 missing response is stored as null.
 
-Inline PNG payloads in supported chat, Responses, Anthropic, and Gemini Live
-image parts are replaced in a deep copy of the request by
-``$blob:<sha256>``. Data-URL prefixes and all other part keys remain intact.
-Readers find references by scanning string values for the unanchored pattern
-``\\$blob:[0-9a-f]{64}`` and restore them by replacing the sentinel with base64
-of the corresponding decoded PNG blob.
+Inline PNG payloads in supported chat, Responses, and Anthropic image parts are
+replaced in a deep copy of the request by ``$blob:<sha256>``. Data-URL prefixes
+and all other part keys remain intact. Readers find references by scanning
+string values for the unanchored pattern ``\\$blob:[0-9a-f]{64}`` and restore
+them by replacing the sentinel with base64 of the corresponding decoded PNG
+blob.
 
 Capture is best-effort and cannot fail an evaluation. The first failure in a
 trial emits one stderr warning, disables that trial's sink, and is never
@@ -186,11 +186,6 @@ class WireCapture:
 
     def _replace_blobs(self, value: Any) -> None:
         if isinstance(value, dict):
-            inline_data = value.get("inlineData")
-            if isinstance(inline_data, dict):
-                payload = inline_data.get("data")
-                if isinstance(payload, str):
-                    inline_data["data"] = self._store_blob(payload)
             part_type = value.get("type")
             if part_type == "image_url":
                 image_url = value.get("image_url")
