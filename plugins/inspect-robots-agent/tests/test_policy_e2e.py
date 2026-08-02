@@ -2539,7 +2539,7 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
 
 
-def test_non_string_param_coercion() -> None:
+def test_non_string_params_rejected() -> None:
     for param, val in [
         ("model", 42),
         ("model", 0),
@@ -2571,3 +2571,8 @@ def test_non_string_param_coercion() -> None:
         assert f"{param} must be a string, got {val!r}." in str(exc_info.value)
         expected_fix = f"fix: the -P parser coerces unquoted values; pass -P '{param}=\"value\"'"
         assert expected_fix in str(exc_info.value)
+
+
+def test_policy_config_defaults() -> None:
+    policy = LLMAgentPolicy(model="anthropic/claude-3-5-sonnet", base_url="http://localhost:8000")
+    assert policy._pre_check is None

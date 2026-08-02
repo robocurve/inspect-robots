@@ -285,6 +285,8 @@ class LLMAgentPolicy(PolicyBase):
             ("effort", effort),
             ("speed", speed),
         ]:
+            if val is _UNSET:
+                continue
             if val is not None and not isinstance(val, str):
                 raise ConfigError(
                     f"{name} must be a string, got {val!r}.\n"
