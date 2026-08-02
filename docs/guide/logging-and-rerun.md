@@ -46,6 +46,12 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
+The sink lays out labeled joint series per arm, with commanded `action/*` and
+measured `state/*` together for each side and cameras, the LLM transcript, and
+reward alongside. Embodiments without `dim_labels` get one combined joints
+plot. The layout is re-sent at each trial boundary so it follows the live trial,
+which resets viewer tweaks then; a single-trial `run` sends it exactly once.
+
 Logging is non-blocking. `log_step` snapshots each transition and a background
 worker hands it to the SDK, so a slow or stalled viewer connection never delays
 the control loop (on real hardware, a blocked viewer used to stall the robot
