@@ -1542,6 +1542,25 @@ def test_eval_end_shuts_down_worker_and_log_step_restarts_it(
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
+def test_sink_reuse_after_interrupted_eval_shuts_down_previous_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reusing a sink when the previous worker is still running shuts it down safely."""
+    _install_fake_rerun(monkeypatch)
+    sink = RerunSink()
+    _log_one(sink, 0)
+    assert sink._worker is not None
+    prev_worker = sink._worker
+
+    # Simulate crash path: on_eval_start called without on_eval_end
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert not prev_worker.is_alive()
+    assert sink._blueprint_prefix is None
+    assert sink._blueprint_warned is False
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
 def test_emit_failure_warns_once_and_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
