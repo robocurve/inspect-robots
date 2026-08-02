@@ -18,8 +18,8 @@ Subcommands:
 - ``inspect-robots summarize LOG.json [--model M]`` — distill a saved eval log
   into a deterministic digest or model-written learnings file.
 - ``inspect-robots view LOG.json|LOG_DIR [-o PATH] [--open] [--serve]`` — render
-  one saved eval log or a browsable directory index as self-contained HTML,
-  optionally serving a directory until stopped.
+  one saved eval log or a browsable HTML directory index, optionally serving
+  a directory until stopped.
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
@@ -50,10 +50,11 @@ import threading
 import time
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import FrameType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
@@ -347,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_view = sub.add_parser(
         "view",
-        help="render saved eval logs as self-contained HTML reports",
+        help="render saved eval logs as HTML reports",
         description=(
             "Render one EvalLog JSON file, or every top-level *.json in a logs "
             "directory with a browsable index. A directory log named index.json "
@@ -1215,8 +1216,6 @@ def _build_and_announce_guardrails(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from dataclasses import replace
-
     from inspect_robots import eval
     from inspect_robots.logging import JsonLogSink
     from inspect_robots.scene import Scene
@@ -1381,8 +1380,6 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     the embodiment once per task), the CLI resolves the embodiment exactly
     once for the whole set, so a real robot is not reconnected between tasks.
     """
-    from dataclasses import replace
-
     from inspect_robots import eval_set
 
     _check_shared_run_conflicts(args)
@@ -1552,6 +1549,70 @@ def _write_html(document: str, out_path: Path | None) -> int:
     return len(encoded)
 
 
+def _trial_prefixes(log: EvalLog) -> tuple[str, ...]:
+    """Return every trial filename prefix represented by a parsed log."""
+    from inspect_robots.frames import _safe
+
+    return tuple(
+        _safe(f"{scene.scene_id}-e{trial}")
+        for scene in log.samples
+        for trial in range(max(len(scene.epochs), len(scene.policy_transcripts)))
+    )
+
+
+def _discover_trial_media(log: EvalLog, log_path: Path) -> dict[str, list[tuple[str, Path]]]:
+    """Discover a log's videos once at the CLI filesystem boundary."""
+    from inspect_robots._video import trial_videos
+
+    return trial_videos(log.stats.frames_dir, log_path, _trial_prefixes(log))
+
+
+_COPY_MTIME_TOLERANCE_SECONDS = 1.0
+
+
+def _link_media_file(source: Path, target: Path) -> None:
+    """Idempotently link one media file relatively, copying when links fail."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    relative_source = os.path.relpath(source, target.parent)
+    if target.is_symlink():
+        if os.readlink(target) == relative_source:
+            return
+        target.unlink()
+    elif target.exists():
+        source_stat = source.stat()
+        target_stat = target.stat()
+        if (
+            target_stat.st_size == source_stat.st_size
+            and target_stat.st_mtime + _COPY_MTIME_TOLERANCE_SECONDS >= source_stat.st_mtime
+        ):
+            return
+        shutil.copy2(source, target)
+        return
+    try:
+        os.symlink(relative_source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
+def _page_trial_media(
+    discovered: dict[str, list[tuple[str, Path]]],
+    frames_dir: str | None,
+    out_path: Path,
+) -> dict[str, list[tuple[str, str]]]:
+    """Link discovered videos beside a report and return page-relative hrefs."""
+    if frames_dir is None:
+        return {}
+    stamp = PureWindowsPath(frames_dir).name if "\\" in frames_dir else Path(frames_dir).name
+    linked: dict[str, list[tuple[str, str]]] = {}
+    for prefix, videos in discovered.items():
+        for label, source in videos:
+            target = out_path.parent / "media" / stamp / source.name
+            _link_media_file(source, target)
+            href = (Path("media") / stamp / source.name).as_posix()
+            linked.setdefault(prefix, []).append((label, href))
+    return linked
+
+
 def _render_log_page(
     log: EvalLog,
     log_path: Path,
@@ -1559,6 +1620,7 @@ def _render_log_page(
     *,
     no_frames: bool,
     frames_budget: float,
+    discovered_videos: dict[str, list[tuple[str, Path]]] | None = None,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -1566,12 +1628,19 @@ def _render_log_page(
         from inspect_robots._video import resolve_frames_dir
 
         frames_dir = resolve_frames_dir(log.stats.frames_dir, log_path)
+    trial_media = None
+    if out_path is not None:
+        videos = (
+            _discover_trial_media(log, log_path) if discovered_videos is None else discovered_videos
+        )
+        trial_media = _page_trial_media(videos, log.stats.frames_dir, out_path)
     document = render_html(
         log,
         title=f"{log.eval.task} - {log_path.name}",
         log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
+        trial_media=trial_media,
     )
     return _write_html(document, out_path)
 
@@ -1631,6 +1700,15 @@ def _index_entry(log: EvalLog, log_path: Path, page: str) -> IndexEntry:
         errored_trials=log.results.errored_trials,
         termination=_index_termination(log),
         error=log.error,
+        stamp=(
+            None
+            if log.stats.frames_dir is None
+            else (
+                PureWindowsPath(log.stats.frames_dir).name
+                if "\\" in log.stats.frames_dir
+                else Path(log.stats.frames_dir).name
+            )
+        ),
     )
 
 
@@ -1720,10 +1798,19 @@ def _render_view_directory(
         page_path = out_dir / page_name
         try:
             log = read_eval_log(str(log_path))
+            discovered_videos = _discover_trial_media(log, log_path)
+            newest_video_mtime = max(
+                (
+                    path.stat().st_mtime
+                    for videos in discovered_videos.values()
+                    for _, path in videos
+                ),
+                default=log_path.stat().st_mtime,
+            )
             render_page = (
                 force
                 or not page_path.exists()
-                or page_path.stat().st_mtime < log_path.stat().st_mtime
+                or page_path.stat().st_mtime < max(log_path.stat().st_mtime, newest_video_mtime)
             )
             if render_page:
                 print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
@@ -1733,12 +1820,23 @@ def _render_view_directory(
                     page_path,
                     no_frames=args.no_frames,
                     frames_budget=args.frames_budget,
+                    discovered_videos=discovered_videos,
                 )
                 pages_written += 1
             entries.append(_index_entry(log, log_path, page_name))
         except Exception as exc:
             print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
             entries.append(_unreadable_index_entry(log_path, exc))
+
+    readable = sorted(
+        (entry for entry in entries if entry.page is not None),
+        key=lambda entry: (entry.created, Path(entry.name).stem),
+    )
+    numbers = {entry.name: position for position, entry in enumerate(readable, start=1)}
+    entries = [
+        replace(entry, number=numbers[entry.name]) if entry.page is not None else entry
+        for entry in entries
+    ]
 
     index_path = out_dir / "index.html"
     bytes_written += _write_html(

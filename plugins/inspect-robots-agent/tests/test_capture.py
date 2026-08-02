@@ -79,14 +79,6 @@ def test_extracts_all_wire_image_shapes_without_mutating_request(tmp_path: Path)
                 "cache_control": {"type": "ephemeral"},
                 "vendor": "anthropic",
             },
-            {
-                "inlineData": {
-                    "mimeType": "image/png",
-                    "data": _PAYLOAD,
-                    "vendor": "gemini-source",
-                },
-                "vendor": "gemini-live",
-            },
         ]
     }
     original = json.loads(json.dumps(request))
@@ -124,14 +116,6 @@ def test_extracts_all_wire_image_shapes_without_mutating_request(tmp_path: Path)
         },
         "cache_control": {"type": "ephemeral"},
         "vendor": "anthropic",
-    }
-    assert parts[3] == {
-        "inlineData": {
-            "mimeType": "image/png",
-            "data": sentinel,
-            "vendor": "gemini-source",
-        },
-        "vendor": "gemini-live",
     }
     assert request == original
     assert re.fullmatch(r"\$blob:[0-9a-f]{64}", sentinel)

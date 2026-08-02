@@ -14,6 +14,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,6 @@ from inspect_robots.task import Task
 
 if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
-    from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -80,6 +80,24 @@ def _git_commit() -> str | None:
     return commit
 
 
+def _claim_run_stamp(log_dir: str) -> tuple[str, Path]:
+    """Atomically claim a collision-proof run stamp and its frames directory."""
+    prefix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    frames_root = Path(log_dir) / "frames"
+    for _attempt in range(16):
+        stamp = f"{prefix}_{uuid.uuid4().hex[:8]}"
+        stamp_dir = frames_root / stamp
+        try:
+            stamp_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return stamp, stamp_dir
+    stamp = f"{prefix}_{uuid.uuid4().hex}"
+    stamp_dir = frames_root / stamp
+    stamp_dir.mkdir(parents=True, exist_ok=False)
+    return stamp, stamp_dir
+
+
 class _Broadcast:
     """Fan a sink lifecycle out to several sinks, preserving hook order."""
 
@@ -97,17 +115,6 @@ class _Broadcast:
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         for hook in self._policy_message_hooks:
             hook(t, messages)
-
-    def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
-        """Offer the resolved spaces to sinks that declare a bind_spaces hook.
-
-        Duck-typed like ``log_policy_messages``: sinks without the attribute
-        are unaffected, so the sink Protocol is unchanged.
-        """
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_spaces", None)
-            if callable(hook):
-                hook(action_space, observation_space)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
@@ -205,20 +212,29 @@ def eval(
         else embodiment
     )
     try:
-        return _run_eval(
-            task,
-            policy,
-            embodiment,
-            log_dir=log_dir,
-            sinks=sinks,
-            seed=seed,
-            fail_on_error=fail_on_error,
-            controller=controller,
-            approver=approver,
-            remap=remap,
-            store_frames=store_frames,
-            before_scoring=before_scoring,
-        )
+        run_stamp, stamp_dir = _claim_run_stamp(log_dir)
+        try:
+            return _run_eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=log_dir,
+                sinks=sinks,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+                before_scoring=before_scoring,
+                run_stamp=run_stamp,
+            )
+        finally:
+            if not store_frames:
+                with suppress(OSError):
+                    stamp_dir.rmdir()
+                with suppress(OSError):
+                    stamp_dir.parent.rmdir()
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
         # when the run halts, so a real robot never leaks its connection.
@@ -240,6 +256,7 @@ def _run_eval(
     remap: dict[str, str] | None,
     store_frames: bool,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    run_stamp: str,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -284,11 +301,6 @@ def _run_eval(
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 
-    # One subdirectory per run: trial ids repeat across runs (scene-epoch),
-    # so a shared directory would silently overwrite the previous run's
-    # frames or transcripts.
-    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
-
     frame_store: FrameStore | None = None
     if store_frames:
         frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
@@ -310,7 +322,6 @@ def _run_eval(
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
     )
-    bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()

@@ -1,8 +1,9 @@
 """The canonical JSON eval-log sink.
 
 Writes the immutable [`EvalLog`][inspect_robots.log.EvalLog] to ``log_dir`` once the run
-finishes. The write is atomic (temp file + ``os.replace``) so an interrupted
-overnight run never leaves a half-written log.
+finishes. The write is atomic (temp file + hard-link claim, with an
+``os.replace`` fallback) so an interrupted overnight run never leaves a
+half-written log and concurrent writers cannot claim the same filename.
 
 The file is strict RFC 8259 JSON: non-finite floats (``nan``, ``±inf``, e.g. a
 ``min_distance_to_goal`` score when no distance was ever recorded) are mapped
@@ -83,11 +84,35 @@ class JsonLogSink:
     def on_eval_end(self, log: EvalLog) -> None:
         """Atomically serialize the final log and expose its path."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
-        self.path = self.log_dir / filename
-        tmp = self.path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        task_slug = _slug(log.eval.task)
+        final_stem = f"{task_slug}_{uuid.uuid4().hex[:8]}"
+        attempt = 0
+        while True:
+            final = self.log_dir / f"{final_stem}.json"
+            tmp = self.log_dir / f".{final_stem}.{uuid.uuid4().hex}.tmp"
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(
+                    _sanitize(log.to_dict()),
+                    fh,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(tmp, final)
+            except FileExistsError:
+                tmp.unlink()
+                if attempt == 16:
+                    raise
+                redrawn = uuid.uuid4().hex
+                final_stem = f"{task_slug}_{redrawn if attempt == 15 else redrawn[:8]}"
+                attempt += 1
+                continue
+            except OSError:
+                os.replace(tmp, final)
+            else:
+                tmp.unlink()
+            self.path = final
+            return

@@ -1,4 +1,4 @@
-"""Render evaluation logs as dependency-free, self-contained HTML documents."""
+"""Render evaluation logs as dependency-free HTML report documents."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import html
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +17,7 @@ import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
+from inspect_robots._video import default_fps
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
@@ -31,9 +32,128 @@ _BLOB_SENTINEL_RE = re.compile(r"\$blob:([^\s]+)")
 _BLOB_SHA_RE = re.compile(r"[0-9a-f]{64}")
 _MISSING = object()
 
-_FRAME_CLICK_SCRIPT = """document.addEventListener('click', (event) => {
+_VIEW_SCRIPT = """document.addEventListener('click', (event) => {
   const cell = event.target.closest('.frame-cell');
   if (cell) cell.classList.toggle('wide');
+});
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll(".trial.has-player").forEach(trial => {
+    const player = trial.querySelector(".player");
+    const videos = Array.from(player.querySelectorAll("video"));
+    const playpause = player.querySelector(".playpause");
+    const scrub = player.querySelector(".scrub");
+    const clock = player.querySelector(".clock");
+    const follow = player.querySelector(".follow");
+    const rail = trial.querySelector(".transcript");
+    const fps = Number(player.dataset.fps);
+    let master = null, settled = 0, frameRequest = null, autoScrolling = false;
+
+    function setFollow(on) {
+      follow.classList.toggle("on", on);
+      follow.textContent = on ? "Follow" : "Follow off";
+    }
+    function disableFollow() {
+      if (!autoScrolling) setFollow(false);
+    }
+    function update(time) {
+      if (!master) return;
+      const step = Math.round(time * fps);
+      scrub.value = String(Math.round(1000 * time / master.duration));
+      clock.textContent = `step ${step} · ${time.toFixed(1)}s`;
+      if (!rail) return;
+      let live = null;
+      rail.querySelectorAll(".message[data-step]").forEach(message => {
+        if (Number(message.dataset.step) <= step) live = message;
+      });
+      rail.querySelectorAll(".message.live").forEach(message => {
+        if (message !== live) message.classList.remove("live");
+      });
+      if (live) {
+        live.classList.add("live");
+        if (follow.classList.contains("on")) {
+          autoScrolling = true;
+          rail.scrollTop = live.offsetTop - rail.offsetTop - 16;
+          requestAnimationFrame(() => { autoScrolling = false; });
+        }
+      }
+    }
+    function seek(time) {
+      videos.forEach(video => {
+        if (video.readyState >= 1 && Number.isFinite(video.duration)) {
+          video.currentTime = Math.min(time, video.duration);
+        }
+      });
+      update(Math.min(time, master.duration));
+    }
+    function animate() {
+      update(master.currentTime);
+      if (!master.paused && !master.ended) {
+        frameRequest = requestAnimationFrame(animate);
+      }
+    }
+    function pauseAll() {
+      videos.forEach(video => video.pause());
+      playpause.textContent = "Play";
+      if (frameRequest !== null) cancelAnimationFrame(frameRequest);
+      frameRequest = null;
+      update(master.currentTime);
+    }
+    function elect() {
+      const playable = videos.filter(video => video.dataset.playable === "yes");
+      if (!playable.length) return;
+      master = playable.reduce((longest, video) =>
+        video.duration > longest.duration ? video : longest
+      );
+      playpause.disabled = false;
+      scrub.disabled = false;
+      follow.disabled = false;
+      master.addEventListener("ended", pauseAll);
+      update(0);
+    }
+    function settle(video, playable) {
+      if (video.dataset.settled) return;
+      video.dataset.settled = "yes";
+      if (playable && Number.isFinite(video.duration)) video.dataset.playable = "yes";
+      settled += 1;
+      if (settled === videos.length) elect();
+    }
+    videos.forEach(video => {
+      if (video.readyState >= 1) settle(video, true);
+      else {
+        video.addEventListener("loadedmetadata", () => settle(video, true), { once: true });
+        video.addEventListener("error", () => settle(video, false), { once: true });
+      }
+    });
+    playpause.addEventListener("click", () => {
+      if (!master) return;
+      if (!master.paused && !master.ended) {
+        pauseAll();
+        return;
+      }
+      seek(master.ended ? 0 : master.currentTime);
+      videos.forEach(video => {
+        const started = video.play();
+        if (started) started.catch(() => {});
+      });
+      playpause.textContent = "Pause";
+      frameRequest = requestAnimationFrame(animate);
+    });
+    scrub.addEventListener("input", () => {
+      if (master) seek(Number(scrub.value) * master.duration / 1000);
+    });
+    follow.addEventListener("click", () => setFollow(!follow.classList.contains("on")));
+    if (rail) {
+      rail.addEventListener("scroll", disableFollow);
+      rail.addEventListener("wheel", () => setFollow(false));
+      rail.addEventListener("touchstart", () => setFollow(false));
+      rail.addEventListener("click", event => {
+        const message = event.target.closest(".message[data-step]");
+        if (!message || event.target.closest(".frame-cell") || event.target.closest("a")) return;
+        if (getSelection().toString() || !master) return;
+        seek(Number(message.dataset.step) / fps);
+      });
+    }
+  });
 });"""
 
 
@@ -173,8 +293,27 @@ dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 }
 details { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 12px; }
 summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.trial { position: relative; }
+.player {
+  position: sticky; top: 0; z-index: 2; margin-top: 18px; padding: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+}
+.cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.cam { margin: 0; min-width: 0; }
+.cam figcaption { margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.cam video { display: block; width: 100%; max-height: 42vh; background: #000; }
+.controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.controls button { font: inherit; }
+.scrub { min-width: 100px; flex: 1; }
+.clock { min-width: 112px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.follow.on { font-weight: 700; }
+.trial.has-player .transcript { max-height: 60vh; overflow-y: auto; }
 .conversation { margin-top: 14px; }
-.message { margin: 13px 0; padding: 2px 0 2px 13px; border-left: 3px solid var(--system); }
+.message {
+  margin: 13px 0; padding: 2px 0 2px 13px; border-left: 3px solid var(--system);
+  scroll-margin-top: 16px;
+}
+.message.live { background: var(--grey-bg); }
 .message.user { border-color: var(--user); }
 .message.assistant { border-color: var(--assistant); }
 .message.tool { border-color: var(--tool); margin-left: 20px; }
@@ -442,7 +581,32 @@ def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
     return "".join(runs)
 
 
-def _render_message(raw_message: object, frame_ctx: _FrameContext | None = None) -> str:
+def _message_step(raw_message: object) -> int | None:
+    """Return the minimum camera-label step in one user message, if any."""
+    if not isinstance(raw_message, dict) or raw_message.get("role") != "user":
+        return None
+    content = raw_message.get("content")
+    if not isinstance(content, list):
+        return None
+    steps: list[int] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if not isinstance(text, str):
+            continue
+        match = _FRAME_LABEL_RE.fullmatch(text)
+        if match is not None:
+            steps.append(int(match.group("step")))
+    return min(steps) if steps else None
+
+
+def _render_message(
+    raw_message: object,
+    frame_ctx: _FrameContext | None = None,
+    *,
+    anchor: int = 0,
+) -> str:
     """Render one tolerant chat message without trusting its role or content."""
     if not isinstance(raw_message, dict):
         return ""
@@ -459,15 +623,16 @@ def _render_message(raw_message: object, frame_ctx: _FrameContext | None = None)
         body = "" if content is None else f'<div class="content">{_escape(content)}</div>'
     if role == "tool":
         return (
-            f'<div class="message {role_class}"><div class="role">{_escape(role)}</div>{body}</div>'
+            f'<div class="message {role_class}" data-step="{anchor}">'
+            f'<div class="role">{_escape(role)}</div>{body}</div>'
         )
     calls = ""
     tool_calls = raw_message.get("tool_calls")
     if isinstance(tool_calls, list):
         calls = "".join(_render_tool_call(raw_call) for raw_call in tool_calls)
     return (
-        f'<div class="message {role_class}"><div class="role">{_escape(role)}</div>'
-        f"{body}{calls}</div>"
+        f'<div class="message {role_class}" data-step="{anchor}">'
+        f'<div class="role">{_escape(role)}</div>{body}{calls}</div>'
     )
 
 
@@ -475,11 +640,14 @@ def _render_chat_transcript(
     transcript: list[object], frame_ctx: _FrameContext | None = None
 ) -> str:
     """Render a defensive role-oriented conversation."""
-    return (
-        '<div class="conversation">'
-        + "".join(_render_message(message, frame_ctx) for message in transcript)
-        + "</div>"
-    )
+    rendered: list[str] = []
+    anchor = 0
+    for message in transcript:
+        step = _message_step(message)
+        if step is not None:
+            anchor = step
+        rendered.append(_render_message(message, frame_ctx, anchor=anchor))
+    return '<div class="conversation">' + "".join(rendered) + "</div>"
 
 
 def _elide_json_values(value: Any) -> Any:
@@ -756,12 +924,35 @@ def _render_trial_wire(
     )
 
 
+def _render_player(media: Sequence[tuple[str, str]], fps: float) -> str:
+    """Render one synchronized camera player from already-relative media links."""
+    cameras = "".join(
+        '<figure class="cam">'
+        f"<figcaption>{_escape(label)}</figcaption>"
+        f'<video src="{_escape(href)}" preload="metadata" muted playsinline></video>'
+        "</figure>"
+        for label, href in media
+    )
+    return (
+        f'<section class="player" data-fps="{fps:g}">'
+        f'<div class="cams">{cameras}</div>'
+        '<div class="controls">'
+        '<button class="playpause" type="button" disabled>Play</button>'
+        '<input class="scrub" type="range" min="0" max="1000" value="0" step="1" disabled>'
+        '<span class="clock">step 0 · 0.0s</span>'
+        '<button class="follow on" type="button" disabled>Follow</button>'
+        "</div></section>"
+    )
+
+
 def _scene_section(
     scene: SceneResult,
     *,
     open_transcript: bool,
     budget: _FrameBudget,
     log_path: Path | None,
+    fps: float,
+    trial_media: Mapping[str, Sequence[tuple[str, str]]] | None,
     frame_ctx: _FrameContext | None = None,
 ) -> str:
     """Render one complete scene card and its available trial transcripts."""
@@ -816,24 +1007,36 @@ def _scene_section(
     # ``notes`` is empty exactly when no trial carried a note, and most will not.
     notes_block = "" if not notes else f"<h3>Grader notes</h3>{notes}"
 
-    transcripts = "".join(
-        (
-            f'<details class="transcript"{" open" if open_transcript else ""}>'
-            f"<summary>Trial {trial} transcript</summary>"
-            f"{_render_trial_transcript(transcript, frame_ctx, scene.scene_id, trial)}"
-            "</details>"
+    trials: list[str] = []
+    trial_count = max(len(scene.epochs), len(scene.policy_transcripts))
+    for trial in range(trial_count):
+        prefix = _safe(f"{scene.scene_id}-e{trial}")
+        media = () if trial_media is None else trial_media.get(prefix, ())
+        player = "" if not media else _render_player(media, fps)
+        transcript = (
+            scene.policy_transcripts[trial] if trial < len(scene.policy_transcripts) else None
         )
-        for trial, transcript in enumerate(scene.policy_transcripts)
-        if transcript is not None
-    )
-    wires = "".join(
-        _render_trial_wire(scene, trial, log_path, budget) for trial in range(len(scene.epochs))
-    )
+        transcript_html = (
+            ""
+            if transcript is None
+            else (
+                f'<details class="transcript"{" open" if open_transcript else ""}>'
+                f"<summary>Trial {trial} transcript</summary>"
+                f"{_render_trial_transcript(transcript, frame_ctx, scene.scene_id, trial)}"
+                "</details>"
+            )
+        )
+        wire = _render_trial_wire(scene, trial, log_path, budget)
+        player_class = " has-player" if media else ""
+        trials.append(
+            f'<div class="trial{player_class}" id="trial-{_escape(prefix)}">'
+            f"{player}{transcript_html}{wire}</div>"
+        )
     return (
         '<section class="scene">'
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene.status)}</div>{instruction}{error}{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{notes_block}{transcripts}{wires}</section>"
+        f"{reasons_block}{judgements_block}{notes_block}{''.join(trials)}</section>"
     )
 
 
@@ -844,8 +1047,9 @@ def render_html(
     log_path: Path | None = None,
     frames_dir: Path | None = None,
     frames_budget_bytes: int = 50_000_000,
+    trial_media: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> str:
-    """Return one self-contained HTML document describing the complete evaluation log."""
+    """Return one HTML document describing the complete evaluation log."""
     git = (
         'git <span class="chip">unknown</span>'
         if log.eval.git_commit is None
@@ -901,12 +1105,15 @@ def render_html(
     )
     budget = _FrameBudget(limit=frames_budget_bytes)
     frame_ctx = None if frames_dir is None else _FrameContext(frames_dir, "", budget)
+    fps = default_fps(log.eval.embodiment_info)[0]
     scenes = "".join(
         _scene_section(
             scene,
             open_transcript=transcript_count == 1,
             budget=budget,
             log_path=log_path,
+            fps=fps,
+            trial_media=trial_media,
             frame_ctx=frame_ctx,
         )
         for scene in log.samples
@@ -931,7 +1138,7 @@ def render_html(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
 <style>{_STYLES}</style>
-<script>{_FRAME_CLICK_SCRIPT}</script>
+<script>{_VIEW_SCRIPT}</script>
 </head>
 <body>
 <header><div class="header-inner">
