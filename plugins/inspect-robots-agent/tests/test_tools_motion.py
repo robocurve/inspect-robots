@@ -1286,3 +1286,13 @@ def test_displacement_pose_mode_keeps_move_by() -> None:
     move = toolset.schemas()[0]["function"]
     assert move["name"] == "move_by"
     assert move["description"].startswith("Move BY")
+
+
+def test_chunk_final_metadata_tagged_on_last_action() -> None:
+    result = _execute_absolute(0.5, current=0.0)
+    assert result.chunk is not None
+    actions = result.chunk.actions
+    assert len(actions) > 1
+    for action in actions[:-1]:
+        assert "chunk_final" not in action.meta
+    assert actions[-1].meta.get("chunk_final") is True

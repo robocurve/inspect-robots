@@ -499,6 +499,8 @@ class Toolset:
         *,
         target: npt.NDArray[np.float64] | None = None,
     ) -> ToolResult:
+        if actions:
+            actions[-1].meta["chunk_final"] = True
         note = f"executing {self._move_tool} over {steps} steps"
         if self._hz is not None:
             note += f" ({steps / self._hz:.1f}s)"
