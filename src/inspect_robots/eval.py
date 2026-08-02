@@ -328,6 +328,10 @@ def _run_eval(
     halted = False
     stopped = False
     cancelled_exc: _CancelledTrial | None = None
+    # A proportion threshold is a share of the whole eval, so the denominator is
+    # every trial the run intends to attempt. Using the completed-so-far count
+    # made the first error 1/1 = 100%, which trips any threshold below 1.
+    planned_trials = len(task.scenes) * epoch_spec.count
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
@@ -462,7 +466,7 @@ def _run_eval(
             if halted:
                 stopped = True
                 break
-            if _should_fail(fail_on_error, error_count, total_trials):
+            if _should_fail(fail_on_error, error_count, planned_trials):
                 # Checked after every trial, so fail_on_error=True stops at the
                 # first PolicyError instead of finishing the scene's epochs.
                 status = "error"
@@ -549,7 +553,11 @@ def _run_eval(
 
 
 def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
-    """Inspect-style ``fail_on_error`` evaluation for PolicyError-class failures."""
+    """Inspect-style ``fail_on_error`` evaluation for PolicyError-class failures.
+
+    ``trials`` is the number of trials the eval plans to run, not the number
+    completed so far: a proportion threshold is a share of the whole eval.
+    """
     if not fail_on_error or errors == 0:  # covers False, 0, 0.0
         return False
     if fail_on_error is True:
