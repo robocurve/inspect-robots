@@ -612,13 +612,15 @@ def test_observation_content_renders_approver_interventions() -> None:
             "env_step": 2,
             "approvals": [
                 {"t": 0, "detail": "clamped"},
-                {"t": 1, "detail": "delta_clamped"},
+                {"t": 1, "detail": "clamped"},
+                {"t": 2, "detail": "delta_clamped"},
+                {"t": 3, "detail": "clamped"},
             ],
         },
     )
     parts = _observation_content(obs)
     text = parts[0]["text"]
-    assert "approver: 2 step(s) modified (clamped, delta_clamped)." in text
+    assert "approver: 4 step(s) modified (clamped \u00d73, delta_clamped)." in text
 
 
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:

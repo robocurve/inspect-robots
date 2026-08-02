@@ -450,8 +450,20 @@ def test_rollout_surfaces_approvals_in_observation_extra() -> None:
             self.captured_extras.clear()
 
         def act(self, observation: Observation) -> ActionChunk:
-            self.captured_extras.append(dict(observation.extra))
-            return ActionChunk(actions=[Action(data=np.array([1.0, 1.0]))])
+            # Capture a deep copy of observation.extra to inspect what policy was given
+            import copy
+
+            self.captured_extras.append(copy.deepcopy(dict(observation.extra)))
+            # Mutate extra dict to verify rollout store is not corrupted by policy
+            if (
+                isinstance(observation.extra.get("approvals"), list)
+                and observation.extra["approvals"]
+            ):
+                observation.extra["approvals"][0]["detail"] = "corrupted"
+            # Emit 2 actions per chunk so step 0 & 1 happen between act() calls
+            act1 = Action(data=np.array([1.0, 1.0]))
+            act2 = Action(data=np.array([1.0, 1.0]))
+            return ActionChunk(actions=[act1, act2])
 
     space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
     policy = _ObsCapturingPolicy()
@@ -459,10 +471,16 @@ def test_rollout_surfaces_approvals_in_observation_extra() -> None:
     assert len(policy.captured_extras) > 1
     # First inference sees empty approvals (step 0 hasn't approved anything yet)
     assert policy.captured_extras[0]["approvals"] == []
-    # Subsequent inferences see recorded approvals
+    # Second inference sees only the approvals since the previous act() (steps 0 & 1)
     second_approvals = policy.captured_extras[1]["approvals"]
-    assert isinstance(second_approvals, list) and len(second_approvals) > 0
+    assert isinstance(second_approvals, list) and len(second_approvals) == 2
     assert second_approvals[0] == {"t": 0, "detail": "clamped"}
+    assert second_approvals[1] == {"t": 1, "detail": "clamped"}
+    # Third inference sees windowed approvals since second act() (steps 2 & 3)
+    if len(policy.captured_extras) > 2:
+        third_approvals = policy.captured_extras[2]["approvals"]
+        assert isinstance(third_approvals, list) and len(third_approvals) == 2
+        assert third_approvals[0] == {"t": 2, "detail": "clamped"}
 
 
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:

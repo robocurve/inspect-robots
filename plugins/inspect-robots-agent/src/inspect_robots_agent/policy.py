@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1000,7 +1001,16 @@ def _approvals_line(observation: Observation) -> str | None:
         return None
     total = len(approvals)
     details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
-    detail_str = f" ({', '.join(details)})" if details else ""
+    if not details:
+        return f"approver: {total} step(s) modified."
+    counts = Counter(details)
+    formatted: list[str] = []
+    for flag, count in counts.items():
+        if count > 1:
+            formatted.append(f"{flag} \u00d7{count}")
+        else:
+            formatted.append(flag)
+    detail_str = f" ({', '.join(formatted)})"
     return f"approver: {total} step(s) modified{detail_str}."
 
 

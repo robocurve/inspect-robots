@@ -267,10 +267,12 @@ def rollout(
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
-            approvals = list(store.get(_APPROVALS_KEY, []))
+            all_approvals = store.get(_APPROVALS_KEY, [])
+            last_seen = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_seen:]]
             try:
                 obs_with_extra = replace(
-                    obs, extra={**obs.extra, "env_step": t, "approvals": approvals}
+                    obs, extra={**obs.extra, "env_step": t, "approvals": tail_approvals}
                 )
                 action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
@@ -281,6 +283,7 @@ def rollout(
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
+                store["_rollout_last_approvals_idx"] = len(all_approvals)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
