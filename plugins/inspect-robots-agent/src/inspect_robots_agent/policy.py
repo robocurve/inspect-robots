@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -820,6 +821,25 @@ class LLMAgentPolicy(PolicyBase):
                                 if result.capture is None
                                 else _unique_names(result.capture)
                             )
+                            # Exclude cameras from self._revealed if their image-bearing message
+                            # was evicted by image_horizon
+                            if self._image_horizon is not None:
+                                active_camera_names: set[str] = set()
+                                for msg in outgoing:
+                                    content_list = msg.get("content")
+                                    if isinstance(content_list, list):
+                                        for part in content_list:
+                                            if (
+                                                isinstance(part, dict)
+                                                and part.get("type") == "text"
+                                            ):
+                                                text = part.get("text", "")
+                                                if text.startswith("camera '"):
+                                                    end_quote = text.find("'", 8)
+                                                    if end_quote != -1:
+                                                        active_camera_names.add(text[8:end_quote])
+                                self._revealed.intersection_update(active_camera_names)
+
                             skipped = tuple(name for name in requested if name in self._revealed)
                             immediate_frames = tuple(
                                 name for name in requested if name not in self._revealed
@@ -994,6 +1014,25 @@ def _step_label(observation: Observation) -> str:
     return f"step {step}" if isinstance(step, int) else ""
 
 
+def _approvals_line(observation: Observation) -> str | None:
+    approvals = observation.extra.get("approvals")
+    if not isinstance(approvals, list) or not approvals:
+        return None
+    total = len(approvals)
+    details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
+    if not details:
+        return f"approver: {total} step(s) modified."
+    counts = Counter(details)
+    formatted: list[str] = []
+    for flag, count in counts.items():
+        if count > 1:
+            formatted.append(f"{flag} \u00d7{count}")
+        else:
+            formatted.append(flag)
+    detail_str = f" ({', '.join(formatted)})"
+    return f"approver: {total} step(s) modified{detail_str}."
+
+
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
@@ -1007,6 +1046,9 @@ def _observation_content(
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
     lines.extend(_state_lines(observation, state_labels))
+    app_line = _approvals_line(observation)
+    if app_line is not None:
+        lines.append(app_line)
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
