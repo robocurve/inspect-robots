@@ -19,6 +19,7 @@ from inspect_robots._setup import (
     SUGGESTED,
     _camera_inventory,
     _camera_rows,
+    _camera_view_state,
     _CameraNode,
     _can_serial,
     _duplicated_serials,
@@ -3813,3 +3814,61 @@ def test_suggest_can_pinning_pinned_names_or_no_assigned_kernel_name_are_silent(
     _suggest_can_pinning(order_net, slots, {"left_channel": "can9"}, out=unassigned_out)
     assert pinned_out.getvalue() == ""
     assert unassigned_out.getvalue() == ""
+
+
+def test_camera_view_state_suppresses_toggle_when_rows_are_identical() -> None:
+    inv = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci/usb1/1-1",
+            serial="SN1",
+            by_id="/dev/v4l/by-id/cam1",
+            by_path="/dev/v4l/by-path/cam1",
+        )
+    ]
+    # When by_id_rows and by_path_rows match exactly, toggle 'p' should be suppressed
+    active_is_by_id, advertise_toggle = _camera_view_state(
+        inv, ["/dev/v4l/by-id/cam1"], ["/dev/v4l/by-id/cam1"]
+    )
+    assert active_is_by_id is True
+    assert advertise_toggle is False
+
+
+def test_prompt_device_slot_detects_duplicate_across_by_id_and_by_path() -> None:
+    inventory = [
+        _CameraNode(
+            node="/dev/video0",
+            camera="/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1",
+            serial="SN123",
+            by_id="/dev/v4l/by-id/usb-Cam_123-video-index0",
+            by_path="/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0",
+        )
+    ]
+    by_id_dir = Path("/dev/v4l/by-id")
+    by_path_dir = Path("/dev/v4l/by-path")
+    assigned = {"top_cam_device": ("v4l2", "top", "/dev/v4l/by-id/usb-Cam_123-video-index0")}
+
+    # User attempts to assign the by-path path of the SAME camera to the left camera role
+    by_path_val = "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"
+    input_fn, _prompts = _scripted_input([by_path_val, "n", "s"])
+    out = io.StringIO()
+
+    res, _ = _prompt_device_slot(
+        "left camera",
+        "v4l2",
+        ["/dev/v4l/by-id/usb-Cam_123-video-index0"],
+        [by_path_val],
+        True,
+        by_id_dir,
+        by_path_dir,
+        None,
+        assigned,
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _b: None,
+        camera_role="left",
+    )
+    assert res is None
+    assert "already assigned to the top camera" in out.getvalue()

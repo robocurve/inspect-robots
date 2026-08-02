@@ -321,8 +321,14 @@ def _camera_view_state(
             record.by_id is None or (record.serial is not None and record.serial in duplicated)
             for record in inventory
         )
-        return active_is_by_id, advertise_path_toggle
-    return bool(by_id_rows) or not by_path_rows, len(by_path_rows) > len(by_id_rows)
+    else:
+        active_is_by_id = bool(by_id_rows) or not by_path_rows
+        advertise_path_toggle = len(by_path_rows) > len(by_id_rows)
+
+    if by_id_rows == by_path_rows:
+        advertise_path_toggle = False
+
+    return active_is_by_id, advertise_path_toggle
 
 
 def _identify_by_replug(
@@ -528,6 +534,7 @@ def _prompt_device_slot(
     out: IO[str],
     identify: Callable[[bool], str | None],
     camera_role: str | None = None,
+    rescan_inventory: Callable[[], list[_CameraNode]] | None = None,
 ) -> tuple[str | None, bool]:
     """Prompt for one slot and return its device plus active listing state."""
     warned_current = False
@@ -557,6 +564,15 @@ def _prompt_device_slot(
             selected = identify(active_is_by_id)
             if selected is None:
                 continue
+            if kind == "v4l2" and rescan_inventory is not None:
+                new_inventory = rescan_inventory()
+                if new_inventory:
+                    inventory.clear()
+                    inventory.extend(new_inventory)
+                    by_id_devices.clear()
+                    by_id_devices.extend(_camera_rows(inventory, by_id_dir, by_id=True))
+                    by_path_devices.clear()
+                    by_path_devices.extend(_camera_rows(inventory, by_path_dir, by_id=False))
         elif not entered and current is not None:
             if (
                 kind == "v4l2"
@@ -635,11 +651,26 @@ def _prompt_device_slot(
             )
             continue
 
+        def physical_id(dev_path: str) -> str:
+            resolved = str(Path(dev_path).resolve(strict=False))
+            for rec in inventory:
+                if dev_path in (rec.by_id, rec.by_path, rec.node) or resolved == str(
+                    Path(rec.node).resolve(strict=False)
+                ):
+                    return rec.camera or rec.node
+            return resolved
+
+        sel_id = physical_id(selected) if (kind == "v4l2" and inventory) else selected
         other = next(
             (
                 (assigned_label, device)
                 for assigned_kind, assigned_label, device in assigned.values()
-                if assigned_kind == kind and device == selected
+                if assigned_kind == kind
+                and (
+                    physical_id(device) == sel_id
+                    if (kind == "v4l2" and inventory)
+                    else device == selected
+                )
             ),
             None,
         )
@@ -735,6 +766,7 @@ def _camera_section(
                     by_path_dir=by_path_dir,
                 ),
                 camera_role=role,
+                rescan_inventory=rescan_inventory,
             )
             if selected is not None:
                 assignments[key] = selected
@@ -897,6 +929,7 @@ def _device_section(
             input_fn=input_fn,
             out=out,
             identify=identify,
+            rescan_inventory=rescan_inventory if slot.kind == "v4l2" else None,
         )
         assignments.pop(slot.arg, None)
         assigned_devices.pop(slot.arg, None)
