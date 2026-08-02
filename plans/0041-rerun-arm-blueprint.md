@@ -278,5 +278,5 @@ Coverage note: every branch above is reachable from the tests in Step 1 (labels/
 
 - Preserving operator layout tweaks across trial boundaries: rerun has no mid-path wildcards, so the layout must be re-sent per trial namespace and each re-send resets viewer tweaks. Accepted: the layout follows the live trial, and the motivating single-instruction `run` flow sends exactly once. `make_active`/`make_default` juggling stays at SDK defaults until someone needs it.
 - A declaration protocol for plot grouping (PLOT_GROUPS-style): `dim_labels` already carries the grouping and is conformance-checked; a dedicated protocol is YAGNI until an embodiment needs groups that labels cannot express.
-- Splitting commanded vs measured into separate views, styling (colors, line styles), and gripper-vs-joint separation: the per-side overlay is the requested "one plot per hand"; refinements are viewer-side tweaks operators can make live, and the sent layout never overwrites them.
+- Splitting commanded vs measured into separate views, styling (colors, line styles), and gripper-vs-joint separation: the per-side overlay is the requested "one plot per hand"; refinements are viewer-side tweaks operators can make live (reset at trial boundaries when the layout re-sends).
 - The `run --policy agent` CLI path needs no change: it reaches `eval()` and the bus like every other run.

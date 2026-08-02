@@ -456,6 +456,16 @@ def _views(recorder: _BlueprintRecorder, kind: str) -> list[_BlueprintNode]:
     return [call for call in recorder.calls if call.kind == kind]
 
 
+def _sent_tree(root: object) -> list[_BlueprintNode]:
+    """Flatten every node reachable from one sent Blueprint, depth-first."""
+    if not isinstance(root, _BlueprintNode):
+        return []
+    nodes = [root]
+    for arg in root.args:
+        nodes.extend(_sent_tree(arg))
+    return nodes
+
+
 def test_joint_groups_split_on_label_prefix() -> None:
     labels = tuple(
         f"{side}_{part}" for side in ("left", "right") for part in ("j0", "j1", "gripper")
@@ -491,6 +501,17 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
     assert sink.flush(timeout=5.0)
 
     assert len(recorder.sent) == 1
+    # The sent Blueprint must actually CONTAIN the views (a constructed view
+    # that never gets wired into a column would pass constructor-level
+    # assertions while the viewer shows nothing).
+    reachable = _sent_tree(recorder.sent[0])
+    reachable_names = {
+        view.kwargs.get("name") for view in reachable if view.kind == "TimeSeriesView"
+    }
+    assert {"left", "right", "reward"} <= reachable_names
+    assert any(view.kind == "Spatial2DView" for view in reachable)
+    assert any(view.kind == "TextLogView" for view in reachable)
+    assert any(view.kind == "TextDocumentView" for view in reachable)
     time_series = _views(recorder, "TimeSeriesView")
     left = next(view for view in time_series if view.kwargs.get("name") == "left")
     right = next(view for view in time_series if view.kwargs.get("name") == "right")
@@ -676,6 +697,36 @@ def test_reused_sink_resends_blueprint_for_same_trial_prefix(
         sink.on_eval_end(None)  # type: ignore[arg-type]
 
     assert len(recorder.sent) == 2
+
+
+def test_eval_drives_the_blueprint_through_bind_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: eval() wires bind_spaces into RerunSink and a layout is sent."""
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[RerunSink()])
+    assert len(recorder.sent) >= 1
+    reachable = _sent_tree(recorder.sent[0])
+    # CubePick's dx/dy labels collapse to the single combined joints view.
+    assert any(
+        view.kind == "TimeSeriesView" and view.kwargs.get("name") == "joints" for view in reachable
+    )
+
+
+def test_blueprint_skipped_for_zero_dim_action_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-dim action space sends no layout instead of empty-content views."""
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(Box(shape=(0,)), ObservationSpace())
+    sink.on_trial_start("s0", 0)
+    _blueprint_step(sink)
+    assert sink.flush(timeout=5.0)
+    assert recorder.sent == []
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 def test_policy_messages_emit_ordered_levels_on_the_step_timeline(

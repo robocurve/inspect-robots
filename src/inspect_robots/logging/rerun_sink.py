@@ -315,7 +315,9 @@ class RerunSink:
         spaces were never bound or the SDK predates blueprints; any build or
         send failure degrades to the automatic layout with a single warning.
         """
-        if self._action_dim is None:
+        # Falsy covers both "never bound" (None) and a 0-dim action space,
+        # which would otherwise build empty-content views.
+        if not self._action_dim:
             return
         rrb = getattr(rr, "blueprint", None)
         send = getattr(rr, "send_blueprint", None)
