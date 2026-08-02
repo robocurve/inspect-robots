@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The Rerun viewer shows one time-series plot per labeled action-dim group (YAM: "left" with dims 0-6, "right" with dims 7-13, commanded and measured series together) instead of the heuristic subset it picks today, by sending an explicit blueprint at eval start (#265).
+**Goal:** The Rerun viewer shows one time-series plot per labeled action-dim group (YAM: "left" with dims 0-6, "right" with dims 7-13, commanded and measured series together) instead of the heuristic subset it picks today, by sending an explicit blueprint for each trial namespace (#265; the issue's "sent exactly once" wording rested on wildcard support rerun does not have).
 
 **Architecture:** A new duck-typed sink hook (`bind_spaces`, mirroring the existing `bind_task`/`log_policy_messages` getattr precedents) hands sinks the resolved `Box` action space and `ObservationSpace` before `on_eval_start`. `RerunSink` distills them into plain fields (dim labels, action dim count, camera names, state keys and 1-D state field lengths), derives groups by first-underscore label prefix, and sends one blueprint per trial namespace FROM THE WORKER THREAD: `_emit` notices the first payload of each new prefix and sends a blueprint whose views use concrete exact paths under that prefix (rerun's entity-query grammar supports `/**` ONLY as a suffix — mid-path wildcards like `trial/**/action/0` are accepted silently but match nothing, so per-prefix sends with exact paths are the only correct shape). The existing threading contract ("all SDK calls after startup happen on the worker") is preserved untouched. Every failure mode (hook never called, unlabeled dims, SDK without blueprint support, build/send exception) degrades to today's heuristic layout with at most one warning.
 
@@ -180,6 +180,8 @@ def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, l
 
 (Verify `Box.dim` is the dim-count property in spaces.py:127-133 — `Box.size` does NOT exist.)
 
+`on_eval_start` additionally resets `self._blueprint_prefix = None` and `self._blueprint_warned = False` (caller thread, pre-worker — mirroring the `_emit_warned` reset in `_shutdown` so a reused sink's second eval, which replays identical `trial/s0/e0` prefixes into a fresh recording, gets its blueprint again). Add a two-drive test: start/log/flush/end twice with the same prefix, assert two sends.
+
 `_send_blueprint(rr, prefix)` runs on the worker. Trigger at the top of `_emit` (before the transcript `isinstance` branch, so a transcript-first trial still gets its layout):
 
 ```python
@@ -265,7 +267,7 @@ Coverage note: every branch above is reachable from the tests in Step 1 (labels/
 **Files:**
 - Modify: the rerun docs section (`grep -rn "rerun" docs/ README.md --include="*.md" -l` and pick the page describing the viewer; likely `docs/guide/cli.md` or a visualization guide), `CHANGELOG.md` (`## [Unreleased]` → `### Added`), `src/inspect_robots/CLAUDE.md` module-map row for `logging/`.
 
-- [ ] **Step 1:** One short paragraph in the viewer docs: the sink sends a layout grouping joint series per labeled arm (commanded `action/*` and measured `state/*` together per side), with cameras, the LLM transcript pane, and reward laid out alongside; embodiments without `dim_labels` get one combined joints plot; the layout is sent once at eval start and never re-sent, so operator tweaks survive trial boundaries. No em dashes in prose.
+- [ ] **Step 1:** One short paragraph in the viewer docs: the sink sends a layout grouping joint series per labeled arm (commanded `action/*` and measured `state/*` together per side), with cameras, the LLM transcript pane, and reward laid out alongside; embodiments without `dim_labels` get one combined joints plot; the layout is re-sent at each trial boundary so it always follows the live trial (viewer tweaks reset then; a single-trial `run` sends exactly once). No em dashes in prose.
 - [ ] **Step 2:** CHANGELOG under `### Added`, referencing #265 and plan 0041, mirroring existing entry format.
 - [ ] **Step 3:** Extend the module-map row for the rerun sink with the blueprint mention (plan 0041), matching phrasing density.
 - [ ] **Step 4:** `uv run pytest -q` green; commit `docs: describe the per-arm rerun blueprint layout (#265)`.
