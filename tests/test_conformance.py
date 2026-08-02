@@ -9,10 +9,12 @@ import pytest
 
 from inspect_robots.conformance import (
     DeviceSlot,
+    OptionSlot,
     assert_embodiment_conformant,
     check_embodiment,
     device_slots,
     missing_runtime_requirements,
+    option_slots,
 )
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.mock import CubePickEmbodiment
@@ -112,6 +114,71 @@ def test_device_slots_attribute_or_iteration_failure_is_empty() -> None:
 
     assert device_slots(_BrokenAttribute()) == ()
     assert device_slots(_Factory) == ()
+
+
+def test_option_slots_absent_attribute_is_empty() -> None:
+    class _Factory:
+        pass
+
+    assert option_slots(_Factory) == ()
+    assert option_slots(None) == ()
+
+
+def test_option_slots_valid_tuple_round_trips_in_order() -> None:
+    slots = (
+        OptionSlot(
+            arg="auto_start",
+            label="Skip the operator start prompts (auto_start)",
+        ),
+        OptionSlot(arg="verbose", label="Verbose", default=True),
+    )
+
+    class _Factory:
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = slots
+
+    assert option_slots(_Factory) == slots
+
+
+def test_option_slots_default_is_false() -> None:
+    assert OptionSlot(arg="a", label="A").default is False
+
+
+def test_option_slots_accepts_lists_and_ignores_offending_entries() -> None:
+    valid = OptionSlot(arg="auto_start", label="Auto start")
+
+    class _Factory:
+        OPTION_SLOTS: ClassVar[list[object]] = [
+            "not a slot",
+            valid,
+            None,
+        ]
+
+    assert option_slots(_Factory) == (valid,)
+
+
+@pytest.mark.parametrize("garbage", [7, None])
+def test_option_slots_whole_value_garbage_is_empty(garbage: object) -> None:
+    class _Factory:
+        OPTION_SLOTS: ClassVar[object] = garbage
+
+    assert option_slots(_Factory) == ()
+
+
+def test_option_slots_attribute_or_iteration_failure_is_empty() -> None:
+    class _BrokenAttribute:
+        @property
+        def OPTION_SLOTS(self) -> object:
+            raise RuntimeError("broken descriptor")
+
+    class _BrokenIteration:
+        def __iter__(self) -> object:
+            raise RuntimeError("broken iterator")
+
+    class _Factory:
+        OPTION_SLOTS: ClassVar[object] = _BrokenIteration()
+
+    assert option_slots(_BrokenAttribute()) == ()
+    assert option_slots(_Factory) == ()
 
 
 def test_runtime_requirements_absent_attribute_is_empty() -> None:

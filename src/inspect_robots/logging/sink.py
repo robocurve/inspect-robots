@@ -13,6 +13,12 @@ normalize that shape on this live path, so sinks must render defensively.
 Sinks must not mutate the supplied messages. The extension deliberately stays
 off both ``LogSink`` and ``NullSink``: it must not change structural protocol
 conformance or advertise a no-op that makes policies build transcript deltas.
+
+A second duck-typed extension, ``bind_spaces(action_space, observation_space)``,
+is called by ``eval()`` exactly once per run, before ``on_eval_start``, with the
+resolved embodiment ``Box`` and ``ObservationSpace``. A sink that defines a
+callable ``bind_spaces`` MUST accept this two-argument signature; like
+``log_policy_messages``, the name is claimed by the eval loop.
 """
 
 from __future__ import annotations

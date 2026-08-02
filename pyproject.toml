@@ -58,7 +58,7 @@ inspect-robot = "inspect_robots.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots"
-Documentation = "https://inspectrobots.org/"
+Documentation = "https://docs.inspectrobots.org/"
 Repository = "https://github.com/robocurve/inspect-robots"
 Issues = "https://github.com/robocurve/inspect-robots/issues"
 

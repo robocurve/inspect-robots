@@ -20,7 +20,7 @@ from inspect_robots.spaces import (
     StateField,
     StateSpec,
 )
-from inspect_robots.types import Observation
+from inspect_robots.types import Action, Observation
 from inspect_robots_agent._llm import ToolCall
 from inspect_robots_agent._tools import ToolResult, ToolsetError, build_toolset
 
@@ -61,6 +61,21 @@ def _absolute_space(
 
 def _absolute_obs_space(dim: int = 1, key: str = "q") -> ObservationSpace:
     return ObservationSpace(state=StateSpec(fields=(StateField(key=key, shape=(dim,)),)))
+
+
+def _declaring_space(
+    max_step: tuple[float | None, float | None] = (None, 0.1),
+) -> Box:
+    return Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            dim_labels=("joint", "gripper"),
+            max_step=max_step,
+        ),
+    )
 
 
 def _camera_obs_space() -> ObservationSpace:
@@ -330,10 +345,18 @@ def test_build_rejects_degenerate_derivations() -> None:
     with pytest.raises(ToolsetError, match="too large to derive a playout cap"):
         build_toolset(_delta_space(), ObservationSpace(), control_hz=1e308)
 
-    with pytest.raises(ToolsetError, match="underflows to a zero per-step limit"):
+    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
         build_toolset(
             _absolute_space(),
             _absolute_obs_space(),
+            control_hz=10.0,
+            max_speed_frac=5e-324,
+        )
+
+    with pytest.raises(ToolsetError, match="underflows to a zero per-step limit"):
+        build_toolset(
+            _delta_space(),
+            ObservationSpace(),
             control_hz=10.0,
             max_speed_frac=5e-324,
         )
@@ -401,6 +424,133 @@ def test_low_precision_bounds_never_outrun_native_backstop() -> None:
     store: dict[str, Any] = {}
     for action in result.chunk.actions:
         assert chain.review(action, store) is action
+
+
+def test_declared_step_paces_gripper_while_undeclared_joint_is_unchanged() -> None:
+    space = _declaring_space()
+    toolset = build_toolset(space, _absolute_obs_space(dim=2), control_hz=10.0)
+    observation = _obs({"q": np.array([0.0, 0.0])})
+
+    gripper = toolset.execute(
+        _call("move_joints", targets={"gripper": 1.0}),
+        observation,
+    )
+    joint = toolset.execute(
+        _call("move_joints", targets={"joint": 1.0}),
+        observation,
+    )
+
+    assert gripper.error is None and gripper.chunk is not None
+    assert len(gripper.chunk.actions) == 11
+    assert joint.error is None and joint.chunk is not None
+    assert len(joint.chunk.actions) == 51
+
+    undeclared = Box(
+        shape=(2,),
+        low=space.low,
+        high=space.high,
+        semantics=ActionSemantics("joint_pos", dim_labels=("joint", "gripper")),
+    )
+    old_toolset = build_toolset(undeclared, _absolute_obs_space(dim=2), control_hz=10.0)
+    old_full_stroke = old_toolset.execute(
+        _call("move_joints", targets={"gripper": 1.0}),
+        observation,
+    )
+    assert old_full_stroke.chunk is None
+    assert old_full_stroke.error is not None
+    assert "playout cap" in old_full_stroke.error
+
+
+@pytest.mark.parametrize(
+    ("max_speed_frac", "expected_steps"),
+    [(0.05, 21), (0.2, 11)],
+)
+def test_declared_step_scales_down_but_not_above_its_ceiling(
+    max_speed_frac: float,
+    expected_steps: int,
+) -> None:
+    toolset = build_toolset(
+        _declaring_space(),
+        _absolute_obs_space(dim=2),
+        control_hz=10.0,
+        max_speed_frac=max_speed_frac,
+    )
+    result = toolset.execute(
+        _call("move_joints", targets={"gripper": 1.0}),
+        _obs({"q": np.array([0.0, 0.0])}),
+    )
+
+    assert result.error is None and result.chunk is not None
+    assert len(result.chunk.actions) == expected_steps
+
+
+def test_combined_declared_move_uses_largest_per_dimension_step_count() -> None:
+    toolset = build_toolset(
+        _declaring_space(),
+        _absolute_obs_space(dim=2),
+        control_hz=10.0,
+    )
+    result = toolset.execute(
+        _call("move_joints", targets={"joint": 0.4, "gripper": 1.0}),
+        _obs({"q": np.array([0.0, 0.0])}),
+    )
+
+    assert result.error is None and result.chunk is not None
+    assert len(result.chunk.actions) == 21
+
+
+def test_declared_step_is_the_float_spacing_guard_budget() -> None:
+    space = Box(
+        shape=(1,),
+        low=np.array([1e9]),
+        high=np.array([1e9 + 100.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            dim_labels=("joint",),
+            max_step=(0.1,),
+        ),
+    )
+
+    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+        build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+
+
+def test_declared_step_pacing_underflow_hits_movable_zero_limit_guard() -> None:
+    space = Box(
+        shape=(1,),
+        low=np.array([0.0]),
+        high=np.array([1e-300]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            dim_labels=("joint",),
+            max_step=(1e-300,),
+        ),
+    )
+
+    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
+        build_toolset(
+            space,
+            _absolute_obs_space(),
+            control_hz=10.0,
+            max_speed_frac=1e-300,
+        )
+
+
+def test_declared_step_chunks_pass_the_default_delta_approver_unmodified() -> None:
+    space = _declaring_space()
+    toolset = build_toolset(space, _absolute_obs_space(dim=2), control_hz=10.0)
+    start = np.array([0.0, 0.0])
+    result = toolset.execute(
+        _call("move_joints", targets={"gripper": 1.0}),
+        _obs({"q": start}),
+    )
+    assert result.chunk is not None
+
+    approver = DeltaLimitApprover(space)
+    store: dict[str, Any] = {}
+    approver.review(Action(data=start), store)
+    for action in result.chunk.actions:
+        assert approver.review(action, store) is action
 
 
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])

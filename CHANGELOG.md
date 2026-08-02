@@ -9,6 +9,54 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- The Rerun sink now sends a per-trial blueprint that groups labeled action
+  dimensions by arm, overlays aligned measured state, and lays out cameras,
+  transcript, events, and reward alongside the joint plots
+  ([plan 0041](plans/0041-rerun-arm-blueprint.md), #265).
+
+- **Approver interventions in observations:** safety approver rewrites (such as
+  clamping or delta-limiting) since the previous decision are now windowed into
+  `observation.extra["approvals"]`. `LLMAgentPolicy` renders them as aggregated prompt
+  lines (e.g. `approver: 3 step(s) modified (clamped ×3).`), enabling LLM/VLA models
+  to recognize safety interventions and adapt targets (#187, #217).
+
+- **Agent plugin (0.20.0):** `-P wire=gemini-live` now serves
+  `google/gemini-robotics-er-2-streaming-preview` through Google's stateful
+  v1beta Live API. The sync websocket client streams only new observations,
+  preserves exact tool-response ordering, recovers expired or dropped
+  sessions from the image-free transcript, and captures each socket attempt
+  with content-addressed frame blobs (plan 0039, #252).
+
+- `inspect-robots view --serve` now serves a rendered logs directory, refreshes
+  it incrementally as new runs arrive, and supports explicit host/port binding
+  for local or remote browsing (plan 0037, #241)
+
+- `inspect-robots view` now accepts a logs directory and incrementally renders
+  self-contained per-run reports plus a searchable browsable index, with
+  unreadable logs surfaced in place instead of aborting the whole directory
+  ([plan 0035](plans/0035-view-log-directory.md), #234).
+
+- Embodiments can contribute specialized approvers to the CLI's default
+  guardrail chain through the new public `GuardrailContribution` API. Generic
+  clamp and delta-limit gates remain first, contribution warnings stay visible,
+  and `DeltaLimitApprover.rewind_reference` safely supports hold substitutions.
+  The new public API is the rationale for the 0.31.0 minor release
+  ([plan 0034](plans/0034-embodiment-contributed-guardrails.md), #232).
+
+- Per-dimension `ActionSemantics.max_step` declarations let embodiments set
+  absolute-control pacing and safety ceilings in native units. Default delta
+  approval, agent-tool interpolation, and CaP-X motion queues honor mixed
+  declared/range-derived limits while policy compatibility deliberately ignores
+  embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
+
+- `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
+  boolean behavior toggles that `inspect-robots setup` interviews as yes/no
+  questions and writes into `[embodiment.args]`. First consumer:
+  inspect-robots-yam's `auto_start` (yam#87).
+
+- Policy connection failures now include an actionable action-server
+  remediation hint in the recorded error message (#219).
+
 - Wire capture: eval logs now record 100% of what the LLM saw. The agent
   policy captures every request/response attempt at the wire-client
   serialization point (tool schemas, evicted view, depth composites,
@@ -28,6 +76,12 @@ All notable changes to this project are documented here. The format is based on
   runs now prompt for exactly those trials — registered tasks and `eval-set`
   included (#194).
 
+### Changed
+
+- The `llm/latest` Rerun pane now shows only the step's assistant message(s);
+  the full conversation remains in the `llm` TextLog stream
+  ([plan 0037](plans/0037-rerun-latest-assistant-only.md), #243).
+
 ### Removed
 
 - **`Task.control_hz`** (breaking). `rollout()` never actually paced the
@@ -40,8 +94,35 @@ All notable changes to this project are documented here. The format is based on
   rationale). `compat`'s policy/embodiment rate-mismatch warning is
   unaffected.
 
+### Fixed
+
+- `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
+  and unplug-identifies cameras as physical USB devices. A camera whose color
+  node lost udev's by-id name race (multi-interface cameras such as the
+  RealSense D435) or whose by-path name is duplicated by systemd
+  `usbv2-`/`usbv3-` aliases no longer vanishes from the listing or defeats
+  `u`; shared-serial cameras are listed by port-stable by-path names, and a
+  saved-but-dead by-id path now points the operator at the camera's current
+  location by serial. Unplug-to-identify for CAN and serial slots now also
+  takes its before snapshot at the moment `u` is answered instead of when
+  the section listing was printed, so a device attached mid-wizard is still
+  identifiable.
+
+- **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
+  `tool_calls[].extra_content` (`google.thought_signature`) into conversation
+  history. Dropping it made Gemini reject any request ending on a tool
+  message — e.g. after an `eef_pos` workspace-bounds rejection — with HTTP 400
+  "Function call is missing a thought_signature", erroring the trial (#229,
+  #230). Non-Gemini requests are unchanged.
+
+- **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
+  now raises `ConfigError` instead of silently converting `True` to a 1-step
+  horizon (`bool` is a subclass of `int` in Python).
+
 ### Changed
 
+- Camera frames in HTML reports now render as captioned responsive grid rows,
+  with click-to-expand cells for closer inspection (plan 0036, #239).
 - **Task horizon binding now follows compatibility checking.** An
   embodiment's optional `bind_task()` hook receives the resolved step envelope
   only after the policy/embodiment/task triple is known to be compatible. This

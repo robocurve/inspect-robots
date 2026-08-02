@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from inspect_robots.approver import GuardrailContribution
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.types import Action, Observation, StepResult
@@ -80,6 +81,15 @@ class Embodiment(Protocol):
     fires once per ``eval()``, which can be several times over an embodiment's
     lifetime; each call replaces the previous envelope. ``EmbodimentBase``
     ships a no-op default.
+
+    Embodiments may also define an **optional**
+    ``contribute_guardrails(self, action_space: Box) -> GuardrailContribution``
+    hook, likewise omitted from this Protocol so existing implementations
+    remain runtime-conformant. The CLI calls it with the resolved action space
+    and appends its contribution after the generic clamp and delta limiter.
+    Direct ``rollout()`` and programmatic ``eval()`` callers compose their own
+    approvers, so the hook is CLI input rather than a universal callback.
+    ``EmbodimentBase`` returns an empty contribution by default.
     """
 
     info: EmbodimentInfo
@@ -118,6 +128,10 @@ class EmbodimentBase(ABC):
 
     def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
         """Default: embodiments with nothing to display or pre-allocate ignore it."""
+
+    def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+        """Default: embodiments without specialized safety gates contribute nothing."""
+        return GuardrailContribution()
 
     def close(self) -> None:  # noqa: B027 - intentional no-op default
         """Default: nothing to release."""

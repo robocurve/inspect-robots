@@ -26,6 +26,20 @@ def _space() -> Box:
     )
 
 
+def _declaring_space() -> Box:
+    return Box(
+        shape=(3,),
+        low=np.array([-1.0, -2.0, 0.0]),
+        high=np.array([1.0, 2.0, 1.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            gripper="continuous",
+            dim_labels=("shoulder", "elbow", "gripper"),
+            max_step=(0.02, None, 0.1),
+        ),
+    )
+
+
 def _motion(
     *, control_hz: float = 10.0, max_speed_frac: float = 0.1, open_high: bool = True
 ) -> MotionQueue:
@@ -51,6 +65,12 @@ def test_speed_fraction_and_control_rate_set_per_step_interpolation() -> None:
     assert len(chunk.actions) == 11
     assert np.all(deltas <= np.array([0.02, 0.04, 0.01]))
     assert np.array_equal(chunk.actions[-1].data, np.array([0.2, -0.4, 1.0]))
+    target = np.array([0.2, -0.4, 1.0])
+    expected = np.stack(
+        [start + (target - start) * fraction for fraction in np.linspace(1.0 / 11, 1.0, 11)]
+    )
+    expected[-1] = target
+    assert np.array_equal(np.stack([action.data for action in chunk.actions]), expected)
     assert chunk.control_hz == 10.0
 
 
@@ -77,6 +97,51 @@ def test_low_control_rate_never_exceeds_delta_limit_approver_backstop() -> None:
     per_step = np.abs(np.diff(np.stack(points), axis=0))
     native_backstop = 0.05 * (space.high - space.low)  # type: ignore[operator]
     assert np.all(per_step <= native_backstop)
+
+
+def test_declared_step_chunks_traverse_at_pace_and_pass_default_approver() -> None:
+    space = _declaring_space()
+    motion = MotionQueue(
+        space,
+        control_hz=10.0,
+        max_speed_frac=0.1,
+        gripper_index=2,
+    )
+    start = np.array([0.0, 0.0, 1.0])
+    motion.begin_turn(start)
+    motion.close_gripper()
+    chunk = motion.take_chunk()
+
+    assert len(chunk.actions) == 11
+    points = np.stack([start, *(action.data for action in chunk.actions)])
+    assert np.all(np.abs(np.diff(points[:, 2])) < 0.1)
+    assert chunk.actions[-1].data[2] == 0.0
+
+    approver = DeltaLimitApprover(space)
+    store: dict[str, object] = {}
+    approver.review(Action(data=start), store)
+    for action in chunk.actions:
+        assert approver.review(action, store) is action
+
+
+@pytest.mark.parametrize(
+    ("max_speed_frac", "expected_steps"),
+    [(0.05, 21), (0.2, 11)],
+)
+def test_declared_step_pacing_scales_down_but_not_up(
+    max_speed_frac: float,
+    expected_steps: int,
+) -> None:
+    motion = MotionQueue(
+        _declaring_space(),
+        control_hz=10.0,
+        max_speed_frac=max_speed_frac,
+        gripper_index=2,
+    )
+    motion.begin_turn(np.array([0.0, 0.0, 1.0]))
+    motion.close_gripper()
+
+    assert len(motion.take_chunk().actions) == expected_steps
 
 
 def test_cursor_chains_across_arm_and_gripper_calls() -> None:
@@ -133,3 +198,42 @@ def test_offset_bounds_with_coarse_float_grid_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="too coarse"):
         MotionQueue(space, control_hz=10.0, max_speed_frac=0.1, gripper_index=1)
+
+
+def test_declared_step_is_the_float_spacing_guard_budget() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([1e9, 0.0]),
+        high=np.array([1e9 + 100.0, 1.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            gripper="continuous",
+            dim_labels=("j0", "gripper"),
+            max_step=(0.1, None),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="too coarse"):
+        MotionQueue(space, control_hz=10.0, max_speed_frac=0.1, gripper_index=1)
+
+
+def test_declared_step_pacing_precedes_movable_zero_limit_guard() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([0.0, 0.0]),
+        high=np.array([1e-300, 1.0]),
+        semantics=ActionSemantics(
+            "joint_pos",
+            gripper="continuous",
+            dim_labels=("j0", "gripper"),
+            max_step=(1e-300, None),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="underflows the per-step limit"):
+        MotionQueue(
+            space,
+            control_hz=10.0,
+            max_speed_frac=1e-300,
+            gripper_index=1,
+        )

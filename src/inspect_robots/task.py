@@ -75,7 +75,7 @@ class Task:
             raise ConfigError(
                 f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
             )
-        if self.max_steps is not None and self.max_steps < 1:
+        if self.max_steps is not None and (isinstance(self.max_steps, bool) or self.max_steps < 1):
             raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps}")
         if self.max_seconds is not None and (
             isinstance(self.max_seconds, bool)

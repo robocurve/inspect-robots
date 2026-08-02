@@ -20,7 +20,7 @@ const config: Config = {
       },
     },
   ],
-  url: 'https://inspectrobots.org',
+  url: 'https://docs.inspectrobots.org',
   baseUrl: '/',
   organizationName: 'robocurve',
   projectName: 'inspect-robots',

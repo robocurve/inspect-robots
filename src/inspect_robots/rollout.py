@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
+_APPROVALS_KEY = "_rollout_approvals"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -144,6 +145,56 @@ def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> Ins
     return exc
 
 
+def _connection_failure(exc: Exception) -> bool:
+    """Return whether an exception chain contains a connection failure."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConnectionError) or type(current).__name__ in {
+            "ConnectionError",
+            "NewConnectionError",
+            "ConnectError",
+        }:
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return False
+
+
+def _policy_error(policy: Policy, exc: Exception) -> PolicyError:
+    """Wrap a generic policy exception, appending a hint on connection failures."""
+    message = str(exc)
+    if _connection_failure(exc):
+        try:
+            url = getattr(policy, "server_url", None)
+            remedy = getattr(policy, "remedy", None)
+            name = policy.info.name
+            if url:
+                # "up and healthy", not "running": builtin ConnectionError
+                # matches also cover reset/broken-pipe, where the server
+                # answered and then dropped the connection.
+                message += (
+                    f"\nhint: policy {name!r} could not hold a connection to its "
+                    f"action server at {url} — is the server up and healthy? "
+                    "Start (or restart) it, then rerun."
+                )
+            else:
+                message += (
+                    f"\nhint: policy {name!r} hit a connection failure — "
+                    "a backend it depends on may be down or unreachable."
+                )
+            if remedy:
+                message += f"\nhint: {remedy}"
+        except Exception:
+            pass  # a raising server_url/remedy property must not mask the trial error
+    return PolicyError(message)
+
+
 def _store_frames(
     frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
@@ -204,7 +255,7 @@ def rollout(
             _record_failure(record, exc, -1)
             raise
         except Exception as exc:
-            raise _record_failure(record, PolicyError(str(exc)), -1) from exc
+            raise _record_failure(record, _policy_error(policy, exc), -1) from exc
         try:
             obs = embodiment.reset(scene, seed=seed)
         except InspectRobotsError as exc:
@@ -216,18 +267,23 @@ def rollout(
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
+            all_approvals = store.get(_APPROVALS_KEY, [])
+            last_seen = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_seen:]]
             try:
-                action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                obs_with_extra = replace(
+                    obs, extra={**obs.extra, "env_step": t, "approvals": tail_approvals}
                 )
+                action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
             except Exception as exc:
-                raise _record_failure(record, PolicyError(str(exc)), t) from exc
+                raise _record_failure(record, _policy_error(policy, exc), t) from exc
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
+                store["_rollout_last_approvals_idx"] = len(all_approvals)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
@@ -277,6 +333,7 @@ def rollout(
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
+                store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
             try:
