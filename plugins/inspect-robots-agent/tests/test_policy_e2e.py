@@ -605,6 +605,24 @@ def test_transcript_is_none_before_first_reset() -> None:
     assert policy.transcript() is None
 
 
+def test_observation_content_renders_approver_interventions() -> None:
+    obs = Observation(
+        state={"q": np.array([0.0])},
+        extra={
+            "env_step": 2,
+            "approvals": [
+                {"t": 0, "detail": "clamped"},
+                {"t": 1, "detail": "clamped"},
+                {"t": 2, "detail": "delta_clamped"},
+                {"t": 3, "detail": "clamped"},
+            ],
+        },
+    )
+    parts = _observation_content(obs)
+    text = parts[0]["text"]
+    assert "approver: 4 step(s) modified (clamped \u00d73, delta_clamped)." in text
+
+
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="reach"))

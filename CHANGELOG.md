@@ -9,6 +9,29 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `FrameStore` now persists each post-action observation once and exposes it
+  through `StepRecord.result_image_refs`. Stored records strip camera arrays
+  from both pre-action and post-action observations, and the terminal visual
+  state is recoverable for offline scoring.
+
+- The Rerun sink now sends a per-trial blueprint that groups labeled action
+  dimensions by arm, overlays aligned measured state, and lays out cameras,
+  transcript, events, and reward alongside the joint plots
+  ([plan 0041](plans/0041-rerun-arm-blueprint.md), #265).
+
+- **Approver interventions in observations:** safety approver rewrites (such as
+  clamping or delta-limiting) since the previous decision are now windowed into
+  `observation.extra["approvals"]`. `LLMAgentPolicy` renders them as aggregated prompt
+  lines (e.g. `approver: 3 step(s) modified (clamped ×3).`), enabling LLM/VLA models
+  to recognize safety interventions and adapt targets (#187, #217).
+
+- **Agent plugin (0.20.0):** `-P wire=gemini-live` now serves
+  `google/gemini-robotics-er-2-streaming-preview` through Google's stateful
+  v1beta Live API. The sync websocket client streams only new observations,
+  preserves exact tool-response ordering, recovers expired or dropped
+  sessions from the image-free transcript, and captures each socket attempt
+  with content-addressed frame blobs (plan 0039, #252).
+
 - `inspect-robots view --serve` now serves a rendered logs directory, refreshes
   it incrementally as new runs arrive, and supports explicit host/port binding
   for local or remote browsing (plan 0037, #241)
@@ -78,6 +101,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
+  and unplug-identifies cameras as physical USB devices. A camera whose color
+  node lost udev's by-id name race (multi-interface cameras such as the
+  RealSense D435) or whose by-path name is duplicated by systemd
+  `usbv2-`/`usbv3-` aliases no longer vanishes from the listing or defeats
+  `u`; shared-serial cameras are listed by port-stable by-path names, and a
+  saved-but-dead by-id path now points the operator at the camera's current
+  location by serial. Unplug-to-identify for CAN and serial slots now also
+  takes its before snapshot at the moment `u` is answered instead of when
+  the section listing was printed, so a device attached mid-wizard is still
+  identifiable.
+
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation
   history. Dropping it made Gemini reject any request ending on a tool
@@ -145,6 +180,11 @@ All notable changes to this project are documented here. The format is based on
   payloads that previously grew until the API's request-size ceiling (HTTP
   413). Stored history, transcripts, and frame side-cars are unchanged.
   Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
+### Fixed
+
+- **Agent plugin:** `images=on_demand` mode now permits re-requesting a camera with `take_pic` if its frame was elided by `image_horizon`, preventing untrue "already shown" refusals (#192).
+
 
 ### Added
 

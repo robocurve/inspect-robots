@@ -29,9 +29,11 @@ class Observation:
     ``images`` are keyed by camera name; ``state`` holds proprioception keyed by a
     controlled vocabulary (e.g. ``"eef_pos"``, ``"gripper"``). ``instruction`` is
     the language goal for this step (usually constant across an episode, but may
-    change for long-horizon tasks). The rollout injects the current step into the
-    policy-facing observation's ``extra["env_step"]`` and reserves that key;
-    embodiments should not set it.
+    change for long-horizon tasks). The rollout injects ``extra["env_step"]``
+    (int) and ``extra["approvals"]`` (list of ``{"t": int, "detail": str | None}``
+    records for safety interventions since the previous ``act()`` call) into the
+    policy-facing observation and reserves those keys; embodiments should not set
+    them.
     """
 
     images: Mapping[str, ImageArray] = field(default_factory=dict)
