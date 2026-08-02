@@ -410,9 +410,10 @@ def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Epochs' internal wording, so a regression to "--epochs: Epochs
+    # count must be >= 1" fails here instead of passing a substring check.
+    assert str(excinfo.value) == f"--epochs must be >= 1, got {epochs_value}"
 
 
 @pytest.mark.parametrize("epochs_value", ["0", "-1"])
@@ -431,10 +432,10 @@ def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> 
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
-    assert "cubepick-reach" in message  # the failing task name is named
+    # eval-set runs several tasks, so the message must name which one rejected
+    # the flag — pinned exactly for the same reason as the run case above.
+    expected = f"--epochs (task 'cubepick-reach') must be >= 1, got {epochs_value}"
+    assert str(excinfo.value) == expected
 
 
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
