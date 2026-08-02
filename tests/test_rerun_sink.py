@@ -1475,6 +1475,39 @@ def test_real_rerun_accepts_the_blueprint(tmp_path: Path) -> None:
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
+def test_sink_reuse_after_interrupted_eval_shuts_down_previous_worker() -> None:
+    """Reusing a sink when the previous worker is still running shuts it down safely."""
+    sink = RerunSink(flush_timeout=1.0)
+
+    class FiringRR:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, Any]] = []
+
+        def init(self, app_id: str) -> None:
+            pass
+
+        def set_time_sequence(self, name: str, value: int) -> None:
+            pass
+
+        def log(self, entity: str, data: Any) -> None:
+            self.events.append((entity, data))
+
+    fake_rr = FiringRR()
+    sink._rr = fake_rr
+    sink.on_trial_start("s0", 0)
+    obs = Observation(state={"joint_pos": np.array([1.0])})
+    sink.log_step(0, obs, Action(data=np.array([0.0])), StepResult(observation=obs))
+    assert sink._worker is not None
+    prev_worker = sink._worker
+
+    # Simulate crash path: on_eval_start called without on_eval_end
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert not prev_worker.is_alive()
+    assert sink._blueprint_prefix is None
+    assert sink._blueprint_warned is False
+
+
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     """The real SDK atexit path is bounded after a connected peer stops reading."""
     rr = pytest.importorskip("rerun")
