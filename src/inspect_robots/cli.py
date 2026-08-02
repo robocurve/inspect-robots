@@ -1515,10 +1515,12 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {value:.4g}")
+        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(f"{k}={v:.4g}" for k, v in sorted(scene.reduced.items()))
+        reduced = "  ".join(
+            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
+        )
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:

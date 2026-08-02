@@ -130,6 +130,13 @@ All notable changes to this project are documented here. The format is based on
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
 
+- **`inspect`/`view` no longer crash on a log's own sanitized non-finite
+  metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
+  stays RFC 8259 valid, but the CLI and HTML renderers formatted every metric
+  with `.4g`, which raises on `None`. A log the sink itself wrote could crash
+  `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
+  four render sites now show `n/a` for a null metric (#253).
+
 ### Changed
 
 - Camera frames in HTML reports now render as captioned responsive grid rows,
