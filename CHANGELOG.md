@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format is based on
   transcript, events, and reward alongside the joint plots
   ([plan 0041](plans/0041-rerun-arm-blueprint.md), #265).
 
+- **Approver interventions in observations:** safety approver rewrites (such as
+  clamping or delta-limiting) since the previous decision are now windowed into
+  `observation.extra["approvals"]`. `LLMAgentPolicy` renders them as aggregated prompt
+  lines (e.g. `approver: 3 step(s) modified (clamped ×3).`), enabling LLM/VLA models
+  to recognize safety interventions and adapt targets (#187, #217).
+
 - **Agent plugin (0.20.0):** `-P wire=gemini-live` now serves
   `google/gemini-robotics-er-2-streaming-preview` through Google's stateful
   v1beta Live API. The sync websocket client streams only new observations,
