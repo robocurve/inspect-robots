@@ -18,7 +18,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.eval import _git_commit
-from inspect_robots.log import EvalLog
+from inspect_robots.log import EvalLog, EvalSpec
 from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -27,7 +27,7 @@ from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
-from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
@@ -503,6 +503,49 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     logs = eval(_task(max_steps=60), adaptive, CubePickEmbodiment(), log_dir=str(tmp_path))
     assert adaptive.bound_names == ["cubepick"]
     assert logs[0].status == "success"
+
+
+def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
+    tmp_path: Path,
+) -> None:
+    class _SpaceAware(NullSink):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object, object] | tuple[str]] = []
+
+        def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
+            self.calls.append(("bind_spaces", action_space, observation_space))
+
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+            self.calls.append(("on_eval_start",))
+
+    class _OddAttr(NullSink):
+        bind_spaces = "not a hook"
+
+    embodiment = CubePickEmbodiment()
+    aware = _SpaceAware()
+    no_hook = NullSink()
+    odd = _OddAttr()
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        sinks=[aware, no_hook, odd],
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "success"
+    assert aware.calls == [
+        (
+            "bind_spaces",
+            embodiment.info.action_space,
+            embodiment.info.observation_space,
+        ),
+        ("on_eval_start",),
+    ]
+    assert getattr(no_hook, "bind_spaces", None) is None
+    assert odd.bind_spaces == "not a hook"
 
 
 def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
+_APPROVALS_KEY = "_rollout_approvals"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -63,8 +64,10 @@ def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> in
 class StepRecord:
     """One step of a recorded trajectory.
 
-    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, ``observation`` has its
-    images stripped and ``image_refs`` holds on-disk handles instead (R5).
+    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, both
+    ``observation`` and ``result.observation`` have their images stripped.
+    ``image_refs`` and ``result_image_refs`` hold the corresponding on-disk
+    handles instead (R5).
     """
 
     t: int
@@ -72,6 +75,7 @@ class StepRecord:
     action: Action
     result: StepResult
     image_refs: Mapping[str, FrameRef] | None = None
+    result_image_refs: Mapping[str, FrameRef] | None = None
 
 
 @dataclass
@@ -263,13 +267,18 @@ def rollout(
         except Exception as exc:
             raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
 
+        obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
+            all_approvals = store.get(_APPROVALS_KEY, [])
+            last_seen = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_seen:]]
             try:
-                action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                obs_with_extra = replace(
+                    obs, extra={**obs.extra, "env_step": t, "approvals": tail_approvals}
                 )
+                action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -278,6 +287,7 @@ def rollout(
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
+                store["_rollout_last_approvals_idx"] = len(all_approvals)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
@@ -327,6 +337,7 @@ def rollout(
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
+                store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
             try:
@@ -338,9 +349,23 @@ def rollout(
                 raise _record_failure(record, EmbodimentFault(str(exc)), t) from exc
 
             sink.log_step(t, obs, action, result)
-            obs_rec, refs = _store_frames(frame_store, trial_id, t, obs)
+            result_obs_rec, result_refs = _store_frames(
+                frame_store, trial_id, t + 1, result.observation
+            )
+            result_rec = (
+                result
+                if result_obs_rec is result.observation
+                else replace(result, observation=result_obs_rec)
+            )
             record.steps.append(
-                StepRecord(t=t, observation=obs_rec, action=action, result=result, image_refs=refs)
+                StepRecord(
+                    t=t,
+                    observation=obs_rec,
+                    action=action,
+                    result=result_rec,
+                    image_refs=refs,
+                    result_image_refs=result_refs,
+                )
             )
             record.events.append(
                 step_event(t, result.terminated, result.truncated, result.termination_reason)
@@ -363,6 +388,8 @@ def rollout(
                 record.termination_reason = stop_reason
                 break
             obs = result.observation
+            obs_rec = result_obs_rec
+            refs = result_refs
         else:
             record.truncated = True
             record.termination_reason = "max_steps"

@@ -19,6 +19,7 @@ import pytest
 
 from inspect_robots import eval
 from inspect_robots.logging import RerunSink
+from inspect_robots.logging import rerun_sink as rerun_sink_module
 from inspect_robots.logging.rerun_sink import (
     _render_message,
     _StepPayload,
@@ -29,6 +30,14 @@ from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import registered
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
+from inspect_robots.spaces import (
+    ActionSemantics,
+    Box,
+    CameraSpec,
+    ObservationSpace,
+    StateField,
+    StateSpec,
+)
 from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 
@@ -247,6 +256,50 @@ class _TextDocument(NamedTuple):
     media_type: str
 
 
+class _BlueprintNode(NamedTuple):
+    kind: str
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+
+
+class _BlueprintFactory:
+    def __init__(self, recorder: _BlueprintRecorder, kind: str) -> None:
+        self._recorder = recorder
+        self._kind = kind
+
+    def __call__(self, *args: object, **kwargs: object) -> _BlueprintNode:
+        if self._recorder.fail_on == self._kind:
+            raise ValueError(f"cannot build {self._kind}")
+        node = _BlueprintNode(self._kind, args, kwargs)
+        self._recorder.calls.append(node)
+        return node
+
+
+class _BlueprintRecorder:
+    def __init__(self, *, send: bool = True, fail_on: str | None = None) -> None:
+        self.send = send
+        self.fail_on = fail_on
+        self.calls: list[_BlueprintNode] = []
+        self.sent: list[object] = []
+        self.module = types.ModuleType("rerun.blueprint")
+        for kind in (
+            "TimeSeriesView",
+            "Spatial2DView",
+            "TextDocumentView",
+            "TextLogView",
+            "Vertical",
+            "Grid",
+            "Horizontal",
+            "Blueprint",
+        ):
+            setattr(self.module, kind, _BlueprintFactory(self, kind))
+
+    def install(self, fake: types.ModuleType) -> None:
+        fake.blueprint = self.module  # type: ignore[attr-defined]
+        if self.send:
+            fake.send_blueprint = self.sent.append  # type: ignore[attr-defined]
+
+
 def _install_fake_rerun(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -254,6 +307,7 @@ def _install_fake_rerun(
     gate: threading.Event | None = None,
     log_error: Exception | None = None,
     text_document: bool = True,
+    blueprint: _BlueprintRecorder | None = None,
 ) -> list[tuple[str, object]]:
     """Install a fake ``rerun`` module (new-API surface); return the (path, value) log."""
     logged: list[tuple[str, object]] = []
@@ -279,6 +333,9 @@ def _install_fake_rerun(
     fake.TextLog = lambda t, *, level=None: ("TextLog", t, level)  # type: ignore[attr-defined]
     if text_document:
         fake.TextDocument = _TextDocument  # type: ignore[attr-defined]
+    if blueprint is not None:
+        blueprint.install(fake)
+        monkeypatch.setitem(sys.modules, "rerun.blueprint", blueprint.module)
     monkeypatch.setitem(sys.modules, "rerun", fake)
     return logged
 
@@ -371,6 +428,305 @@ def _arm_completed_worker(sink: RerunSink) -> None:
     worker.join()
     sink._worker = worker
     sink._state = _WorkerState(stop=threading.Event())
+
+
+def _labeled_action_space() -> Box:
+    return Box(
+        shape=(4,),
+        semantics=ActionSemantics(
+            "joint_pos",
+            dim_labels=("left_j0", "left_gripper", "right_j0", "right_gripper"),
+        ),
+    )
+
+
+def _blueprint_step(sink: RerunSink, t: int = 0) -> None:
+    sink.log_step(
+        t,
+        Observation(
+            images={"top": np.zeros((4, 4, 3), dtype=np.uint8)},
+            state={"joint_pos": np.arange(4, dtype=np.float64)},
+        ),
+        Action(data=np.arange(4, dtype=np.float64)),
+        StepResult(observation=Observation(), reward=1.0),
+    )
+
+
+def _views(recorder: _BlueprintRecorder, kind: str) -> list[_BlueprintNode]:
+    return [call for call in recorder.calls if call.kind == kind]
+
+
+def _sent_tree(root: object) -> list[_BlueprintNode]:
+    """Flatten every node reachable from one sent Blueprint, depth-first."""
+    if not isinstance(root, _BlueprintNode):
+        return []
+    nodes = [root]
+    for arg in root.args:
+        nodes.extend(_sent_tree(arg))
+    return nodes
+
+
+def test_joint_groups_split_on_label_prefix() -> None:
+    labels = tuple(
+        f"{side}_{part}" for side in ("left", "right") for part in ("j0", "j1", "gripper")
+    )
+    assert rerun_sink_module._joint_groups(labels, 6) == [
+        ("left", [0, 1, 2]),
+        ("right", [3, 4, 5]),
+    ]
+    assert rerun_sink_module._joint_groups(None, 3) == [("joints", [0, 1, 2])]
+    assert rerun_sink_module._joint_groups(("a_x", "a_y"), 2) == [("joints", [0, 1])]
+    assert rerun_sink_module._joint_groups(("ax", "by"), 2) == [("joints", [0, 1])]
+    assert rerun_sink_module._joint_groups(("l_a", "up", "r_b"), 3) == [("joints", [0, 1, 2])]
+    assert rerun_sink_module._joint_groups(("l_a", "r_b"), 3) == [("joints", [0, 1, 2])]
+
+
+def test_blueprint_sent_per_trial_prefix_with_per_group_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(
+        _labeled_action_space(),
+        ObservationSpace(
+            cameras=(CameraSpec(name="top", height=4, width=4),),
+            state=StateSpec(fields=(StateField(key="joint_pos", shape=(4,)),)),
+        ),
+    )
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s0", 0)
+
+    _blueprint_step(sink)
+    assert sink.flush(timeout=5.0)
+
+    assert len(recorder.sent) == 1
+    # The sent Blueprint must actually CONTAIN the views (a constructed view
+    # that never gets wired into a column would pass constructor-level
+    # assertions while the viewer shows nothing).
+    reachable = _sent_tree(recorder.sent[0])
+    reachable_names = {
+        view.kwargs.get("name") for view in reachable if view.kind == "TimeSeriesView"
+    }
+    assert {"left", "right", "reward"} <= reachable_names
+    assert any(view.kind == "Spatial2DView" for view in reachable)
+    assert any(view.kind == "TextLogView" for view in reachable)
+    assert any(view.kind == "TextDocumentView" for view in reachable)
+    time_series = _views(recorder, "TimeSeriesView")
+    left = next(view for view in time_series if view.kwargs.get("name") == "left")
+    right = next(view for view in time_series if view.kwargs.get("name") == "right")
+    assert left.kwargs["contents"] == [
+        "+ trial/s0/e0/action/0",
+        "+ trial/s0/e0/action/1",
+        "+ trial/s0/e0/state/joint_pos/0",
+        "+ trial/s0/e0/state/joint_pos/1",
+    ]
+    assert right.kwargs["contents"] == [
+        "+ trial/s0/e0/action/2",
+        "+ trial/s0/e0/action/3",
+        "+ trial/s0/e0/state/joint_pos/2",
+        "+ trial/s0/e0/state/joint_pos/3",
+    ]
+    assert any(
+        view.kwargs
+        == {
+            "name": "top",
+            "origin": "/",
+            "contents": ["+ trial/s0/e0/camera/top"],
+        }
+        for view in _views(recorder, "Spatial2DView")
+    )
+    assert any(
+        view.kwargs.get("contents") == ["+ trial/s0/e0/llm", "+ trial/s0/e0/event/**"]
+        for view in _views(recorder, "TextLogView")
+    )
+    assert any(
+        view.kwargs.get("contents") == ["+ trial/s0/e0/llm/latest"]
+        for view in _views(recorder, "TextDocumentView")
+    )
+    assert any(view.kwargs.get("contents") == ["+ trial/s0/e0/reward"] for view in time_series)
+
+    sink.on_trial_start("s1", 0)
+    _blueprint_step(sink, 1)
+    assert sink.flush(timeout=5.0)
+    assert len(recorder.sent) == 2
+    assert any(
+        view.kwargs.get("contents") == ["+ trial/s1/e0/reward"]
+        for view in _views(recorder, "TimeSeriesView")
+    )
+
+    _blueprint_step(sink, 2)
+    assert sink.flush(timeout=5.0)
+    assert len(recorder.sent) == 2
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_transcript_first_payload_sends_blueprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(_labeled_action_space(), ObservationSpace())
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s0", 0)
+
+    sink.log_policy_messages(0, [{"role": "assistant", "content": "first"}])
+    assert sink.flush(timeout=5.0)
+
+    assert len(recorder.sent) == 1
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_blueprint_state_keys_without_statespec_get_own_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(
+        Box(shape=(4,)),
+        ObservationSpace(state_keys=frozenset({"eef_pos", "cube_pos"})),
+    )
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s0", 0)
+    _blueprint_step(sink)
+    assert sink.flush(timeout=5.0)
+
+    views = _views(recorder, "TimeSeriesView")
+    assert any(view.kwargs.get("contents") == ["+ trial/s0/e0/state/eef_pos/**"] for view in views)
+    assert any(view.kwargs.get("contents") == ["+ trial/s0/e0/state/cube_pos/**"] for view in views)
+    assert _views(recorder, "Spatial2DView") == []
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+    rich_sink = RerunSink()
+    rich_sink.bind_spaces(
+        _labeled_action_space(),
+        ObservationSpace(
+            state=StateSpec(
+                fields=(
+                    StateField(key="joint_pos", shape=(4,)),
+                    StateField(key="eef_pose", shape=(7,)),
+                    StateField(key="matrix", shape=(2, 2)),
+                )
+            )
+        ),
+    )
+    rich_sink.on_eval_start(None)  # type: ignore[arg-type]
+    rich_sink.on_trial_start("s1", 0)
+    _blueprint_step(rich_sink)
+    assert rich_sink.flush(timeout=5.0)
+
+    rich_views = _views(recorder, "TimeSeriesView")
+    assert any(
+        view.kwargs.get("contents") == ["+ trial/s1/e0/state/eef_pose/**"] for view in rich_views
+    )
+    assert any(
+        view.kwargs.get("contents") == ["+ trial/s1/e0/state/matrix/**"] for view in rich_views
+    )
+    assert not any(
+        view.kwargs.get("contents") == ["+ trial/s1/e0/state/joint_pos/**"] for view in rich_views
+    )
+    rich_sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_blueprint_skipped_without_bind_spaces_or_blueprint_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    unbound = RerunSink()
+    unbound.on_eval_start(None)  # type: ignore[arg-type]
+    _log_one(unbound)
+    assert unbound.flush(timeout=5.0)
+    assert recorder.sent == []
+    unbound.on_eval_end(None)  # type: ignore[arg-type]
+
+    _install_fake_rerun(monkeypatch)
+    no_blueprint = RerunSink()
+    no_blueprint.bind_spaces(_labeled_action_space(), ObservationSpace())
+    no_blueprint.on_eval_start(None)  # type: ignore[arg-type]
+    _log_one(no_blueprint)
+    assert no_blueprint.flush(timeout=5.0)
+    no_blueprint.on_eval_end(None)  # type: ignore[arg-type]
+
+    no_send_recorder = _BlueprintRecorder(send=False)
+    _install_fake_rerun(monkeypatch, blueprint=no_send_recorder)
+    no_send = RerunSink()
+    no_send.bind_spaces(_labeled_action_space(), ObservationSpace())
+    no_send.on_eval_start(None)  # type: ignore[arg-type]
+    _log_one(no_send)
+    assert no_send.flush(timeout=5.0)
+    assert no_send_recorder.sent == []
+    no_send.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_blueprint_build_failure_warns_once_and_run_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BlueprintRecorder(fail_on="TimeSeriesView")
+    logged = _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(_labeled_action_space(), ObservationSpace())
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    with pytest.warns(RuntimeWarning, match="automatic layout") as caught:
+        sink.on_trial_start("s0", 0)
+        _blueprint_step(sink)
+        assert sink.flush(timeout=5.0)
+        sink.on_trial_start("s1", 0)
+        _blueprint_step(sink, 1)
+        assert sink.flush(timeout=5.0)
+
+    assert len(caught) == 1
+    assert len([path for path, _ in logged if path.endswith("/action/0")]) == 2
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_reused_sink_resends_blueprint_for_same_trial_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(_labeled_action_space(), ObservationSpace())
+
+    for _ in range(2):
+        sink.on_eval_start(None)  # type: ignore[arg-type]
+        sink.on_trial_start("s0", 0)
+        _blueprint_step(sink)
+        assert sink.flush(timeout=5.0)
+        sink.on_eval_end(None)  # type: ignore[arg-type]
+
+    assert len(recorder.sent) == 2
+
+
+def test_eval_drives_the_blueprint_through_bind_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: eval() wires bind_spaces into RerunSink and a layout is sent."""
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[RerunSink()])
+    assert len(recorder.sent) >= 1
+    reachable = _sent_tree(recorder.sent[0])
+    # CubePick's dx/dy labels collapse to the single combined joints view.
+    assert any(
+        view.kind == "TimeSeriesView" and view.kwargs.get("name") == "joints" for view in reachable
+    )
+
+
+def test_blueprint_skipped_for_zero_dim_action_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 0-dim action space sends no layout instead of empty-content views."""
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(Box(shape=(0,)), ObservationSpace())
+    sink.on_trial_start("s0", 0)
+    _blueprint_step(sink)
+    assert sink.flush(timeout=5.0)
+    assert recorder.sent == []
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 def test_policy_messages_emit_ordered_levels_on_the_step_timeline(
@@ -1095,6 +1451,28 @@ def test_real_rerun_accepts_the_transcript_document_call() -> None:
     if not hasattr(rr, "TextDocument"):
         pytest.skip("pre-TextDocument rerun-sdk lacks the archetype")
     rr.TextDocument("**[INFO]** assistant: hi  \nthere", media_type="text/markdown")
+
+
+@pytest.mark.skipif(not _RERUN_INSTALLED, reason="rerun-sdk not installed")
+def test_real_rerun_accepts_the_blueprint(tmp_path: Path) -> None:
+    """The real SDK accepts every constructor and send call in the trial blueprint."""
+    rr = pytest.importorskip("rerun")
+    sink = RerunSink(str(tmp_path / "blueprint.rrd"))
+    sink._rr = rr
+    sink.bind_spaces(
+        _labeled_action_space(),
+        ObservationSpace(
+            cameras=(CameraSpec(name="top", height=4, width=4),),
+            state=StateSpec(fields=(StateField(key="joint_pos", shape=(4,)),)),
+        ),
+    )
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sink._send_blueprint(rr, "trial/s0/e0")
+
+    sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
