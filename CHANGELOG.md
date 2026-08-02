@@ -88,6 +88,11 @@ All notable changes to this project are documented here. The format is based on
   413). Stored history, transcripts, and frame side-cars are unchanged.
   Restore the old unbounded behavior with `-P image_horizon=none` (#188).
 
+### Fixed
+
+- **Agent plugin:** `images=on_demand` mode now permits re-requesting a camera with `take_pic` if its frame was elided by `image_horizon`, preventing untrue "already shown" refusals (#192).
+
+
 ### Added
 
 - **Public user-defaults API:** `inspect_robots.defaults` lets plugin CLIs read

@@ -758,12 +758,10 @@ class LLMAgentPolicy(PolicyBase):
                                                 and part.get("type") == "text"
                                             ):
                                                 text = part.get("text", "")
-                                                if text.startswith("camera "):
-                                                    for term in text.split():
-                                                        if term.startswith(("'", '"')):
-                                                            active_camera_names.add(
-                                                                term.strip("'\"").rstrip(":")
-                                                            )
+                                                if text.startswith("camera '"):
+                                                    end_quote = text.find("'", 8)
+                                                    if end_quote != -1:
+                                                        active_camera_names.add(text[8:end_quote])
                                 self._revealed.intersection_update(active_camera_names)
 
                             skipped = tuple(name for name in requested if name in self._revealed)

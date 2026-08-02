@@ -405,7 +405,7 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                 }
             ]
         },
-        # Call 5: move_by
+        # Call 5: take_pic left again (still visible; should be refused)
         {
             "choices": [
                 {
@@ -415,6 +415,29 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
                         "tool_calls": [
                             {
                                 "id": "call_5",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["left"], "note": "Check left again"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 6: move_by
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_6",
                                 "type": "function",
                                 "function": {
                                     "name": "move_by",
@@ -444,8 +467,27 @@ def test_on_demand_allows_re_reveal_after_eviction() -> None:
     policy.bind(embodiment.info)
     scene = Scene(id="s0", instruction="reach")
     policy.reset(scene)
-    observation = embodiment.reset(scene, seed=0)
 
-    # Should complete without error / refusal when re-requesting 'top' after eviction
+    import numpy as np
+
+    from inspect_robots.types import Observation
+
+    images = {
+        name: np.full((2, 2, 3), i, dtype=np.uint8)
+        for i, name in enumerate(["top", "front", "left"], start=1)
+    }
+    observation = Observation(state={"q": np.array([0.0])}, images=images, extra={"env_step": 0})
+
     chunk = policy.act(observation)
     assert chunk is not None
+
+    tool_results = [
+        message["content"] for message in policy._messages if message.get("role") == "tool"
+    ]
+    assert tool_results[:4] == [
+        "captured 1 frame(s): 'top'",
+        "captured 1 frame(s): 'front'",
+        "captured 1 frame(s): 'left'",
+        "captured 1 frame(s): 'top'",
+    ]
+    assert tool_results[4].startswith("already shown for this observation: 'left'")
