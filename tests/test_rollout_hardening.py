@@ -261,12 +261,20 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)
-    assert store.count > 0
+    assert store.count == len(record.steps) + 1
     first = record.steps[0]
-    assert not first.observation.images  # images stripped from the record
+    assert not first.observation.images
+    assert not first.result.observation.images
     assert first.image_refs is not None and "top" in first.image_refs
+    assert first.result_image_refs is not None and "top" in first.result_image_refs
+    assert first.image_refs["top"].t == 0
+    assert first.result_image_refs["top"].t == 1
     loaded = first.image_refs["top"].load()
     assert loaded.shape == (32, 32, 3)
+    terminal = record.steps[-1]
+    assert terminal.result_image_refs is not None
+    assert terminal.result_image_refs["top"].t == terminal.t + 1
+    assert terminal.result_image_refs["top"].load().shape == (32, 32, 3)
 
 
 def test_per_trial_seed_varies_by_epoch() -> None:
