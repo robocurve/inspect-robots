@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
+_APPROVALS_KEY = "_rollout_approvals"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -266,10 +267,14 @@ def rollout(
         t = 0
         while t < max_steps:
             prev_inferences = len(store.get(_INFER_KEY, []))
+            all_approvals = store.get(_APPROVALS_KEY, [])
+            last_seen = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_seen:]]
             try:
-                action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                obs_with_extra = replace(
+                    obs, extra={**obs.extra, "env_step": t, "approvals": tail_approvals}
                 )
+                action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -278,6 +283,7 @@ def rollout(
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
+                store["_rollout_last_approvals_idx"] = len(all_approvals)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
@@ -327,6 +333,7 @@ def rollout(
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
+                store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
             try:
