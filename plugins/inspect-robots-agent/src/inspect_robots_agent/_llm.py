@@ -137,6 +137,7 @@ class ToolCall:
     id: str
     name: str
     arguments: str
+    extra_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ class AssistantMessage:
                     "id": c.id,
                     "type": "function",
                     "function": {"name": c.name, "arguments": c.arguments},
+                    **({"extra_content": c.extra_content} if c.extra_content is not None else {}),
                 }
                 for c in self.tool_calls
             ]
@@ -266,6 +268,7 @@ def _parse_message(payload: dict[str, Any]) -> AssistantMessage:
             id=str(c["id"]),
             name=str(c["function"]["name"]),
             arguments=str(c["function"]["arguments"]),
+            extra_content=c.get("extra_content"),
         )
         for c in message.get("tool_calls") or []
     )

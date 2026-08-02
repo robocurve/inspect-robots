@@ -16,7 +16,13 @@ from inspect_robots.frames import FrameStore
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
-from inspect_robots.rollout import TrialRecord, derive_seed, rollout
+from inspect_robots.rollout import (
+    TrialRecord,
+    _connection_failure,
+    _policy_error,
+    derive_seed,
+    rollout,
+)
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
@@ -585,3 +591,139 @@ def test_oversized_policy_transcript_becomes_dropped_marker() -> None:
         "bytes": 2 * 1024 * 1024 + 2,
         "note": "exceeds inline limit; policies must not embed binary data",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Connection failures: actionable policy-server hints without dependency coupling.
+# --------------------------------------------------------------------------- #
+class _ResetConnectionPolicy(_BoomPolicy):
+    def reset(self, scene: Scene) -> None:
+        raise ConnectionRefusedError("connection refused")
+
+
+def test_policy_reset_connection_failure_records_neutral_hint() -> None:
+    with pytest.raises(PolicyError) as excinfo:
+        _run(_ResetConnectionPolicy(), CubePickEmbodiment())
+
+    assert str(excinfo.value) == (
+        "connection refused\n"
+        "hint: policy 'boom' hit a connection failure — "
+        "a backend it depends on may be down or unreachable."
+    )
+    assert excinfo.value.record is not None
+
+
+def test_named_connection_error_chain_records_url_and_remedy_hint() -> None:
+    class NewConnectionError(Exception):
+        pass
+
+    class ConnectionError(Exception):
+        pass
+
+    class _ServerPolicy(_BoomPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = PolicyInfo(name="server-backed", action_space=_BOX)
+            self.server_url = "http://127.0.0.1:8202"
+            self.remedy = "start the test action server, then rerun"
+
+        def act(self, observation: Observation) -> ActionChunk:
+            try:
+                raise NewConnectionError("connection refused")
+            except NewConnectionError as exc:
+                raise ConnectionError("pool failed") from exc
+
+    with pytest.raises(PolicyError) as excinfo:
+        _run(_ServerPolicy(), CubePickEmbodiment())
+
+    assert str(excinfo.value) == (
+        "pool failed\n"
+        "hint: policy 'server-backed' could not hold a connection to its "
+        "action server at http://127.0.0.1:8202 — is the server up and healthy? "
+        "Start (or restart) it, then rerun.\n"
+        "hint: start the test action server, then rerun"
+    )
+
+
+def test_non_connection_policy_failure_has_no_hint() -> None:
+    class _ValueErrorPolicy(_BoomPolicy):
+        def act(self, observation: Observation) -> ActionChunk:
+            raise ValueError("bad response")
+
+    with pytest.raises(PolicyError) as excinfo:
+        _run(_ValueErrorPolicy(), CubePickEmbodiment())
+
+    assert str(excinfo.value) == "bad response"
+    assert "hint:" not in str(excinfo.value)
+
+
+def test_connection_failure_context_cycle_terminates() -> None:
+    exc = ValueError("cycle")
+    exc.__context__ = exc
+    assert _connection_failure(exc) is False
+
+
+def test_max_retry_error_chained_to_timeout_is_not_connection_failure() -> None:
+    class MaxRetryError(Exception):
+        pass
+
+    exc = MaxRetryError("retries exhausted")
+    exc.__cause__ = TimeoutError("server was slow")
+    assert _connection_failure(exc) is False
+    assert "hint:" not in str(_policy_error(_BoomPolicy(), exc))
+
+
+def test_connection_failure_respects_suppressed_context() -> None:
+    suppressed: ValueError
+    try:
+        raise ConnectionError("connection refused")
+    except ConnectionError:
+        try:
+            raise ValueError("wrapper") from None
+        except ValueError as exc:
+            suppressed = exc
+
+    unsuppressed: ValueError
+    try:
+        raise ConnectionError("connection refused")
+    except ConnectionError:
+        try:
+            raise ValueError("wrapper")
+        except ValueError as exc:
+            unsuppressed = exc
+
+    assert "hint:" not in str(_policy_error(_BoomPolicy(), suppressed))
+    assert "hint:" in str(_policy_error(_BoomPolicy(), unsuppressed))
+
+
+def test_policy_error_handles_each_optional_server_hint_attribute() -> None:
+    class _UrlOnlyPolicy(_BoomPolicy):
+        server_url = "http://127.0.0.1:9000"
+
+    class _RemedyOnlyPolicy(_BoomPolicy):
+        remedy = "start the local backend"
+
+    url_only = str(_policy_error(_UrlOnlyPolicy(), ConnectionError("refused")))
+    remedy_only = str(_policy_error(_RemedyOnlyPolicy(), ConnectionError("refused")))
+
+    assert "action server at http://127.0.0.1:9000" in url_only
+    assert url_only.count("\nhint:") == 1
+    assert "a backend it depends on may be down or unreachable." in remedy_only
+    assert remedy_only.endswith("\nhint: start the local backend")
+
+
+def test_raising_server_url_property_does_not_mask_policy_failure() -> None:
+    class _RaisingServerUrlPolicy(_BoomPolicy):
+        @property
+        def server_url(self) -> str:
+            raise RuntimeError("property exploded")
+
+        def reset(self, scene: Scene) -> None:
+            raise ConnectionRefusedError("base connection failure")
+
+    with pytest.raises(PolicyError) as excinfo:
+        _run(_RaisingServerUrlPolicy(), CubePickEmbodiment())
+
+    assert str(excinfo.value) == "base connection failure"
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.error == "PolicyError: base connection failure"

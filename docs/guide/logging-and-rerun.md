@@ -46,6 +46,16 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
+The sink lays out labeled joint series per arm, with commanded `action/*` and
+measured `state/*` together for each side and cameras, the LLM transcript, and
+reward alongside. Embodiments without `dim_labels` get one combined joints
+plot. The layout is re-sent at each trial boundary so it follows the live trial,
+which resets viewer tweaks then; a single-trial `run` sends it exactly once.
+The layout is built from the declared spaces, so entities logged outside them
+(an undeclared state key, or a camera whose runtime name differs from its
+declared name) are not shown by the sent layout and must be added in the
+viewer manually.
+
 Logging is non-blocking. `log_step` snapshots each transition and a background
 worker hands it to the SDK, so a slow or stalled viewer connection never delays
 the control loop (on real hardware, a blocked viewer used to stall the robot
@@ -80,9 +90,10 @@ Policies that support transcript streaming automatically add conversation rows
 at `trial/<scene>/e<epoch>/llm`. In the Rerun viewer, add a TextLog view and
 select that entity path. Tool results use the DEBUG level and system prompts use
 TRACE, so enable both levels in the view's log-level filter to see the whole
-conversation. The same updates are also available as markdown at
-`trial/<scene>/e<epoch>/llm/latest`; add a Text Document view for a wrapped
-reading pane that stays synchronized with the timeline cursor.
+conversation. The most recent assistant message is also available as markdown
+at `trial/<scene>/e<epoch>/llm/latest`; add a Text Document view for a wrapped
+reading pane that stays synchronized with the timeline cursor and always shows
+the policy's latest decision.
 
 Scrubbing the `step` timeline highlights the transcript rows emitted for that
 control step alongside its camera and state data. This live stream is a

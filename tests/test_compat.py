@@ -70,6 +70,30 @@ def test_control_mode_mismatch_is_error() -> None:
     assert any(i.code == "control_mode" for i in report.errors)
 
 
+def test_embodiment_only_max_step_declaration_is_compatible() -> None:
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="absolute-policy",
+            action_space=Box(
+                shape=(2,),
+                semantics=ActionSemantics(control_mode="joint_pos"),
+            ),
+        )
+    )
+    embodiment = CubePickEmbodiment()
+    embodiment.info = replace(
+        embodiment.info,
+        action_space=Box(
+            shape=(2,),
+            low=np.zeros(2),
+            high=np.ones(2),
+            semantics=ActionSemantics(control_mode="joint_pos", max_step=(None, 0.1)),
+        ),
+    )
+
+    assert check_compatibility(policy, embodiment).ok
+
+
 def test_missing_required_state_is_error() -> None:
     policy = _StubPolicy(
         PolicyInfo(

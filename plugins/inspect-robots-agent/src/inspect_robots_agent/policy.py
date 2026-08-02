@@ -17,9 +17,10 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 import numpy as np
@@ -36,11 +37,13 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
+from inspect_robots_agent._gemini_live import GeminiLiveClient
 from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
     ENV_MODEL,
     ChatClient,
+    Provider,
     ToolCall,
     _has_openrouter_variant,
     resolve_provider,
@@ -56,16 +59,32 @@ _MAX_CONSECUTIVE_FAILURES = 3
 #: The only endpoint that serves /v1/messages without an explicit base_url.
 _ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
 
+#: The HTTP endpoint resolution must land on before it can be upgraded to Live.
+_GOOGLE_BASE = _DIRECT_PROVIDERS["google"].base_url
+
+#: Key-free endpoint recorded in policy configuration and capture rows.
+_GEMINI_LIVE_BASE = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+)
+
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
 # The native wire reuses the set as output_config.effort, where "none" and
 # "minimal" are rejected and xhigh/max need a cap this client cannot stream;
 # both surface as a guided 400 rather than a per-wire allowlist (plan 0026).
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic", "gemini-live"})
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
+
+
+class _Unset:
+    """Marker type for constructor defaults resolved per wire."""
+
+
+_UNSET: Final = _Unset()
 
 # Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
 _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
@@ -245,12 +264,12 @@ class LLMAgentPolicy(PolicyBase):
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
-        effort: str | None = "low",
+        effort: str | None | _Unset = _UNSET,
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
         depth: str = "render",
-        image_horizon: int | None = 2,
+        image_horizon: int | None | _Unset = _UNSET,
         prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
@@ -315,11 +334,6 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
             raise ConfigError("max_llm_calls must be >= 1")
-        if effort is not None and effort not in _EFFORT_LEVELS:
-            raise ConfigError(
-                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
-                f"the field, got {effort!r}"
-            )
         # Order matters from here down (plan 0026): wire is validated before
         # the params that are only legal on one wire, the api_key_env default
         # is applied before resolution, and the OpenRouter check after it.
@@ -327,6 +341,18 @@ class LLMAgentPolicy(PolicyBase):
         # guided message instead of a traceback (#168).
         if wire not in _WIRE_FORMATS:
             raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        if effort is not _UNSET and effort is not None and effort not in _EFFORT_LEVELS:
+            raise ConfigError(
+                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
+                f"the field, got {effort!r}"
+            )
+        resolved_effort: str | None = None if wire == "gemini-live" else "low"
+        if not isinstance(effort, _Unset):
+            resolved_effort = effort
+        if wire == "gemini-live" and effort is not _UNSET and effort is not None:
+            raise ConfigError(
+                "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
+            )
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if images not in _IMAGE_MODES:
@@ -360,14 +386,35 @@ class LLMAgentPolicy(PolicyBase):
             or max_output_tokens < 1
         ):
             raise ConfigError("max_output_tokens must be an int >= 1")
-        if image_horizon is not None and (
-            isinstance(image_horizon, bool)
-            or not isinstance(image_horizon, int)
-            or image_horizon < 1
+        if (
+            image_horizon is not _UNSET
+            and image_horizon is not None
+            and (
+                isinstance(image_horizon, bool)
+                or not isinstance(image_horizon, int)
+                or image_horizon < 1
+            )
         ):
             raise ConfigError(
                 "image_horizon must be an int >= 1, or None to send full image history.\n"
                 "fix: pass -P image_horizon=N or -P image_horizon=none"
+            )
+        resolved_image_horizon: int | None = None if wire == "gemini-live" else 2
+        if not isinstance(image_horizon, _Unset):
+            resolved_image_horizon = image_horizon
+        if wire == "gemini-live" and image_horizon is not _UNSET and image_horizon is not None:
+            raise ConfigError(
+                "image_horizon is not supported on wire='gemini-live'.\n"
+                "fix: drop -P image_horizon=; the Live API's own context-window "
+                "compression is the equivalent mechanism because already-streamed "
+                "frames cannot be evicted"
+            )
+
+        if wire == "gemini-live" and base_url and not base_url.startswith(("ws://", "wss://")):
+            raise ConfigError(
+                "wire='gemini-live' requires a ws:// or wss:// base_url, got "
+                f"{base_url!r}.\nfix: drop -P base_url= to use Google's Live API, "
+                "or pass a websocket endpoint"
             )
 
         environ = dict(os.environ) if env is None else env
@@ -383,13 +430,23 @@ class LLMAgentPolicy(PolicyBase):
         effective_key_env = api_key_env
         if wire == "anthropic" and base_url and not api_key_env:
             effective_key_env = "ANTHROPIC_API_KEY"
+        if wire == "gemini-live" and base_url and not api_key_env:
+            effective_key_env = "GEMINI_API_KEY"
         requested_model = model or environ.get(ENV_MODEL)
-        provider = resolve_provider(
-            model=requested_model,
-            base_url=base_url,
-            api_key_env=effective_key_env,
-            env=environ,
-        )
+        try:
+            provider = resolve_provider(
+                model=requested_model,
+                base_url=base_url,
+                api_key_env=effective_key_env,
+                env=environ,
+            )
+        except ConfigError as exc:
+            if wire != "gemini-live" or base_url:
+                raise
+            raise ConfigError(
+                "wire='gemini-live' needs Google's direct Live API provider.\n"
+                "fix: use -P model=google/... and set $GEMINI_API_KEY"
+            ) from exc
         if wire == "anthropic" and not base_url and provider.base_url != _ANTHROPIC_BASE:
             # Only Anthropic's own endpoint serves /v1/messages. Resolution can
             # land elsewhere two ways: the OpenRouter fallback, or another
@@ -438,6 +495,17 @@ class LLMAgentPolicy(PolicyBase):
                 f"{asked!r} resolved to {where}, which does not serve one.\n"
                 f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
             )
+        if wire == "gemini-live" and not base_url:
+            if provider.base_url != _GOOGLE_BASE:
+                raise ConfigError(
+                    "wire='gemini-live' needs Google's direct Live API provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                )
+            provider = Provider(
+                base_url=_GEMINI_LIVE_BASE,
+                api_key=provider.api_key,
+                model=provider.model,
+            )
 
         resolved_max_output_tokens = (
             (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
@@ -445,7 +513,7 @@ class LLMAgentPolicy(PolicyBase):
             else None
         )
         self._capture = WireCapture() if wire_capture else None
-        self._client: ChatClient | ResponsesClient | AnthropicClient
+        self._client: ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient
         if wire == "anthropic":
             assert resolved_max_output_tokens is not None
             self._client = AnthropicClient(
@@ -457,6 +525,8 @@ class LLMAgentPolicy(PolicyBase):
             )
         elif wire == "responses":
             self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
+        elif wire == "gemini-live":
+            self._client = GeminiLiveClient(provider, capture=self._capture)
         else:
             self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
@@ -464,12 +534,12 @@ class LLMAgentPolicy(PolicyBase):
         # Robot control is latency-sensitive: default to low reasoning effort
         # (the arm stands still while the model thinks; safety guardrails sit
         # below the model, so effort trades thinking time, not safety).
-        self._effort = effort
+        self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
         self._images = images
         self._depth = depth
-        self._image_horizon = image_horizon
+        self._image_horizon = resolved_image_horizon
         self._prior_learnings_text = prior_learnings_text
         self._pre_check = pre_check
         self.config = AgentPolicyConfig(
@@ -482,12 +552,12 @@ class LLMAgentPolicy(PolicyBase):
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
-            effort=effort,
+            effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
             images=images,
             depth=depth,
-            image_horizon=image_horizon,
+            image_horizon=resolved_image_horizon,
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
@@ -565,6 +635,11 @@ class LLMAgentPolicy(PolicyBase):
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist wire capture and the transcript at the end of the trial."""
+        if isinstance(self._client, GeminiLiveClient):
+            # Trial finalization must stay successful even if a half-dead Live
+            # transport violates close()'s own best-effort contract.
+            with suppress(Exception):
+                self._client.close()
         if self._capture is not None:
             capture_path = self._capture.end_trial()
             if capture_path is not None:

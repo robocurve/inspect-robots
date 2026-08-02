@@ -82,6 +82,28 @@ wizard probes and interviews slots in declaration order, then writes each
 selection to its `arg` key under `[embodiment.args]`. Slots with the same
 non-`None` `group` are all-or-none. Ungrouped slots remain independent.
 
+## Declare option slots
+
+Declare boolean behavior toggles on the registered embodiment factory. Import
+[`OptionSlot`](/api/#inspect_robots.conformance.OptionSlot) from the
+`inspect_robots.conformance` submodule:
+
+```python
+from inspect_robots.conformance import OptionSlot
+
+OPTION_SLOTS = (
+    OptionSlot(
+        arg="auto_start",
+        label="Skip the operator start prompts (auto_start)",
+    ),
+)
+```
+
+Each slot is one yes/no question in the setup wizard. Its `arg` is the
+`[embodiment.args]` key written as `true` or `false`. On re-runs, the carried
+config value is the suggested answer. A declaration is skipped when its `arg`
+collides with a device slot, a camera key, or an earlier option declaration.
+
 ## The conformance kit
 
 Add one test built on
