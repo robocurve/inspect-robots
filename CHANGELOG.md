@@ -120,9 +120,22 @@ All notable changes to this project are documented here. The format is based on
   "Function call is missing a thought_signature", erroring the trial (#229,
   #230). Non-Gemini requests are unchanged.
 
+- **`fail_on_error` as a proportion no longer halts on the first error.** The
+  ratio was computed against the trials completed so far, so the first errored
+  trial was always 1/1 = 100% and tripped any threshold below 1, making
+  `0<x<1` behave identically to `True`. The denominator is now the planned
+  trial count (#254).
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
+
+- **`inspect`/`view` no longer crash on a log's own sanitized non-finite
+  metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
+  stays RFC 8259 valid, but the CLI and HTML renderers formatted every metric
+  with `.4g`, which raises on `None`. A log the sink itself wrote could crash
+  `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
+  four render sites now show `n/a` for a null metric (#253).
 
 ### Changed
 

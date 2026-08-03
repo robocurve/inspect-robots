@@ -1285,6 +1285,24 @@ def test_view_stdout_contains_only_the_document(
     assert "wrote " not in out
 
 
+def test_view_renders_null_metric_from_sanitized_non_finite_score(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a single-file `view` must render a sanitized
+    null metric as "n/a" instead of crashing on ``.4g`` formatting."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["view", str(path)]) == 0
+
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<div class="stat-value">n/a</div>' in document
+
+
 def test_view_embeds_frames_resolved_from_log_relative_fallback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1551,6 +1569,31 @@ def test_view_directory_end_to_end_and_unreadable_log(
     assert "[1/3] rendering foreign.json" not in out.err
     assert "warning: could not read or render foreign.json" in out.err
     assert out.err.count(" rendering ") == 2
+
+
+def test_view_directory_includes_log_with_sanitized_null_metric(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a log the sink itself wrote (null metric from a
+    non-finite score) reads fine and must appear in the directory index
+    rather than being dropped as "could not read or render"."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _directory_view_log(
+        created="2026-07-30T12:00:00Z",
+        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+    )
+    _write_log(log, logs, "null-metric.json")
+
+    assert main(["view", str(logs)]) == 0
+
+    out = capsys.readouterr()
+    assert "could not read or render" not in out.err
+    assert (logs / "html" / "null-metric.html").is_file()
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "null-metric.json" in index
+    assert "min_distance_to_goal=n/a" in index
+    assert out.out.startswith(f"index: {logs / 'html' / 'index.html'} (1 logs, 1 pages, ")
 
 
 def test_view_directory_multi_scene_metrics_empty_samples_and_errored_trials(
@@ -2174,6 +2217,23 @@ def test_run_outcome_breaks_count_ties_alphabetically_by_phrase(
     assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
 
     assert "outcome: 1 hit step limit, 1 succeeded" in capsys.readouterr().out
+
+
+def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: json_log.py writes inf/nan metrics as JSON null
+    so the log stays RFC 8259 valid; `inspect` must tolerate that null."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "min_distance_to_goal: n/a" in capsys.readouterr().out
 
 
 def test_inspect_outcome_maps_give_up_reason(

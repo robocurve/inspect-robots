@@ -498,9 +498,48 @@ def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
         scorer=success_at_end(),
         max_steps=20,
     )
-    # Every trial raises -> proportion 1.0 >= 0.5 threshold -> eval status error.
+    # Every trial raises -> the 0.5 threshold is reached at 2 of 4 planned trials.
     logs = eval(task, _BoomPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), fail_on_error=0.5)
     assert logs[0].status == "error"
+
+
+class _BoomOncePolicy(_BoomPolicy):
+    """Raises only while running the first scene."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._scene_id = ""
+
+    def reset(self, scene: Scene) -> None:
+        self._scene_id = scene.id
+        return None
+
+    def act(self, observation: Observation) -> ActionChunk:
+        if self._scene_id == "s0":
+            raise RuntimeError("inference exploded")
+        return ScriptedPolicy().act(observation)
+
+
+def test_fail_on_error_proportion_tolerates_errors_below_the_threshold(
+    tmp_path: Path,
+) -> None:
+    """1 error in 4 planned trials is 25%, under a 0.5 threshold, so the eval runs on (#254)."""
+    task = Task(
+        name="t",
+        scenes=[Scene(id=f"s{i}", instruction="x") for i in range(4)],
+        scorer=success_at_end(),
+        max_steps=20,
+    )
+    logs = eval(
+        task, _BoomOncePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), fail_on_error=0.5
+    )
+
+    log = logs[0]
+    # The denominator is the planned trial count, so one failure no longer reads
+    # as 1/1 = 100% and halt the run after the very first trial.
+    assert log.status != "error"
+    assert [s.scene_id for s in log.samples] == ["s0", "s1", "s2", "s3"]
+    assert [s.status for s in log.samples] == ["error", "success", "success", "success"]
 
 
 # --------------------------------------------------------------------------- #

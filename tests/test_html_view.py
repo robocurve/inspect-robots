@@ -186,6 +186,22 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     )
 
 
+def test_non_finite_metric_written_as_null_renders_as_not_available() -> None:
+    """Regression for #253: json_log.py sanitizes inf/nan metrics to ``None``
+    so the log stays valid JSON. The HTML viewer must tolerate the ``None``
+    it reads back rather than crashing on ``.4g`` formatting."""
+    log = _log()
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+
+    document = render_html(log, title="pick-cube - run.json")
+
+    assert "min_distance_to_goal" in document
+    assert '<div class="stat-value">n/a</div>' in document
+
+
 def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     log = _log()
     spec = dataclasses.replace(
