@@ -53,7 +53,9 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   (b) rewriting the `tests/test_setup.py:498` assertion on
   `_duplicated_serials(inventory) == {"SN0001"}` to the new helper's
   equivalent claim (same fixture, same meaning: the shared serial is
-  ambiguous); (c) nothing else — in particular
+  ambiguous), including the matching import swap in the
+  `tests/test_setup.py:22-30` import block; (c) nothing else — in
+  particular
   `test_reconcile_missing_current_matches_serial_from_by_id_name`
   (`tests/test_setup.py:549-568`) constructs `_CameraNode` directly and
   must keep passing, which the defaulted `model=None` field guarantees.
@@ -70,7 +72,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   dir, one per physical camera), `serial`, `by_id`, `by_path`.
 - `_setup.py:1058-1097` — `_camera_inventory`: groups symlinks by resolved
   target, probes color capability, locates the USB device dir via
-  `_usb_device_dir` (`:1034-1041`, only returns ancestors where
+  `_usb_device_dir` (`:1027-1041`, only returns ancestors where
   `idVendor.is_file()`, so `idVendor` exists whenever `camera` is not
   None), reads `serial` with `.strip() or None` (empty serial becomes
   None, which is how it escapes duplicate detection today).
@@ -123,8 +125,9 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   `_CameraNode` (defaulted, so direct constructions in existing tests
   stay valid; docstring: stable udev-name proxy, `idVendor:idProduct`).
   In `_camera_inventory`, read both files next to the existing serial
-  read, same exception envelope, normalizing with `.strip()`; either file
-  missing or empty yields `model=None`.
+  read, same exception envelope, using the `.strip() or None` EXPRESSION
+  form (an `if`-based empty check would add a branch no listed test
+  covers); either file missing or empty yields `model=None`.
 - [ ] **Step 3: gates green, commit.**
 
 ## Task 2: name-collision ambiguity replaces serial-collision ambiguity
@@ -164,26 +167,39 @@ fixtures from plan 0040 in `tests/test_setup.py`.
 
 ## Task 3: refuse ambiguous by-id names on every acceptance path
 
-- [ ] **Step 1: failing tests.** Two paths: (i) the selected device equals
-  an already-assigned ambiguous by-id name (typed manually; after Task 2
-  the identify flow can no longer produce one) — assert the wizard prints
-  a refusal explaining the name is shared between two cameras and
-  re-prompts, and that no "Use X for both" question appears in the
-  transcript; (ii) the SLOT-1 Enter-accept hole: a carried `current`
-  equal to an ambiguous by-id name whose symlink exists on the rig —
-  today `selected = current` silently succeeds at `_setup.py:595` because
-  no conflict exists yet; assert the refusal fires there too and the
-  prompt re-asks.
+- [ ] **Step 1: failing tests.** Two paths, both driven by calling
+  `_prompt_device_slot` directly (the existing helper pattern at
+  `tests/test_setup.py:60-86`, but with a real camera inventory): (i) a
+  freshly TYPED ambiguous by-id name with a pre-populated `assigned` dict
+  holding the same name — once the feature exists this state is
+  unreachable through the full wizard (every acceptance path refuses),
+  so a run_setup-level transcript cannot test it; assert the refusal
+  prints and no "Use X for both" question appears; (ii) the SLOT-1
+  Enter-accept hole: a carried `current` equal to an ambiguous by-id
+  name whose symlink exists — today `selected = current` succeeds at
+  `_setup.py:595`; assert the refusal fires and the prompt re-asks.
+  Test-fake wrinkle for (ii): the `_color_by_node` fake
+  (`tests/test_setup.py:228`) keys on basename, and after Task 2 the
+  ambiguous by-id name is in neither rows list, so the first Enter hits
+  the not-in-listing warning block and burns a `continue`; either feed
+  two Enters or make the color fake resolve symlinks (production is
+  unaffected — the real probe resolves).
 - [ ] **Step 2: implement.** Refuse at the single point where any
   `selected` value is about to be returned (covering typed names,
   Enter-accepted current values, and duplicate collisions alike): when
   `selected` is the `by_id` of any inventory record whose identity key is
-  ambiguous, print the refusal (name the cameras' by-path names so the
-  operator knows what to pick) and `continue`. The "use for both" yes/no
-  stays for every other duplicate (typed raw paths, by-path duplicates
-  from a genuinely shared device). The empty-inventory raw fallback
-  (`_camera_rows:1147-1152`) keeps today's behavior: with no records,
-  ambiguity is undetectable in principle.
+  ambiguous, print the refusal (name the claimant cameras via
+  `by_path or node`, mirroring `_print_camera_name_hint` at
+  `_setup.py:294`, so the operator knows what to pick) and `continue`.
+  The "use for both" yes/no stays for every other duplicate (typed raw
+  paths, by-path duplicates from a genuinely shared device). The
+  empty-inventory raw fallback (`_camera_rows:1147-1152`) keeps today's
+  behavior: with no records, ambiguity is undetectable in principle.
+  Non-camera slots are unaffected by construction (`_device_section`
+  passes an empty inventory for non-v4l2 kinds, `_setup.py:896`).
+  Accepted limitation, note in the refusal-block comment: a typed
+  speed-qualified alias (`usbv2-`/`usbv3-`) of the same ambiguous camera
+  bypasses the exact-string match; records store only the plain alias.
 - [ ] **Step 3: gates green, commit.**
 
 ## Task 4: docs and changelog sweep
