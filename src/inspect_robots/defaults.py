@@ -16,6 +16,9 @@ if defaults.embodiment_args_owner == "my_embodiment":
 ``inspect_robots.registry.registered`` and check its class instead of
 comparing names.)
 
+``INSPECT_ROBOTS_CONFIG`` selects the config file itself before the standard
+config-home derivation.
+
 A missing file yields empty defaults. A malformed or type-invalid file raises
 ``SystemExit`` naming the file, with a plain one-line message that callers may
 catch.
@@ -33,6 +36,7 @@ from typing import Any
 
 __all__ = ["Defaults", "config_path", "load_defaults"]
 
+_ENV_CONFIG = "INSPECT_ROBOTS_CONFIG"
 _ENV_POLICY = "INSPECT_ROBOTS_POLICY"
 _ENV_EMBODIMENT = "INSPECT_ROBOTS_EMBODIMENT"
 _ENV_SIM_EMBODIMENT = "INSPECT_ROBOTS_SIM_EMBODIMENT"
@@ -98,10 +102,14 @@ class Defaults:
 def config_path(env: Mapping[str, str]) -> Path | None:
     """Return the user config file path derived from ``env``.
 
-    The result is ``<config-home>/inspect-robots/config.ini``, whether or not
-    the file exists. Return ``None`` when neither ``XDG_CONFIG_HOME`` nor
-    ``HOME`` is set; a variable set to the empty string counts as unset.
+    ``INSPECT_ROBOTS_CONFIG`` names the config file itself and takes precedence
+    over ``XDG_CONFIG_HOME`` and ``HOME``. Otherwise, the result is
+    ``<config-home>/inspect-robots/config.ini``, whether or not the file exists.
+    Return ``None`` when none of those variables is set; a variable set to the
+    empty string counts as unset.
     """
+    if override := env.get(_ENV_CONFIG):
+        return Path(override)
     if xdg := env.get("XDG_CONFIG_HOME"):
         home = Path(xdg)
     elif user_home := env.get("HOME"):

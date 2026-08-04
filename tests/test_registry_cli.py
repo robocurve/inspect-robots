@@ -47,6 +47,7 @@ def _hermetic_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.delenv(ENV_POLICY, raising=False)
     monkeypatch.delenv(ENV_EMBODIMENT, raising=False)
     monkeypatch.delenv(ENV_SIM_EMBODIMENT, raising=False)
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
     return config_home
 
 
