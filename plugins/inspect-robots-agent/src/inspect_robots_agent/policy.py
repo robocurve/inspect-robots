@@ -58,7 +58,7 @@ from ._capture import WireCapture
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
-#: Anthropic's Messages endpoint, used to distinguish its compat endpoint.
+#: Anthropic's base URL, allowlisted by the Messages-endpoint guard below.
 _ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
 
 #: The HTTP endpoint resolution must land on before it can be upgraded to Live.
@@ -511,21 +511,21 @@ class LLMAgentPolicy(PolicyBase):
             prefix, separator, body = stripped.partition("/")
             domestic = prefix in _MESSAGES_CAPABLE_PREFIXES
             stripped_body = body if domestic and separator else stripped
+            example = (
+                "thinkingmachines/Inkling"
+                if prefix == "thinkingmachines"
+                else "anthropic/claude-opus-5"
+            )
             if not stripped_body:
                 # ':free', 'anthropic/', 'anthropic/:free': nothing usable is
                 # left once the suffix comes off, so echoing the remainder
                 # would name an empty id. Give a whole command instead.
-                example = (
-                    "thinkingmachines/Inkling"
-                    if prefix == "thinkingmachines"
-                    else "anthropic/claude-opus-5"
-                )
                 fix = f"fix: pass a full model id (-P model={example})"
             elif "/" in stripped and not domestic:
                 # A foreign prefix cannot resolve to a Messages endpoint.
                 # Decide this before the variant branch, which would otherwise
                 # remove a suffix that was never the real problem.
-                fix = "fix: use an anthropic/ model id"
+                fix = "fix: use an anthropic/ or thinkingmachines/ model id"
             elif stripped != asked:
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
@@ -533,18 +533,28 @@ class LLMAgentPolicy(PolicyBase):
                 # advice that earns a second refusal is worse than none.
                 fix = f"fix: drop the OpenRouter variant suffix (-P model={stripped})"
                 if "/" not in stripped:
+                    # A bare provider prefix must not be prefixed again:
+                    # 'anthropic/thinkingmachines' would name no model.
                     fix = (
-                        f"fix: use -P model=anthropic/{stripped} "
-                        "(the :variant suffix routes to OpenRouter)"
+                        f"fix: pass a full model id (-P model={example})"
+                        if stripped in _MESSAGES_CAPABLE_PREFIXES
+                        else (
+                            f"fix: use -P model=anthropic/{stripped} "
+                            "(the :variant suffix routes to OpenRouter)"
+                        )
                     )
             elif "/" not in asked:
-                fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
+                fix = (
+                    f"fix: pass a full model id (-P model={example})"
+                    if asked in _MESSAGES_CAPABLE_PREFIXES
+                    else f"fix: prefix the model id (-P model=anthropic/{asked})"
+                )
             else:
                 # A Messages-capable prefix with a usable body has only its
-                # direct-provider key left to fix.
-                entry = _DIRECT_PROVIDERS.get(prefix)
-                key_env = entry.key_env if entry is not None else "ANTHROPIC_API_KEY"
-                fix = f"fix: set ${key_env}"
+                # direct-provider key left to fix. Reaching here implies
+                # `domestic` (a foreign prefix took the branch above), so the
+                # prefix is always a table entry.
+                fix = f"fix: set ${_DIRECT_PROVIDERS[prefix].key_env}"
             where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
             raise ConfigError(
                 "wire='messages' needs a Messages API endpoint, but the model "

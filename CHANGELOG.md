@@ -17,7 +17,8 @@ All notable changes to this project are documented here. The format is based on
 - **Agent plugin (0.21.0):** `thinkingmachines/*` models with
   `$TINKER_API_KEY` now resolve directly to Tinker's Messages endpoint with
   `wire=messages` inferred. `wire=anthropic` remains a permanent alias for
-  `wire=messages`; construction guards now diagnose explicit wire conflicts,
+  `wire=messages` (the recorded `policy_config` canonicalizes the alias to
+  `messages`); construction guards now diagnose explicit wire conflicts,
   Messages endpoint routing mistakes, and possible silent tool drops on an
   explicit Chat Completions endpoint (plan 0044, #278).
 

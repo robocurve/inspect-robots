@@ -1003,6 +1003,34 @@ def test_bare_thinkingmachines_prefix_gets_a_full_command_fix() -> None:
     assert "fix: pass a full model id (-P model=thinkingmachines/Inkling)" in str(excinfo.value)
 
 
+def test_explicit_messages_wire_accepts_thinkingmachines() -> None:
+    """An agreeing explicit wire must not trip the conflict guard."""
+    policy = LLMAgentPolicy(
+        model="thinkingmachines/Inkling",
+        wire="messages",
+        env={"TINKER_API_KEY": "tk"},
+    )
+
+    assert isinstance(policy._client, AnthropicClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "messages"
+    assert policy.config.model == "thinkingmachines/Inkling"
+
+
+def test_bare_thinkingmachines_id_gets_a_full_command_fix() -> None:
+    """A provider prefix used as a bare model id must not be prefixed again."""
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines",
+            wire="messages",
+            env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+    message = str(excinfo.value)
+    assert "fix: pass a full model id (-P model=thinkingmachines/Inkling)" in message
+    assert "anthropic/thinkingmachines" not in message
+
+
 def test_anthropic_wire_alias_is_accepted_and_recorded_canonically() -> None:
     policy = LLMAgentPolicy(
         model="anthropic/claude-opus-5",
@@ -1170,7 +1198,7 @@ def test_explicit_base_url_suppresses_the_openrouter_guard() -> None:
 
 
 def test_non_anthropic_prefix_is_not_told_to_set_the_anthropic_key() -> None:
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="meta-llama/llama-3",
             wire="messages",
@@ -1264,7 +1292,7 @@ def test_chat_wire_gateway_keeps_the_openrouter_default() -> None:
 def test_foreign_prefix_with_a_variant_is_terminal_in_one_step() -> None:
     # Dropping the suffix would leave 'openai/gpt-5.6', still refused. The
     # prefix is the real problem, so say so first.
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="openai/gpt-5.6:free",
             wire="messages",
@@ -1273,7 +1301,7 @@ def test_foreign_prefix_with_a_variant_is_terminal_in_one_step() -> None:
 
 
 def test_foreign_prefix_with_an_empty_body_does_not_name_an_empty_id() -> None:
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="openai/:free",
             wire="messages",
@@ -1337,7 +1365,7 @@ def test_another_direct_provider_is_refused_not_sent_to_its_endpoint() -> None:
 def test_direct_provider_guidance_uses_the_requested_id_not_the_stripped_one() -> None:
     # resolve_provider strips 'groq/', so branching on the resolved id would
     # read it as bare and suggest the nonsense 'anthropic/llama-3'.
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(model="groq/llama-3", wire="messages", env={"GROQ_API_KEY": "sk-groq"})
 
 
