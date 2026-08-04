@@ -33,7 +33,21 @@ Resolved in order (first hit wins):
 1. explicit flags: `--policy` / `--embodiment`
 2. environment: `INSPECT_ROBOTS_POLICY` / `INSPECT_ROBOTS_EMBODIMENT`
 3. the user config file `~/.config/inspect-robots/config.ini`
-   (`$XDG_CONFIG_HOME` is honored):
+   (`$XDG_CONFIG_HOME` is honored).
+
+#### Several rigs on one host
+
+The config file itself is selected in this order: `--config PATH`,
+`$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
+`HOME`. Use a separate file for each rig without changing the config home for
+the whole process:
+
+```bash
+inspect-robots setup --config ~/.config/inspect-robots/rig-b.ini
+inspect-robots run --task my-benchmark --config ~/.config/inspect-robots/rig-b.ini
+```
+
+The selected file uses INI:
 
 ```ini
 [defaults]
@@ -60,9 +74,11 @@ same-named config key. An `[*.args]` section belongs to the component named
 in `[defaults]`: it applies whenever that same component is the one selected
 (by default, by flag, or by env var), and is ignored with a stderr note when
 a *different* component is selected. Your YAM rig's `rest_pose` never reaches
-`--embodiment kitchen`. There is deliberately no project-local config file:
-a checked-in file choosing which policy drives your hardware would be a trust
-footgun.
+`--embodiment kitchen`. There is deliberately no project-local config file.
+Because `.env` values load into the environment, a directory's `.env` can pin
+`INSPECT_ROBOTS_CONFIG` for everything run there. Treat a checked-in `.env`
+that selects hardware with the same suspicion as a checked-in config: either
+can choose which policy drives your hardware.
 
 ### Running in simulation: `--sim`
 

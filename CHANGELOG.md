@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `INSPECT_ROBOTS_CONFIG` and the per-subcommand `--config` flag now select the
+  config file, enabling per-rig configs on multi-rig hosts. The setup wizard
+  writes the selected file ([plan 0042](plans/0042-config-file-selection.md),
+  #274).
+
 - `FrameStore` now persists each post-action observation once and exposes it
   through `StepRecord.result_image_refs`. Stored records strip camera arrays
   from both pre-action and post-action observations, and the terminal visual
