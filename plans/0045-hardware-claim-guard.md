@@ -14,7 +14,7 @@ or is needed). Sim embodiments declare no device slots and are untouched.
 POSIX-only; where `fcntl` is unavailable the guard is a silent no-op.
 Closes #281.
 
-**Architecture:** A new private module `_claims.py` (stdlib-only, lazy
+**Architecture:** A new private module `_claims.py` (no new deps, lazy
 `fcntl` import) exposes `claim_devices(slots, kvs, env) -> DeviceClaim`. It
 selects the kvs values whose keys match a `DeviceSlot.arg`, normalizes each
 (paths resolve through symlinks so a by-id and a by-path spelling of one
@@ -31,9 +31,12 @@ never blocks an eval for environmental reasons: unusable lock directory,
 missing `fcntl`, or an unregistered embodiment name all degrade to a
 warning or silent no-op.
 
-**Tech stack:** stdlib only (`fcntl` lazily imported, `hashlib`, `os`,
-`pathlib`). pytest; flock contention is testable in-process because flock
-conflicts across distinct file descriptors within one process.
+**Tech stack:** no new dependencies (`fcntl` lazily imported, `hashlib`,
+`os`, `pathlib`; the `DeviceSlot` import from `conformance` pulls numpy,
+which is already a hard core dep). pytest; flock contention is testable
+in-process because flock conflicts across distinct file descriptors within
+one process (while a re-flock on the SAME open file description does not,
+which is why values are deduplicated before locking).
 
 ## Global Constraints
 
@@ -71,11 +74,16 @@ conflicts across distinct file descriptors within one process.
   factories else ()`).
 - `src/inspect_robots/cli.py`: `_ResolvedComponents` NamedTuple :1161-1169
   (policy, policy_name, policy_source, embodiment, embodiment_name,
-  embodiment_source); `_resolve_components` :1194-1236 — embodiment args
+  embodiment_source; ONE construction site at :1234, every consumer uses
+  attribute access); `_resolve_components` :1194-1236 — embodiment args
   dict built at :1225 (`embodiment_kvs = {**embodiment_defaults,
-  **_parse_kvs(args.embodiment_args)}`), embodiment constructed LAST at
-  :1227-1233 (docstring :1197-1199 says this ordering exists so callers can
-  open their try/finally right after). `_cmd_run` :1275: resolve :1322-1323,
+  **_parse_kvs(args.embodiment_args)}`), then the POLICY resolves at :1227,
+  then the embodiment constructs at :1228-1233 through TWO call sites (the
+  `--sim` branch passes `"sim_embodiment.args"` positionally, the real
+  branch does not; docstring :1197-1199 says the embodiment-last ordering
+  exists so callers can open their try/finally right after). The claim is
+  acquired AFTER the policy resolves and before either embodiment call
+  site, and the rollback try/except must wrap BOTH sites. `_cmd_run` :1275: resolve :1322-1323,
   `try:` :1324, `finally: embodiment.close()` :1390-1396. `_cmd_eval_set`
   :1437: resolve :1466-1467, `finally:` :1518-1522. `_cmd_doctor` :2144
   constructs too but is a short-lived diagnostic (out of scope, see below).
@@ -130,12 +138,15 @@ Behavior contract:
   `Path(tempfile.gettempdir()) / f"inspect-robots-{os.getuid()}"` (getuid
   is only reached on POSIX because the fcntl import gates everything;
   document this in the docstring). Created with `parents=True,
-  exist_ok=True`.
-- Lock file per value: `sha256(normalized.encode())[:16] + ".lock"`, opened
-  `O_CREAT | O_RDWR`, `flock(LOCK_EX | LOCK_NB)`. On success, truncate and
-  write `f"{os.getpid()} {normalized}\n"` (advisory diagnostics), keep the
-  fd. Lockfiles are deliberately never unlinked (unlink-while-locked races
-  a concurrent opener onto a dead inode; the runtime dir is per-user tmpfs).
+  exist_ok=True, mode=0o700` — and created LAZILY, only once at least one
+  value will actually be claimed, so slotless runs never touch the
+  filesystem.
+- Lock file per value: `sha256(normalized.encode()).hexdigest()[:16] +
+  ".lock"`, opened `os.open(path, O_CREAT | O_RDWR, 0o600)`,
+  `flock(LOCK_EX | LOCK_NB)`. On success, truncate and write
+  `f"{os.getpid()} {normalized}\n"` (advisory diagnostics), keep the fd.
+  Lockfiles are deliberately never unlinked (unlink-while-locked races a
+  concurrent opener onto a dead inode; the runtime dir is per-user tmpfs).
 - On `BlockingIOError`/`OSError` from flock: release everything acquired so
   far, read the holder line (best effort, empty on any error), raise
   `SystemExit(f"device {value!r} is already claimed by another inspect-robots"
@@ -143,9 +154,11 @@ Behavior contract:
   `holder_suffix` is `f" (PID {pid})"` when the line parsed.
 - Degradations (each a covered branch): `import fcntl` fails → return an
   empty claim silently; lock dir uncreatable or a lock file unopenable
-  (OSError from mkdir/open) → one `warnings.warn(RuntimeWarning)` naming the
-  path, return an empty claim (never block an eval on environment trouble);
-  no slots or no matching kvs → empty claim.
+  (OSError from mkdir/open) → RELEASE everything acquired so far (share the
+  conflict path's rollback helper), one `warnings.warn(RuntimeWarning)`
+  naming the path, return an empty claim (never block an eval on
+  environment trouble, and never leave handle-less fds flocked); no slots
+  or no matching kvs → empty claim.
 - `release()`: `flock(LOCK_UN)` + close each fd, tolerate OSError per fd,
   idempotent (second call no-op).
 
@@ -182,16 +195,24 @@ Behavior contract:
   `XDG_RUNTIME_DIR` → lock file appears under
   `tempfile.gettempdir()/inspect-robots-<uid>/...` (monkeypatch
   `tempfile.gettempdir` to tmp_path to stay hermetic).
+- `test_unopenable_lock_file_warns_and_noops`: lock DIR exists but the lock
+  file path is unopenable (pre-create the hashed filename as a DIRECTORY so
+  `os.open` raises) → RuntimeWarning, empty claim; the per-value open
+  OSError arc is distinct from the mkdir arc above.
+- `test_conflict_with_unparseable_holder_omits_pid`: pre-claim a value,
+  then truncate/garbage the lockfile content behind the claim's back;
+  a second claim still raises SystemExit containing the value but no
+  `PID` suffix (the best-effort holder parse arc).
+- `test_release_survives_externally_closed_fd`: claim, `os.close` one of
+  the claim's fds behind its back, `release()` does not raise and the
+  remaining fds release (the per-fd OSError tolerance arc).
 
-Mark any test that monkeypatches attributes ON the real fcntl module with
-`_needs_fcntl`-style skipif; plain flock-using tests need no mark on the
-blocking CI (Linux/macOS) but MUST be skipped on Windows — add a
-module-level `pytestmark = pytest.mark.skipif(sys.platform == "win32",
-reason="fcntl is POSIX-only")` EXCEPT for `test_without_fcntl_is_a_noop`,
-which must run everywhere; structure the file so that test sits outside the
-marked class or carries no mark (e.g. put the POSIX tests in a
-`@pytest.mark.skipif`-decorated class and leave the no-fcntl test at module
-level).
+Skip structure (this is the instruction, not a suggestion): put every
+flock-using test in a `@pytest.mark.skipif(sys.platform == "win32",
+reason="fcntl is POSIX-only")`-decorated class (`TestClaimsPosix`), and
+keep `test_without_fcntl_is_a_noop` as a module-level function with NO
+skip mark so it runs on every platform including the Windows advisory
+lane. Do NOT use a module-level `pytestmark` (it cannot exempt a test).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -204,9 +225,15 @@ Follow the contract above. Structure hint: a module-level
 `claim_devices` building a `DeviceClaim(fds: list[int])`. Keep the fcntl
 import at the top of `claim_devices` so the no-op arc is one early return.
 Use `os.open`/`os.write`/`os.close` (fd-based, matching flock) rather than
-file objects. Module docstring states the advisory nature and the flock
-lifetime guarantee (kernel releases on process death; stale locks cannot
-exist).
+file objects. The holder read on conflict keeps `os.read` and the `int()`
+parse inside ONE `except (OSError, ValueError, IndexError)` block: a
+separate read-only except arm is untriggerable from a fresh O_RDWR fd and
+would break the branch gate. Module docstring states the advisory nature
+and the flock lifetime guarantee (kernel releases on process death; stale
+locks cannot exist). Test caution: in
+`test_release_survives_externally_closed_fd`, close the fd immediately
+before `release()` with no intervening file-opening operations, or a
+recycled fd number makes release() unlock an unrelated file.
 
 - [ ] **Step 4: Run tests, then the full gate set**
 
@@ -264,26 +291,35 @@ run currently succeeds (no guard), so the conflict assertions fail.
 - [ ] **Step 3: Implement**
 
 - `_ResolvedComponents` gains `claim: DeviceClaim` (import `_claims` at the
-  top of cli.py; it is stdlib-only and cheap).
-- In `_resolve_components`, after the policy resolves and `embodiment_kvs`
-  is built (:1225), and BEFORE the embodiment constructs (:1227-1233):
+  top of cli.py; it adds no new dependencies and is cheap).
+- In `_resolve_components`: the policy resolves FIRST (:1227, unchanged and
+  outside the claim's lifetime — a policy failure must not leak a claim);
+  then acquire the claim; then construct the embodiment with the rollback
+  wrapping BOTH embodiment call sites (the `--sim` branch at :1229-1231 and
+  the real branch at :1233):
 
 ```python
+    policy = _resolve_or_exit("policy", ...)          # unchanged, before the claim
     factories = registered("embodiment")
     slots = (
         device_slots(factories[embodiment_name]) if embodiment_name in factories else ()
     )
     claim = claim_devices(slots, embodiment_kvs, os.environ)
     try:
-        embodiment = _resolve_or_exit("embodiment", embodiment_name, ..., **embodiment_kvs)
+        if ...sim branch...:
+            embodiment = _resolve_or_exit("embodiment", embodiment_name,
+                                          "sim_embodiment.args", **embodiment_kvs)
+        else:
+            embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
     except BaseException:
+        # _resolve_or_exit raises SystemExit, which is not an Exception.
         claim.release()
         raise
 ```
 
-  (`BaseException` because `_resolve_or_exit` raises SystemExit; a comment
-  says so. `registered` and `device_slots` are already imported or need
-  imports — check the top of cli.py.)
+  (Match the actual existing branch shapes at :1228-1233 rather than this
+  sketch's ellipses. `registered` and `device_slots` need imports — check
+  the top of cli.py.)
 - `_cmd_run` finally (:1390-1396) becomes `finally: embodiment.close();
   resolved.claim.release()` — close first, release second, and the release
   must run even if `close()` raises (nested try/finally). Same in
@@ -320,9 +356,13 @@ git commit -m "cli: claim device slots before constructing hardware embodiments 
 adapters.md: one paragraph after the slot declaration example: declared
 slots also feed a run-time advisory claim; when two evals name the same
 device the second fails at startup instead of double-driving the hardware;
-the claim is flock-based, per-user, and vanishes with the process. cli.md:
-one sentence in the run section with the conflict error's shape. No em
-dashes in prose.
+the claim is flock-based and vanishes with the process. State the scope
+honestly: claims are per-user (two different users driving one rig are not
+guarded), and on hosts without `XDG_RUNTIME_DIR` the fallback directory
+lives under the world-writable temp dir, so the guard is a safety net
+against your own concurrent evals, not a security boundary. cli.md: one
+sentence in the run section with the conflict error's shape. No em dashes
+in prose.
 
 - [ ] **Step 2: CHANGELOG + module map + gates + commit**
 
