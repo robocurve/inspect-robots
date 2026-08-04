@@ -33,16 +33,22 @@ pytest with the existing fake-client patterns in
 - Gates (all blocking), run from the worktree root. The root mypy/pytest
   configs do NOT cover the plugin (root `testpaths=["tests"]`, coverage
   `source=["inspect_robots"]`), so the plugin gates must be the CI commands
-  (`.github/workflows/ci.yml:317-331`):
-  - `uv run ruff check .` and `uv run ruff format --check .` (repo-wide).
+  (`.github/workflows/ci.yml:317-331`, quoted verbatim):
+  - `uv run --no-sync ruff check plugins/inspect-robots-agent` and
+    `uv run --no-sync ruff format --check plugins/inspect-robots-agent`
+    (repo-wide ruff is a strict superset and also acceptable).
   - `uv run mypy --config-file plugins/inspect-robots-agent/pyproject.toml
     plugins/inspect-robots-agent/src/inspect_robots_agent`.
   - `uv run pytest plugins/inspect-robots-agent/tests
-    --cov=inspect_robots_agent --cov-report=term-missing`.
-  Coverage bar: CI gates plugins at fail-under=0 and the plugin sits at
-  97.73% today (pre-existing `_gemini_live.py` gaps), so the rule is **no
-  regression on touched files**: `_tools.py` stays 100%, `policy.py` stays
-  at or above its current 99% with every new line and branch covered.
+    --cov=inspect_robots_agent --cov-report=term-missing
+    --cov-fail-under=0`. The `--cov-fail-under=0` is LOAD-BEARING: run
+    from the worktree root, pytest-cov otherwise inherits the root
+    `[tool.coverage.report] fail_under = 100` and fails a green suite at
+    the plugin's pre-existing 97.73%.
+  Coverage bar: the rule is **no regression on touched files**:
+  `_tools.py` stays 100%, `policy.py` stays at or above its current 99%
+  with every new line and branch covered (the 97.73% total is pre-existing
+  `_gemini_live.py` gaps, not the implementer's problem).
 - Every public module/class/function needs a docstring stating the contract
   (ruff D1).
 - Repo root is the `wt-ir-hindsight` worktree at
@@ -74,8 +80,11 @@ pytest with the existing fake-client patterns in
   schemas pass through verbatim to every wire), so schema-required is
   purely an instruction to the model.
 - Existing required-list assertions that break mechanically (permitted
-  edits): `tests/test_tools_motion.py:578-581` (`["summary"]`) and
-  `:601-604` (`["reason"]`).
+  edits): both in `test_schemas_match_control_mode_and_remove_duration`
+  (`tests/test_tools_motion.py:570`) — the full three-tool lists at
+  `:578-582` (`[["targets","note"],["summary"],["reason"]]`, absolute) and
+  `:601-605` (`[["deltas","note"],["summary"],["reason"]]`, displacement);
+  each needs BOTH stop-tool entries extended with `"hindsight"`.
 - `policy.py:100-134` — `_SYSTEM_TEMPLATE` and `_ON_DEMAND_SYSTEM_TEMPLATE`;
   both end with "When the goal is achieved call done; if it cannot be
   achieved call give_up. You have a budget of {budget} LLM calls...".
@@ -149,8 +158,15 @@ pytest with the existing fake-client patterns in
   ends via `done` WITH hindsight, trial 2 ends via forced give_up — and
   trial 2's metadata has no `hindsight` key. No two-trial helper exists:
   hand-build `Task(scenes=[...], epochs=2, ...)` (`Task.epochs`,
-  `src/inspect_robots/task.py:69`); the `_Script` transport consumes
-  responses sequentially across trials.
+  `src/inspect_robots/task.py:69`). `_Script` semantics trap
+  (`test_policy_e2e.py:160-170`): the transport pops sequentially but
+  REPEATS ITS FINAL RESPONSE FOREVER — a script ending in the
+  `done`+hindsight response makes trial 2 replay `done` and inverts the
+  scenario. The script must end with a MOVE response (e.g.
+  `[move, done+hindsight, move]`) and use a small `max_llm_calls` so
+  trial 2 loops the trailing move into budget exhaustion (budget is
+  checked before each call at `policy.py:810`; `_calls_used` resets per
+  trial at `policy.py:695`).
 - [ ] **Step 2: implement.** At the `policy.py:955` stop-chunk site, stash
   `chunk.actions[0].meta.get("stop_hindsight")` on the policy when
   `request_stop` is set. Clear the stash early in `reset()`
