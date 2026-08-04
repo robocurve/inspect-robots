@@ -108,6 +108,7 @@ All notable changes to this project are documented here. The format is based on
 
 - The CAN pinning suggestion no longer degrades to a bare warning when adapter
   serials are shared or missing. It emits port-pinned `KERNELS` rules instead
+  when the adapters sit on distinct USB ports
   ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
 
 - `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists

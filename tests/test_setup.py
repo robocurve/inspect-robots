@@ -188,6 +188,14 @@ def _symlink(link: Path, target: Path) -> None:
         pytest.skip("symlinks unavailable")
 
 
+def _mkdir_or_skip(path: Path, *, parents: bool = False) -> None:
+    """A mkdir helper that skips where the filesystem rejects the name (Windows)."""
+    try:
+        path.mkdir(parents=parents)
+    except OSError:  # pragma: no cover - Windows rejects colon-named dirs
+        pytest.skip("filesystem rejects the fixture name")
+
+
 def _usb_device(
     devices: Path, port: str, serial: str, sysfs_video: Path, nodes: dict[str, str]
 ) -> None:
@@ -276,7 +284,7 @@ def _attach_can_adapter(
     if serial is not None:
         (root / "serial").write_text(serial + "\n", encoding="utf-8")
     device = root / device_leaf
-    device.mkdir()
+    _mkdir_or_skip(device)
     try:
         (sysfs_net / ifname / "device").symlink_to(device, target_is_directory=True)
     except OSError as exc:
@@ -773,7 +781,7 @@ def test_can_kernels_reads_interface_kernel_name(tmp_path: Path) -> None:
     interface = sysfs_net / "can0"
     interface.mkdir(parents=True)
     device = tmp_path / "usb3" / "3-2" / "3-2:1.0"
-    device.mkdir(parents=True)
+    _mkdir_or_skip(device, parents=True)
     try:
         (interface / "device").symlink_to(device, target_is_directory=True)
     except OSError as exc:
@@ -3829,7 +3837,7 @@ def test_suggest_can_pinning_dual_channel_adapter_stays_bare_warning(
     adapter.mkdir(parents=True)
     (adapter / "serial").write_text("SN0001\n", encoding="utf-8")
     device = adapter / "3-2:1.0"
-    device.mkdir()
+    _mkdir_or_skip(device)
     try:
         for ifname in ("can0", "can1"):
             (sysfs_net / ifname / "device").symlink_to(device, target_is_directory=True)
