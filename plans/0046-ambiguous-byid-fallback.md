@@ -167,7 +167,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
 
 ## Task 3: refuse ambiguous by-id names on every acceptance path
 
-- [ ] **Step 1: failing tests.** Two paths, both driven by calling
+- [x] **Step 1: failing tests.** Two paths, both driven by calling
   `_prompt_device_slot` directly (the existing helper pattern at
   `tests/test_setup.py:60-86`, but with a real camera inventory): (i) a
   freshly TYPED ambiguous by-id name with a pre-populated `assigned` dict
@@ -184,7 +184,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   the not-in-listing warning block and burns a `continue`; either feed
   two Enters or make the color fake resolve symlinks (production is
   unaffected — the real probe resolves).
-- [ ] **Step 2: implement.** Refuse at the single point where any
+- [x] **Step 2: implement.** Refuse at the single point where any
   `selected` value is about to be returned (covering typed names,
   Enter-accepted current values, and duplicate collisions alike): when
   `selected` is the `by_id` of any inventory record whose identity key is
@@ -200,7 +200,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   Accepted limitation, note in the refusal-block comment: a typed
   speed-qualified alias (`usbv2-`/`usbv3-`) of the same ambiguous camera
   bypasses the exact-string match; records store only the plain alias.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 4: docs and changelog sweep
 

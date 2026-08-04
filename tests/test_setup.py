@@ -753,6 +753,125 @@ def test_ambiguous_identities_deduplicates_nodes_per_camera() -> None:
     assert _ambiguous_identities(records) == set()
 
 
+def test_prompt_device_slot_refuses_typed_ambiguous_by_id_before_duplicate_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    ambiguous_name = str(by_id / "usb-Intel_RealSense_405_405-video-index0")
+    input_fn, prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "left camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        None,
+        {"top_cam_device": ("v4l2", "top", ambiguous_name)},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="left",
+    )
+
+    assert selected is None
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert "pci-usb-3-2-video-index0, pci-usb-3-4-video-index0" in out.getvalue()
+    assert all("Use " not in prompt or " for both " not in prompt for prompt in prompts)
+    assert sum(prompt.startswith("left camera") for prompt in prompts) == 2
+
+
+def test_prompt_device_slot_refuses_enter_accepted_ambiguous_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    ambiguous_name = str(by_id / "usb-Intel_RealSense_405_405-video-index0")
+    input_fn, prompts = _scripted_input(["", "", "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        ambiguous_name,
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert "offers no color capture format" in out.getvalue()
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert "pci-usb-3-2-video-index0, pci-usb-3-4-video-index0" in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 3
+
+
+def test_prompt_device_slot_refusal_lists_cross_model_serial_claimants(tmp_path: Path) -> None:
+    ambiguous_name = str(tmp_path / "by-id" / "usb-Camera_SN0001-video-index0")
+    inventory = [
+        _CameraNode(
+            "/dev/video13",
+            "camera-a",
+            "SN0001",
+            ambiguous_name,
+            "/dev/v4l/by-path/model-a",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video15",
+            "camera-b",
+            "SN0001",
+            None,
+            "/dev/v4l/by-path/model-b",
+            "1d6b:0102",
+        ),
+    ]
+    input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        [],
+        [],
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert "claimant cameras by port: model-a, model-b" in out.getvalue()
+
+
 def test_camera_rows_raw_fallback_when_no_color_confirmed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

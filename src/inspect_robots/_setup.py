@@ -632,6 +632,42 @@ def _prompt_device_slot(
             )
             continue
 
+        ambiguous = _ambiguous_identities(inventory)
+        ambiguous_record = next(
+            (
+                record
+                for record in inventory
+                if record.by_id == selected and _is_ambiguous(record, ambiguous)
+            ),
+            None,
+        )
+        if ambiguous_record is not None:
+            identity = (ambiguous_record.model, ambiguous_record.serial)
+            claimants = sorted(
+                {
+                    Path(record.by_path or record.node).name
+                    for record in inventory
+                    if (record.model, record.serial) == identity
+                    or (
+                        ambiguous_record.serial is not None
+                        and record.serial == ambiguous_record.serial
+                    )
+                }
+            )
+            names = ", ".join(claimants)
+            print(
+                _paint(
+                    f"cannot use ambiguous by-id camera name {selected}; "
+                    f"choose one of these claimant cameras by port: {names}",
+                    _YELLOW,
+                    out,
+                ),
+                file=out,
+            )
+            # A typed speed-qualified usbv2-/usbv3- alias bypasses this
+            # exact-string match because records store only the plain alias.
+            continue
+
         other = next(
             (
                 (assigned_label, device)
