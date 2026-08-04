@@ -167,7 +167,12 @@ When the selected registered embodiment declares device slots, those slots
 drive one device interview for cameras, CAN interfaces, and serial devices.
 CAN slots list SocketCAN interfaces and support unplug-to-identify; rigs with
 multiple USB adapters named `can0`, `can1`, and so on also receive a udev
-pinning suggestion so replug order cannot swap physical devices.
+pinning suggestion so replug order cannot swap physical devices. The suggestion
+pins by adapter serial when serials are present and distinct, and otherwise
+emits USB-port `KERNELS` rules. The fallback is needed for rigs with several
+identical `gs_usb` adapters such as Innomaker's, because every unit reports
+`SN0001`. A port-pinned name stays valid only while the adapter keeps the same
+physical USB port.
 
 ```bash
 inspect-robots setup
