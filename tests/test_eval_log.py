@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from inspect_robots import eval_set, read_eval_log
+from inspect_robots._html import render_html
+from inspect_robots._summarize import TrialTranscript, build_digest
 from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
@@ -53,6 +55,7 @@ def _golden_log() -> EvalLog:
                 instruction="reach the cube",
                 operator_judgements=("yes",),
                 operator_notes=("gripper closed early",),
+                operator_messages=(({"t": 3, "text": "keep left <now>"},),),
                 trial_metadata=({"foo": "bar"},),
                 termination_reasons=("success",),
                 policy_transcripts=(
@@ -92,6 +95,9 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].instruction == "reach the cube"
     assert restored.samples[0].operator_judgements == ("yes",)
     assert restored.samples[0].operator_notes == ("gripper closed early",)
+    assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
+    assert isinstance(restored.samples[0].operator_messages, tuple)
+    assert isinstance(restored.samples[0].operator_messages[0], tuple)
     assert restored.samples[0].trial_metadata == ({"foo": "bar"},)
     assert restored.samples[0].termination_reasons == ("success",)
     assert restored.samples[0].policy_transcripts == (
@@ -112,6 +118,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
         del sample["instruction"]
         del sample["operator_judgements"]
         del sample["operator_notes"]
+        del sample["operator_messages"]
         del sample["trial_metadata"]
         del sample["termination_reasons"]
         del sample["policy_transcripts"]
@@ -122,6 +129,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].instruction is None
     assert restored.samples[0].operator_judgements == ()
     assert restored.samples[0].operator_notes == ()
+    assert restored.samples[0].operator_messages == ()
     assert restored.samples[0].trial_metadata == ()
     assert restored.samples[0].termination_reasons == ()
     assert restored.samples[0].policy_transcripts == ()
@@ -173,6 +181,8 @@ def test_eval_log_and_friends_are_frozen() -> None:
     with pytest.raises(AttributeError):
         log.samples[0].operator_judgements.append("no")  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
+        log.samples[0].operator_messages[0].append({})  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
         log.samples[0].trial_metadata.append({})  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         log.samples[0].termination_reasons.append("failure")  # type: ignore[attr-defined]
@@ -183,6 +193,19 @@ def test_unsupported_schema_version_rejected() -> None:
     data["version"] = 999
     with pytest.raises(ValueError, match="schema version"):
         EvalLog.from_dict(data)
+
+
+def test_operator_feedback_appears_in_digest_and_escaped_html() -> None:
+    log = _golden_log()
+    transcripts = [TrialTranscript("s0", 0, None, "none")]
+
+    digest = build_digest(log, transcripts)
+    document = render_html(log, title="operator feedback")
+
+    assert "operator feedback: keep left <now>" in digest
+    assert "Operator feedback" in document
+    assert "keep left &lt;now&gt;" in document
+    assert "keep left <now>" not in document
 
 
 def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
