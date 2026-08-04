@@ -220,6 +220,14 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _port_number(text: str) -> int:
+    """Parse a TCP port number for an argparse option."""
+    port = int(text)
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 1-65535")
+    return port
+
+
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
     """Attach the --config override to a subcommand that reads the config file."""
     parser.add_argument(
@@ -289,6 +297,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="stream the rollout to a Rerun viewer already running elsewhere "
         "(e.g. your laptop via an SSH reverse tunnel: ssh -R 9876:localhost:9876 ...); "
         f"URL defaults to {DEFAULT_RERUN_CONNECT_URL}",
+    )
+    p_run.add_argument(
+        "--rerun-port",
+        type=_port_number,
+        default=None,
+        metavar="PORT",
+        help="spawn the live Rerun viewer on this port (implies --rerun; "
+        "a per-rig rerun_port config key sets the default)",
     )
 
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
@@ -1273,6 +1289,16 @@ def _build_and_announce_guardrails(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.rerun_port is not None and args.rerun_connect:
+        raise SystemExit(
+            "--rerun-port spawns a local viewer and --rerun-connect streams "
+            "to a remote one: pass only one"
+        )
+    if args.rerun_port is not None and args.rerun is False:
+        raise SystemExit(
+            "--no-rerun disables the live viewer and --rerun-port requests one: pass only one"
+        )
+
     from dataclasses import replace
 
     from inspect_robots import eval
@@ -1357,13 +1383,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
             sinks.append(RerunSink(connect_url=args.rerun_connect))
             print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}")
-        elif args.rerun if args.rerun is not None else defaults.rerun:
-            from inspect_robots.logging.rerun_sink import RerunSink
+        else:
+            spawn_wanted = args.rerun_port is not None or (
+                args.rerun if args.rerun is not None else defaults.rerun
+            )
+            if spawn_wanted:
+                from inspect_robots.logging.rerun_sink import RerunSink
 
-            # spawn=True opens the live viewer; the sink itself degrades to a
-            # warn-once no-op when rerun-sdk is not installed.
-            sinks.append(RerunSink(spawn=True))
-            print(f"{_styled('rerun:', _CYAN)} live viewer")
+                # spawn=True opens the live viewer; the sink itself degrades to a
+                # warn-once no-op when rerun-sdk is not installed.
+                port = args.rerun_port if args.rerun_port is not None else defaults.rerun_port
+                if port is None:
+                    sinks.append(RerunSink(spawn=True))
+                else:
+                    sinks.append(RerunSink(spawn=True, spawn_port=port))
+                print(f"{_styled('rerun:', _CYAN)} live viewer")
         try:
             logs = eval(
                 task,
