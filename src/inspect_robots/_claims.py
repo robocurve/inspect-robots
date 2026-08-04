@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 import warnings
 from collections.abc import Mapping
@@ -36,6 +37,7 @@ class DeviceClaim:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
             except OSError:
+                # Unlock or close may race an external close; release is best-effort and idempotent.
                 pass
 
 
@@ -48,9 +50,17 @@ def _lock_dir(env: Mapping[str, str]) -> Path | None:
     lock_dir = runtime_dir / "inspect-robots" / "locks"
     try:
         lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_dir_stat = os.lstat(lock_dir)
     except OSError as exc:
         warnings.warn(
             f"cannot create device claim lock directory {lock_dir}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    if not stat.S_ISDIR(lock_dir_stat.st_mode) or lock_dir_stat.st_uid != os.getuid():
+        warnings.warn(
+            f"cannot use device claim lock directory {lock_dir}: not a directory we own",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -100,7 +110,7 @@ def claim_devices(
         digest = hashlib.sha256(value.encode()).hexdigest()[:16]
         lock_path = lock_dir / f"{digest}.lock"
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         except OSError as exc:
             claim.release()
             warnings.warn(
@@ -126,7 +136,16 @@ def claim_devices(
                 f" process{holder_suffix}: two evals must not drive one rig"
             ) from None
 
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()} {value}\n".encode())
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()} {value}\n".encode())
+        except OSError as exc:
+            claim.release()
+            warnings.warn(
+                f"cannot write device claim lock file {lock_path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return claim
 
     return claim

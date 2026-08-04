@@ -126,6 +126,38 @@ class TestClaimsPosix:
 
         assert claim._fds == []
 
+    def test_symlink_lock_dir_warns_and_noops(self, tmp_path: Path) -> None:
+        real_lock_dir = tmp_path / "real-locks"
+        real_lock_dir.mkdir()
+        lock_dir = _lock_dir(tmp_path)
+        lock_dir.parent.mkdir()
+        lock_dir.symlink_to(real_lock_dir, target_is_directory=True)
+
+        with pytest.warns(RuntimeWarning, match=str(lock_dir)):
+            claim = claim_devices(
+                (_slot("left_channel"),),
+                {"left_channel": "can0"},
+                {"XDG_RUNTIME_DIR": str(tmp_path)},
+            )
+
+        assert claim._fds == []
+        assert list(real_lock_dir.iterdir()) == []
+
+    def test_foreign_owned_lock_dir_warns_and_noops(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        actual_uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: actual_uid + 1)
+
+        with pytest.warns(RuntimeWarning, match=str(_lock_dir(tmp_path))):
+            claim = claim_devices(
+                (_slot("left_channel"),),
+                {"left_channel": "can0"},
+                {"XDG_RUNTIME_DIR": str(tmp_path)},
+            )
+
+        assert claim._fds == []
+
     def test_gettempdir_fallback_used_without_runtime_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -150,6 +182,42 @@ class TestClaimsPosix:
             )
 
         assert claim._fds == []
+
+    def test_symlink_lock_file_warns_and_noops(self, tmp_path: Path) -> None:
+        target = tmp_path / "victim"
+        target.write_text("keep me", encoding="utf-8")
+        lock_path = _lock_path(tmp_path, "can0")
+        lock_path.parent.mkdir(parents=True)
+        lock_path.symlink_to(target)
+
+        with pytest.warns(RuntimeWarning, match=str(lock_path)):
+            claim = claim_devices(
+                (_slot("left_channel"),),
+                {"left_channel": "can0"},
+                {"XDG_RUNTIME_DIR": str(tmp_path)},
+            )
+
+        assert claim._fds == []
+        assert target.read_text(encoding="utf-8") == "keep me"
+
+    def test_write_failure_warns_releases_and_noops(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slots = (_slot("left_channel"),)
+        kvs = {"left_channel": "can0"}
+        env = {"XDG_RUNTIME_DIR": str(tmp_path)}
+
+        def fail_ftruncate(_fd: int, _length: int) -> None:
+            raise OSError("truncate failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "ftruncate", fail_ftruncate)
+            with pytest.warns(RuntimeWarning, match=str(_lock_path(tmp_path, "can0"))):
+                claim = claim_devices(slots, kvs, env)
+
+        assert claim._fds == []
+        replacement = claim_devices(slots, kvs, env)
+        replacement.release()
 
     def test_conflict_with_unparseable_holder_omits_pid(self, tmp_path: Path) -> None:
         slots = (_slot("left_channel"),)
