@@ -159,6 +159,14 @@ All notable changes to this project are documented here. The format is based on
   `0<x<1` behave identically to `True`. The denominator is now the planned
   trial count (#254).
 
+- **A long task name no longer costs a finished run its log.** `JsonLogSink`
+  derives the filename from the task name without capping its length, so a name
+  past roughly 238 characters pushed the path over the 255-byte limit and
+  `on_eval_end` raised `OSError: File name too long` after every trial had
+  already run — leaving the log directory empty and the results unrecoverable.
+  The slug is now capped; the full name is still recorded in the log body, and
+  the filename's uuid suffix keeps runs distinct (#292).
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
