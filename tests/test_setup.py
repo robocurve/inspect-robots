@@ -933,6 +933,38 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     assert 'Next: inspect-robots "place the fork on the plate"' in output
 
 
+def test_run_setup_writes_inspect_robots_config_override(tmp_path: Path) -> None:
+    xdg = tmp_path / "xdg"
+    decoy_path = _config_path(xdg)
+    decoy_path.parent.mkdir(parents=True)
+    decoy_bytes = b"[defaults]\npolicy = decoy\n"
+    decoy_path.write_bytes(decoy_bytes)
+    override_path = tmp_path / "rig-b" / "config.ini"
+    assert not override_path.parent.exists()
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {
+            "XDG_CONFIG_HOME": str(xdg),
+            "INSPECT_ROBOTS_CONFIG": str(override_path),
+            "DISPLAY": ":0",
+        },
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "missing-by-id",
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    assert result == 0
+    assert "[defaults]" in override_path.read_text(encoding="utf-8")
+    assert f"inspect-robots setup — writes {override_path}" in out.getvalue()
+    assert decoy_path.read_bytes() == decoy_bytes
+    assert not decoy_path.with_name("config.ini.bak").exists()
+    assert not override_path.with_name("config.ini.bak").exists()
+
+
 def test_run_setup_lists_race_loser_camera_and_selects_it_by_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
