@@ -86,6 +86,7 @@ class Defaults:
     max_steps: int | None = None
     store_frames: bool = False
     rerun: bool = False
+    rerun_port: int | None = None
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
@@ -169,6 +170,20 @@ def _read_config(path: Path) -> Defaults:
             raise _die(path, f"[defaults] rerun must be true or false, got {raw_rerun!r}")
         rerun = parsed_rerun
 
+    rerun_port: int | None = None
+    if raw_port := parser.get("defaults", "rerun_port", fallback=None):
+        parsed_port = _parse_value(raw_port)
+        if (
+            not isinstance(parsed_port, int)
+            or isinstance(parsed_port, bool)
+            or not 1 <= parsed_port <= 65535
+        ):
+            raise _die(
+                path,
+                f"[defaults] rerun_port must be an integer in 1-65535, got {raw_port!r}",
+            )
+        rerun_port = parsed_port
+
     policy = parser.get("defaults", "policy", fallback=None)
     embodiment = parser.get("defaults", "embodiment", fallback=None)
     sim_embodiment = parser.get("defaults", "sim_embodiment", fallback=None)
@@ -183,6 +198,7 @@ def _read_config(path: Path) -> Defaults:
         max_steps=max_steps,
         store_frames=store_frames,
         rerun=rerun,
+        rerun_port=rerun_port,
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
@@ -202,6 +218,7 @@ _CONFIG_KEYS = (
     "max_steps",
     "store_frames",
     "rerun",
+    "rerun_port",
 )
 
 
@@ -218,6 +235,10 @@ def _set_default(env: Mapping[str, str], key: str, value: str) -> Path:
         parsed = _parse_value(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
             raise SystemExit(f"max_steps must be an integer >= 1, got {value!r}")
+    if key == "rerun_port":
+        parsed = _parse_value(value)
+        if not isinstance(parsed, int) or isinstance(parsed, bool) or not 1 <= parsed <= 65535:
+            raise SystemExit(f"rerun_port must be an integer in 1-65535, got {value!r}")
     if key in ("store_frames", "rerun") and not isinstance(_parse_value(value), bool):
         raise SystemExit(f"{key} must be true or false, got {value!r}")
 

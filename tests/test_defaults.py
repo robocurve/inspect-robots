@@ -246,6 +246,26 @@ def test_config_rerun_rejects_non_bool(tmp_path: Path) -> None:
         load_defaults({"XDG_CONFIG_HOME": str(config_home)})
 
 
+def test_config_rerun_port_parses_int(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\nrerun_port = 9877\n")
+    assert load_defaults({"XDG_CONFIG_HOME": str(config_home)}).rerun_port == 9877
+
+
+def test_config_rerun_port_defaults_none(tmp_path: Path) -> None:
+    config_home = tmp_path / "cfg"
+    _write_config(config_home, "[defaults]\npolicy = x\n")
+    assert load_defaults({"XDG_CONFIG_HOME": str(config_home)}).rerun_port is None
+
+
+@pytest.mark.parametrize("bad", ["true", "0", "65536", "9876.5"])
+def test_config_rerun_port_rejects_invalid(tmp_path: Path, bad: str) -> None:
+    config_home = tmp_path / "cfg"
+    path = _write_config(config_home, f"[defaults]\nrerun_port = {bad}\n")
+    with pytest.raises(SystemExit, match=rf"{re.escape(str(path))}.*1-65535"):
+        load_defaults({"XDG_CONFIG_HOME": str(config_home)})
+
+
 def test_set_default_requires_config_home() -> None:
     with pytest.raises(SystemExit, match="config home"):
         set_default({}, "policy", "scripted")

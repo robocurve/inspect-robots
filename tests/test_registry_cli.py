@@ -5113,6 +5113,18 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert main(["config", "set", "rerun", "true"]) == 0
 
 
+def test_cli_config_set_rejects_bad_rerun_port(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="rerun_port must be an integer in 1-65535"):
+        main(["config", "set", "rerun_port", "sometimes"])
+
+    assert main(["config", "set", "rerun_port", "9877"]) == 0
+    capsys.readouterr()
+    assert main(["config", "show"]) == 0
+    assert "rerun_port: 9877" in capsys.readouterr().out
+
+
 def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
     """A factory's guided ConfigError must exit cleanly, not print a traceback."""
     from inspect_robots.errors import ConfigError
