@@ -16,7 +16,9 @@ import pytest
 
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
+from inspect_robots._claims import claim_devices
 from inspect_robots.cli import main
+from inspect_robots.conformance import DeviceSlot
 from inspect_robots.console import USAGE, OperatorConsole
 from inspect_robots.defaults import (
     _ENV_EMBODIMENT as ENV_EMBODIMENT,
@@ -459,6 +461,157 @@ def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> No
             scorer=success_at_end(),
             max_steps=max_steps,
         )
+
+
+_DEVICE_CLAIM_SLOTS = (DeviceSlot(arg="channel", kind="can", label="bus"),)
+_DEVICE_CLAIM_EMBODIMENT = "device-claim-test-embodiment"
+
+
+def _register_device_claim_embodiment(monkeypatch: pytest.MonkeyPatch) -> str:
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeviceClaimEmbodiment(CubePickEmbodiment):
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            super().__init__()
+            self.channel = channel
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _DeviceClaimEmbodiment
+    )
+    return _DEVICE_CLAIM_EMBODIMENT
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_claims_and_releases_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    args = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            main(args)
+        assert "can9" in str(exc_info.value)
+        assert "already claimed" in str(exc_info.value)
+    finally:
+        existing.release()
+
+    assert main(args) == 0
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_without_device_slots_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
+    assert not (tmp_path / "inspect-robots" / "locks").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_claim_released_when_embodiment_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _BrokenDeviceClaimEmbodiment:
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            raise TypeError(f"construction exploded for {channel}")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _BrokenDeviceClaimEmbodiment
+    )
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    with pytest.raises(SystemExit, match="construction exploded"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                _DEVICE_CLAIM_EMBODIMENT,
+                "-E",
+                "channel=can9",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_eval_set_claims_once_for_the_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    _register_task("claim/a")
+    _register_task("claim/b")
+    args = [
+        "eval-set",
+        "claim/a",
+        "claim/b",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+
+    try:
+        existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                main(args)
+            assert "can9" in str(exc_info.value)
+            assert "already claimed" in str(exc_info.value)
+        finally:
+            existing.release()
+
+        assert main(args) == 0
+        after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        after.release()
+    finally:
+        reg._FACTORIES["task"].pop("claim/a", None)
+        reg._FACTORIES["task"].pop("claim/b", None)
 
 
 def test_cli_eval_set_runs_multiple_exact_tasks(

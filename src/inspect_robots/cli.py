@@ -58,6 +58,7 @@ from types import FrameType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
 from inspect_robots import __version__
+from inspect_robots._claims import DeviceClaim, claim_devices
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
     _chat_content,
@@ -68,6 +69,7 @@ from inspect_robots._html import (
 )
 from inspect_robots._html_index import IndexEntry, render_index
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
+from inspect_robots.conformance import device_slots
 from inspect_robots.console import USAGE, OperatorConsole
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
@@ -81,6 +83,7 @@ from inspect_robots.defaults import (
     _set_default,
     load_defaults,
 )
+from inspect_robots.registry import registered
 from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
@@ -1183,6 +1186,7 @@ class _ResolvedComponents(NamedTuple):
     embodiment: Any
     embodiment_name: str
     embodiment_source: str
+    claim: DeviceClaim
 
 
 def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
@@ -1241,14 +1245,21 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
-    if args.sim:
-        embodiment = _resolve_or_exit(
-            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
-        )
-    else:
-        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    factories = registered("embodiment")
+    slots = device_slots(factories[embodiment_name]) if embodiment_name in factories else ()
+    claim = claim_devices(slots, embodiment_kvs, os.environ)
+    try:
+        if args.sim:
+            embodiment = _resolve_or_exit(
+                "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+            )
+        else:
+            embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    except BaseException:
+        claim.release()
+        raise
     return _ResolvedComponents(
-        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source
+        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source, claim
     )
 
 
@@ -1427,7 +1438,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # torque in close(); skipping this leaves a robot energized. The span
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
-        embodiment.close()
+        try:
+            embodiment.close()
+        finally:
+            resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1553,7 +1567,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # Same "close what we open" contract as _cmd_run: the CLI resolved the
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
-        embodiment.close()
+        try:
+            embodiment.close()
+        finally:
+            resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
