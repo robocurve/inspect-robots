@@ -1212,6 +1212,19 @@ def _can_serial(sysfs_net: Path, ifname: str) -> str | None:
         return None
 
 
+def _can_kernels(sysfs_net: Path, ifname: str) -> str | None:
+    """Kernel device name of a CAN interface's USB interface, if resolvable.
+
+    The name (for example ``3-2:1.0``) is what a udev ``KERNELS==`` clause
+    matches, pinning the interface to its physical USB port.
+    """
+    try:
+        return (sysfs_net / ifname / "device").resolve(strict=True).name
+    except (OSError, RuntimeError):
+        # RuntimeError: symlink loops raise it from resolve() before py3.13.
+        return None
+
+
 def _suggest_can_pinning(
     sysfs_net: Path,
     slots: tuple[DeviceSlot, ...],

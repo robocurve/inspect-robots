@@ -20,6 +20,7 @@ from inspect_robots._setup import (
     _camera_inventory,
     _camera_rows,
     _CameraNode,
+    _can_kernels,
     _can_serial,
     _duplicated_serials,
     _identify_by_replug,
@@ -763,6 +764,25 @@ def test_can_serial_reads_through_device_symlink(tmp_path: Path) -> None:
 
 def test_can_serial_missing_serial_returns_none(tmp_path: Path) -> None:
     assert _can_serial(tmp_path / "net", "can0") is None
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_can_kernels_reads_interface_kernel_name(tmp_path: Path) -> None:
+    sysfs_net = tmp_path / "net"
+    interface = sysfs_net / "can0"
+    interface.mkdir(parents=True)
+    device = tmp_path / "usb3" / "3-2" / "3-2:1.0"
+    device.mkdir(parents=True)
+    try:
+        (interface / "device").symlink_to(device, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    assert _can_kernels(sysfs_net, "can0") == "3-2:1.0"
+
+
+def test_can_kernels_missing_device_link_returns_none(tmp_path: Path) -> None:
+    assert _can_kernels(tmp_path / "net", "can0") is None
 
 
 def test_read_raw_config_preserves_percent_and_literal_tilde(tmp_path: Path) -> None:
