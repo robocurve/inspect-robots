@@ -104,7 +104,7 @@ def test_spawn_uses_bounded_memory_limit_after_plain_init() -> None:
 
     assert fake.calls == [
         ("init", ("inspect_robots", {})),
-        ("spawn", {"memory_limit": "2GiB"}),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876}),
     ]
 
 
@@ -116,7 +116,25 @@ def test_custom_spawn_memory_limit_is_forwarded_verbatim() -> None:
 
     sink.on_eval_start(None)  # type: ignore[arg-type]
 
-    assert fake.calls[-1] == ("spawn", {"memory_limit": "4GiB"})
+    assert fake.calls[-1] == ("spawn", {"memory_limit": "4GiB", "port": 9876})
+
+
+def test_custom_spawn_port_is_forwarded_verbatim() -> None:
+    """A caller-provided viewer port reaches rr.spawn unchanged."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True, spawn_port=9877)
+    sink._rr = fake
+
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls[-1] == ("spawn", {"memory_limit": "2GiB", "port": 9877})
+
+
+@pytest.mark.parametrize("spawn_port", [0, 65536])
+def test_spawn_port_out_of_range_raises(spawn_port: int) -> None:
+    """Viewer spawn ports outside the valid TCP range are rejected."""
+    with pytest.raises(ValueError, match="spawn_port"):
+        RerunSink(spawn=True, spawn_port=spawn_port)
 
 
 def test_default_startup_never_spawns_a_viewer() -> None:
