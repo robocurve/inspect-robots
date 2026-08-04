@@ -1335,6 +1335,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise SystemExit(
             "-T only applies to --task runs; an ad-hoc instruction task takes no constructor args"
         )
+    if args.max_steps is not None and args.max_steps < 1:
+        raise SystemExit(f"--max-steps must be >= 1, got {args.max_steps}")
     _check_shared_run_conflicts(args)
 
     defaults = load_defaults(os.environ)

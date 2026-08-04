@@ -3284,6 +3284,30 @@ def test_adhoc_only_flags_rejected_with_task() -> None:
         main([*base, "--scorer", "operator"])
 
 
+@pytest.mark.parametrize("max_steps_value", ["0", "-5"])
+def test_cli_run_zero_max_steps_exits_with_guided_error(max_steps_value: str) -> None:
+    """--max-steps 0 / negative must produce a guided SystemExit, not a raw traceback (#248)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "run",
+                "--instruction",
+                "wipe the table",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--max-steps",
+                max_steps_value,
+                "--no-prompt",
+            ]
+        )
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Task's internal wording, so a regression to
+    # "--max-steps: Task 'adhoc': max_steps must be >= 1" fails here.
+    assert str(excinfo.value) == f"--max-steps must be >= 1, got {max_steps_value}"
+
+
 def test_task_args_rejected_with_instruction() -> None:
     with pytest.raises(SystemExit, match="-T only applies"):
         main(["run", "--instruction", "reach it", "-T", "num_scenes=1"])
