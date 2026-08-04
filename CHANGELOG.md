@@ -146,6 +146,14 @@ All notable changes to this project are documented here. The format is based on
   the section listing was printed, so a device attached mid-wizard is still
   identifiable.
 
+- **`DeltaLimitApprover` now honors an explicit `max_delta` on a
+  multi-dimensional action space.** The validated delta stayed flat `(dim,)`
+  while the derived default was reshaped to the box shape, so a non-1-D box
+  (such as a bimanual `(2, 7)`) either raised a numpy broadcast `ValueError`
+  mid-rollout in an absolute mode, or in a displacement mode made the CLI's
+  guardrail builder skip the limiter altogether and apply only the box bounds
+  that `--max-action-delta` was meant to tighten (#287).
+
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation
   history. Dropping it made Gemini reject any request ending on a tool
