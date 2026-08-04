@@ -2004,6 +2004,8 @@ def _cmd_view(args: argparse.Namespace) -> int:
         raise SystemExit("--port requires --serve")
     if args.host is not None and not args.serve:
         raise SystemExit("--host requires --serve")
+    if args.port is not None and not (0 <= args.port <= 65535):
+        raise SystemExit(f"--port must be between 0 and 65535, got {args.port}")
     args.port = 8300 if args.port is None else args.port
     args.host = "127.0.0.1" if args.host is None else args.host
 
