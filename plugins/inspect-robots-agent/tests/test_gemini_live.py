@@ -790,7 +790,7 @@ def test_per_wire_default_resolution_and_explicit_none() -> None:
     anthropic = LLMAgentPolicy(
         model="m",
         base_url="http://stub.test",
-        wire="anthropic",
+        wire="messages",
         wire_capture=False,
         env={},
     )

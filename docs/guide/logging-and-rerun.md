@@ -163,7 +163,7 @@ The agent policy records **exactly what each LLM call sent and received** —
 by default, for every run. The saved transcript alone is not that object:
 outgoing requests carry the tool schemas, only the newest `image_horizon`
 frames (older ones become elision stubs), rendered depth composites, and, on
-the Anthropic wire, `cache_control` breakpoints — none of which survive into
+the Messages wire, `cache_control` breakpoints — none of which survive into
 `policy_transcripts`. Wire capture stores the real thing, per attempt,
 including retries and the failed calls a run died on.
 

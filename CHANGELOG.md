@@ -14,6 +14,13 @@ All notable changes to this project are documented here. The format is based on
   writes the selected file ([plan 0042](plans/0042-config-file-selection.md),
   #274).
 
+- **Agent plugin (0.21.0):** `thinkingmachines/*` models with
+  `$TINKER_API_KEY` now resolve directly to Tinker's Messages endpoint with
+  `wire=messages` inferred. `wire=anthropic` remains a permanent alias for
+  `wire=messages`; construction guards now diagnose explicit wire conflicts,
+  Messages endpoint routing mistakes, and possible silent tool drops on an
+  explicit Chat Completions endpoint (plan 0044, #278).
+
 - `FrameStore` now persists each post-action observation once and exposes it
   through `StepRecord.result_image_refs`. Stored records strip camera arrays
   from both pre-action and post-action observations, and the terminal visual
@@ -87,6 +94,12 @@ All notable changes to this project are documented here. The format is based on
   included (#194).
 
 ### Changed
+
+- **Agent plugin:** with both `$TINKER_API_KEY` and `$OPENROUTER_API_KEY` set,
+  an unset wire for `thinkingmachines/*` now prefers direct Tinker routing on
+  `wire=messages` over OpenRouter on `wire=chat`. An explicit conflicting wire
+  now requires dropping `-P wire=` or deliberately selecting a gateway with
+  `-P base_url=...` and `-P api_key_env=NAME` (plan 0042, #278).
 
 - The `llm/latest` Rerun pane now shows only the step's assistant message(s);
   the full conversation remains in the `llm` TextLog stream

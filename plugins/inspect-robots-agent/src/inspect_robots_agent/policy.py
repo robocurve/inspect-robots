@@ -46,6 +46,7 @@ from inspect_robots_agent._llm import (
     ChatClient,
     Provider,
     ToolCall,
+    _direct_claim,
     _has_openrouter_variant,
     resolve_provider,
 )
@@ -57,7 +58,7 @@ from ._capture import WireCapture
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
-#: The only endpoint that serves /v1/messages without an explicit base_url.
+#: Anthropic's Messages endpoint, used to distinguish its compat endpoint.
 _ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
 
 #: The HTTP endpoint resolution must land on before it can be upgraded to Live.
@@ -71,11 +72,17 @@ _GEMINI_LIVE_BASE = (
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
-# The native wire reuses the set as output_config.effort, where "none" and
-# "minimal" are rejected and xhigh/max need a cap this client cannot stream;
-# both surface as a guided 400 rather than a per-wire allowlist (plan 0026).
+# The Messages wire reuses the set as output_config.effort. Anthropic rejects
+# "none"/"minimal", and its endpoint requires streaming for the cap xhigh/max
+# need; Tinker accepts xhigh/max without streaming. Rejections get guided errors.
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic", "gemini-live"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live"})
+_WIRE_ALIASES = {"anthropic": "messages"}
+_AGENT_NATIVE_WIRES = frozenset({"chat", "messages"})
+_MESSAGES_CAPABLE_PREFIXES = frozenset(
+    {"anthropic"}
+    | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
+)
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
@@ -214,10 +221,11 @@ class AgentPolicyConfig(PolicyConfig):
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
+    #: Canonical wire name; constructor input ``anthropic`` aliases ``messages``.
     wire: str = "chat"
     wire_capture: bool = True
     speed: str | None = None
-    #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
+    #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
     max_llm_calls: int = 100
@@ -266,7 +274,7 @@ class LLMAgentPolicy(PolicyBase):
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str | None = None,
-        wire: str = "chat",
+        wire: str | _Unset = _UNSET,
         wire_capture: bool = True,
         speed: str | None = None,
         max_output_tokens: int | None = None,
@@ -342,13 +350,25 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
             raise ConfigError("max_llm_calls must be >= 1")
+        environ = dict(os.environ) if env is None else env
+        requested_model = model or environ.get(ENV_MODEL)
+        direct_claim = (
+            _direct_claim(requested_model, environ, native_wires=_AGENT_NATIVE_WIRES)
+            if not base_url
+            else None
+        )
         # Order matters from here down (plan 0026): wire is validated before
         # the params that are only legal on one wire, the api_key_env default
         # is applied before resolution, and the OpenRouter check after it.
         # Every construction check raises ConfigError so the CLI renders a
         # guided message instead of a traceback (#168).
-        if wire not in _WIRE_FORMATS:
-            raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        wire_was_explicit = not isinstance(wire, _Unset)
+        if isinstance(wire, _Unset):
+            wire = direct_claim[1].wire if direct_claim is not None else "chat"
+        else:
+            wire = _WIRE_ALIASES.get(wire, wire)
+            if wire not in _WIRE_FORMATS:
+                raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
         if effort is not _UNSET and effort is not None and effort not in _EFFORT_LEVELS:
             raise ConfigError(
                 f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
@@ -373,19 +393,19 @@ class LLMAgentPolicy(PolicyBase):
                 f"depth must be one of {sorted(_DEPTH_MODES)}, got {depth!r}.\n"
                 "fix: pass -P depth=render or -P depth=off"
             )
-        if wire != "anthropic":
-            # A dropped speed would bill at standard rates while the user
-            # believes fast mode is on; a dropped cap is a limit that never
-            # applied. Both fail loudly rather than silently.
+        if wire != "messages":
+            # Claude fast mode and the Messages output cap cannot apply on
+            # other wires, so reject those mismatches during construction.
+            # A Messages server may still ignore speed itself, as Tinker does.
             if speed is not None:
                 raise ConfigError(
-                    f"speed is only supported on wire='anthropic', got wire={wire!r}.\n"
-                    "fix: pass -P wire=anthropic, or drop -P speed="
+                    f"speed is only supported on wire='messages', got wire={wire!r}.\n"
+                    "fix: pass -P wire=messages, or drop -P speed="
                 )
             if max_output_tokens is not None:
                 raise ConfigError(
-                    "max_output_tokens is only supported on wire='anthropic', got "
-                    f"wire={wire!r}.\nfix: pass -P wire=anthropic, or drop "
+                    "max_output_tokens is only supported on wire='messages', got "
+                    f"wire={wire!r}.\nfix: pass -P wire=messages, or drop "
                     "-P max_output_tokens="
                 )
         if max_output_tokens is not None and (
@@ -425,7 +445,6 @@ class LLMAgentPolicy(PolicyBase):
                 "or pass a websocket endpoint"
             )
 
-        environ = dict(os.environ) if env is None else env
         # resolve_provider reads api_key_env only when base_url is set, where
         # it otherwise defaults to OPENROUTER_API_KEY and would send an
         # OpenRouter key as x-api-key to a third-party gateway.
@@ -436,17 +455,17 @@ class LLMAgentPolicy(PolicyBase):
         # consistency only, since resolve_provider ignores api_key_env when
         # base_url is falsy; it is load-bearing in the guard below.
         effective_key_env = api_key_env
-        if wire == "anthropic" and base_url and not api_key_env:
+        if wire == "messages" and base_url and not api_key_env:
             effective_key_env = "ANTHROPIC_API_KEY"
         if wire == "gemini-live" and base_url and not api_key_env:
             effective_key_env = "GEMINI_API_KEY"
-        requested_model = model or environ.get(ENV_MODEL)
         try:
             provider = resolve_provider(
                 model=requested_model,
                 base_url=base_url,
                 api_key_env=effective_key_env,
                 env=environ,
+                native_wires=_AGENT_NATIVE_WIRES,
             )
         except ConfigError as exc:
             if wire != "gemini-live" or base_url:
@@ -455,11 +474,32 @@ class LLMAgentPolicy(PolicyBase):
                 "wire='gemini-live' needs Google's direct Live API provider.\n"
                 "fix: use -P model=google/... and set $GEMINI_API_KEY"
             ) from exc
-        if wire == "anthropic" and not base_url and provider.base_url != _ANTHROPIC_BASE:
-            # Only Anthropic's own endpoint serves /v1/messages. Resolution can
-            # land elsewhere two ways: the OpenRouter fallback, or another
-            # direct provider whose key happens to be set (openai/* with
-            # $OPENAI_API_KEY). An explicit -P base_url= is the user's call.
+        if (
+            direct_claim is not None
+            and direct_claim[1].wire != "chat"
+            and wire_was_explicit
+            and wire != direct_claim[1].wire
+        ):
+            prefix, direct = direct_claim
+            fix = f"fix: drop -P wire= ({prefix}/* defaults to wire={direct.wire})"
+            if wire in {"chat", "responses"}:
+                fix += (
+                    ", or pass -P base_url=... (+ -P api_key_env=NAME) to route this wire "
+                    "through a gateway such as OpenRouter deliberately"
+                )
+            raise ConfigError(
+                f"wire={wire!r} cannot drive {prefix}/* — the provider's direct "
+                "endpoint serves only the Messages API.\n"
+                f"{fix}"
+            )
+        if (
+            wire == "messages"
+            and not base_url
+            and provider.wire != "messages"
+            and provider.base_url != _ANTHROPIC_BASE
+        ):
+            # Resolution can land elsewhere through OpenRouter or another
+            # direct provider. An explicit -P base_url= is the user's call.
             # Branch on the requested id, not provider.model: a direct
             # provider strips its own prefix, so the resolved id would read
             # as bare and draw a nonsense 'anthropic/gpt-5.6' suggestion.
@@ -468,16 +508,23 @@ class LLMAgentPolicy(PolicyBase):
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
             asked = requested_model or ""
             stripped = asked.rpartition(":")[0] if _has_openrouter_variant(asked) else asked
-            if not stripped.removeprefix("anthropic/"):
+            prefix, separator, body = stripped.partition("/")
+            domestic = prefix in _MESSAGES_CAPABLE_PREFIXES
+            stripped_body = body if domestic and separator else stripped
+            if not stripped_body:
                 # ':free', 'anthropic/', 'anthropic/:free': nothing usable is
                 # left once the suffix comes off, so echoing the remainder
                 # would name an empty id. Give a whole command instead.
-                fix = "fix: pass a full model id (-P model=anthropic/claude-opus-5)"
-            elif "/" in stripped and not stripped.startswith("anthropic/"):
-                # A foreign prefix can never resolve to the Messages API, so
-                # this is terminal whatever the suffix says. Decided before
-                # the variant branch, which would otherwise spend a refusal
-                # removing a suffix that was never the real problem.
+                example = (
+                    "thinkingmachines/Inkling"
+                    if prefix == "thinkingmachines"
+                    else "anthropic/claude-opus-5"
+                )
+                fix = f"fix: pass a full model id (-P model={example})"
+            elif "/" in stripped and not domestic:
+                # A foreign prefix cannot resolve to a Messages endpoint.
+                # Decide this before the variant branch, which would otherwise
+                # remove a suffix that was never the real problem.
                 fix = "fix: use an anthropic/ model id"
             elif stripped != asked:
                 # A :variant id routes here whatever keys are set, so naming
@@ -493,13 +540,14 @@ class LLMAgentPolicy(PolicyBase):
             elif "/" not in asked:
                 fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
             else:
-                # Anthropic-prefixed with a usable body: only the key is left.
-                # Unreachable with the key set, since such an id resolves to
-                # Anthropic's own endpoint and never reaches this guard.
-                fix = "fix: set $ANTHROPIC_API_KEY"
+                # A Messages-capable prefix with a usable body has only its
+                # direct-provider key left to fix.
+                entry = _DIRECT_PROVIDERS.get(prefix)
+                key_env = entry.key_env if entry is not None else "ANTHROPIC_API_KEY"
+                fix = f"fix: set ${key_env}"
             where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
             raise ConfigError(
-                "wire='anthropic' needs a Messages API endpoint, but the model "
+                "wire='messages' needs a Messages API endpoint, but the model "
                 f"{asked!r} resolved to {where}, which does not serve one.\n"
                 f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
             )
@@ -517,12 +565,12 @@ class LLMAgentPolicy(PolicyBase):
 
         resolved_max_output_tokens = (
             (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
-            if wire == "anthropic"
+            if wire == "messages"
             else None
         )
         self._capture = WireCapture() if wire_capture else None
         self._client: ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient
-        if wire == "anthropic":
+        if wire == "messages":
             assert resolved_max_output_tokens is not None
             self._client = AnthropicClient(
                 provider,
@@ -550,6 +598,8 @@ class LLMAgentPolicy(PolicyBase):
         self._image_horizon = resolved_image_horizon
         self._prior_learnings_text = prior_learnings_text
         self._pre_check = pre_check
+        self._explicit_base_url = bool(base_url)
+        self._wire = wire
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -782,7 +832,15 @@ class LLMAgentPolicy(PolicyBase):
             if not message.tool_calls:
                 failures += 1
                 if failures >= _MAX_CONSECUTIVE_FAILURES:
-                    raise RuntimeError(f"LLM produced no tool call in {failures} consecutive turns")
+                    error = f"LLM produced no tool call in {failures} consecutive turns"
+                    if self._wire == "chat" and self._explicit_base_url:
+                        error += (
+                            "\nnote: some OpenAI-compatible endpoints accept `tools` but "
+                            "silently ignore them (Tinker's OpenAI-compatible API is one). "
+                            "If the provider serves the Messages API, retry with "
+                            "-P wire=messages and its Messages base_url."
+                        )
+                    raise RuntimeError(error)
                 self._messages.append(
                     {
                         "role": "user",

@@ -410,7 +410,7 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert "data:" not in serialized
 
 
-@pytest.mark.parametrize("wire", ["chat", "responses", "anthropic"])
+@pytest.mark.parametrize("wire", ["chat", "responses", "messages"])
 def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     wire: str, tmp_path: Path
 ) -> None:
@@ -446,7 +446,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
         == {
             "chat": "/chat/completions",
             "responses": "/responses",
-            "anthropic": "/messages",
+            "messages": "/messages",
         }[wire]
     )
     blob_dir = capture_path.parent.parent / "blobs"
@@ -454,7 +454,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     assert captured_request == script.requests[1]
     assert "camera frame(s) elided" in json.dumps(captured_request)
 
-    if wire == "anthropic":
+    if wire == "messages":
         elision_blocks = [
             block
             for message in captured_request["messages"]
@@ -1456,6 +1456,49 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
     assert logs[0].status == "error"
     (record,) = sink.records
     assert record.error is not None and "no tool call" in record.error
+
+
+def test_no_tool_call_three_strikes_notes_explicit_chat_base_url() -> None:
+    policy = _policy(_Script([_text_response("no tools")]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert str(excinfo.value).endswith(
+        "note: some OpenAI-compatible endpoints accept `tools` but silently ignore "
+        "them (Tinker's OpenAI-compatible API is one). If the provider serves the "
+        "Messages API, retry with -P wire=messages and its Messages base_url."
+    )
+
+
+def test_no_tool_call_three_strikes_omits_note_without_explicit_base_url() -> None:
+    script = _Script([_text_response("no tools")])
+    policy = LLMAgentPolicy(
+        model="openai/gpt-test",
+        transport=httpx.MockTransport(script),
+        env={"OPENAI_API_KEY": "sk-oai"},
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert "silently ignore" not in str(excinfo.value)
+
+
+def test_invalid_tool_call_three_strikes_omits_silent_tool_drop_note() -> None:
+    policy = _policy(_Script([_tool_response("move_by", {"deltas": {"dz": 0.1}})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert "tool calls kept failing" in str(excinfo.value)
+    assert "silently ignore" not in str(excinfo.value)
 
 
 def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> None:
@@ -2542,7 +2585,7 @@ def test_anthropic_usage_is_summed_into_trial_metadata(
     sink = _RecordingSink()
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="http://llm.test/v1",
         transcript_echo=True,
         transport=httpx.MockTransport(handler),
