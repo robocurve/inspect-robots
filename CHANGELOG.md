@@ -129,6 +129,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+
+- **`inspect-robots run --instruction ... --max-steps 0` (or negative) no longer
+  crashes with a raw `ConfigError` traceback.** The flag is now range-checked up
+  front and exits with a guided `--max-steps must be >= 1, got 0` message,
+  matching how the other numeric run flags are validated (#248).
+
 - The CAN pinning suggestion no longer degrades to a bare warning when adapter
   serials are shared or missing. It emits port-pinned `KERNELS` rules instead
   when the adapters sit on distinct USB ports
