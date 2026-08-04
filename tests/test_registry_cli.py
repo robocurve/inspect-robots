@@ -4962,6 +4962,80 @@ def test_guided_error_mentions_config_set() -> None:
 # --- config set / show (plan 0008 §3e) ----------------------------------------
 
 
+def test_config_show_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    path.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "policy: rig-b" in out
+    assert f"policy: rig-b  ({path})" in out
+
+
+def test_config_set_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    xdg = tmp_path / "decoy"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    assert main(["config", "set", "policy", "x", "--config", str(path)]) == 0
+
+    assert "policy = x" in path.read_text(encoding="utf-8")
+    assert not (xdg / "inspect-robots" / "config.ini").exists()
+
+
+def test_config_flag_beats_env_var(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path_a = tmp_path / "rig-a.ini"
+    path_b = tmp_path / "rig-b.ini"
+    path_a.write_text("[defaults]\npolicy = rig-a\n", encoding="utf-8")
+    path_b.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", str(path_a))
+
+    assert main(["config", "show", "--config", str(path_b)]) == 0
+
+    out = capsys.readouterr().out
+    assert f"policy: rig-b  ({path_b})" in out
+    assert "rig-a" not in out
+
+
+def test_config_flag_expands_tilde(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = tilde-rig\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", "~/rig.ini"]) == 0
+
+    assert f"policy: tilde-rig  ({path})" in capsys.readouterr().out
+
+
+def test_no_config_flag_leaves_environ_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
+
+    assert main(["list"]) == 0
+
+    assert "INSPECT_ROBOTS_CONFIG" not in os.environ
+
+
 def test_cli_config_set_writes_and_show_reads(
     _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
