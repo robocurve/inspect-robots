@@ -32,10 +32,18 @@ the existing `_can_serial` fixtures.
   (ruff D1).
 - Repo root is the `ir-wt-can-pinning` worktree at
   `~/robocurve/ir-wt-can-pinning`; run everything via `uv run ...` there.
-- The serial rung's output stays byte-for-byte identical: the exact-copy
-  tests at `tests/test_setup.py:3682`, `:3712`, `:3731` (and any sibling
-  pinning tests) pass untouched. If one fails, treat it as a bug in the new
-  code, not a test to update.
+- The serial rung's output stays byte-for-byte identical: all FIVE existing
+  pinning tests pass untouched — `:3682`, `:3712`, `:3731`, the parametrized
+  `test_suggest_can_pinning_bad_serials_print_warning_without_rules` at
+  `:3766` (`("SAME","SAME")` and `("ONLY",None)`), and the silent-non-USB
+  test at `:3785`. If one fails, treat it as a bug in the new code, not a
+  test to update.
+- The `:3766` test is load-bearing for the new ladder: after this change its
+  inputs reach rung 2 and fall through to the bare warning ONLY because the
+  `_attach_can_adapter` fixture (`tests/test_setup.py:263-281`) hard-codes
+  every device-dir leaf as `net-device`, making the kernel names collide.
+  That default must be preserved; `:3766` thereby becomes the
+  duplicate-kernels rung-3 regression test.
 - Docs follow the repo writing rules (no em dashes in prose).
 - Commit messages: imperative, scoped; reference #275.
 
@@ -58,8 +66,10 @@ the existing `_can_serial` fixtures.
   `sysfs_net/<ifname>` with a `device` symlink to a fake interface dir whose
   parent holds a `serial` file. Reuse this shape; for the fallback tests give
   interface dirs realistic kernel names (`3-2:1.0`, `3-4:1.0`).
-- `tests/test_setup.py:3682-3760` — the three existing pinning tests,
-  including one asserting the full block copy verbatim.
+- `tests/test_setup.py:3682-3800` — the five existing pinning tests,
+  including one asserting the full block copy verbatim (`:3682`), the
+  parametrized bad-serials warning test (`:3766`), and the silent non-USB
+  test (`:3785`).
 - `docs/guide/cli.md:132-135` — the CAN wizard paragraph ending in the
   pinning-suggestion sentence.
 
@@ -96,9 +106,13 @@ def _can_kernels(sysfs_net: Path, ifname: str) -> str | None:
     """
     try:
         return (sysfs_net / ifname / "device").resolve(strict=True).name
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: symlink loops raise it from resolve() before py3.13.
         return None
 ```
+
+`strict=True` is load-bearing: a non-strict resolve of a missing link would
+return the literal path and `.name` would read `"device"`.
 
 - [ ] **Step 4: Run tests, then the full gate set**
 
@@ -124,7 +138,11 @@ git commit -m "setup: read a CAN interface's kernel device name (#275)"
 
 Mirror the existing pinning fixtures (two adapters on USB, assigned
 `left_channel=can0`, `right_channel=can1` through the same `DeviceSlot`
-tuples the neighboring tests build), varying only serials and interface dirs:
+tuples the neighboring tests build). The `_attach_can_adapter` helper
+(`tests/test_setup.py:263-281`) hard-codes its device-dir leaf as
+`net-device`; grow it a keyword parameter for that name whose default STAYS
+`net-device` (the `:3766` test depends on colliding kernel names), and pass
+realistic interface names (`3-2:1.0`, `3-4:1.0`) only in the new tests:
 
 - `test_suggest_can_pinning_shared_serials_fall_back_to_port_rules`: both
   adapters report serial `SN0001`, interface dirs `3-2:1.0` and `3-4:1.0`.
@@ -147,13 +165,16 @@ tuples the neighboring tests build), varying only serials and interface dirs:
   netdevs whose `device` links resolve to the SAME interface dir (one gs_usb
   dual-channel adapter), serials shared; output is exactly the single
   warning line, no rules.
-- `test_suggest_can_pinning_unresolvable_kernels_stays_bare_warning`: serials
-  shared and one interface's `device` link missing; single warning line only.
+- `test_suggest_can_pinning_unresolvable_kernels_stays_bare_warning`: one
+  interface's `device` link missing entirely (its serial then also reads
+  None, so the serial rung already fails) while the other has a normal
+  interface dir; the `not all(kernels)` arm fires and the output is the
+  single warning line only.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 `uv run pytest tests/test_setup.py -k pinning -v` — the new tests fail on
-missing rules/copy; the three existing ones still pass.
+missing rules/copy; all five existing ones still pass.
 
 - [ ] **Step 3: Implement**
 
@@ -194,21 +215,19 @@ Restructure `_suggest_can_pinning` minimally:
 
 The serial rung's rendered block must remain byte-for-byte what the test at
 `:3682` asserts today (same intro lines, same rule format); only the internal
-shape changes. Drop the now-unused `serial_values` filter (in the serial rung
-`all(serials)` already guarantees no None; mypy needs the narrowed list — a
-comprehension over `serials` inside the `if` arm after the `all()` check may
-still type as `str | None`, so build the clauses from `serials` with an
-explicit narrowing (`[s for s in serials if s is not None]`) or `cast`,
-whichever reads cleaner under strict mypy. Update the function docstring:
-serial-pinned rules preferred, port-pinned fallback, bare warning last.
+shape changes. Note mypy accepts f-strings over `str | None`, so no narrowing
+is strictly required; keep a `[s for s in serials if s is not None]`
+comprehension anyway as a runtime guard so a `None` can never render into a
+rule (same for `kernels`). Update the function docstring: serial-pinned rules
+preferred, port-pinned fallback, bare warning last.
 
 - [ ] **Step 4: Run tests, then the full gate set**
 
 `uv run pytest tests/test_setup.py -k pinning -v`, then all four gates.
 100% coverage means every ladder arm is hit; the four new tests plus the
-three existing ones cover serial-rung, both fallback triggers (missing and
-duplicated serials), and both rung-3 arms (duplicate kernels, unresolvable
-kernels).
+five existing ones cover serial-rung, both fallback triggers (missing and
+duplicated serials), and both rung-3 arms (duplicate kernels via `:3766`
+and the new dual-channel test, unresolvable kernels).
 
 - [ ] **Step 5: Commit**
 
