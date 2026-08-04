@@ -68,9 +68,10 @@ mapping would never reach them.
 - Tests: `tests/test_defaults_public.py:29-78` — the `config_path` test
   idiom (plain dict envs, tmp_path). `tests/test_registry_cli.py:88-94` —
   `main([...])` invocation harness; `:39` shows the
-  `monkeypatch.setenv("XDG_CONFIG_HOME", ...)` pattern. `tests/test_setup.py`
-  ~553 — the golden-config run_setup harness (env dict, scripted `input_fn`,
-  `io.StringIO()` out).
+  `monkeypatch.setenv("XDG_CONFIG_HOME", ...)` pattern.
+  `test_run_setup_defaults_and_numbered_cameras_write_golden_config`
+  (`tests/test_setup.py:903`) — the golden-config run_setup harness (env
+  dict, scripted `input_fn`, `io.StringIO()` out).
 - Public API: `config_path` is already in `defaults.__all__`
   (`tests/test_defaults_public.py:19`); its signature does not change, so
   `tests/test_api_snapshot.py` stays untouched.
@@ -104,8 +105,16 @@ In `tests/test_defaults_public.py`, following the existing idiom:
 - `test_set_default_writes_the_override_file`: `_set_default(env, "policy",
   "x")` with the override in env writes the override path (and returns it),
   leaving the XDG location untouched. Import `_set_default` the way
-  `tests/test_defaults.py` does if it already imports it; otherwise a private
-  import in this file is fine (mirror whichever exists).
+  `tests/test_defaults.py:27` already does.
+
+Also in this task (suite hermeticity, same commit): extend the autouse
+`_hermetic_defaults` fixture at `tests/test_registry_cli.py:34-43` with
+`monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)`. That fixture
+promises CLI-driven tests stay blind to the developer's real config; the
+moment the new rung lands, a developer shell exporting
+`INSPECT_ROBOTS_CONFIG` would otherwise leak past the fixture's
+`XDG_CONFIG_HOME` isolation into every `main()`-driven test
+(`run`/`doctor`/`config` all call `load_defaults(os.environ)`).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -136,7 +145,7 @@ sentence to the module docstring's resolution description.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/inspect_robots/defaults.py tests/test_defaults_public.py
+git add src/inspect_robots/defaults.py tests/test_defaults_public.py tests/test_registry_cli.py
 git commit -m "config: honor INSPECT_ROBOTS_CONFIG as the config file override (#274)"
 ```
 
@@ -164,8 +173,11 @@ restores `os.environ` at teardown (main() overwrites the key in place).
 - `test_config_flag_beats_env_var`: `monkeypatch.setenv` the env var to file
   A, pass `--config` file B; `config show` reads B.
 - `test_config_flag_expands_tilde`: `monkeypatch.setenv("HOME",
-  str(tmp_path))`, write `tmp_path / "rig.ini"`, pass `--config "~/rig.ini"`;
-  `config show` reads it (assert on a distinctive policy value).
+  str(tmp_path))` AND `monkeypatch.setenv("USERPROFILE", str(tmp_path))`
+  (the extra CI tier runs the full suite on windows-latest, where
+  `expanduser` ignores `HOME` and consults `USERPROFILE`); write
+  `tmp_path / "rig.ini"`, pass `--config "~/rig.ini"`; `config show` reads
+  it (assert on a distinctive policy value).
 - `test_no_config_flag_leaves_environ_untouched`:
   `monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)`, run
   `main(["list"])`, assert the key is still absent from `os.environ`.
@@ -203,9 +215,9 @@ In `main()` immediately after `parse_args`:
 
 ```python
     if config_override := getattr(args, "config", None):
-        # os.environ, not a local mapping: plugins re-read the config from
-        # os.environ while constructing components, so the flag must be
-        # visible process-wide.
+        # os.environ, not a local mapping: external plugins (inspect-robots-yam's
+        # default loader) re-read the config from os.environ while constructing
+        # components, and subprocesses inherit it.
         os.environ["INSPECT_ROBOTS_CONFIG"] = str(Path(config_override).expanduser())
 ```
 
@@ -242,7 +254,9 @@ rig B's wizard back to rig A's file.
 
 - [ ] **Step 1: Write the (initially passing) test**
 
-Copy the golden-config harness scaffold (`tests/test_setup.py` ~553). Build
+Copy the golden-config harness scaffold
+(`test_run_setup_defaults_and_numbered_cameras_write_golden_config`,
+`tests/test_setup.py:903`). Build
 an env dict with BOTH `XDG_CONFIG_HOME` (pointing at a decoy tree that
 already contains an `inspect-robots/config.ini` with recognizable content)
 AND `INSPECT_ROBOTS_CONFIG=str(tmp_path / "rig-b" / "config.ini")` (parent
