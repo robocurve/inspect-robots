@@ -204,7 +204,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
 
 ## Task 4: docs and changelog sweep
 
-- [ ] **Step 1:** Update the user-facing strings and docs that state the
+- [x] **Step 1:** Update the user-facing strings and docs that state the
   old rule, at minimum: `_print_camera_name_hint`'s message
   (`_setup.py:296-299`, "a serial shared by two cameras" → wording that
   covers duplicate OR missing serials; tests assert only the "no usable
@@ -213,6 +213,6 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   module docstring for other by-id trust or duplicate-serial language.
   Update the `_duplicated_serials` docstring's successor to name the
   empty-serial case explicitly.
-- [ ] **Step 2:** `CHANGELOG.md` entry under "Unreleased" per
+- [x] **Step 2:** `CHANGELOG.md` entry under "Unreleased" per
   `CONTRIBUTING.md:131`, referencing #299.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**

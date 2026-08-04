@@ -158,9 +158,10 @@ policy or embodiment is not registered in the current environment, and then
 helps assign camera devices. It lists every color-capable camera that udev
 names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
-names when a by-id link is missing or when two cameras share one serial.
-Multi-interface cameras such as the RealSense D435 can lose udev's name race
-between their depth and RGB interfaces.
+names when a by-id link is missing or when multiple physical cameras can claim
+the same by-id identity. This includes cameras with duplicate serials and
+same-model cameras with missing serials. Multi-interface cameras such as the
+RealSense D435 can lose udev's name race between their depth and RGB interfaces.
 
 Answer `u` and unplug the camera when asked to identify the physical USB
 device that disappeared, including cameras the by-id listing cannot name. The

@@ -292,9 +292,9 @@ def _print_camera_name_hint(
     names = ", ".join(Path(record.by_path or record.node).name for record in fallback)
     message = (
         f"{len(fallback)} camera node(s) have no usable by-id entry "
-        "(udev name race between USB interfaces, or a serial shared by "
-        f"two cameras): {names}; by-path names, stable per physical USB "
-        "port, are used where available"
+        "(udev name race between USB interfaces, duplicate serials, or "
+        f"same-model cameras with missing serials): {names}; by-path names, "
+        "stable per physical USB port, are used where available"
     )
     if active_is_by_id:
         message += "; press 'p' to see every camera by port name"
