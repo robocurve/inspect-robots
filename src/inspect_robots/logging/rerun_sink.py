@@ -128,6 +128,27 @@ def _joint_groups(labels: tuple[str, ...] | None, dim: int) -> list[tuple[str, l
     return list(groups.items())
 
 
+_CAMERA_RANK = {"left": 0, "top": 1, "right": 2}
+
+
+def _camera_order(names: tuple[str, ...]) -> list[str]:
+    """Order camera views left, top, right by name prefix.
+
+    The rank key is the name's first-underscore prefix, lowercased, so
+    ``left_cam``, ``Left_cam``, and a bare ``left`` all rank as ``left``.
+    Operators read the workspace spatially, which rarely matches the
+    declared camera order (YAM declares top first). Names without a ranked
+    prefix sort after the ranked ones; ties break in codepoint order.
+    """
+    return sorted(
+        names,
+        key=lambda name: (
+            _CAMERA_RANK.get(name.split("_", 1)[0].lower(), len(_CAMERA_RANK)),
+            name,
+        ),
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class _StepPayload:
     """One transition, snapshotted so no live buffers are shared across threads."""
@@ -313,6 +334,14 @@ class RerunSink:
     def _send_blueprint(self, rr: Any, prefix: str) -> None:
         """Send an explicit layout for one trial namespace, if the SDK can.
 
+        The layout is two rows (a run with no cameras sends only the second
+        row): the camera views in left/top/right order across the top, then
+        a tabbed text panel beside the per-group joint plots. The latest
+        LLM message is the default tab; the full transcript log and the
+        reward series sit behind tabs, so reward-logging runs keep it one
+        click away while agent-policy runs, which never log rewards, do not
+        spend a permanently empty plot slot on it.
+
         Rerun's entity queries support ``/**`` only as a suffix, so the views
         name each trial's entities with concrete paths and the layout is
         re-sent when a new trial namespace begins (the viewer follows the
@@ -348,32 +377,31 @@ class RerunSink:
                             contents=[f"+ {prefix}/state/{key}/**"],
                         )
                     )
-            plots.append(
-                rrb.TimeSeriesView(
-                    name="reward",
-                    origin="/",
-                    contents=[f"+ {prefix}/reward"],
-                )
-            )
             cameras = [
                 rrb.Spatial2DView(
                     name=camera,
                     origin="/",
                     contents=[f"+ {prefix}/camera/{camera}"],
                 )
-                for camera in self._camera_names
+                for camera in _camera_order(self._camera_names)
             ]
-            text = rrb.Vertical(
+            text = rrb.Tabs(
                 rrb.TextDocumentView(name="latest", contents=[f"+ {prefix}/llm/latest"]),
                 rrb.TextLogView(
                     name="llm",
                     contents=[f"+ {prefix}/llm", f"+ {prefix}/event/**"],
                 ),
+                rrb.TimeSeriesView(
+                    name="reward",
+                    origin="/",
+                    contents=[f"+ {prefix}/reward"],
+                ),
             )
-            columns = [rrb.Vertical(*plots), text]
+            row = rrb.Horizontal(text, *plots)
             if cameras:
-                columns.insert(0, rrb.Grid(*cameras))
-            send(rrb.Blueprint(rrb.Horizontal(*columns)))
+                send(rrb.Blueprint(rrb.Vertical(rrb.Horizontal(*cameras), row)))
+            else:
+                send(rrb.Blueprint(row))
         except Exception as exc:
             if not self._blueprint_warned:
                 self._blueprint_warned = True

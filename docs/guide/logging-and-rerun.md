@@ -46,10 +46,13 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
-The sink lays out labeled joint series per arm, with commanded `action/*` and
-measured `state/*` together for each side and cameras, the LLM transcript, and
-reward alongside. Embodiments without `dim_labels` get one combined joints
-plot. The layout is re-sent at each trial boundary so it follows the live trial,
+The sink lays out two rows: camera views in left/top/right name order across
+the top, then a tabbed text panel (latest LLM message up front, the full
+transcript and the reward series behind tabs) beside one plot per arm, with
+commanded `action/*` and measured `state/*` together for each side.
+Embodiments without `dim_labels` get one combined joints plot; runs without
+cameras send only the second row.
+The layout is re-sent at each trial boundary so it follows the live trial,
 which resets viewer tweaks then; a single-trial `run` sends it exactly once.
 The layout is built from the declared spaces, so entities logged outside them
 (an undeclared state key, or a camera whose runtime name differs from its
