@@ -1232,7 +1232,10 @@ def _suggest_can_pinning(
     *,
     out: IO[str],
 ) -> None:
-    """Suggest serial-pinned udev names for assigned order-dependent CAN devices."""
+    """Suggest stable udev names for assigned order-dependent CAN devices.
+
+    Prefer serial-pinned rules, fall back to port-pinned rules, then a bare warning.
+    """
     scanned = _scan_can(sysfs_net)
     order_dependent = [ifname for ifname in scanned if re.fullmatch(r"can\d+", ifname)]
     if len(order_dependent) < 2 or not any(
@@ -1250,11 +1253,6 @@ def _suggest_can_pinning(
         return
 
     warning = "these CAN interfaces have order-dependent names; a replug can swap them."
-    serials = [_can_serial(sysfs_net, ifname) for ifname in order_dependent]
-    if not all(serials) or len(set(serials)) != len(serials):
-        print(_paint(warning, _YELLOW, out), file=out)
-        return
-
     derived_names: list[str] = []
     for ifname in order_dependent:
         assigned_arg = next(
@@ -1277,20 +1275,35 @@ def _suggest_can_pinning(
     if collision or any(len(name) > 15 for name in derived_names):
         derived_names = [f"can_{chr(ord('a') + index)}" for index in range(len(derived_names))]
 
-    serial_values = [serial for serial in serials if serial is not None]
-    rules = [
-        f'  SUBSYSTEM=="net", ACTION=="add", ATTRS{{serial}}=="{serial}", NAME="{name}"'
-        for serial, name in zip(serial_values, derived_names, strict=True)
-    ]
-    block = "\n".join(
-        [
+    serials = [_can_serial(sysfs_net, ifname) for ifname in order_dependent]
+    if all(serials) and len(set(serials)) == len(serials):
+        serial_values = [serial for serial in serials if serial is not None]
+        attribute_clauses = [f'ATTRS{{serial}}=="{serial}"' for serial in serial_values]
+        intro = [
             warning,
             "pin them by adapter serial (paste into /etc/udev/rules.d/70-can-names.rules,",
             "then replug or reboot), and re-run setup to record the pinned names:",
-            *rules,
         ]
-    )
-    print(_paint(block, _YELLOW, out), file=out)
+    else:
+        kernels = [_can_kernels(sysfs_net, ifname) for ifname in order_dependent]
+        if not all(kernels) or len(set(kernels)) != len(kernels):
+            print(_paint(warning, _YELLOW, out), file=out)
+            return
+        kernel_values = [kernel for kernel in kernels if kernel is not None]
+        attribute_clauses = [f'KERNELS=="{kernel}"' for kernel in kernel_values]
+        intro = [
+            warning,
+            "adapter serials are missing or shared, so pin them by USB port instead",
+            "(paste into /etc/udev/rules.d/70-can-names.rules, then replug or reboot),",
+            "and re-run setup to record the pinned names; a port-pinned name follows the",
+            "physical USB port, so keep each adapter plugged into the same port:",
+        ]
+
+    rules = [
+        f'  SUBSYSTEM=="net", ACTION=="add", {clause}, NAME="{name}"'
+        for clause, name in zip(attribute_clauses, derived_names, strict=True)
+    ]
+    print(_paint("\n".join([*intro, *rules]), _YELLOW, out), file=out)
 
 
 def _read_raw_config(path: Path) -> dict[str, dict[str, str]] | str:
