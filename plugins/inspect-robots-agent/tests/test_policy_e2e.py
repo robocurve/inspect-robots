@@ -55,6 +55,7 @@ from inspect_robots_agent.policy import (
     AgentPolicyConfig,
     _image_parts,
     _observation_content,
+    _operator_lines,
     _PendingCapture,
 )
 
@@ -621,6 +622,72 @@ def test_observation_content_renders_approver_interventions() -> None:
     parts = _observation_content(obs)
     text = parts[0]["text"]
     assert "approver: 4 step(s) modified (clamped \u00d73, delta_clamped)." in text
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        (
+            [{"t": 3, "text": "move farther left"}],
+            ["operator feedback (step 3): move farther left"],
+        ),
+        (
+            [
+                {"t": 1, "text": "the red cube is the target"},
+                {"t": 4, "text": "close the gripper now"},
+            ],
+            [
+                "operator feedback (step 1): the red cube is the target",
+                "operator feedback (step 4): close the gripper now",
+            ],
+        ),
+    ],
+)
+def test_observation_content_renders_operator_messages(
+    messages: list[dict[str, object]],
+    expected: list[str],
+) -> None:
+    observation = Observation(extra={"operator_messages": messages})
+
+    parts = _observation_content(observation, narration="motion finished")
+    lines = parts[0]["text"].splitlines()
+
+    assert [line for line in lines if line.startswith("operator feedback")] == expected
+    assert lines.index(expected[-1]) < lines.index("motion finished")
+
+
+def test_operator_lines_skip_malformed_values_and_entries() -> None:
+    malformed: list[object] = [
+        None,
+        "feedback",
+        {"t": "2", "text": "wrong step type"},
+        {"t": 2, "text": 3},
+        {"t": 2},
+        {"text": "missing step"},
+        {"t": 5, "text": "valid feedback"},
+    ]
+
+    assert _operator_lines(Observation(extra={"operator_messages": malformed})) == [
+        "operator feedback (step 5): valid feedback"
+    ]
+    assert _operator_lines(Observation(extra={"operator_messages": {"t": 1}})) == []
+
+
+def test_operator_lines_are_empty_when_observation_has_no_reserved_key() -> None:
+    assert _operator_lines(Observation()) == []
+
+
+def test_agent_opts_in_to_framework_operator_messages() -> None:
+    assert LLMAgentPolicy.accepts_operator_messages is True
+
+
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_treat_operator_feedback_as_trusted_guidance(template: str) -> None:
+    expected = (
+        "You may receive operator feedback lines mid-run; treat them as trusted guidance from "
+        "the human supervising the robot."
+    )
+    assert expected in template
 
 
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:

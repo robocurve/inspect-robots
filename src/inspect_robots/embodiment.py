@@ -82,6 +82,13 @@ class Embodiment(Protocol):
     lifetime; each call replaces the previous envelope. ``EmbodimentBase``
     ships a no-op default.
 
+    Embodiments may additionally offer an optional ``defer_operator_end()``
+    hook. An embodiment that polls stdin for the end-of-episode keypress must
+    stop doing so when called; the framework console owns stdin for this run.
+    Offering the hook is also how a real-hardware embodiment declares itself
+    console-safe. The hook stays outside this Protocol so older embodiments
+    remain conformant.
+
     Embodiments may also define an **optional**
     ``contribute_guardrails(self, action_space: Box) -> GuardrailContribution``
     hook, likewise omitted from this Protocol so existing implementations

@@ -17,6 +17,7 @@ import pytest
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
 from inspect_robots.cli import main
+from inspect_robots.console import USAGE, OperatorConsole
 from inspect_robots.defaults import (
     _ENV_EMBODIMENT as ENV_EMBODIMENT,
 )
@@ -29,6 +30,12 @@ from inspect_robots.defaults import (
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
+
+
+class _ConsolePolicy(ScriptedPolicy):
+    """Opt into the framework's attended operator-message channel."""
+
+    accepts_operator_messages = True
 
 
 @pytest.fixture(autouse=True)
@@ -3177,6 +3184,308 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
 
+def test_attended_opted_in_run_builds_console_calls_defer_and_prints_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-run-test"
+    embodiment_name = "deferred-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                embodiment_name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorConsole)
+    assert _DeferredHardware.hook_calls == 1
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_opted_in_eval_set_uses_simulated_console_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = "console-policy-for-eval-set-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return True, [_step_limit_log(task="cubepick-reach", reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorConsole)
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_console_stays_off_for_legacy_real_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _LegacyHardware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+    policy_name = "console-policy-for-legacy-hardware-test"
+    embodiment_name = "legacy-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_LegacyHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert out.count("predates the operator console") == 1
+    assert "still owns the end-of-episode keypress" in out
+    assert "feedback typing stays off" in out
+    assert USAGE not in out
+
+
+def test_attended_console_stays_off_on_windows_before_calling_defer_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-windows-test"
+    embodiment_name = "deferred-hardware-for-windows-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    assert _DeferredHardware.hook_calls == 0
+    out = capsys.readouterr().out
+    assert out.count("select cannot watch stdin on Windows") == 1
+    assert USAGE not in out
+
+
+@pytest.mark.parametrize(("tty", "extra_args"), [(False, ()), (True, ("--no-prompt",))])
+def test_operator_console_requires_attendance(
+    tty: bool,
+    extra_args: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = f"console-policy-unattended-{tty}"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: tty)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    "cubepick",
+                    "--log-dir",
+                    str(tmp_path),
+                    *extra_args,
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert operator_inputs == [None]
+    assert USAGE not in capsys.readouterr().out
+
+
+def test_policy_without_opt_in_skips_console_silently_before_platform_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert "operator console" not in out
+    assert USAGE not in out
+
+
 def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3445,6 +3754,35 @@ def test_prompt_operator_adopts_definitive_embodiment_verdict(
         "source": "embodiment",
         "note": None,
     }
+
+
+def test_prompt_operator_early_returns_for_pre_set_console_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.cli import _prompt_operator
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason="success",
+        operator_judgement="n",
+        operator_note="console note",
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("pre-set verdict must not prompt")
+    )
+
+    _prompt_operator(record, Scene(id="s0", instruction="reach"))
+
+    assert record.operator_judgement == "n"
+    assert record.operator_note == "console note"
+    assert record.events == []
+    assert "operator verdict adopted from console: n" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -3722,6 +4060,34 @@ def test_prompt_on_operator_end_prompts_and_records_note(
     assert record.operator_judgement == "partial"
     assert record.operator_note == "left gripper slipped"
     capsys.readouterr()
+
+
+def test_prompt_on_operator_end_adopts_pre_set_console_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.cli import _prompt_operator_on_operator_end
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=True,
+        termination_reason="operator_end",
+        operator_judgement="partial",
+        operator_note="left gripper slipped",
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("pre-set verdict must not prompt")
+    )
+
+    _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
+
+    assert record.operator_judgement == "partial"
+    assert record.operator_note == "left gripper slipped"
+    assert "operator verdict adopted from console: partial" in capsys.readouterr().out
 
 
 def test_prompt_on_operator_end_ignores_other_reasons(
