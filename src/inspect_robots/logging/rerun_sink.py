@@ -134,15 +134,18 @@ _CAMERA_RANK = {"left": 0, "top": 1, "right": 2}
 def _camera_order(names: tuple[str, ...]) -> list[str]:
     """Order camera views left, top, right by name prefix.
 
-    The rank key is the name's first-underscore prefix, so ``left_cam`` and
-    a bare ``left`` both rank as ``left``. Operators read the workspace
-    spatially, which rarely matches the declared camera order (YAM declares
-    top first). Names without a ranked prefix sort after the ranked ones;
-    ties break alphabetically.
+    The rank key is the name's first-underscore prefix, lowercased, so
+    ``left_cam``, ``Left_cam``, and a bare ``left`` all rank as ``left``.
+    Operators read the workspace spatially, which rarely matches the
+    declared camera order (YAM declares top first). Names without a ranked
+    prefix sort after the ranked ones; ties break in codepoint order.
     """
     return sorted(
         names,
-        key=lambda name: (_CAMERA_RANK.get(name.split("_", 1)[0], len(_CAMERA_RANK)), name),
+        key=lambda name: (
+            _CAMERA_RANK.get(name.split("_", 1)[0].lower(), len(_CAMERA_RANK)),
+            name,
+        ),
     )
 
 
@@ -331,11 +334,13 @@ class RerunSink:
     def _send_blueprint(self, rr: Any, prefix: str) -> None:
         """Send an explicit layout for one trial namespace, if the SDK can.
 
-        The layout is two rows: the camera views in left/top/right order
-        across the top, then the LLM text (latest document up front, the
-        full transcript log behind a tab) beside the per-group joint plots.
-        There is no reward view; agent-policy runs never log rewards, and a
-        permanently empty panel costs a plot slot.
+        The layout is two rows (a run with no cameras sends only the second
+        row): the camera views in left/top/right order across the top, then
+        a tabbed text panel beside the per-group joint plots. The latest
+        LLM message is the default tab; the full transcript log and the
+        reward series sit behind tabs, so reward-logging runs keep it one
+        click away while agent-policy runs, which never log rewards, do not
+        spend a permanently empty plot slot on it.
 
         Rerun's entity queries support ``/**`` only as a suffix, so the views
         name each trial's entities with concrete paths and the layout is
@@ -385,6 +390,11 @@ class RerunSink:
                 rrb.TextLogView(
                     name="llm",
                     contents=[f"+ {prefix}/llm", f"+ {prefix}/event/**"],
+                ),
+                rrb.TimeSeriesView(
+                    name="reward",
+                    origin="/",
+                    contents=[f"+ {prefix}/reward"],
                 ),
             )
             row = rrb.Horizontal(text, *plots)

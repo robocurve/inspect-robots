@@ -519,6 +519,7 @@ def test_camera_order_ranks_left_top_right() -> None:
         "wrist_cam",
         "zed",
     ]
+    assert rerun_sink_module._camera_order(("Top_cam", "left_cam")) == ["left_cam", "Top_cam"]
     assert rerun_sink_module._camera_order(()) == []
 
 
@@ -549,7 +550,7 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
     reachable_names = {
         view.kwargs.get("name") for view in reachable if view.kind == "TimeSeriesView"
     }
-    assert {"left", "right"} == reachable_names
+    assert {"left", "right", "reward"} == reachable_names
     assert any(view.kind == "Spatial2DView" for view in reachable)
     assert any(view.kind == "TextLogView" for view in reachable)
     assert any(view.kind == "TextDocumentView" for view in reachable)
@@ -566,10 +567,13 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
         "TimeSeriesView",
         "TimeSeriesView",
     ]
-    assert [_node(child).kind for child in _node(plot_row.args[0]).args] == [
+    tabs = _node(plot_row.args[0])
+    assert [_node(child).kind for child in tabs.args] == [
         "TextDocumentView",
         "TextLogView",
+        "TimeSeriesView",
     ]
+    assert _node(tabs.args[2]).kwargs.get("contents") == ["+ trial/s0/e0/reward"]
     time_series = _views(recorder, "TimeSeriesView")
     left = next(view for view in time_series if view.kwargs.get("name") == "left")
     right = next(view for view in time_series if view.kwargs.get("name") == "right")
@@ -602,9 +606,10 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
         view.kwargs.get("contents") == ["+ trial/s0/e0/llm/latest"]
         for view in _views(recorder, "TextDocumentView")
     )
-    # No reward view anywhere: agent-policy runs never log rewards, so a
-    # reward panel would sit permanently empty.
-    assert not any("reward" in str(view.kwargs.get("contents")) for view in time_series)
+    # The reward series lives behind the text tabs, not in a plot slot:
+    # agent-policy runs never log rewards, so a permanently visible reward
+    # panel would sit empty.
+    assert [_node(child).kwargs.get("name") for child in plot_row.args[1:]] == ["left", "right"]
 
     sink.on_trial_start("s1", 0)
     _blueprint_step(sink, 1)
@@ -665,6 +670,11 @@ def test_transcript_first_payload_sends_blueprint(monkeypatch: pytest.MonkeyPatc
     assert sink.flush(timeout=5.0)
 
     assert len(recorder.sent) == 1
+    # A camera-less run sends the plot row as the root, not a Vertical with
+    # an empty top row.
+    row = _node(_node(recorder.sent[0]).args[0])
+    assert row.kind == "Horizontal"
+    assert _node(row.args[0]).kind == "Tabs"
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
