@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- CLI `run` and `eval-set` now take per-user advisory claims for declared
+  device slots before hardware construction, reject concurrent evals aimed at
+  the same rig, and release claims during embodiment teardown
+  ([plan 0045](plans/0045-hardware-claim-guard.md), #281).
+
 - `RerunSink` gains `spawn_port`, alongside the `rerun_port` config key and
   `--rerun-port`, giving each rig its own live viewer on multi-rig hosts
   ([plan 0044](plans/0044-rerun-viewer-port.md), #280).

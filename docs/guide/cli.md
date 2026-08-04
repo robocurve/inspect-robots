@@ -21,6 +21,10 @@ they came from are printed before the robot moves. Two flags exist only for
 instruction runs: `--max-steps N` (horizon, default 300) and `--scorer NAME`
 (default `operator`).
 
+If another eval holds a declared device, startup exits with
+`device 'can0' is already claimed by another inspect-robots process (PID 123):
+two evals must not drive one rig`.
+
 The sugar only fires when the first argument contains whitespace, so a
 mistyped subcommand (`inspect-robots isnpect`) errors out instead of starting
 a rollout; a single-word instruction needs the explicit

@@ -76,6 +76,14 @@ DEVICE_SLOTS = (
 )
 ```
 
+These declarations also feed a run-time advisory device claim. If two evals
+name the same device, the second fails at startup instead of double-driving the
+hardware. The claim is `flock`-based and vanishes with the process. Claims are
+per-user, so they do not guard against two different users driving one rig. On
+hosts without `XDG_RUNTIME_DIR`, the fallback lock directory lives under the
+world-writable temporary directory, so the guard is a safety net against your
+own concurrent evals, not a security boundary.
+
 The recognized kinds are `v4l2` for stable camera paths, `can` for SocketCAN
 interface names, and `serial` for absolute `/dev/serial/by-id` paths. The setup
 wizard probes and interviews slots in declaration order, then writes each
