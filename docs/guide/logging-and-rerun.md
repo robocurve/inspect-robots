@@ -76,6 +76,7 @@ Rerun.
 ```python
 RerunSink("run.rrd")                   # record to a file, view later
 RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
+RerunSink(spawn=True, spawn_port=9877)  # chosen viewer port (CLI: --rerun-port 9877)
 RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
 RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
 ```
@@ -106,7 +107,8 @@ viewer on your own machine instead and stream to it: `rerun` on your laptop,
 `ssh -R 9876:localhost:9876 <robot>` for the tunnel, then
 `inspect-robots run ... --rerun-connect` (a bare `--rerun-connect` targets the
 tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
-and SDK versions must match for live connections.
+and SDK versions must match for live connections. Hosts driving two rigs give
+each config its own `rerun_port` so each run spawns its own viewer window.
 
 ## Frame side-cars
 
