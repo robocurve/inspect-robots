@@ -33,7 +33,7 @@ also wedges, the sink unregisters the SDK's unbounded ``atexit`` flush,
 disables itself, and abandons queued SDK-side data.
 
 The viewer limit applies only to viewers this package spawns; a viewer already
-running on the default port keeps the limit it started with. The bounded exit
+running on the same port keeps the limit it started with. The bounded exit
 probe requires rerun-sdk 0.22 or newer because older recording streams expose
 no ``flush`` method. A new sink in the same process can still hang in
 ``rr.init`` after a connection wedges, and paths such as Ctrl-C that skip
@@ -173,6 +173,7 @@ class RerunSink:
         application_id: str = "inspect_robots",
         spawn: bool = False,
         spawn_memory_limit: str = "2GiB",
+        spawn_port: int = 9876,
         connect_url: str | None = None,
         jpeg_quality: int | None = 75,
         queue_size: int = 64,
@@ -181,6 +182,7 @@ class RerunSink:
         """Configure output mode, buffering, and the local viewer memory ceiling.
 
         ``spawn_memory_limit`` is consulted only when ``spawn`` is true.
+        ``spawn_port`` is consulted only when ``spawn`` is true.
         """
         # rerun's save/connect/spawn calls each *replace* the global sink, so
         # combining any two modes would silently drop one of the streams.
@@ -192,10 +194,13 @@ class RerunSink:
             raise ValueError("recording_path and connect_url are mutually exclusive")
         if queue_size < 1:
             raise ValueError(f"queue_size must be >= 1, got {queue_size}")
+        if not 1 <= spawn_port <= 65535:
+            raise ValueError(f"spawn_port must be in 1-65535, got {spawn_port}")
         self.recording_path = recording_path
         self.application_id = application_id
         self.spawn = spawn
         self.spawn_memory_limit = spawn_memory_limit
+        self.spawn_port = spawn_port
         self.connect_url = connect_url
         self.jpeg_quality = jpeg_quality
         self.queue_size = queue_size
@@ -602,7 +607,7 @@ class RerunSink:
         try:
             rr.init(self.application_id)
             if self.spawn:
-                rr.spawn(memory_limit=self.spawn_memory_limit)
+                rr.spawn(memory_limit=self.spawn_memory_limit, port=self.spawn_port)
             if self.connect_url is not None:
                 rr.connect_grpc(self.connect_url)
             if self.recording_path is not None:

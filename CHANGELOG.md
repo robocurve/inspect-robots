@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `RerunSink` gains `spawn_port`, alongside the `rerun_port` config key and
+  `--rerun-port`, giving each rig its own live viewer on multi-rig hosts
+  ([plan 0044](plans/0044-rerun-viewer-port.md), #280).
+
 - `INSPECT_ROBOTS_CONFIG` and the per-subcommand `--config` flag now select the
   config file, enabling per-rig configs on multi-rig hosts. The setup wizard
   writes the selected file ([plan 0042](plans/0042-config-file-selection.md),

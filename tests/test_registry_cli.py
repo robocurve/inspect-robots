@@ -4359,9 +4359,11 @@ class _FakeRerunSink:
         recording_path: str | None = None,
         *,
         spawn: bool = False,
+        spawn_port: int = 9876,
         connect_url: str | None = None,
     ) -> None:
         self.spawn = spawn
+        self.spawn_port = spawn_port
         self.connect_url = connect_url
         self.steps = 0
         _FakeRerunSink.instances.append(self)
@@ -4402,6 +4404,7 @@ def test_config_rerun_attaches_live_viewer_sink(
     assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
     (sink,) = _fake_rerun.instances  # constructed exactly once
     assert sink.spawn is True  # live viewer, not just a recording
+    assert sink.spawn_port == 9876
     assert sink.steps > 0  # actually received rollout traffic
 
 
@@ -4452,6 +4455,107 @@ def test_rerun_connect_takes_precedence_over_rerun(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+
+
+def test_rerun_port_flag_spawns_viewer_on_that_port(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9877",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9877
+
+
+def test_config_rerun_port_reaches_spawned_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9878
+
+
+def test_rerun_port_flag_beats_config(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9879",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn_port == 9879
+
+
+def test_config_rerun_port_alone_does_not_enable_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_rerun_connect(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--rerun-port.*--rerun-connect"):
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-port",
+            "9877",
+            "--rerun-connect",
+        )
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_no_rerun(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--no-rerun.*--rerun-port"):
+        _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun", "--rerun-port", "9877")
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_rejects_out_of_range(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-port", "0")
+    assert excinfo.value.code == 2
+    assert _fake_rerun.instances == []
 
 
 def test_styled_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5111,6 +5215,18 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
     assert main(["config", "set", "rerun", "true"]) == 0
+
+
+def test_cli_config_set_rejects_bad_rerun_port(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="rerun_port must be an integer in 1-65535"):
+        main(["config", "set", "rerun_port", "sometimes"])
+
+    assert main(["config", "set", "rerun_port", "9877"]) == 0
+    capsys.readouterr()
+    assert main(["config", "show"]) == 0
+    assert "rerun_port: 9877" in capsys.readouterr().out
 
 
 def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:

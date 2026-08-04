@@ -201,6 +201,7 @@ embodiment = yam_arms     # same plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
+rerun_port = 9877         # viewer port for this rig (default 9876)
 store_frames = true       # save each run's camera frames under logs/frames/
 
 [embodiment.args]
