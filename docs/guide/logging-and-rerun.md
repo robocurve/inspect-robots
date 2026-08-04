@@ -76,7 +76,7 @@ Rerun.
 ```python
 RerunSink("run.rrd")                   # record to a file, view later
 RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
-RerunSink(spawn=True, spawn_port=9877)  # chosen viewer port (CLI: --rerun-port 9877)
+RerunSink(spawn=True, spawn_port=9877) # chosen viewer port (CLI: --rerun-port 9877)
 RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
 RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
 ```

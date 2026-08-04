@@ -1289,7 +1289,7 @@ def _build_and_announce_guardrails(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    if args.rerun_port is not None and args.rerun_connect:
+    if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
             "--rerun-port spawns a local viewer and --rerun-connect streams "
             "to a remote one: pass only one"

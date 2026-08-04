@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import socket
 import subprocess
 import sys
@@ -1469,6 +1470,13 @@ def test_real_rerun_accepts_the_transcript_document_call() -> None:
     if not hasattr(rr, "TextDocument"):
         pytest.skip("pre-TextDocument rerun-sdk lacks the archetype")
     rr.TextDocument("**[INFO]** assistant: hi  \nthere", media_type="text/markdown")
+
+
+@pytest.mark.skipif(not _RERUN_INSTALLED, reason="requires rerun-sdk")
+def test_real_rerun_spawn_signature_accepts_forwarded_kwargs() -> None:
+    """The real SDK spawn signature accepts every keyword the sink forwards."""
+    rr = pytest.importorskip("rerun")
+    assert {"port", "memory_limit"} <= set(inspect.signature(rr.spawn).parameters)
 
 
 @pytest.mark.skipif(not _RERUN_INSTALLED, reason="rerun-sdk not installed")
