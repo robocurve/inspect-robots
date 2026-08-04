@@ -36,16 +36,20 @@ from inspect_robots.transcript import (
     approval_event,
     error_event,
     inference_event,
+    operator_event,
+    operator_message_event,
     reset_event,
     step_event,
 )
-from inspect_robots.types import Action, Observation, StepResult
+from inspect_robots.types import OPERATOR_END, Action, Observation, StepResult
 
 if TYPE_CHECKING:
+    from inspect_robots.console import OperatorInput
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
 _APPROVALS_KEY = "_rollout_approvals"
+_OPERATOR_MSGS_KEY = "_rollout_operator_messages"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -220,6 +224,7 @@ def rollout(
     approver: Approver,
     sink: LogSink,
     frame_store: FrameStore | None = None,
+    operator_input: OperatorInput | None = None,
 ) -> TrialRecord:
     """Run a single trial and return its record.
 
@@ -248,6 +253,7 @@ def rollout(
     delta_hook: Any = getattr(policy, "transcript_delta", None)
     messages_hook: Any = getattr(sink, "log_policy_messages", None)
     stream_ok = callable(delta_hook) and callable(messages_hook)
+    console_ok = operator_input is not None
 
     try:
         t = -1
@@ -267,16 +273,70 @@ def rollout(
         except Exception as exc:
             raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
 
+        if operator_input is not None:
+            try:
+                operator_input.begin_trial()
+            except Exception as exc:
+                console_ok = False
+                warnings.warn(
+                    f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
         t = 0
         while t < max_steps:
+            poll = None
+            if operator_input is not None and console_ok:
+                try:
+                    poll = operator_input.poll()
+                except Exception as exc:
+                    console_ok = False
+                    warnings.warn(
+                        "Operator console disabled for this trial after "
+                        f"{type(exc).__name__}: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            if poll is not None:
+                for text in poll.messages:
+                    store.setdefault(_OPERATOR_MSGS_KEY, []).append({"t": t, "text": text})
+                    record.events.append(operator_message_event(t, text))
+
             prev_inferences = len(store.get(_INFER_KEY, []))
             all_approvals = store.get(_APPROVALS_KEY, [])
-            last_seen = store.get("_rollout_last_approvals_idx", 0)
-            tail_approvals = [dict(a) for a in all_approvals[last_seen:]]
+            last_approvals_idx = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_approvals_idx:]]
+            all_operator_msgs = store.get(_OPERATOR_MSGS_KEY, [])
+            last_operator_msgs_idx = store.get("_rollout_last_operator_msgs_idx", 0)
+            tail_operator_msgs = [
+                dict(message) for message in all_operator_msgs[last_operator_msgs_idx:]
+            ]
+
+            if poll is not None and poll.end is not None:
+                record.terminated = True
+                record.termination_reason = OPERATOR_END
+                if poll.end.verdict is not None:
+                    record.operator_judgement = poll.end.verdict
+                    record.operator_note = poll.end.note
+                    record.events.append(
+                        operator_event(
+                            t=t,
+                            verdict=poll.end.verdict,
+                            source="console",
+                            note=poll.end.note,
+                        )
+                    )
+                break
+
             try:
+                policy_extra = {**obs.extra, "env_step": t, "approvals": tail_approvals}
+                if operator_input is not None:
+                    policy_extra["operator_messages"] = tail_operator_msgs
                 obs_with_extra = replace(
-                    obs, extra={**obs.extra, "env_step": t, "approvals": tail_approvals}
+                    obs,
+                    extra=policy_extra,
                 )
                 action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
@@ -288,6 +348,8 @@ def rollout(
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
                 store["_rollout_last_approvals_idx"] = len(all_approvals)
+                if operator_input is not None:
+                    store["_rollout_last_operator_msgs_idx"] = len(all_operator_msgs)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
