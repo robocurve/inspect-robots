@@ -16,14 +16,18 @@ sink ctor kwarg `spawn_port` forwarded to `rr.spawn(port=...)`, consulted only
 when `spawn=True` (the `spawn_memory_limit` precedent, plan 0014); a
 `rerun_port` `[defaults]` key read like `max_steps` with a 1-65535 range; and
 a `--rerun-port` flag that implies the live viewer (the way `--rerun-connect`
-implies connecting) and beats the config key. `--rerun-connect` and
-`--rerun-port` are contradictory (one says remote viewer, the other says
-local spawn) and error loudly together. `application_id` is already a ctor
-parameter and needs no work.
+implies connecting) and beats the config key. Flag contradictions error loudly and
+immediately: `--rerun-connect --rerun-port` (remote viewer vs local spawn)
+and `--no-rerun --rerun-port` (no viewer vs a viewer port) both die at the
+top of `_cmd_run`, before any component resolves. `application_id` is
+already a ctor parameter and needs no work.
 
 **Tech stack:** stdlib only. The rerun-sdk is NOT installed in this worktree's
 venv; every sink test runs against the existing `_StartupRR`-style mocks, and
-that is sufficient (the SDK signature was verified against rerun_sdk 0.35.0).
+that is sufficient: the keyword-only `port: int = 9876` on `spawn()` was
+verified in rerun_sdk 0.23.1, 0.34.x, and 0.35.0, CI's locked version is
+0.34.0 (`uv.lock`), and the `test (rerun extra)` CI job never calls spawn
+against the real SDK (its `spawn=True` tests all use fake `_rr` objects).
 
 ## Global Constraints
 
@@ -69,7 +73,7 @@ that is sufficient (the SDK signature was verified against rerun_sdk 0.35.0).
   :88); the int-key pattern to copy is `max_steps` in `_read_config`
   :151-156; `_CONFIG_KEYS` :197-205; `_set_default` validation :208-222.
 - Tests: `tests/test_rerun_sink.py` `_StartupRR` mock :78-94 (records
-  `("init", (app_id, kwargs))`, `("spawn", kwargs)`, `("connect", url)`);
+  `("init", (app_id, kwargs))`, `("spawn", kwargs)`, `("connect_grpc", url)`);
   exact-equality assertions :97-108, :111-119, :122-130, :133-146;
   mutual-exclusion :60-75. `tests/test_registry_cli.py` `_FakeRerunSink`
   :4352-4378, `_fake_rerun` fixture :4381-4387 (monkeypatches
@@ -118,8 +122,9 @@ missing `port`.
 consulted only when `spawn` is true. Validate
 `if not 1 <= spawn_port <= 65535: raise ValueError(...)` next to the
 `queue_size` check. In `on_eval_start`, `rr.spawn(memory_limit=...,
-port=self.spawn_port)`. Update the class docstring line about "a viewer
-already running on the default port" (:35-37) to say "on the same port".
+port=self.spawn_port)`. Update the MODULE docstring line about "a viewer
+already running on the default port" (rerun_sink.py:35-36) to say "on the
+same port".
 
 - [ ] **Step 4: Run tests, then the full gate set**
 
@@ -215,6 +220,11 @@ harness:
   (the port key customizes, never switches on).
 - `test_rerun_port_conflicts_with_rerun_connect`: both flags → SystemExit
   with a message naming both flags; no sink constructed.
+- `test_rerun_port_conflicts_with_no_rerun`: `--no-rerun --rerun-port 9877`
+  → SystemExit naming both flags; no sink constructed. (An explicit off
+  switch silently losing to the port flag would ship unpinned: branch
+  coverage cannot see `or`-operand arcs, so this contradiction is an error,
+  matching the connect conflict.)
 - `test_rerun_port_rejects_out_of_range`: `--rerun-port 0` → argparse error
   (SystemExit 2).
 - Default-port arc: assert in one existing-style test (e.g. extend
@@ -234,20 +244,23 @@ rejects the unknown flag.
   sets the default). `_port_number(text: str) -> int` raises
   `argparse.ArgumentTypeError("port must be in 1-65535")` outside the range
   (module-level helper next to `_add_config_arg`, with a docstring).
-- In `_cmd_run`, before the sink branches: if `args.rerun_connect` and
-  `args.rerun_port is not None`, `raise SystemExit("--rerun-port spawns a "
-  "local viewer and --rerun-connect streams to a remote one: pass only one")`.
+- Both contradiction checks live at the TOP of `_cmd_run`, before any
+  component resolves (a pure flag error must not touch hardware):
+  `if args.rerun_port is not None and args.rerun_connect: raise
+  SystemExit("--rerun-port spawns a local viewer and --rerun-connect "
+  "streams to a remote one: pass only one")` and
+  `if args.rerun_port is not None and args.rerun is False: raise
+  SystemExit("--no-rerun disables the live viewer and --rerun-port "
+  "requests one: pass only one")` (`args.rerun` is tri-state; `is False`
+  fires only on an explicit `--no-rerun`).
 - The spawn decision at :1360 becomes: connect branch unchanged; else
   `spawn_wanted = args.rerun_port is not None or (args.rerun if args.rerun
-  is not None else defaults.rerun)`; when spawning,
+  is not None else defaults.rerun)` (safe now that the `--no-rerun`
+  contradiction died earlier); when spawning,
   `port = args.rerun_port if args.rerun_port is not None else
   defaults.rerun_port`, and construct `RerunSink(spawn=True)` when `port is
   None` else `RerunSink(spawn=True, spawn_port=port)` (both arms are
   covered by the tests above).
-- `--no-rerun` semantics: `--rerun-port` states explicit intent, same rank
-  as `--rerun`; do not special-case `--no-rerun --rerun-port N` (the port
-  flag wins through `spawn_wanted`). Note this in the flag help is NOT
-  needed; leave behavior to the expression.
 
 - [ ] **Step 4: Run tests, then the full gate set**
 
