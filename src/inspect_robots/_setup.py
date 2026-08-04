@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import contextlib
 import os
 import re
 import struct
@@ -944,14 +945,17 @@ def _options_section(
     """Interview plugin-declared behavior toggles as yes/no questions.
 
     The carried config value (parsed as a bool) is the suggested answer when
-    present and boolean; otherwise the slot's declared default. Answers are
-    written explicitly (``true``/``false``) so declining a previously enabled
-    toggle turns it off rather than silently carrying it forward.
+    present and boolean; otherwise the slot's context-aware or static default.
+    Answers are written explicitly (``true``/``false``) so declining a previously
+    enabled toggle turns it off rather than silently carrying it forward.
     """
     existing_args = carried.get("embodiment.args", {})
     answers: dict[str, str] = {}
     for option in options:
         suggested = option.default
+        if option.suggest is not None:
+            with contextlib.suppress(Exception):
+                suggested = option.suggest(existing_args)
         if option.arg in existing_args:
             parsed = _parse_value(existing_args[option.arg])
             if isinstance(parsed, bool):
