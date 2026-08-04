@@ -100,7 +100,7 @@ All notable changes to this project are documented here. The format is based on
   an unset wire for `thinkingmachines/*` now prefers direct Tinker routing on
   `wire=messages` over OpenRouter on `wire=chat`. An explicit conflicting wire
   now requires dropping `-P wire=` or deliberately selecting a gateway with
-  `-P base_url=...` and `-P api_key_env=NAME` (plan 0042, #278).
+  `-P base_url=...` and `-P api_key_env=NAME` (plan 0044, #278).
 
 - The `llm/latest` Rerun pane now shows only the step's assistant message(s);
   the full conversation remains in the `llm` TextLog stream

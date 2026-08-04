@@ -1,4 +1,4 @@
-# 0042 — Inkling on Tinker: `thinkingmachines/` provider and `wire=messages`
+# 0044 — Inkling on Tinker: `thinkingmachines/` provider and `wire=messages`
 
 Issue: #278. Revised after critiques R1 (8 findings: ENV_MODEL wire
 inference, the :451 fix ladder, capx blast radius, the hint's explicitness
