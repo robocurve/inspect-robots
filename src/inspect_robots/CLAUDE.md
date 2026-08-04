@@ -8,6 +8,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | Module | Responsibility |
 |--------|----------------|
 | `types.py` | `Observation`, `Action`, `ActionChunk`, `StepResult` (frozen, NumPy-native) |
+| `console.py` | frozen poll results, the `OperatorInput` Protocol, and a threadless stdin console for live feedback and end requests |
 | `spaces.py` | `Box`, `ObservationSpace`, `ActionSemantics`, `StateSpec` + canonical state vocab |
 | `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig`; optional duck-typed `bind(embodiment_info)` hook for embodiment-adaptive policies plus `transcript()` and `transcript_delta()` hooks for complete and live per-trial audit records |
 | `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags; optional duck-typed `bind_task(envelope)` hook for horizon-aware adapters (called by `eval()` after compat with a resolved step envelope; optional input — never fires on direct `rollout()`, keep a fallback) |
@@ -16,14 +17,14 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `scorer.py` | `Score`/`Scorer`, epoch reducers, builtin scorers (incl. operator/VLM) |
 | `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
 | `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |
-| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding, best-effort normalized policy-transcript capture, and the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
+| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding, delivered-once operator input, best-effort normalized policy-transcript capture, and the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
-| `transcript.py` | typed event stream (reset/inference/step/approval/operator/error) |
+| `transcript.py` | typed event stream (reset/inference/step/approval/operator_message/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
 | `conformance.py` | adapter conformance kit: `check_embodiment`/`assert_embodiment_conformant` for declarative guardrail/agent readiness; `missing_runtime_requirements` provides runtime-dependency preflight; `DeviceSlot`/`device_slots` and `OptionSlot`/`option_slots` declare and defensively read embodiment device and boolean option slots |
 | `errors.py` | error taxonomy (continue vs halt) |
 | `eval.py` | `eval()` / `eval_set()` orchestration |
-| `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log`, including per-trial policy transcripts parallel to epochs |
+| `log.py` | immutable, schema-versioned `EvalLog` + `read_eval_log`, including operator messages and policy transcripts parallel to epochs |
 | `logging/` | `LogSink` protocol and optional duck-typed `log_policy_messages()` hook, `JsonLogSink` (atomic), optional `RerunSink` (non-blocking worker thread for steps and transcript rows; per-trial arm-grouped blueprints from bound spaces, plan 0041; drops under pressure, never delays control) |
 | `registry.py` | decorators + entry-point discovery; `_builtins.py` registers in-tree components |
 | `cli.py` | `inspect-robots list` / `run` / `inspect` (with `--transcript` policy-audit rendering) / `summarize` (markdown learnings from a saved log via `_summarize.py`) / `view` (self-contained HTML report with optional stored-frame embedding via `_html.py`; `-o -` for stdout, `--open` for a browser) / `video` (frames-to-MP4 via `_video.py`) / `config set|show` / `setup` (first-run wizard) / `doctor` (adapter conformance), plus the zero-config form `inspect-robots "<instruction>"` (ad-hoc single-scene task; operator prompt on TTY). Every run wires guardrails (Clamp + DeltaLimit) by default; `--disable-guardrails` is the loud opt-out and the chain degrades per component with stderr warnings |
