@@ -30,9 +30,19 @@ pytest with the existing fake-client patterns in
 
 ## Global Constraints
 
-- Gates (all blocking), run from the worktree root: `uv run ruff check .`,
-  `uv run ruff format --check .`, `uv run mypy`, `uv run pytest --cov` at
-  **100% coverage**.
+- Gates (all blocking), run from the worktree root. The root mypy/pytest
+  configs do NOT cover the plugin (root `testpaths=["tests"]`, coverage
+  `source=["inspect_robots"]`), so the plugin gates must be the CI commands
+  (`.github/workflows/ci.yml:317-331`):
+  - `uv run ruff check .` and `uv run ruff format --check .` (repo-wide).
+  - `uv run mypy --config-file plugins/inspect-robots-agent/pyproject.toml
+    plugins/inspect-robots-agent/src/inspect_robots_agent`.
+  - `uv run pytest plugins/inspect-robots-agent/tests
+    --cov=inspect_robots_agent --cov-report=term-missing`.
+  Coverage bar: CI gates plugins at fail-under=0 and the plugin sits at
+  97.73% today (pre-existing `_gemini_live.py` gaps), so the rule is **no
+  regression on touched files**: `_tools.py` stays 100%, `policy.py` stays
+  at or above its current 99% with every new line and branch covered.
 - Every public module/class/function needs a docstring stating the contract
   (ruff D1).
 - Repo root is the `wt-ir-hindsight` worktree at
@@ -54,26 +64,39 @@ pytest with the existing fake-client patterns in
 - `plugins/.../src/inspect_robots_agent/_tools.py:191-216` — `done` schema
   (required `summary`) and `give_up` schema (required `reason`).
 - `_tools.py:265-266` — dispatch: both names route to `_stop`.
-- `_tools.py:307-318` — `_stop`: builds the hold action with meta
+- `_tools.py:307-317` — `_stop`: builds the hold action with meta
   `{request_stop: True, stop_reason: name, stop_detail: summary-or-reason}`,
   returns `note=f"{name}: {detail}"`.
-- `_tools.py` take_pic `note` validation (~321-325) — the existing pattern
+- `_tools.py:320-324` take_pic `note` validation — the existing pattern
   for an execution-level argument check; `hindsight` deliberately does NOT
-  get one (leniency contract above).
+  get one (leniency contract above). No wire client validates tool
+  parameters harness-side (`execute` only json.loads + dict-checks;
+  schemas pass through verbatim to every wire), so schema-required is
+  purely an instruction to the model.
+- Existing required-list assertions that break mechanically (permitted
+  edits): `tests/test_tools_motion.py:578-581` (`["summary"]`) and
+  `:601-604` (`["reason"]`).
 - `policy.py:100-134` — `_SYSTEM_TEMPLATE` and `_ON_DEMAND_SYSTEM_TEMPLATE`;
   both end with "When the goal is achieved call done; if it cannot be
   achieved call give_up. You have a budget of {budget} LLM calls...".
-- `policy.py:955` — the one site that detects the stop chunk:
-  `stopped = bool(chunk.actions[0].meta.get("request_stop"))`.
-- `policy.py:1011-1018` — `_forced_give_up`: synthesizes
+- `policy.py:955` — the tool-call loop's stop-chunk detection:
+  `stopped = bool(chunk.actions[0].meta.get("request_stop"))`. This is the
+  only stash site needed for LLM-produced stops (all four wires funnel
+  through this one loop), BUT the forced path BYPASSES it: `policy.py:810`
+  returns `self._forced_give_up(...)`'s chunk directly. That is safe by
+  construction (the synthetic call carries no hindsight, so `_stop` adds no
+  meta, and `reset()` cleared any previous trial's stash), and it is why
+  the two-trial reset test below is the load-bearing one.
+- `policy.py:1011-1019` — `_forced_give_up`: synthesizes
   `ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))`
-  and requires `result.error` to be None, so `_stop` must not reject a
+  and raises if `result.chunk` is missing, so `_stop` must not reject a
   missing `hindsight`.
+- `policy.py:669-697` — `reset(scene)` is the per-trial state reset
+  (`_messages`, `_calls_used`, `_usage_totals`, `_pending`, ...); clear the
+  hindsight stash EARLY in this method body. (`on_trial_start` at :699-702
+  only begins wire capture and resets nothing — do not put it there.)
 - `policy.py:704-737` — `on_trial_end(record, ...)`: writes
-  `record.metadata["wire_capture"|"transcript"|"llm_usage"]`. The
-  per-trial reset lives wherever the policy resets `_messages`/counters for
-  a new trial (locate `on_trial_begin` or equivalent; wire the hindsight
-  stash reset there).
+  `record.metadata["wire_capture"|"transcript"|"llm_usage"]`.
 - `src/inspect_robots/rollout.py:106-107` — `TrialRecord.metadata`
   ("Extensible metadata for the trial (e.g. populated by policies)");
   `src/inspect_robots/eval.py:469,521` copies it into the sample's
@@ -98,11 +121,14 @@ pytest with the existing fake-client patterns in
   (c) a call WITHOUT `hindsight` (and one with `hindsight: "  "`) still
   succeeds, meta has NO `stop_hindsight` key, and `note` is unchanged.
 - [ ] **Step 2: implement.** Add the parameter to both schemas. Description
-  (same string for both, single source constant): "What do you know now
-  that you wish you had known at the start of this episode? Concrete,
-  transferable facts about this rig, task, or embodiment (geometry, grip
-  offsets, camera quirks, motion behavior), written as advice to a future
-  agent attempting the same task. Say 'none' if nothing qualifies." In
+  (same string for both, single source constant; categories calibrated
+  against a real rollout's answer, see issue #305 comment): "What do you
+  know now that you wish you had known at the start of this episode?
+  Concrete, transferable facts about this rig, task, or embodiment (camera
+  mounting and extrinsics, table and base geometry, gripper axis and
+  offsets, controller behavior, metric scale), written as advice to a
+  future agent attempting the same task. Say 'none' if nothing
+  qualifies." In
   `_stop`, read `arguments.get("hindsight")`; when it is a non-blank
   string, add `stop_hindsight` (stripped) to the meta. No validation
   error path.
@@ -111,22 +137,28 @@ pytest with the existing fake-client patterns in
 ## Task 2: policy stash and `trial_metadata` persistence
 
 - [ ] **Step 1: failing tests.** E2E, following the
-  `test_goal_runs_to_done_and_config_lands_in_log` pattern: a scripted run
-  whose `done` call carries `hindsight` produces a log where
-  `samples[0]["trial_metadata"][0]["hindsight"]` equals the string.
-  Second test: a forced give_up run (budget exhaustion, mirror
+  `test_goal_runs_to_done_and_config_lands_in_log` pattern and its
+  attribute-style access (`logs[0].samples[0].trial_metadata[0]`): a
+  scripted run whose `done` call carries `hindsight` produces a log where
+  `trial_metadata[0]["hindsight"]` equals the string. Second test: a
+  forced give_up run (budget exhaustion, mirror
   `test_transcript_echo_reports_forced_give_up`) produces trial_metadata
-  WITHOUT a `hindsight` key. Third test: two trials in one run where only
-  the first supplies hindsight; the second trial's metadata has no
-  `hindsight` key (per-trial reset, no bleed-through).
+  WITHOUT a `hindsight` key (pins end-to-end leniency: a validation error
+  in `_stop` would trip `_forced_give_up`'s no-chunk raise). Third test
+  (the load-bearing one for the reset): TWO trials in one run — trial 1
+  ends via `done` WITH hindsight, trial 2 ends via forced give_up — and
+  trial 2's metadata has no `hindsight` key. No two-trial helper exists:
+  hand-build `Task(scenes=[...], epochs=2, ...)` (`Task.epochs`,
+  `src/inspect_robots/task.py:69`); the `_Script` transport consumes
+  responses sequentially across trials.
 - [ ] **Step 2: implement.** At the `policy.py:955` stop-chunk site, stash
   `chunk.actions[0].meta.get("stop_hindsight")` on the policy when
-  `request_stop` is set. Reset the stash wherever per-trial state resets.
-  In `on_trial_end`, write `record.metadata["hindsight"]` when the stash
-  is a non-blank string. Note `on_trial_end` currently returns early when
-  there is no transcript (`policy.py:717-719`); the hindsight write must
-  happen BEFORE that early return, or a transcript-less trial silently
-  drops it.
+  `request_stop` is set. Clear the stash early in `reset()`
+  (`policy.py:669`). In `on_trial_end`, write
+  `record.metadata["hindsight"]` when the stash is a non-blank string.
+  `on_trial_end` returns early when there is no transcript
+  (`policy.py:717-719`); the hindsight write must happen BEFORE that early
+  return, or a transcript-less trial silently drops it.
 - [ ] **Step 3: gates green, commit.**
 
 ## Task 3: system prompt announcement
@@ -145,8 +177,14 @@ pytest with the existing fake-client patterns in
 
 - [ ] **Step 1:** Bump the plugin to 0.22.0 in all THREE places (pyproject
   `version`, `uv lock` regeneration, `tests/test_package.py:9` pin).
-- [ ] **Step 2:** Docs sweep: the plugin/agent docs page that lists the
-  tools (grep `docs/` for `give_up`) documents the new argument and both
-  persistence surfaces. Root `CHANGELOG.md` entry under Unreleased
-  referencing #305 and plan 0047, following the sibling-entry convention.
+- [ ] **Step 2:** Docs sweep: `docs/` has NO agent-tools page (grep
+  verified); the documentation surface is
+  `plugins/inspect-robots-agent/README.md` (give_up at lines 137, 144,
+  234). Document the new argument, both persistence surfaces, and that
+  harvested hindsight is suitable input for the existing `prior_learnings`
+  feed-forward mechanism (`policy.py:239-321`) — collection and
+  feed-forward should find each other in the docs. Root `CHANGELOG.md`
+  entry under Unreleased as `**Agent plugin (0.22.0):**` bullets following
+  the sibling convention, referencing #305 and plan 0047, with the same
+  `prior_learnings` cross-reference.
 - [ ] **Step 3: gates green, commit.**
