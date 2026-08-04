@@ -220,6 +220,18 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_config_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach the --config override to a subcommand that reads the config file."""
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="use this config file instead of "
+        "<config-home>/inspect-robots/config.ini (sets $INSPECT_ROBOTS_CONFIG "
+        "for the invocation; useful for hosts driving more than one rig)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
@@ -246,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("-T", dest="task_args", action="append", metavar="k=v")
     _add_shared_eval_args(p_run)
+    _add_config_arg(p_run)
     p_run.add_argument(
         "--max-steps",
         type=int,
@@ -286,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="registered task name(s); shell-quoted globs match by prefix, e.g. 'kitchenbench/*'",
     )
     _add_shared_eval_args(p_eval_set)
+    _add_config_arg(p_eval_set)
     p_eval_set.add_argument(
         "--retry-attempts",
         type=int,
@@ -446,19 +460,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    _add_config_arg(p_doctor)
 
-    sub.add_parser(
+    p_setup = sub.add_parser(
         "setup",
         help="interactive first-run wizard: pick defaults and discover camera devices, "
         "then write config.ini",
     )
+    _add_config_arg(p_setup)
 
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
     p_set.add_argument("key", choices=_CONFIG_KEYS)
     p_set.add_argument("value")
-    config_sub.add_parser("show", help="print resolved defaults and their sources")
+    _add_config_arg(p_set)
+    p_show = config_sub.add_parser("show", help="print resolved defaults and their sources")
+    _add_config_arg(p_show)
     return parser
 
 
@@ -2210,6 +2228,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
+    if config_override := getattr(args, "config", None):
+        # os.environ, not a local mapping: external plugins (inspect-robots-yam's
+        # default loader) re-read the config from os.environ while constructing
+        # components, and subprocesses inherit it.
+        override_path = Path(config_override).expanduser()
+        if not override_path.is_absolute():
+            override_path = Path.cwd() / override_path
+        os.environ["INSPECT_ROBOTS_CONFIG"] = str(override_path)
     if args.command == "list":
         return _cmd_list(args.what)
     if args.command == "run":
