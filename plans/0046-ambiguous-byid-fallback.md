@@ -112,7 +112,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
 
 ## Task 1: model identity on the inventory record
 
-- [ ] **Step 1: failing tests.** The `_usb_device` fixture
+- [x] **Step 1: failing tests.** The `_usb_device` fixture
   (`tests/test_setup.py:211`) already writes `idVendor` with content
   ("8086") but no `idProduct` at all: parameterize the fixture to take a
   product id (and expose the vendor for Task 2's different-model tests),
@@ -121,14 +121,14 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   dir gets `model=None`; unreadable `idProduct` gets `model=None` —
   simulate unreadable with a DIRECTORY named `idProduct`
   (IsADirectoryError is an OSError; `chmod 000` is a no-op under root CI).
-- [ ] **Step 2: implement.** Add `model: str | None = None` to
+- [x] **Step 2: implement.** Add `model: str | None = None` to
   `_CameraNode` (defaulted, so direct constructions in existing tests
   stay valid; docstring: stable udev-name proxy, `idVendor:idProduct`).
   In `_camera_inventory`, read both files next to the existing serial
   read, same exception envelope, using the `.strip() or None` EXPRESSION
   form (an `if`-based empty check would add a branch no listed test
   covers); either file missing or empty yields `model=None`.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 2: name-collision ambiguity replaces serial-collision ambiguity
 

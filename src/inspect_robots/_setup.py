@@ -1014,7 +1014,8 @@ class _CameraNode:
     USB device directory owning the node (one per physical camera) or
     ``None`` where sysfs is unavailable; ``serial`` is the USB serial when
     readable; ``by_id``/``by_path`` are the preferred symlinks resolving to
-    the node in each listing directory, when any exist.
+    the node in each listing directory, when any exist; ``model`` is the
+    stable udev-name proxy ``idVendor:idProduct`` when both values are readable.
     """
 
     node: str
@@ -1022,6 +1023,7 @@ class _CameraNode:
     serial: str | None
     by_id: str | None
     by_path: str | None
+    model: str | None = None
 
 
 def _usb_device_dir(node_name: str, sysfs_video: Path) -> Path | None:
@@ -1078,11 +1080,20 @@ def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> 
             continue
         usb_dir = _usb_device_dir(target.name, sysfs_video)
         serial: str | None = None
+        model: str | None = None
         if usb_dir is not None:
             try:
                 serial = (usb_dir / "serial").read_text(encoding="utf-8").strip() or None
             except (OSError, UnicodeDecodeError):
                 serial = None
+            try:
+                vendor = (usb_dir / "idVendor").read_text(encoding="utf-8").strip() or None
+                product = (usb_dir / "idProduct").read_text(encoding="utf-8").strip() or None
+                model = (
+                    f"{vendor}:{product}" if vendor is not None and product is not None else None
+                )
+            except (OSError, UnicodeDecodeError):
+                model = None
         by_id = names[target]["by_id"]
         by_path = names[target]["by_path"]
         records.append(
@@ -1092,6 +1103,7 @@ def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> 
                 serial=serial,
                 by_id=str(_prefer_plain_alias(by_id)) if by_id else None,
                 by_path=str(_prefer_plain_alias(by_path)) if by_path else None,
+                model=model,
             )
         )
     return records

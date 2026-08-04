@@ -197,18 +197,26 @@ def _mkdir_or_skip(path: Path, *, parents: bool = False) -> None:
 
 
 def _usb_device(
-    devices: Path, port: str, serial: str, sysfs_video: Path, nodes: dict[str, str]
+    devices: Path,
+    port: str,
+    serial: str,
+    sysfs_video: Path,
+    nodes: dict[str, str],
+    *,
+    vendor: str = "8086",
+    product: str = "0b5b",
 ) -> None:
     """One fake sysfs USB device mirroring real sysfs shape.
 
     ``nodes`` maps video-node name to USB interface suffix ("video10": "1.3");
     each node's ``device`` link points at the interface directory itself
     (``<port>/<port>:1.3``), exactly like real sysfs, and the USB device dir
-    above it holds ``idVendor`` + ``serial``.
+    above it holds ``idVendor``, ``idProduct``, and ``serial``.
     """
     usb_dir = devices / port
     usb_dir.mkdir(parents=True, exist_ok=True)
-    (usb_dir / "idVendor").write_text("8086", encoding="utf-8")
+    (usb_dir / "idVendor").write_text(vendor, encoding="utf-8")
+    (usb_dir / "idProduct").write_text(product, encoding="utf-8")
     (usb_dir / "serial").write_text(serial + "\n", encoding="utf-8")
     for node, suffix in nodes.items():
         interface = usb_dir / f"{port}:{suffix}"
@@ -350,6 +358,89 @@ def test_camera_inventory_groups_names_by_resolved_target(
     assert d435.camera is not None and d435.camera.endswith("4-9")
     d405 = by_node["video8"]
     assert d405.by_id is not None and Path(d405.by_id).name.startswith("usb-D405")
+
+
+def test_camera_inventory_reads_usb_model_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video8", "video10"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert {record.model for record in inventory} == {"8086:0b5b"}
+
+
+def test_camera_inventory_model_is_none_without_resolvable_sysfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    dev.mkdir()
+    by_path.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, tmp_path / "missing-sysfs")
+
+    assert len(inventory) == 1
+    assert inventory[0].camera is None
+    assert inventory[0].model is None
+
+
+def test_camera_inventory_unreadable_product_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    product = devices / "2-1" / "idProduct"
+    product.unlink()
+    product.mkdir()
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].model is None
+
+
+@pytest.mark.parametrize("usb_id", ["idVendor", "idProduct"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_camera_inventory_missing_or_empty_usb_id_has_no_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usb_id: str,
+    *,
+    missing: bool,
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    identity_file = devices / "2-1" / usb_id
+    if missing:
+        identity_file.unlink()
+    else:
+        identity_file.write_text("", encoding="utf-8")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].model is None
 
 
 def test_camera_inventory_probes_each_target_once(
