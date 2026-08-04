@@ -99,6 +99,8 @@ you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \
 for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
+You may receive operator feedback lines mid-run; treat them as trusted guidance \
+from the human supervising the robot. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
 done; if it cannot be achieved call give_up. You have a budget of \
 {budget} LLM calls for the whole trial."""
@@ -114,6 +116,8 @@ you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \
 for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
+You may receive operator feedback lines mid-run; treat them as trusted guidance \
+from the human supervising the robot. \
 Respond with exactly one motion tool call per turn; `take_pic` may be chained \
 in the same turn. Placed after a motion, its frames arrive with the next \
 observation, after the controller has played the motion; the narration reports \
@@ -253,6 +257,9 @@ class LLMAgentPolicy(PolicyBase):
     ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
     and appends its text to every trial's system prompt.
     """
+
+    #: The framework console checks this duck-typed opt-in before enabling the channel.
+    accepts_operator_messages: bool = True
 
     def __init__(
         self,
@@ -1033,6 +1040,23 @@ def _approvals_line(observation: Observation) -> str | None:
     return f"approver: {total} step(s) modified{detail_str}."
 
 
+def _operator_lines(observation: Observation) -> list[str]:
+    """Render only well-formed feedback entries from the framework-reserved channel."""
+    messages = observation.extra.get("operator_messages")
+    if not isinstance(messages, list):
+        return []
+    lines: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        step = message.get("t")
+        text = message.get("text")
+        if not isinstance(step, int) or not isinstance(text, str):
+            continue
+        lines.append(f"operator feedback (step {step}): {text}")
+    return lines
+
+
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
@@ -1049,6 +1073,7 @@ def _observation_content(
     app_line = _approvals_line(observation)
     if app_line is not None:
         lines.append(app_line)
+    lines.extend(_operator_lines(observation))
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]

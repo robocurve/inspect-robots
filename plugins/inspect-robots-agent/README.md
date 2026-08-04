@@ -162,6 +162,14 @@ absolute interpolants. In displacement modes, a value tighter than the action
 box can truncate each `move_by` step. Either setting can make the executed
 motion fall short of the tool's requested total.
 
+### Operator feedback
+
+`LLMAgentPolicy` opts into the framework's live operator channel on attended
+runs. Feedback typed during a trial is included in the next observation sent
+to the model, labeled with the environment step when it was received. The
+model treats these lines as trusted guidance from the human supervising the
+robot. The framework also saves the feedback in the eval log.
+
 ## Motion pre-check
 
 Python callers can pass `pre_check=` to `LLMAgentPolicy` to inspect one
