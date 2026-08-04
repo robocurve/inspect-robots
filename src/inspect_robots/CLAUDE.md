@@ -33,6 +33,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `_pngenc.py` | strict-uint8, NumPy plus stdlib PNG and data-URL encoding for stored camera frames |
 | `_video.py` | `inspect-robots video`: reunite a log with its `FrameStore` side-cars and pipe them to the ffmpeg binary, one MP4 per (trial, camera) stream (plan 0016: stderr temp file not pipe, per-stream failure isolation, strict uint8) |
 | `defaults.py` | public reader for user default policy/embodiment (+ `--sim` counterpart): component env vars > selected config file; `INSPECT_ROBOTS_CONFIG` overrides its XDG/HOME-derived location (INI, py3.10 has no tomllib; deliberately no project-local file); `_set_default` backs `config set` |
+| `_claims.py` | per-user advisory `flock` claims for normalized embodiment device-slot values, with lazy no-op behavior without `fcntl`, process-lifetime locks, and idempotent release |
 | `_dotenv.py` | dependency-free `.env` parsing and working-directory auto-loading with real environment variables taking precedence |
 | `_setup.py` | the `inspect-robots setup` wizard (plans 0009, 0011, 0032, 0040, and 0043): IO-injected prompts for `[defaults]`, plugin-declared V4L2/CAN/serial device slots with serial-pinned or port-pinned CAN udev rules, boolean option interviews, color-probed camera inventory grouped by sysfs USB device, trust-ladder naming, device-level unplug identify, headless-rerun warning; renders config.ini itself (comments survive) and carries unmanaged sections/keys through raw |
 | `mock/` | dependency-free `CubePick` world + scripted/random/noop policies |
@@ -54,4 +55,6 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
   default `fail_on_error=False`.
 - `eval()` closes embodiments it resolved from registry names ("close what we
   open"); caller-constructed objects are caller-owned.
+- The CLI releases device claims in the same `finally` that closes the
+  embodiment.
 - `mock/` and core must never import `rerun`/`torch` at module top.
