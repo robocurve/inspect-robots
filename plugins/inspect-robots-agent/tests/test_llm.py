@@ -55,6 +55,78 @@ def test_anthropic_model_with_anthropic_key() -> None:
     assert p.model == "claude-fable-5"  # provider prefix stripped for the compat endpoint
 
 
+def test_thinkingmachines_claims_direct_on_the_messages_wire() -> None:
+    p = resolve_provider(
+        model="thinkingmachines/Inkling",
+        base_url=None,
+        api_key_env=None,
+        env={"TINKER_API_KEY": "tk", "OPENROUTER_API_KEY": "or-key"},
+        native_wires=frozenset({"chat", "messages"}),
+    )
+
+    assert p.base_url == (
+        "https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1"
+    )
+    assert p.api_key == "tk"
+    assert p.model == "thinkingmachines/Inkling"
+    assert p.wire == "messages"
+
+
+def test_default_native_wires_routes_thinkingmachines_through_openrouter() -> None:
+    p = resolve_provider(
+        model="thinkingmachines/Inkling",
+        base_url=None,
+        api_key_env=None,
+        env={"TINKER_API_KEY": "tk", "OPENROUTER_API_KEY": "or-key"},
+    )
+
+    assert p.base_url == "https://openrouter.ai/api/v1"
+    assert p.model == "thinkingmachines/Inkling"
+    assert p.wire == "chat"
+
+
+def test_thinkingmachines_without_its_key_falls_back_to_openrouter() -> None:
+    p = resolve_provider(
+        model="thinkingmachines/Inkling",
+        base_url=None,
+        api_key_env=None,
+        env={"OPENROUTER_API_KEY": "or-key"},
+        native_wires=frozenset({"chat", "messages"}),
+    )
+
+    assert p.base_url == "https://openrouter.ai/api/v1"
+    assert p.model == "thinkingmachines/Inkling"
+
+
+def test_explicit_base_url_bypasses_thinkingmachines_entry() -> None:
+    p = resolve_provider(
+        model="thinkingmachines/Inkling",
+        base_url="http://gateway.test/v1",
+        api_key_env="OPENROUTER_API_KEY",
+        env={"TINKER_API_KEY": "tk", "OPENROUTER_API_KEY": "or-key"},
+        native_wires=frozenset({"chat", "messages"}),
+    )
+
+    assert p.base_url == "http://gateway.test/v1"
+    assert p.api_key == "or-key"
+    assert p.model == "thinkingmachines/Inkling"
+    assert p.wire == "chat"
+
+
+def test_thinkingmachines_peft_checkpoint_suffix_still_claims_direct() -> None:
+    p = resolve_provider(
+        model="thinkingmachines/Inkling:peft:262144",
+        base_url=None,
+        api_key_env=None,
+        env={"TINKER_API_KEY": "tk"},
+        native_wires=frozenset({"chat", "messages"}),
+    )
+
+    assert "tinker.thinkingmachines.dev" in p.base_url
+    assert p.model == "thinkingmachines/Inkling:peft:262144"
+    assert p.wire == "messages"
+
+
 def test_openai_model_with_openai_key() -> None:
     p = resolve_provider(
         model="openai/gpt-5.2", base_url=None, api_key_env=None, env={"OPENAI_API_KEY": "oai"}
@@ -182,10 +254,27 @@ def test_bare_prefix_without_openrouter_key_is_a_guided_error() -> None:
 
 def test_guided_error_names_the_new_provider_keys() -> None:
     with pytest.raises(ConfigError) as excinfo:
-        resolve_provider(model="google/gemini-3.5-flash", base_url=None, api_key_env=None, env={})
+        resolve_provider(
+            model="google/gemini-3.5-flash",
+            base_url=None,
+            api_key_env=None,
+            env={},
+            native_wires=frozenset({"chat", "messages"}),
+        )
     message = str(excinfo.value)
     assert "GEMINI_API_KEY" in message
     assert "google/*" in message
+    assert "TINKER_API_KEY" in message
+    assert "thinkingmachines/*" in message
+
+
+def test_default_native_wire_key_hints_omit_messages_only_providers() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        resolve_provider(model="thinkingmachines/Inkling", base_url=None, api_key_env=None, env={})
+
+    message = str(excinfo.value)
+    assert "TINKER_API_KEY" not in message
+    assert "thinkingmachines/*" not in message
 
 
 def test_missing_model_is_a_guided_error() -> None:
