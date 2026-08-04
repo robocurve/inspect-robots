@@ -633,39 +633,48 @@ def _prompt_device_slot(
             continue
 
         ambiguous = _ambiguous_identities(inventory)
+        selected_path = Path(selected)
+        selected_is_by_id = selected_path.parent.resolve(strict=False) == by_id_dir.resolve(
+            strict=False
+        )
+        selected_node = selected_path.resolve(strict=False)
         ambiguous_record = next(
             (
                 record
                 for record in inventory
-                if record.by_id == selected and _is_ambiguous(record, ambiguous)
+                if _is_ambiguous(record, ambiguous)
+                and (
+                    record.by_id == selected
+                    or (selected_is_by_id and selected_node == Path(record.node))
+                )
             ),
             None,
         )
         if ambiguous_record is not None:
             identity = (ambiguous_record.model, ambiguous_record.serial)
-            claimants = sorted(
-                {
-                    Path(record.by_path or record.node).name
-                    for record in inventory
-                    if (record.model, record.serial) == identity
-                    or (
-                        ambiguous_record.serial is not None
-                        and record.serial == ambiguous_record.serial
+            claimants_by_camera: dict[str, str] = {}
+            for record in inventory:
+                if (record.model, record.serial) == identity or (
+                    ambiguous_record.serial is not None and record.serial == ambiguous_record.serial
+                ):
+                    claimants_by_camera.setdefault(
+                        record.camera or record.node,
+                        Path(record.by_path or record.node).name,
                     )
-                }
-            )
+            claimants = sorted(claimants_by_camera.values())
             names = ", ".join(claimants)
             print(
                 _paint(
                     f"cannot use ambiguous by-id camera name {selected}; "
-                    f"choose one of these claimant cameras by port: {names}",
+                    f"choose one of these claimant cameras by port: {names}; "
+                    "enter its number from the listing",
                     _YELLOW,
                     out,
                 ),
                 file=out,
             )
-            # A typed speed-qualified usbv2-/usbv3- alias bypasses this
-            # exact-string match because records store only the plain alias.
+            # A dangling by-id alias remains out of scope because it cannot
+            # resolve to an inventory node.
             continue
 
         other = next(

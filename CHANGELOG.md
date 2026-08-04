@@ -133,7 +133,7 @@ All notable changes to this project are documented here. The format is based on
   another physical camera can claim the same udev identity, including
   same-model cameras with missing serials. It lists and stores port-stable
   by-path names instead and refuses carried or manually entered ambiguous
-  by-id paths (#299).
+  by-id paths ([plan 0046](plans/0046-ambiguous-byid-fallback.md), #299).
 
 - The CAN pinning suggestion no longer degrades to a bare warning when adapter
   serials are shared or missing. It emits port-pinned `KERNELS` rules instead

@@ -827,6 +827,77 @@ def test_prompt_device_slot_refuses_enter_accepted_ambiguous_current(
     assert sum(prompt.startswith("top camera") for prompt in prompts) == 3
 
 
+def test_prompt_device_slot_refuses_enter_accepted_speed_qualified_by_id_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _serialless_same_model_rig(tmp_path)
+    speed_qualified = by_id / "usbv2-Intel_RealSense_405_405-video-index0"
+    _symlink(speed_qualified, dev / "video15")
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    input_fn, prompts = _scripted_input(["", "", "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        str(speed_qualified),
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 3
+
+
+def test_prompt_device_slot_accepts_ambiguous_camera_by_path_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    current = str(by_path / "pci-usb-3-4-video-index0")
+    input_fn, prompts = _scripted_input([""])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        current,
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected == current
+    assert "cannot use ambiguous by-id camera name" not in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 1
+
+
 def test_prompt_device_slot_refusal_lists_cross_model_serial_claimants(tmp_path: Path) -> None:
     ambiguous_name = str(tmp_path / "by-id" / "usb-Camera_SN0001-video-index0")
     inventory = [
@@ -869,7 +940,74 @@ def test_prompt_device_slot_refusal_lists_cross_model_serial_claimants(tmp_path:
     )
 
     assert selected is None
-    assert "claimant cameras by port: model-a, model-b" in out.getvalue()
+    assert (
+        "claimant cameras by port: model-a, model-b; enter its number from the listing"
+        in out.getvalue()
+    )
+
+
+def test_prompt_device_slot_refusal_deduplicates_claimants_per_camera(tmp_path: Path) -> None:
+    ambiguous_name = str(tmp_path / "by-id" / "usb-Camera-video-index0")
+    inventory = [
+        _CameraNode(
+            "/dev/video13",
+            "camera-a",
+            None,
+            ambiguous_name,
+            "/dev/v4l/by-path/model-a-color",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video14",
+            "camera-a",
+            None,
+            None,
+            "/dev/v4l/by-path/model-a-depth",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video15",
+            "camera-b",
+            None,
+            None,
+            "/dev/v4l/by-path/model-b-color",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video16",
+            "camera-c",
+            "UNIQUE",
+            "/dev/v4l/by-id/unique-camera",
+            "/dev/v4l/by-path/model-c-color",
+            "1d6b:0102",
+        ),
+    ]
+    input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        [],
+        [],
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert out.getvalue().count("model-a-color") == 1
+    assert "model-a-depth" not in out.getvalue()
+    assert out.getvalue().count("model-b-color") == 1
+    assert "model-c-color" not in out.getvalue()
 
 
 def test_camera_rows_raw_fallback_when_no_color_confirmed(
