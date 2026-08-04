@@ -283,11 +283,9 @@ def _print_camera_name_hint(
     inventory: list[_CameraNode], active_is_by_id: bool, out: IO[str]
 ) -> None:
     """Explain fallback rows: cameras whose by-id name is missing or ambiguous."""
-    duplicated = _duplicated_serials(inventory)
+    ambiguous = _ambiguous_identities(inventory)
     fallback = [
-        record
-        for record in inventory
-        if record.by_id is None or (record.serial is not None and record.serial in duplicated)
+        record for record in inventory if record.by_id is None or _is_ambiguous(record, ambiguous)
     ]
     if not fallback:
         return
@@ -313,13 +311,12 @@ def _camera_view_state(
     name is missing or ambiguous. Empty inventory uses the historical formulas.
     """
     if inventory:
-        duplicated = _duplicated_serials(inventory)
+        ambiguous = _ambiguous_identities(inventory)
         active_is_by_id = any(record.by_id for record in inventory) or not any(
             record.by_path for record in inventory
         )
         advertise_path_toggle = any(
-            record.by_id is None or (record.serial is not None and record.serial in duplicated)
-            for record in inventory
+            record.by_id is None or _is_ambiguous(record, ambiguous) for record in inventory
         )
         return active_is_by_id, advertise_path_toggle
     return bool(by_id_rows) or not by_path_rows, len(by_path_rows) > len(by_id_rows)
@@ -405,7 +402,7 @@ def _identify_camera_by_replug(
 
     def name_of(cameras: dict[str, list[_CameraNode]], key: str) -> str:
         flat = [record for records in cameras.values() for record in records]
-        return _preferred_name(cameras[key], _duplicated_serials(flat), prefer_by_id=prefer_by_id)
+        return _preferred_name(cameras[key], _ambiguous_identities(flat), prefer_by_id=prefer_by_id)
 
     before_inventory = rescan()
     if not before_inventory:
@@ -1109,30 +1106,56 @@ def _camera_inventory(by_id_dir: Path, by_path_dir: Path, sysfs_video: Path) -> 
     return records
 
 
-def _duplicated_serials(inventory: list[_CameraNode]) -> set[str]:
-    """Return serials shared by more than one physical camera.
+def _ambiguous_identities(
+    inventory: list[_CameraNode],
+) -> set[tuple[str | None, str | None]]:
+    """Return by-id identities claimable by more than one physical camera.
 
-    A by-id name embedding such a serial is ambiguous: udev lets the two
-    devices overwrite each other's links on every replug, so the name can
-    silently swap cameras.
+    Cameras sharing a model and an empty serial can overwrite the same by-id
+    link on every replug. A duplicated non-empty serial remains ambiguous
+    across models. Records with no model and no serial are unknown rather than
+    shared identities.
     """
     per_camera = {record.camera or record.node: record for record in inventory}
-    counts = Counter(record.serial for record in per_camera.values() if record.serial is not None)
-    return {serial for serial, count in counts.items() if count > 1}
+    identity_counts = Counter((record.model, record.serial) for record in per_camera.values())
+    serial_counts = Counter(
+        record.serial for record in per_camera.values() if record.serial is not None
+    )
+    ambiguous = {
+        identity
+        for identity, count in identity_counts.items()
+        if identity != (None, None) and count > 1
+    }
+    duplicated_serials = {serial for serial, count in serial_counts.items() if count > 1}
+    ambiguous.update(
+        (record.model, record.serial)
+        for record in per_camera.values()
+        if record.serial in duplicated_serials
+    )
+    return ambiguous
 
 
-def _preferred_name(records: list[_CameraNode], duplicated: set[str], *, prefer_by_id: bool) -> str:
+def _is_ambiguous(record: _CameraNode, ambiguous: set[tuple[str | None, str | None]]) -> bool:
+    """Return whether a camera record carries an ambiguous by-id identity."""
+    return (record.model, record.serial) in ambiguous
+
+
+def _preferred_name(
+    records: list[_CameraNode],
+    ambiguous: set[tuple[str | None, str | None]],
+    *,
+    prefer_by_id: bool,
+) -> str:
     """Return the trust-ladder name for one camera's color nodes.
 
-    Ladder: a by-id name whose serial is not shared by another camera (it
-    survives port moves), else the plain by-path name (stable per physical
-    USB port), else the raw node path. ``prefer_by_id=False`` (the 'p'
-    port-name view) skips the first rung.
+    Ladder: an unambiguous by-id name (it survives port moves), else the plain
+    by-path name (stable per physical USB port), else the raw node path.
+    ``prefer_by_id=False`` (the 'p' port-name view) skips the first rung.
     """
     ranked: list[tuple[int, str]] = []
     for record in records:
         by_id = record.by_id
-        trusted = by_id is not None and (record.serial is None or record.serial not in duplicated)
+        trusted = by_id is not None and not _is_ambiguous(record, ambiguous)
         # The explicit by_id check narrows the optional string for mypy.
         if prefer_by_id and by_id is not None and trusted:
             ranked.append((0, by_id))
@@ -1152,9 +1175,9 @@ def _camera_rows(inventory: list[_CameraNode], directory: Path, *, by_id: bool) 
     unavailable) the raw directory listing is offered unfiltered, matching
     the historical ``_scan_cameras`` fallback.
     """
-    duplicated = _duplicated_serials(inventory)
+    ambiguous = _ambiguous_identities(inventory)
     rows = sorted(
-        {_preferred_name([record], duplicated, prefer_by_id=by_id) for record in inventory}
+        {_preferred_name([record], ambiguous, prefer_by_id=by_id) for record in inventory}
     )
     if rows:
         return rows
@@ -1186,7 +1209,7 @@ def _reconcile_missing_current(
     if len({record.camera or record.node for record in records}) > 1:
         # Two cameras carry this serial: pointing at either would be a guess.
         return None
-    return _preferred_name(records, _duplicated_serials(inventory), prefer_by_id=prefer_by_id)
+    return _preferred_name(records, _ambiguous_identities(inventory), prefer_by_id=prefer_by_id)
 
 
 def _scan_can(sysfs_net: Path) -> list[str]:

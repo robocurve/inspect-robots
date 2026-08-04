@@ -132,7 +132,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
 
 ## Task 2: name-collision ambiguity replaces serial-collision ambiguity
 
-- [ ] **Step 1: failing tests.** Fixture: two same-model cameras, both
+- [x] **Step 1: failing tests.** Fixture: two same-model cameras, both
   `serial` files empty, one owning the shared by-id symlink, the other
   by-path only (mirror the rig-2 listing). Assert: (a) `_camera_rows`
   by-id view lists BOTH cameras by their by-path names; (b)
@@ -148,7 +148,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   cameras with `camera=None` (no sysfs: `model=None, serial=None`) both
   KEEP their by-id names (unknown identity is not shared identity);
   (h) the existing duplicate-serial tests pass unchanged.
-- [ ] **Step 2: implement.** Add
+- [x] **Step 2: implement.** Add
   `_ambiguous_identities(inventory) -> set[tuple[str | None, str | None]]`
   per the Architecture paragraph — dedup per physical camera via
   `record.camera or record.node` exactly as `_duplicated_serials` does
@@ -163,7 +163,7 @@ fixtures from plan 0040 in `tests/test_setup.py`.
   ambiguity in the module. Rewrite the `tests/test_setup.py:498`
   assertion to the new helper's equivalent claim (permitted-edit (b) in
   Global Constraints).
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 3: refuse ambiguous by-id names on every acceptance path
 
