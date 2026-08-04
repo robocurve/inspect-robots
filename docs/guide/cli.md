@@ -78,7 +78,9 @@ a *different* component is selected. Your YAM rig's `rest_pose` never reaches
 Because `.env` values load into the environment, a directory's `.env` can pin
 `INSPECT_ROBOTS_CONFIG` for everything run there. Treat a checked-in `.env`
 that selects hardware with the same suspicion as a checked-in config: either
-can choose which policy drives your hardware.
+can choose which policy drives your hardware. Use an absolute path in `.env`:
+the value is literal, so `~` is not expanded and a config write would create a
+real `~` directory.
 
 ### Running in simulation: `--sim`
 

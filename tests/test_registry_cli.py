@@ -5028,6 +5028,39 @@ def test_config_flag_expands_tilde(
     assert f"policy: tilde-rig  ({path})" in capsys.readouterr().out
 
 
+def test_config_flag_anchors_relative_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = relative-rig\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+
+    assert main(["config", "show", "--config", "rig.ini"]) == 0
+
+    assert "policy: relative-rig" in capsys.readouterr().out
+    assert os.environ["INSPECT_ROBOTS_CONFIG"] == str(path)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--config", "p"],
+        ["eval-set", "t", "--config", "p"],
+        ["doctor", "--config", "p"],
+        ["setup", "--config", "p"],
+        ["config", "set", "policy", "x", "--config", "p"],
+        ["config", "show", "--config", "p"],
+    ],
+)
+def test_config_flag_is_wired_to_every_config_reading_subcommand(argv: list[str]) -> None:
+    args = cli.build_parser().parse_args(argv)
+
+    assert args.config == "p"
+
+
 def test_no_config_flag_leaves_environ_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
 

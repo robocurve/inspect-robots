@@ -2232,7 +2232,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # os.environ, not a local mapping: external plugins (inspect-robots-yam's
         # default loader) re-read the config from os.environ while constructing
         # components, and subprocesses inherit it.
-        os.environ["INSPECT_ROBOTS_CONFIG"] = str(Path(config_override).expanduser())
+        override_path = Path(config_override).expanduser()
+        if not override_path.is_absolute():
+            override_path = Path.cwd() / override_path
+        os.environ["INSPECT_ROBOTS_CONFIG"] = str(override_path)
     if args.command == "list":
         return _cmd_list(args.what)
     if args.command == "run":
