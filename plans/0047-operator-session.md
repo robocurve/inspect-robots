@@ -18,10 +18,13 @@ rendering and prompts keep today's exact output so every existing test passes un
    New duck-typed embodiment hook `connect_operator_session(session)`. No visible change.
 2. **yam plan (separate repo):** the yam embodiment implements the hook — routes its
    ticker through `session.status(...)`, its readiness gates through `session.gate(...)`,
-   deletes `default_poll_end` / `_drain_stdin` / its `defer_operator_end` stdin
-   choreography, and bumps its `inspect-robots` floor. Attended VLA runs switch from
-   "any key ends the episode" to "Enter ends the episode" (unified; bumped keys no
-   longer kill episodes) and gain `/y /n /p` verdicts and logged operator notes.
+   deletes its `defer_operator_end` stdin choreography, and bumps its `inspect-robots`
+   floor. The legacy keypress poll (`default_poll_end`) is **kept as the fallback** for
+   runs where the hook is never called (`--no-prompt`, non-TTY, win32, direct
+   `rollout()` — see decision 5a) so those runs can still end an episode before
+   `max_steps`. Session-connected attended VLA runs switch from "any key ends the
+   episode" to "Enter ends the episode" (unified; bumped keys no longer kill episodes)
+   and gain `/y /n /p` verdicts and logged operator notes.
 3. **core follow-up plan:** footer rendering inside `OperatorSession` — cbreak mode,
    echo off, a fixed two-line footer (status line + owned input line), sent-message
    confirmations in scrollback. Purely a rendering change inside one class by then.
@@ -71,7 +74,7 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
   (injectable `readable`/`read`/`output_fn`), `ConsolePoll`, `EndRequest`,
   `OperatorInput` Protocol, `USAGE`. The usage hint on a bad slash command prints via
   `output_fn` (`:112`) — in the session this routes through `write_line`.
-- `src/inspect_robots/cli.py:697-701` — `_PROMPT`, `_NOTES_PROMPT`, `_PROMPT_ANSWERS`,
+- `src/inspect_robots/cli.py:697-702` — `_PROMPT`, `_NOTES_PROMPT`, `_PROMPT_ANSWERS`,
   `_DEFINITIVE_REASONS`; `:705-750` — `_prompt_operator` (verdict adoption, prompt
   loop, notes, `operator_event` emission); `:753-763` — `_prompt_operator_on_operator_end`;
   `:766-772` — `_attended`; `:775-805` — `_build_operator_console` (Windows notice,
@@ -135,6 +138,15 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
    `defer_operator_end` / `is_simulated` / notice-and-off ladder. `defer_operator_end`
    is documented as superseded in the Protocol docstring but keeps working — old-yam +
    new-core must run through the transition window (rigs install from PyPI).
+
+   **5a. The hook is an optional input, not a guarantee.** `connect_operator_session`
+   is only called on attended, console-capable runs; an embodiment that ships it still
+   runs with it never called under `--no-prompt`, non-TTY stdin, win32, direct
+   `rollout()`/`eval()` API use, and older cores. The Protocol docstring must mandate
+   the same graceful-fallback language `bind_task` uses (`embodiment.py:79-83`):
+   an embodiment may not depend on the hook firing, and must keep a working
+   end-of-episode path when it never does (yam keeps its legacy keypress poll for
+   exactly this case; see arc item 2).
 6. **On a session-aware embodiment the console turns on for every policy, not just
    message-accepting ones.** Once the embodiment stands down, someone must own the
    end-of-episode keypress; that is the session. `accepts_operator_messages` now
@@ -163,26 +175,38 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
    blocked on stdin between polls, and prompts only run between trials.
 8. **One session per CLI run, built whenever `_attended(args)`** — even when the
    console channel is off (session still owns the prompts). `_build_operator_console`
-   becomes `_build_operator_session(policy, embodiment) -> tuple[OperatorSession | None,
-   OperatorSession | None]`-shaped logic folded into one helper returning the session
-   and whether to pass it as `operator_input` (see the matrix). Keep it a single
-   function so the enablement rules stay in one place.
-9. **Enablement matrix** (the single helper's contract; wording notices unchanged
-   where they exist today):
+   becomes `_build_operator_session(policy, embodiment) -> tuple[OperatorSession,
+   OperatorSession | None]`: called only from inside the `_attended(args)` branches,
+   it always returns the session (first element — the prompts owner) and returns the
+   same object or `None` as the second element depending on console enablement (what
+   gets passed to `eval()` as `operator_input`). Keep it a single function so the
+   enablement rules stay in one place.
+9. **Enablement matrix and check order.** The helper's checks run in this exact
+   order, chosen to preserve today's observable behavior on every existing path
+   (notably: a non-accepting policy on a hook-less embodiment is **silently** skipped
+   before the platform check, even on Windows — `cli.py:777-787` checks the policy
+   first, and `test_policy_without_opt_in_skips_console_silently_before_platform_gate`
+   pins it):
 
-   | Platform | Policy accepts msgs | Embodiment | console (`operator_input`) | usage line |
-   |---|---|---|---|---|
-   | win32 | any | any | off + today's notice | none |
-   | posix | yes | has `connect_operator_session` | on | feedback |
-   | posix | no | has `connect_operator_session` | on | end-only |
-   | posix | yes | has `defer_operator_end` (only) | on (hook called) | feedback |
-   | posix | yes | `is_simulated`, no hooks | on | feedback |
-   | posix | yes | hardware, no hooks | off + today's legacy notice | none |
-   | posix | no | no `connect_operator_session` | off (today's behavior) | none |
+   1. embodiment has `connect_operator_session` → new-hook branch (see below);
+   2. else policy does not accept messages → console off, **silent** (today);
+   3. else win32 → console off + today's Windows notice;
+   4. else `defer_operator_end` present → call it, console on, feedback usage (today);
+   5. else `is_simulated` → console on, feedback usage (today);
+   6. else → console off + today's legacy-hardware notice.
 
-   `connect_operator_session` is called exactly once, before `eval()`, whenever
-   present and the platform supports the console — regardless of policy — so the
-   embodiment's stand-down and status routing don't depend on which policy runs.
+   New-hook branch (dead code until PR 2 — no embodiment ships the hook yet, which is
+   what keeps this PR behavior-identical; ships tested via a stub embodiment):
+   on win32 the console stays off with the Windows notice (the hook is **not**
+   called — no console exists for the session to own); otherwise call the hook
+   exactly once, before `eval()`, regardless of policy, then console on with the
+   feedback usage line for accepting policies or the end-only line for the rest:
+
+   | Platform | Policy accepts msgs | console (`operator_input`) | usage line |
+   |---|---|---|---|
+   | win32 | any | off + Windows notice | none |
+   | posix | yes | on | feedback |
+   | posix | no | on | end-only |
 10. **Public API and docs.** `OperatorSession` joins `inspect_robots.__all__` and the
     API snapshot. The `Embodiment` Protocol docstring documents the new hook's full
     contract (stand-down promise, what the session provides, `gate` fault semantics).
@@ -199,22 +223,31 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
 
 **Interfaces (public, D1 docstrings):**
 - `class OperatorSession:` constructor
-  `(*, console: OperatorConsole | None = None, input_fn: Callable[[str], str] = input,
-  output_fn: Callable[[str], None] = print, flush_fn: Callable[[], None] | None = None)`
-  — `console=None` constructs a default `OperatorConsole` whose `output_fn` is this
-  session's `write_line`; `flush_fn` defaults to a module-private fd-level flush
-  (zero-timeout `select` + `os.read` discard loop, no-op off-TTY, TTY-bound lines
-  `# pragma: no cover`, mirroring `inspect_robots_yam.operator._flush_stdin_fd`).
+  `(*, console: OperatorConsole | None = None, input_fn: Callable[[str], str] | None =
+  None, write: Callable[[str], None] | None = None, flush_fn: Callable[[], None] |
+  None = None)` — `console=None` constructs a default `OperatorConsole` whose
+  `output_fn` is this session's `write_line`; `flush_fn` defaults to a module-private
+  fd-level flush (zero-timeout `select` + `os.read` discard loop, no-op off-TTY,
+  TTY-bound lines `# pragma: no cover`, mirroring
+  `inspect_robots_yam.operator._flush_stdin_fd`).
+- **Late-bound defaults, not def-time bindings.** `input_fn=None` resolves to the
+  `input` builtin at **call time** (a def-time `= input` default binds the original
+  function object at import, breaking the existing end-to-end CLI tests that
+  monkeypatch `builtins.input` and run `main()` —
+  `test_operator_prompt_records_verdict_and_reprompts_on_typos` et al. must pass
+  untouched). Likewise `write=None` resolves `sys.stdout` per call (write + flush),
+  never binding `sys.stdout.write` at construction, so capsys/monkeypatched stdout
+  keeps working.
+- There is exactly **one** output seam: `write` receives exact strings (including
+  `\r` prefixes, no implicit newline). `write_line` and `status` are built on it;
+  everything the session prints (usage hints, prompt announcements, verdict
+  reprompts) goes through `write_line`. No `print`-shaped second path — two
+  independent stdout paths would reintroduce the tearing this arc removes.
 - `poll() -> ConsolePoll`, `begin_trial() -> None` — delegate to the composed console;
   the session satisfies `isinstance(..., OperatorInput)` (runtime-checkable).
-- `status(line: str | None) -> None` — `\r  {line}   ` in place via `output_fn`-level
-  writer; tracks open/closed; `None` closes with a newline only if open.
+- `status(line: str | None) -> None` — `\r  {line}   ` in place via the `write` seam;
+  tracks open/closed; `None` closes with a newline only if open.
 - `write_line(text: str) -> None` — close open status, print text, repaint status.
-
-Note the raw `\r`/no-newline writes cannot go through a `print`-shaped `output_fn`
-naively: give the session one injectable `write: Callable[[str], None]` seam that
-receives exact strings (including `\r` prefixes, no implicit newline) and implement
-`status`/`write_line` on top of it; default writes to `sys.stdout` with flush.
 
 - [ ] **Step 1: failing tests.** Delegation (`poll`/`begin_trial` forward; default
   console wired with `write_line` as its `output_fn`; `OperatorInput` isinstance).
@@ -264,9 +297,11 @@ status line is open — which is always true between trials today).
 console-gating test file found via `grep -rn "defer_operator_end" tests/`)
 
 **Interface:** one helper replacing `_build_operator_console`, returning
-`(session, operator_input)` per the decision-9 matrix; it prints the applicable
-usage/notice lines and calls `connect_operator_session` (preferred) or
-`defer_operator_end` (fallback) exactly once.
+`(session, operator_input)` per the decision-9 matrix and check order; it prints the
+applicable usage/notice lines and calls `connect_operator_session` (preferred) or
+`defer_operator_end` (fallback) exactly once. The end-only usage text lives in
+`console.py` next to `USAGE` as `USAGE_END_ONLY` (module-level, not exported —
+`USAGE` itself is not in `__all__` either).
 
 - [ ] **Step 1: failing tests.** Matrix rows as parametrized cases with stub policies
   (with/without `accepts_operator_messages`) and stub embodiments (with the new hook /
