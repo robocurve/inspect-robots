@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Defaults", "config_path", "load_defaults"]
+from inspect_robots._dotenv import init_dotenv
+
+__all__ = ["Defaults", "config_path", "init_dotenv", "load_defaults"]
 
 _ENV_POLICY = "INSPECT_ROBOTS_POLICY"
 _ENV_EMBODIMENT = "INSPECT_ROBOTS_EMBODIMENT"
