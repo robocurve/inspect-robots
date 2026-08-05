@@ -165,7 +165,7 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
 7. **The verdict prompts move to the session verbatim** — same constants, same loop,
    same `operator_event` emissions, same EOFError tolerance — as
    `prompt_verdict(record, scene)` and `prompt_verdict_on_operator_end(record, scene)`,
-   reading through the session's injectable `input_fn`/`output_fn`. The CLI keeps its
+   reading through the session's injectable `input_fn`, printing via `write_line`. The CLI keeps its
    branch choosing which one becomes `before_scoring` (ad-hoc operator-scored runs
    prompt every non-definitive trial; registered tasks prompt only operator-ended
    trials — R6). The module-private `cli._prompt_operator*` helpers are deleted, their
