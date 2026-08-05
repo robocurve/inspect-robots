@@ -249,14 +249,14 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
   tracks open/closed; `None` closes with a newline only if open.
 - `write_line(text: str) -> None` — close open status, print text, repaint status.
 
-- [ ] **Step 1: failing tests.** Delegation (`poll`/`begin_trial` forward; default
+- [x] **Step 1: failing tests.** Delegation (`poll`/`begin_trial` forward; default
   console wired with `write_line` as its `output_fn`; `OperatorInput` isinstance).
   Status lifecycle: open → repaint → close → double-close is a no-op; exact byte
   sequences asserted on a recording `write` seam (`\r  t = 3s   `, closing `\n`).
   `write_line` while open: close, line, repaint (exact order); while closed: plain line.
-- [ ] **Step 2: run, confirm FAIL.**
-- [ ] **Step 3: implement.**
-- [ ] **Step 4: green + `ruff` + `mypy` clean.**
+- [x] **Step 2: run, confirm FAIL.**
+- [x] **Step 3: implement.**
+- [x] **Step 4: green + `ruff` + `mypy` clean.**
 
 ### Task 2: `gate()`
 
@@ -267,11 +267,11 @@ end-of-episode keypress); until an embodiment ships the hook, the existing
 `EmbodimentFault` whose message states the problem, remedies (real TTY / injectable
 input / unattended mode), and appends `hint` when given. Never drains after.
 
-- [ ] **Step 1: failing tests.** Flush ordering (flush recorded strictly before
+- [x] **Step 1: failing tests.** Flush ordering (flush recorded strictly before
   input); success path returns None; each of EOFError/OSError → `EmbodimentFault`,
   message contains the remedy text and the hint iff provided; no trailing drain
   (input_fn called exactly once, flush_fn exactly once).
-- [ ] **Step 2-4: fail → implement → green.**
+- [x] **Step 2-4: fail → implement → green.**
 
 ### Task 3: verdict prompts move into the session
 
@@ -285,10 +285,10 @@ input / unattended mode), and appends `hint` when given. Never drains after.
 reading via `input_fn`, printing via `write_line` (equivalent to `print` while no
 status line is open — which is always true between trials today).
 
-- [ ] **Step 1: move the existing prompt tests** to `tests/test_session.py`, adapted
+- [x] **Step 1: move the existing prompt tests** to `tests/test_session.py`, adapted
   to injected `input_fn`/recorded output; add one test that announcements go through
   `write_line`. CLI tests keep passing with `before_scoring` now a bound session method.
-- [ ] **Step 2-4: fail → implement (delete the cli helpers, wire bound methods at
+- [x] **Step 2-4: fail → implement (delete the cli helpers, wire bound methods at
   `cli.py:1375-1387` and `:1522-1528`) → green.**
 
 ### Task 4: CLI enablement — `_build_operator_session` and the connect hook
@@ -303,13 +303,13 @@ applicable usage/notice lines and calls `connect_operator_session` (preferred) o
 `console.py` next to `USAGE` as `USAGE_END_ONLY` (module-level, not exported —
 `USAGE` itself is not in `__all__` either).
 
-- [ ] **Step 1: failing tests.** Matrix rows as parametrized cases with stub policies
+- [x] **Step 1: failing tests.** Matrix rows as parametrized cases with stub policies
   (with/without `accepts_operator_messages`) and stub embodiments (with the new hook /
   with only `defer_operator_end` / simulated / bare hardware): assert hook call counts,
   which usage text printed, and whether `operator_input` is the session or `None`.
   Windows row via `sys.platform` monkeypatch. New-hook rows assert the console is on
   even for a non-accepting policy (end-only wording).
-- [ ] **Step 2-4: fail → implement → green.**
+- [x] **Step 2-4: fail → implement → green.**
 
 ### Task 5: API, protocol docs, module map, changelog, docs sweep
 
@@ -317,13 +317,13 @@ applicable usage/notice lines and calls `connect_operator_session` (preferred) o
 `src/inspect_robots/embodiment.py` (docstring only), `src/inspect_robots/CLAUDE.md`,
 `CHANGELOG.md`, `docs/**` (sweep)
 
-- [ ] `OperatorSession` exported + snapshot updated together.
-- [ ] Protocol docstring: `connect_operator_session` contract; `defer_operator_end`
+- [x] `OperatorSession` exported + snapshot updated together.
+- [x] Protocol docstring: `connect_operator_session` contract; `defer_operator_end`
   marked superseded-but-supported.
-- [ ] CLAUDE.md module table: `session.py` row; `console.py`/`cli.py` rows adjusted.
-- [ ] CHANGELOG under Unreleased (Added: OperatorSession + hook; Changed: verdict
+- [x] CLAUDE.md module table: `session.py` row; `console.py`/`cli.py` rows adjusted.
+- [x] CHANGELOG under Unreleased (Added: OperatorSession + hook; Changed: verdict
   prompts relocated — behavior identical). Plan + issue references.
-- [ ] Docs sweep for operator-console prose; add end-only mode where gating is
+- [x] Docs sweep for operator-console prose; add end-only mode where gating is
   described. Writing-style rules apply (no em dashes, no mid-sentence bold).
-- [ ] **Full gates:** `uv run ruff check . && uv run ruff format --check . &&
+- [x] **Full gates:** `uv run ruff check . && uv run ruff format --check . &&
   uv run mypy && uv run pytest --cov -q` — 100%.
