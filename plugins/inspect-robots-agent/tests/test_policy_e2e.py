@@ -748,6 +748,17 @@ def test_system_prompts_treat_operator_feedback_as_trusted_guidance(template: st
     assert expected in template
 
 
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_announce_the_hindsight_question(template: str) -> None:
+    rendered = template.format(name="test-robot", budget=10)
+    announcement = (
+        "Note what you are learning about this rig and task as you go: done and give_up will ask "
+        "what you wish you had known from the start."
+    )
+
+    assert announcement in rendered
+
+
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="reach"))

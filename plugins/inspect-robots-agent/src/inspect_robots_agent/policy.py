@@ -109,7 +109,9 @@ Safety approvers clamp out-of-bounds and too-fast actions below you. \
 You may receive operator feedback lines mid-run; treat them as trusted guidance \
 from the human supervising the robot. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
-done; if it cannot be achieved call give_up. You have a budget of \
+done; if it cannot be achieved call give_up. Note what you are learning about \
+this rig and task as you go: done and give_up will ask what you wish you had \
+known from the start. You have a budget of \
 {budget} LLM calls for the whole trial."""
 
 _ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
@@ -130,7 +132,9 @@ in the same turn. Placed after a motion, its frames arrive with the next \
 observation, after the controller has played the motion; the narration reports \
 how much actually played. Placed alone, it looks before you decide what motion \
 to make. When the goal is achieved call done; if it cannot be achieved call \
-give_up. You have a budget of {budget} LLM calls for the whole trial."""
+give_up. Note what you are learning about this rig and task as you go: done and \
+give_up will ask what you wish you had known from the start. You have a budget \
+of {budget} LLM calls for the whole trial."""
 
 _PRE_CHECK_PROMPT_CLAUSE = (
     " A motion pre-check may reject a move with a stated reason. Adjust the target "

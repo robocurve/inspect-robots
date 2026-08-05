@@ -179,15 +179,15 @@ pytest with the existing fake-client patterns in
 
 ## Task 3: system prompt announcement
 
-- [ ] **Step 1: failing tests.** Parametrized over both templates (existing
+- [x] **Step 1: failing tests.** Parametrized over both templates (existing
   `:684` pattern): the rendered system prompt contains the announcement
   sentence.
-- [ ] **Step 2: implement.** Insert one sentence into BOTH templates,
+- [x] **Step 2: implement.** Insert one sentence into BOTH templates,
   immediately before the "You have a budget" sentence: "Note what you are
   learning about this rig and task as you go: done and give_up will ask
   what you wish you had known from the start." Update any prompt-snapshot
   assertions (permitted mechanical edits).
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 4: version bump, docs, changelog
 
