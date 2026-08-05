@@ -64,10 +64,12 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   `poll()` assembles lines from chunks (`:90-113`); `begin_trial()` drains (`:115-124`).
   The console's default `read` is fd-level `os.read` (`:55-56`); the session currently
   builds its default console with only `output_fn=self.write_line`.
-- `src/inspect_robots/rollout.py:276-283` — `operator_input.begin_trial()` inside a
-  try/except that disables the channel on failure; `:288-306` — the per-iteration poll
-  with the same degrade discipline; the trial's `finally` teardown block (find with
-  `grep -n "finally" src/inspect_robots/rollout.py`) is where `end_trial()` goes.
+- `src/inspect_robots/rollout.py:276-285` — `operator_input.begin_trial()` inside a
+  try/except that disables the channel on failure; `:291-301` — the per-iteration poll
+  with the same degrade discipline; `:458-463` — KeyboardInterrupt conversion
+  re-raised through the per-trial `finally` at `:463`, which is where `end_trial()`
+  goes. The degrade tests to mirror live in `tests/test_rollout_observation_step.py`
+  (NOT test_rollout_hardening.py, which has no console tests).
 - `src/inspect_robots/cli.py` — `_build_operator_session` (decision-9 ladder): the
   footer activates only on rows where the console turns on; the helper tells the
   session (see decision 3).
@@ -85,9 +87,19 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    implementations stay conformant. `rollout()` calls it best-effort in the trial's
    `finally`: wrapped in the same catch-warn-disable discipline as `poll()`, and it
    must run even when the trial raised (`EmbodimentFault` mid-trial must not leave the
-   user's terminal in raw mode). Restore is idempotent and additionally registered
-   with `atexit` once per session as a crash net; `KeyboardInterrupt` unwinds through
-   the `finally` like any exception.
+   user's terminal in raw mode). `end_trial()` owns the FULL footer teardown, not just
+   termios: idempotently close the footer (clear the input row and the status row,
+   reset `_status_open`) and then restore termios — no core code calls
+   `session.status(None)` (only plugins do), so on `EmbodimentFault`, Ctrl-C, or a
+   plugin that never closes its status line, `end_trial` is the only thing standing
+   between the verdict prompt and a stale `> ` row. The restore callable is an
+   injectable, idempotent method (tests call it directly — a closure registered only
+   with `atexit` would run at interpreter exit and fail the 100% gate), registered
+   with `atexit` once per session as a crash net; restore clears the saved termios
+   attrs so the atexit fallback can never replay a stale saved state over a later
+   trial's raw window. `KeyboardInterrupt` is converted by `rollout()` to its
+   cancelled-trial path and re-raised **through** the same `finally`
+   (rollout.py:458-463), so Ctrl-C restores too.
 2. **Footer mode gates on: console channel enabled AND `sys.stdin.isatty()` AND
    termios importable AND raw-mode entry succeeded.** Any failure (non-tty, Windows,
    exotic terminal, `termios.error`) falls back to plain mode silently at
@@ -100,6 +112,13 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    ambient sniffing inside `poll()`): direct API users of `OperatorSession` (yam
    routes `status()` through it on connected runs) get footer behavior only when the
    run actually has the interjection console, which only the CLI knows.
+   Two contract points: (a) on a session constructed with a caller-injected
+   `console=...`, `enable_footer()` is a documented no-op — the footer requires the
+   session-built console whose seams are the decision-7 dispatching closures;
+   checked at `begin_trial()` alongside the tty/termios gates. (b) the confirmation
+   label is CLI-chosen at enable time: `[sent]` on feedback rows (messages reach the
+   policy), `[noted]` on end-only rows (`USAGE_END_ONLY` says lines are saved to the
+   log; "sent" would imply delivery to the policy that is not happening).
 4. **Line editing is deliberately minimal:** printable characters append, backspace
    (`\x7f`/`\x08`) deletes one, Ctrl-U kills the line, `\n`/`\r` completes it
    (echoing `\r` as line completion matches raw-mode Enter), everything else
@@ -116,11 +135,17 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    move down, rewrite input; scrollback insert = move up, clear, write text + newline,
    write status + newline, rewrite input. Repaints always clear before writing, which
    also self-heals after any stray third-party print (one smudged frame, then clean).
-   The input display clips to `terminal width - 4` showing the tail (injectable
-   `width_fn` defaulting to `shutil.get_terminal_size().columns`). In footer mode
-   `status(None)` tears down both lines (clear input line, clear status line) so the
-   trial ends with a clean terminal for the verdict prompt; plain mode keeps its
-   existing close-with-newline semantics.
+   BOTH rows clip to the terminal width (injectable `width_fn` defaulting to
+   `shutil.get_terminal_size().columns`, re-read at each repaint so resizes re-clip):
+   the input row clips to `width - 4` showing the tail; the status row clips to
+   `width - 1`. An unclipped row that wraps to two physical lines desyncs every
+   relative `\r`/`ESC[A` movement afterward — clipping is correctness, not
+   cosmetics. A `write_line` insert must `\r ESC[K`-clear the input row FIRST, then
+   write the scrollback text, status row, and input row in order. In footer mode
+   `status(None)` tears down both lines (clear input line, clear status line) so a
+   plugin-driven close leaves a clean terminal; `end_trial()` does the same teardown
+   idempotently as the backstop (decision 1); plain mode keeps its existing
+   close-with-newline semantics.
 6. **`[sent]` confirmations come from `poll()`, not from the editor.** The editor
    cannot know whether a completed line is feedback, an end request, a verdict, or a
    usage typo — the console's parser decides. Footer-mode `poll()` delegates, then
@@ -129,31 +154,50 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    episode visibly ends); usage hints already arrive via the console's `output_fn`,
    which is `write_line`. The confirmation therefore appears at the next rollout
    poll, at most one control period after Enter — imperceptible.
-7. **The console keeps line assembly; the editor feeds it completed lines.** The
-   session wraps the `readable`/`read` seams it passes to its default
-   `OperatorConsole`: footer-mode `read` drains the real fd (`os.read`), runs bytes
-   through the editor (echoing per decision 5), and returns only the completed lines
-   (`"line\n"` joined) — an empty string return means EOF exactly as today, and "no
-   completed lines yet" returns `""`? No: `""` signals EOF to the console. The
-   wrapper must instead report `readable() == False` until a completed line exists —
-   i.e. the session buffers keystrokes itself and its wrapped `readable` returns
-   True only when completed lines are queued (or real EOF was seen). This keeps
-   `OperatorConsole` byte-for-byte untouched: its fd-desync rationale (plan 0042
-   decision 9) doesn't apply because the wrapper is not the buffered TextIOWrapper —
-   it drains the fd fully on every rollout poll. `begin_trial()` clears the editor
-   buffer, queued lines, and the composed console's buffer (existing behavior).
-8. **Raw-mode syscalls are the only uncovered lines.** `_enter_cbreak()` /
+7. **The console keeps line assembly; footer-mode `poll()` pumps the editor first.**
+   The pump cannot live in a passive `readable` wrapper: `OperatorConsole.poll()`
+   only calls `read()` while `readable()` is true, so a queue-checking `readable`
+   plus an fd-draining `read` would never drain the fd at all — no echo, no
+   completed line, deadlock. Instead, footer-mode `session.poll()` runs an explicit
+   pump **before** delegating: while the fd is readable, `os.read` chunks, feed the
+   editor (echoing per decision 5), and append each completed raw line to a queue;
+   then call `console.poll()`, whose session-provided seams are dispatching
+   closures — `readable` returns "queue non-empty or real EOF seen", `read` pops
+   queued lines joined with `"\n"` (`""` only on real EOF, preserving the console's
+   EOF contract); in plain mode the same closures delegate straight to the fd
+   defaults. The fd defaults are `console.py`'s existing module-private
+   `_stdin_readable`/`_stdin_read` (imported — same package), injectable on the
+   session as `fd_readable`/`fd_read` seams, so the session adds **no new
+   pragma-no-cover fd lines** (amending decision 8: uncovered lines are the termios
+   syscalls plus nothing new). This keeps `OperatorConsole` byte-for-byte untouched:
+   the fd-desync rationale of plan 0042 decision 9 targets the buffered
+   TextIOWrapper, which this pump is not. Footer-mode `session.begin_trial()`:
+   drain the fd raw with **no echo** (stale pre-trial bytes must not paint into a
+   not-yet-drawn footer), clear the editor buffer and the queue, then call
+   `console.begin_trial()` (its own drain loop sees an empty queue and is a no-op,
+   and it clears its internal buffer as today).
+   Echo cadence note (document in docs, it is a property, not a bug): the pump runs
+   at the rollout poll cadence, once per control step, so on a self-paced robot
+   executing a chunk, keystroke echo can lag up to one `embodiment.step()`. Threads
+   are excluded by the 0048 arc; state it.
+8. **Raw-mode syscalls are the only NEW uncovered lines.** `_enter_cbreak()` /
    `_restore()` module-private helpers own `termios.tcgetattr`/`tcsetattr`
    (`# pragma: no cover` bodies, lazy `import termios`), injectable as
-   `raw_mode_fn`-style seams on the session for tests. The editor, renderer, wrapped
-   seams, `end_trial` paths, and mode fallback are all pure logic over injected
-   callables — fully covered.
+   `raw_mode_fn`-style seams on the session for tests. The session's fd access
+   reuses `console.py`'s already-pragma'd module-private `_stdin_readable` /
+   `_stdin_read` as the defaults behind its `fd_readable`/`fd_read` seams
+   (decision 7) — no new fd pragma lines in session.py. The editor, renderer,
+   dispatching closures, `end_trial` paths, and mode fallback are all pure logic
+   over injected callables — fully covered.
 
 ## Behavior notes (document in CHANGELOG/docs, not code comments)
 
 - Operators see their typing on a stable `> ` line; the timer above never tears.
-- Feedback confirms as `[sent] …` scrollback; Enter still ends; `/y /n /p` still
-  verdict; typos still print the usage hint — all above the footer.
+- Feedback confirms as `[sent] …` scrollback (`[noted] …` in end-only mode); Enter
+  still ends; `/y /n /p` still verdict; typos still print the usage hint — all above
+  the footer.
+- Keystroke echo is pumped at the rollout poll cadence: on a self-paced robot it can
+  lag up to one control step. Property of the threadless design, documented.
 - Off-TTY/Windows/piped stdin: unchanged.
 - Third-party prints (driver chatter) can smudge one frame; the next repaint heals it.
 
@@ -163,11 +207,17 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 
 **Files:** `src/inspect_robots/session.py`, `tests/test_session.py`
 
-- [ ] **Step 1: failing tests.** Editor: append/backspace/Ctrl-U/Enter over scripted
-  chunk sequences incl. split UTF-8 and 64KiB paste; queued-lines `readable` protocol
-  (False until a line completes; True after; EOF passthrough). Renderer: exact byte
-  sequences for status update, write_line insert, input echo, teardown on
-  `status(None)`, tail-clipping at injected width. Plain-mode tests untouched.
+- [ ] **Step 1: failing tests.** Editor + pump (decision 7): scripted `fd_readable`/
+  `fd_read` sequences drive `poll()` — append/backspace/Ctrl-U/Enter incl. split
+  UTF-8 and 64KiB paste; bytes without a newline echo but deliver nothing; the
+  completed line reaches the console parser verbatim on the same `poll()`; the
+  dispatching `readable`/`read` closures satisfy the console's EOF contract (`""`
+  only on real EOF); footer `begin_trial()` discards stale fd bytes with no echo and
+  clears editor + queue. Renderer: exact byte sequences for status update,
+  write_line insert (input row cleared first), input echo, teardown on
+  `status(None)` AND on `end_trial()`, tail-clipping of the input row at
+  `width - 4`, clipping of the status row at `width - 1`, re-clip after a
+  `width_fn` change. Plain-mode tests untouched.
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 2: raw-mode window — `begin_trial()`/`end_trial()` + rollout hook
@@ -176,12 +226,16 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 `tests/test_session.py`, `tests/test_rollout_hardening.py`
 
 - [ ] **Step 1: failing tests.** Session: footer entered only when enabled+tty+raw-ok
-  (each gate falsified via injected seams); failed entry → plain mode this trial and
-  the next trial retries; `end_trial()` restores exactly once (idempotent);
-  restore-on-exception. Rollout: `end_trial` called in `finally` on success, on
-  trial-ending exceptions, and skipped without error when the hook is absent
-  (plain `OperatorConsole`); a raising `end_trial` warns and never masks the trial's
-  own outcome (mirror the `poll()` degrade tests).
+  AND the console is session-built (caller-injected `console=...` → documented no-op);
+  each gate falsified via injected seams; failed entry → plain mode this trial and
+  the next trial retries; `end_trial()` closes the footer rows and restores exactly
+  once (idempotent; saved termios attrs cleared on restore so atexit cannot replay
+  stale state); restore-on-exception. Rollout: `end_trial` called in the per-trial
+  `finally` (rollout.py:463) on success, on trial-ending exceptions, and on the
+  KeyboardInterrupt cancelled-trial path; skipped without error when the hook is
+  absent (plain `OperatorConsole`); a raising `end_trial` warns and never masks the
+  trial's own outcome (mirror the `poll()` degrade tests in
+  `tests/test_rollout_observation_step.py`).
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 3: CLI opt-in + `[sent]` confirmations
@@ -189,10 +243,12 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 **Files:** `src/inspect_robots/cli.py`, `src/inspect_robots/session.py`,
 `tests/test_registry_cli.py`, `tests/test_session.py`
 
-- [ ] **Step 1: failing tests.** Footer enabled on exactly the decision-9 rows where
-  the console turns on (both new-hook and legacy ladders), never otherwise; footer
-  `poll()` emits one `[sent]` per feedback message, nothing for ends/verdicts; matrix
-  outputs otherwise unchanged.
+- [ ] **Step 1: failing tests.** Footer enabled on exactly the plan-0048 decision-9
+  rows where the console turns on (both new-hook and legacy ladders), never
+  otherwise; the CLI passes the confirmation label per row — `[sent]` on feedback
+  rows, `[noted]` on end-only rows (decision 3, contract point b); footer `poll()` emits one labeled
+  confirmation per feedback message, nothing for ends/verdicts; matrix outputs
+  otherwise unchanged.
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 4: docs, module map, changelog, gates
