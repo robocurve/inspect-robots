@@ -120,7 +120,7 @@ pytest with the existing fake-client patterns in
 
 ## Task 1: schema and `_stop` meta
 
-- [ ] **Step 1: failing tests.** In the toolset tests: (a) both stop tools'
+- [x] **Step 1: failing tests.** In the toolset tests: (a) both stop tools'
   schemas declare `hindsight` with `required == [<existing>, "hindsight"]`
   and a description that asks what the agent wishes it had known at the
   start; (b) `_stop` on a call carrying
@@ -129,7 +129,7 @@ pytest with the existing fake-client patterns in
   alongside the unchanged `request_stop`/`stop_reason`/`stop_detail`;
   (c) a call WITHOUT `hindsight` (and one with `hindsight: "  "`) still
   succeeds, meta has NO `stop_hindsight` key, and `note` is unchanged.
-- [ ] **Step 2: implement.** Add the parameter to both schemas. Description
+- [x] **Step 2: implement.** Add the parameter to both schemas. Description
   (same string for both, single source constant; categories calibrated
   against a real rollout's answer, see issue #305 comment): "What do you
   know now that you wish you had known at the start of this episode?
@@ -141,7 +141,7 @@ pytest with the existing fake-client patterns in
   `_stop`, read `arguments.get("hindsight")`; when it is a non-blank
   string, add `stop_hindsight` (stripped) to the meta. No validation
   error path.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 2: policy stash and `trial_metadata` persistence
 

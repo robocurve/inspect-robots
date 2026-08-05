@@ -39,6 +39,13 @@ _MAX_DURATION_S = 10.0
 _BACKSTOP_STEP_FRAC = 0.05
 _DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
+_HINDSIGHT_DESCRIPTION = (
+    "What do you know now that you wish you had known at the start of this episode? "
+    "Concrete, transferable facts about this rig, task, or embodiment (camera mounting "
+    "and extrinsics, table and base geometry, gripper axis and offsets, controller "
+    "behavior, metric scale), written as advice to a future agent attempting the same "
+    "task. Say 'none' if nothing qualifies."
+)
 
 #: A motion hook over the exact clipped absolute waypoints for one move call.
 #:
@@ -197,8 +204,14 @@ class Toolset:
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"summary": {"type": "string"}},
-                    "required": ["summary"],
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "hindsight": {
+                            "type": "string",
+                            "description": _HINDSIGHT_DESCRIPTION,
+                        },
+                    },
+                    "required": ["summary", "hindsight"],
                 },
             },
         }
@@ -209,8 +222,14 @@ class Toolset:
                 "description": "Stop trying; the task cannot be completed. The trial ends.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"reason": {"type": "string"}},
-                    "required": ["reason"],
+                    "properties": {
+                        "reason": {"type": "string"},
+                        "hindsight": {
+                            "type": "string",
+                            "description": _HINDSIGHT_DESCRIPTION,
+                        },
+                    },
+                    "required": ["reason", "hindsight"],
                 },
             },
         }
@@ -307,9 +326,13 @@ class Toolset:
     def _stop(self, name: str, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         data = self._current_state(observation)
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
+        meta = {"request_stop": True, "stop_reason": name, "stop_detail": detail}
+        hindsight = arguments.get("hindsight")
+        if isinstance(hindsight, str) and hindsight.strip():
+            meta["stop_hindsight"] = hindsight.strip()
         action = Action(
             data=data,
-            meta={"request_stop": True, "stop_reason": name, "stop_detail": detail},
+            meta=meta,
         )
         return ToolResult(
             chunk=ActionChunk(actions=[action], control_hz=self._hz),
