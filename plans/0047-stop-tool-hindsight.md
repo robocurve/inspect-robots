@@ -33,7 +33,7 @@ pytest with the existing fake-client patterns in
 - Gates (all blocking), run from the worktree root. The root mypy/pytest
   configs do NOT cover the plugin (root `testpaths=["tests"]`, coverage
   `source=["inspect_robots"]`), so the plugin gates must be the CI commands
-  (`.github/workflows/ci.yml:317-331`, quoted verbatim):
+  (`.github/workflows/ci.yml:317-331`, equivalent modulo --no-sync/-q flags):
   - `uv run --no-sync ruff check plugins/inspect-robots-agent` and
     `uv run --no-sync ruff format --check plugins/inspect-robots-agent`
     (repo-wide ruff is a strict superset and also acceptable).
@@ -165,8 +165,8 @@ pytest with the existing fake-client patterns in
   scenario. The script must end with a MOVE response (e.g.
   `[move, done+hindsight, move]`) and use a small `max_llm_calls` so
   trial 2 loops the trailing move into budget exhaustion (budget is
-  checked before each call at `policy.py:810`; `_calls_used` resets per
-  trial at `policy.py:695`).
+  checked before each call at `policy.py:809`; `_calls_used` resets per
+  trial at `policy.py:694`).
 - [ ] **Step 2: implement.** At the `policy.py:955` stop-chunk site, stash
   `chunk.actions[0].meta.get("stop_hindsight")` on the policy when
   `request_stop` is set. Clear the stash early in `reset()`
