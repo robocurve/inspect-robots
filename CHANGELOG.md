@@ -9,6 +9,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.22.0):** `done` and `give_up` now ask for a required
+  `hindsight` argument: what the agent wishes it had known at the start of
+  the episode, as concrete transferable rig and task facts. The system
+  prompt announces the question up front; the answer persists as
+  `stop_hindsight` action meta and as `trial_metadata["hindsight"]` in the
+  JSON log, written to be usable as `prior_learnings` input on later runs.
+  Missing hindsight never fails execution (the budget-exhausted forced
+  `give_up` cannot answer)
+  ([plan 0047](plans/0047-stop-tool-hindsight.md), #305).
+
 - CLI `run` and `eval-set` now take per-user advisory claims for declared
   device slots before hardware construction, reject concurrent evals aimed at
   the same rig, and release claims during embodiment teardown

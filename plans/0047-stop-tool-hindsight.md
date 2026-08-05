@@ -191,9 +191,9 @@ pytest with the existing fake-client patterns in
 
 ## Task 4: version bump, docs, changelog
 
-- [ ] **Step 1:** Bump the plugin to 0.22.0 in all THREE places (pyproject
+- [x] **Step 1:** Bump the plugin to 0.22.0 in all THREE places (pyproject
   `version`, `uv lock` regeneration, `tests/test_package.py:9` pin).
-- [ ] **Step 2:** Docs sweep: `docs/` has NO agent-tools page (grep
+- [x] **Step 2:** Docs sweep: `docs/` has NO agent-tools page (grep
   verified); the documentation surface is
   `plugins/inspect-robots-agent/README.md` (give_up at lines 137, 144,
   234). Document the new argument, both persistence surfaces, and that
@@ -203,4 +203,4 @@ pytest with the existing fake-client patterns in
   entry under Unreleased as `**Agent plugin (0.22.0):**` bullets following
   the sibling convention, referencing #305 and plan 0047, with the same
   `prior_learnings` cross-reference.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
