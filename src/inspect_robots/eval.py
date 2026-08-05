@@ -41,6 +41,7 @@ from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_fl
 from inspect_robots.task import Task
 
 if TYPE_CHECKING:
+    from inspect_robots.console import OperatorInput
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
@@ -145,6 +146,7 @@ def eval(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
@@ -182,6 +184,8 @@ def eval(
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
+    ``operator_input`` supplies attended-console input; ``None`` disables the channel.
+
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored trials, which are recorded but not scored), after the
     rollout returns and before the scorers run. It may mutate the record —
@@ -217,6 +221,7 @@ def eval(
             approver=approver,
             remap=remap,
             store_frames=store_frames,
+            operator_input=operator_input,
             before_scoring=before_scoring,
         )
     finally:
@@ -239,6 +244,7 @@ def _run_eval(
     approver: Approver | None,
     remap: dict[str, str] | None,
     store_frames: bool,
+    operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
@@ -328,6 +334,10 @@ def _run_eval(
     halted = False
     stopped = False
     cancelled_exc: _CancelledTrial | None = None
+    # A proportion threshold is a share of the whole eval, so the denominator is
+    # every trial the run intends to attempt. Using the completed-so-far count
+    # made the first error 1/1 = 100%, which trips any threshold below 1.
+    planned_trials = len(task.scenes) * epoch_spec.count
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
@@ -335,6 +345,7 @@ def _run_eval(
         notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
+        operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
         scene_status = "success"
         scene_error: str | None = None
@@ -373,6 +384,7 @@ def _run_eval(
                         approver=approver,
                         sink=bus,
                         frame_store=frame_store,
+                        operator_input=operator_input,
                     )
                 except _CancelledTrial as exc:
                     status = "cancelled"
@@ -456,13 +468,20 @@ def _run_eval(
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
+                operator_messages.append(
+                    tuple(
+                        {"t": event.t, "text": event.data["text"]}
+                        for event in record.events
+                        if event.kind == "operator_message"
+                    )
+                )
                 policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
             if halted:
                 stopped = True
                 break
-            if _should_fail(fail_on_error, error_count, total_trials):
+            if _should_fail(fail_on_error, error_count, planned_trials):
                 # Checked after every trial, so fail_on_error=True stops at the
                 # first PolicyError instead of finishing the scene's epochs.
                 status = "error"
@@ -501,6 +520,7 @@ def _run_eval(
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
+                operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
             )
         )
@@ -549,7 +569,11 @@ def _run_eval(
 
 
 def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
-    """Inspect-style ``fail_on_error`` evaluation for PolicyError-class failures."""
+    """Inspect-style ``fail_on_error`` evaluation for PolicyError-class failures.
+
+    ``trials`` is the number of trials the eval plans to run, not the number
+    completed so far: a proportion threshold is a share of the whole eval.
+    """
     if not fail_on_error or errors == 0:  # covers False, 0, 0.0
         return False
     if fail_on_error is True:
@@ -571,6 +595,7 @@ def eval_set(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     retry_attempts: int = 0,
 ) -> tuple[bool, list[EvalLog]]:
@@ -597,6 +622,7 @@ def eval_set(
                 approver=approver,
                 remap=remap,
                 store_frames=store_frames,
+                operator_input=operator_input,
                 before_scoring=before_scoring,
             )
         )

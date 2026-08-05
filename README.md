@@ -139,7 +139,7 @@ last line, so the operator only ever edits the end of the command:
 
 ```bash
 inspect-robots run --policy agent --rerun-connect \
-    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    -P model=anthropic/claude-opus-5 -P wire=messages -P speed=fast \
     -P effort=high \
     --instruction "place the fork on the plate"
 ```

@@ -182,6 +182,9 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
             note = _parallel_value(scene.operator_notes, epoch)
             if note is not None:
                 fields.append(f"operator notes: {_one_line(note)}")
+            if epoch < len(scene.operator_messages):
+                for message in scene.operator_messages[epoch]:
+                    fields.append(f"operator feedback: {_one_line(message['text'])}")
             if not scores and scene.status == "error" and scene.error:
                 fields.append(f"error: {_one_line(scene.error)}")
             lines.append(f"- `{scene.scene_id}` epoch {epoch}: {'; '.join(fields)}")

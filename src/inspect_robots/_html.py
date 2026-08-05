@@ -265,9 +265,9 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _number(value: int | float) -> str:
+def _number(value: int | float | None) -> str:
     """Format numeric log values compactly before their interpolation boundary."""
-    return f"{value:.4g}"
+    return "n/a" if value is None else f"{value:.4g}"
 
 
 def _value(value: object) -> str:
@@ -815,6 +815,15 @@ def _scene_section(
     # Unlike the chip rows above, an all-``None`` tuple emits nothing at all:
     # ``notes`` is empty exactly when no trial carried a note, and most will not.
     notes_block = "" if not notes else f"<h3>Grader notes</h3>{notes}"
+    feedback = "".join(
+        (
+            f'<div class="grader-note"><span class="note-label">trial {trial}, '
+            f"step {_escape(message['t'])}</span>{_escape(message['text'])}</div>"
+        )
+        for trial, messages in enumerate(scene.operator_messages)
+        for message in messages
+    )
+    feedback_block = "" if not feedback else f"<h3>Operator feedback</h3>{feedback}"
 
     transcripts = "".join(
         (
@@ -833,7 +842,8 @@ def _scene_section(
         '<section class="scene">'
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene.status)}</div>{instruction}{error}{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{notes_block}{transcripts}{wires}</section>"
+        f"{reasons_block}{judgements_block}{notes_block}{feedback_block}"
+        f"{transcripts}{wires}</section>"
     )
 
 

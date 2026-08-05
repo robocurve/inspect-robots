@@ -58,6 +58,7 @@ inspect-robots "pick up the red cube" --policy capx \
 Model routing, API key selection, and the `chat` versus `responses` wire follow
 the [inspect-robots-agent](../inspect-robots-agent/) plugin. Model strings come
 from `-P model=...` or `$INSPECT_ROBOTS_MODEL`.
+CaP-X keeps chat-only direct routing, so `thinkingmachines/*` resolves through OpenRouter by design.
 
 ## Required embodiment profile:
 

@@ -55,6 +55,7 @@ from inspect_robots_agent.policy import (
     AgentPolicyConfig,
     _image_parts,
     _observation_content,
+    _operator_lines,
     _PendingCapture,
 )
 
@@ -409,7 +410,87 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert "data:" not in serialized
 
 
-@pytest.mark.parametrize("wire", ["chat", "responses", "anthropic"])
+def test_done_hindsight_lands_in_trial_metadata(tmp_path: Path) -> None:
+    hindsight = "the overhead camera swaps the apparent left and right axes"
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": hindsight})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert logs[0].samples[0].trial_metadata[0]["hindsight"] == hindsight
+
+
+def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> None:
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script, max_llm_calls=1),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    metadata = logs[0].samples[0].trial_metadata[0]
+    assert "hindsight" not in metadata
+    # Pin that the trial really ended via the forced give_up, not max_steps:
+    # a give_up termination with the whole budget consumed cannot be a real
+    # give_up because the script contains no stop response.
+    assert logs[0].samples[0].termination_reasons == ("give_up",)
+    assert metadata["llm_usage"]["llm_calls"] == 1
+
+
+def test_none_sentinel_hindsight_is_not_persisted(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": "None"})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
+
+
+def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> None:
+    hindsight = "the gripper closes along the camera's vertical axis"
+    move = _tool_response("move_by", {"deltas": {"dx": 0.01}})
+    script = _Script(
+        [
+            move,
+            _tool_response("done", {"summary": "cube reached", "hindsight": hindsight}),
+            move,
+        ]
+    )
+    task = Task(
+        name="two-trial-hindsight-reset",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=40,
+        epochs=2,
+    )
+
+    logs = ir_eval(
+        task,
+        _policy(script, max_llm_calls=2),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    first, second = logs[0].samples[0].trial_metadata
+    assert first["hindsight"] == hindsight
+    assert "hindsight" not in second
+    # Trial 2 must have ended via the forced give_up (budget consumed on
+    # replayed moves; the script's trailing response is not a stop).
+    assert logs[0].samples[0].termination_reasons == ("done", "give_up")
+    assert second["llm_usage"]["llm_calls"] == 2
+
+
+@pytest.mark.parametrize("wire", ["chat", "responses", "messages"])
 def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     wire: str, tmp_path: Path
 ) -> None:
@@ -445,7 +526,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
         == {
             "chat": "/chat/completions",
             "responses": "/responses",
-            "anthropic": "/messages",
+            "messages": "/messages",
         }[wire]
     )
     blob_dir = capture_path.parent.parent / "blobs"
@@ -453,7 +534,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     assert captured_request == script.requests[1]
     assert "camera frame(s) elided" in json.dumps(captured_request)
 
-    if wire == "anthropic":
+    if wire == "messages":
         elision_blocks = [
             block
             for message in captured_request["messages"]
@@ -621,6 +702,83 @@ def test_observation_content_renders_approver_interventions() -> None:
     parts = _observation_content(obs)
     text = parts[0]["text"]
     assert "approver: 4 step(s) modified (clamped \u00d73, delta_clamped)." in text
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        (
+            [{"t": 3, "text": "move farther left"}],
+            ["operator feedback (step 3): move farther left"],
+        ),
+        (
+            [
+                {"t": 1, "text": "the red cube is the target"},
+                {"t": 4, "text": "close the gripper now"},
+            ],
+            [
+                "operator feedback (step 1): the red cube is the target",
+                "operator feedback (step 4): close the gripper now",
+            ],
+        ),
+    ],
+)
+def test_observation_content_renders_operator_messages(
+    messages: list[dict[str, object]],
+    expected: list[str],
+) -> None:
+    observation = Observation(extra={"operator_messages": messages})
+
+    parts = _observation_content(observation, narration="motion finished")
+    lines = parts[0]["text"].splitlines()
+
+    assert [line for line in lines if line.startswith("operator feedback")] == expected
+    assert lines.index(expected[-1]) < lines.index("motion finished")
+
+
+def test_operator_lines_skip_malformed_values_and_entries() -> None:
+    malformed: list[object] = [
+        None,
+        "feedback",
+        {"t": "2", "text": "wrong step type"},
+        {"t": 2, "text": 3},
+        {"t": 2},
+        {"text": "missing step"},
+        {"t": 5, "text": "valid feedback"},
+    ]
+
+    assert _operator_lines(Observation(extra={"operator_messages": malformed})) == [
+        "operator feedback (step 5): valid feedback"
+    ]
+    assert _operator_lines(Observation(extra={"operator_messages": {"t": 1}})) == []
+
+
+def test_operator_lines_are_empty_when_observation_has_no_reserved_key() -> None:
+    assert _operator_lines(Observation()) == []
+
+
+def test_agent_opts_in_to_framework_operator_messages() -> None:
+    assert LLMAgentPolicy.accepts_operator_messages is True
+
+
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_treat_operator_feedback_as_trusted_guidance(template: str) -> None:
+    expected = (
+        "You may receive operator feedback lines mid-run; treat them as trusted guidance from "
+        "the human supervising the robot."
+    )
+    assert expected in template
+
+
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_announce_the_hindsight_question(template: str) -> None:
+    rendered = template.format(name="test-robot", budget=10)
+    announcement = (
+        "Note what you are learning about this rig and task as you go: done and give_up will ask "
+        "what you wish you had known from the start."
+    )
+
+    assert announcement in rendered
 
 
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
@@ -1389,6 +1547,49 @@ def test_persistent_non_tool_output_becomes_policy_error(tmp_path: Path) -> None
     assert logs[0].status == "error"
     (record,) = sink.records
     assert record.error is not None and "no tool call" in record.error
+
+
+def test_no_tool_call_three_strikes_notes_explicit_chat_base_url() -> None:
+    policy = _policy(_Script([_text_response("no tools")]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert str(excinfo.value).endswith(
+        "note: some OpenAI-compatible endpoints accept `tools` but silently ignore "
+        "them (Tinker's OpenAI-compatible API is one). If the provider serves the "
+        "Messages API, retry with -P wire=messages and its Messages base_url."
+    )
+
+
+def test_no_tool_call_three_strikes_omits_note_without_explicit_base_url() -> None:
+    script = _Script([_text_response("no tools")])
+    policy = LLMAgentPolicy(
+        model="openai/gpt-test",
+        transport=httpx.MockTransport(script),
+        env={"OPENAI_API_KEY": "sk-oai"},
+    )
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert "silently ignore" not in str(excinfo.value)
+
+
+def test_invalid_tool_call_three_strikes_omits_silent_tool_drop_note() -> None:
+    policy = _policy(_Script([_tool_response("move_by", {"deltas": {"dz": 0.1}})]))
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="stop"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        policy.act(Observation())
+
+    assert "tool calls kept failing" in str(excinfo.value)
+    assert "silently ignore" not in str(excinfo.value)
 
 
 def test_recoverable_tool_error_is_fed_back_and_corrected(tmp_path: Path) -> None:
@@ -2475,7 +2676,7 @@ def test_anthropic_usage_is_summed_into_trial_metadata(
     sink = _RecordingSink()
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="http://llm.test/v1",
         transcript_echo=True,
         transport=httpx.MockTransport(handler),

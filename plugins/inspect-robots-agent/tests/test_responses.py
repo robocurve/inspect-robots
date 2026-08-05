@@ -653,7 +653,7 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",
-            wire="messages",
+            wire="response",
             env={},
         )
 

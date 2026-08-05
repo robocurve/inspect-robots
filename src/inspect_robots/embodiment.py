@@ -82,6 +82,29 @@ class Embodiment(Protocol):
     lifetime; each call replaces the previous envelope. ``EmbodimentBase``
     ships a no-op default.
 
+    Embodiments may additionally offer an optional
+    ``connect_operator_session(session)`` hook. Accepting the session is a
+    stand-down promise for that run: the embodiment must never read stdin or
+    print its own status output after the call. The session provides
+    ``status(line)`` for an in-place status line, ``write_line(text)`` for
+    scrollback that safely repaints that status, and ``gate(prompt, hint=...)``
+    for blocking readiness confirmation. A gate flushes stale fd input first
+    and raises [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault] when
+    stdin is unavailable, with remedies and the embodiment's optional hint.
+    The hook is optional input, not a guarantee. It never fires under
+    ``--no-prompt``, without a TTY, on Windows, from direct ``rollout()`` or
+    ``eval()`` calls, or on older cores. An embodiment must keep a graceful
+    fallback and a working end-of-episode path whenever the hook does not fire.
+    The hook stays outside this Protocol so older embodiments remain
+    conformant.
+
+    The optional ``defer_operator_end()`` hook is superseded by
+    ``connect_operator_session`` but remains supported. An embodiment that
+    polls stdin for the end-of-episode keypress must stop doing so when called;
+    the framework console owns stdin for that run. Offering this legacy hook
+    is also how a real-hardware embodiment declares itself console-safe to
+    cores and adapters that have not adopted the session hook.
+
     Embodiments may also define an **optional**
     ``contribute_guardrails(self, action_space: Box) -> GuardrailContribution``
     hook, likewise omitted from this Protocol so existing implementations

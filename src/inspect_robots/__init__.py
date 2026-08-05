@@ -20,6 +20,7 @@ except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed t
     __version__ = "0.0.0+unknown"
 
 from inspect_robots import defaults
+from inspect_robots.console import ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.embodiment import (
     Embodiment,
     EmbodimentBase,
@@ -47,6 +48,7 @@ from inspect_robots.scorer import (
     reached_goal_state,
     success_at_end,
 )
+from inspect_robots.session import OperatorSession
 from inspect_robots.spaces import (
     ABSOLUTE_CONTROL_MODES,
     ActionSemantics,
@@ -70,9 +72,11 @@ __all__ = [
     "ActionSemantics",
     "Box",
     "CameraSpec",
+    "ConsolePoll",
     "Embodiment",
     "EmbodimentBase",
     "EmbodimentInfo",
+    "EndRequest",
     "Epochs",
     "EvalLog",
     "EvalResults",
@@ -80,6 +84,9 @@ __all__ = [
     "EvalStats",
     "Observation",
     "ObservationSpace",
+    "OperatorConsole",
+    "OperatorInput",
+    "OperatorSession",
     "Policy",
     "PolicyBase",
     "PolicyConfig",

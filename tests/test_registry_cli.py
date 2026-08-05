@@ -16,7 +16,10 @@ import pytest
 
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
+from inspect_robots._claims import claim_devices
 from inspect_robots.cli import main
+from inspect_robots.conformance import DeviceSlot
+from inspect_robots.console import USAGE, USAGE_END_ONLY
 from inspect_robots.defaults import (
     _ENV_EMBODIMENT as ENV_EMBODIMENT,
 )
@@ -29,6 +32,13 @@ from inspect_robots.defaults import (
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
+from inspect_robots.session import OperatorSession
+
+
+class _ConsolePolicy(ScriptedPolicy):
+    """Opt into the framework's attended operator-message channel."""
+
+    accepts_operator_messages = True
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +50,7 @@ def _hermetic_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.delenv(ENV_POLICY, raising=False)
     monkeypatch.delenv(ENV_EMBODIMENT, raising=False)
     monkeypatch.delenv(ENV_SIM_EMBODIMENT, raising=False)
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
     return config_home
 
 
@@ -451,6 +462,157 @@ def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> No
             scorer=success_at_end(),
             max_steps=max_steps,
         )
+
+
+_DEVICE_CLAIM_SLOTS = (DeviceSlot(arg="channel", kind="can", label="bus"),)
+_DEVICE_CLAIM_EMBODIMENT = "device-claim-test-embodiment"
+
+
+def _register_device_claim_embodiment(monkeypatch: pytest.MonkeyPatch) -> str:
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeviceClaimEmbodiment(CubePickEmbodiment):
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            super().__init__()
+            self.channel = channel
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _DeviceClaimEmbodiment
+    )
+    return _DEVICE_CLAIM_EMBODIMENT
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_claims_and_releases_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    args = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            main(args)
+        assert "can9" in str(exc_info.value)
+        assert "already claimed" in str(exc_info.value)
+    finally:
+        existing.release()
+
+    assert main(args) == 0
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_without_device_slots_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
+    assert not (tmp_path / "inspect-robots" / "locks").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_claim_released_when_embodiment_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _BrokenDeviceClaimEmbodiment:
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            raise TypeError(f"construction exploded for {channel}")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _BrokenDeviceClaimEmbodiment
+    )
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    with pytest.raises(SystemExit, match="construction exploded"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                _DEVICE_CLAIM_EMBODIMENT,
+                "-E",
+                "channel=can9",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_eval_set_claims_once_for_the_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    _register_task("claim/a")
+    _register_task("claim/b")
+    args = [
+        "eval-set",
+        "claim/a",
+        "claim/b",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+
+    try:
+        existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                main(args)
+            assert "can9" in str(exc_info.value)
+            assert "already claimed" in str(exc_info.value)
+        finally:
+            existing.release()
+
+        assert main(args) == 0
+        after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        after.release()
+    finally:
+        reg._FACTORIES["task"].pop("claim/a", None)
+        reg._FACTORIES["task"].pop("claim/b", None)
 
 
 def test_cli_eval_set_runs_multiple_exact_tasks(
@@ -1285,6 +1447,24 @@ def test_view_stdout_contains_only_the_document(
     assert "wrote " not in out
 
 
+def test_view_renders_null_metric_from_sanitized_non_finite_score(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a single-file `view` must render a sanitized
+    null metric as "n/a" instead of crashing on ``.4g`` formatting."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["view", str(path)]) == 0
+
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<div class="stat-value">n/a</div>' in document
+
+
 def test_view_embeds_frames_resolved_from_log_relative_fallback(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1551,6 +1731,31 @@ def test_view_directory_end_to_end_and_unreadable_log(
     assert "[1/3] rendering foreign.json" not in out.err
     assert "warning: could not read or render foreign.json" in out.err
     assert out.err.count(" rendering ") == 2
+
+
+def test_view_directory_includes_log_with_sanitized_null_metric(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a log the sink itself wrote (null metric from a
+    non-finite score) reads fine and must appear in the directory index
+    rather than being dropped as "could not read or render"."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _directory_view_log(
+        created="2026-07-30T12:00:00Z",
+        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+    )
+    _write_log(log, logs, "null-metric.json")
+
+    assert main(["view", str(logs)]) == 0
+
+    out = capsys.readouterr()
+    assert "could not read or render" not in out.err
+    assert (logs / "html" / "null-metric.html").is_file()
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "null-metric.json" in index
+    assert "min_distance_to_goal=n/a" in index
+    assert out.out.startswith(f"index: {logs / 'html' / 'index.html'} (1 logs, 1 pages, ")
 
 
 def test_view_directory_multi_scene_metrics_empty_samples_and_errored_trials(
@@ -2174,6 +2379,23 @@ def test_run_outcome_breaks_count_ties_alphabetically_by_phrase(
     assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
 
     assert "outcome: 1 hit step limit, 1 succeeded" in capsys.readouterr().out
+
+
+def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: json_log.py writes inf/nan metrics as JSON null
+    so the log stays RFC 8259 valid; `inspect` must tolerate that null."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "min_distance_to_goal: n/a" in capsys.readouterr().out
 
 
 def test_inspect_outcome_maps_give_up_reason(
@@ -3117,6 +3339,471 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
 
+@pytest.mark.parametrize(
+    (
+        "embodiment_kind",
+        "accepts_messages",
+        "platform",
+        "console_on",
+        "expected_output",
+        "expected_connect_calls",
+        "expected_defer_calls",
+    ),
+    [
+        ("new", True, "linux", True, f"{USAGE}\n", 1, 0),
+        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0),
+        (
+            "new",
+            True,
+            "win32",
+            False,
+            "operator console unavailable: select cannot watch stdin on Windows; "
+            "feedback typing stays off\n",
+            0,
+            0,
+        ),
+        (
+            "new",
+            False,
+            "win32",
+            False,
+            "operator console unavailable: select cannot watch stdin on Windows; "
+            "feedback typing stays off\n",
+            0,
+            0,
+        ),
+        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1),
+        ("defer", False, "win32", False, "", 0, 0),
+        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0),
+        ("simulated", False, "linux", False, "", 0, 0),
+        (
+            "bare",
+            True,
+            "linux",
+            False,
+            "operator console unavailable: this embodiment predates the operator console "
+            "and still owns the end-of-episode keypress; feedback typing stays off\n",
+            0,
+            0,
+        ),
+        ("bare", False, "win32", False, "", 0, 0),
+    ],
+)
+def test_build_operator_session_enablement_matrix(
+    embodiment_kind: str,
+    accepts_messages: bool,
+    platform: str,
+    console_on: bool,
+    expected_output: str,
+    expected_connect_calls: int,
+    expected_defer_calls: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class NewHookEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_calls = 0
+            self.connected_session: OperatorSession | None = None
+
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            self.connect_calls += 1
+            self.connected_session = session
+
+    class DeferredEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+            self.defer_calls = 0
+
+        def defer_operator_end(self) -> None:
+            self.defer_calls += 1
+
+    class BareEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+    policy = type("PolicyStub", (), {"accepts_operator_messages": accepts_messages})()
+    embodiment: CubePickEmbodiment
+    if embodiment_kind == "new":
+        embodiment = NewHookEmbodiment()
+    elif embodiment_kind == "defer":
+        embodiment = DeferredEmbodiment()
+    elif embodiment_kind == "simulated":
+        embodiment = CubePickEmbodiment()
+    else:
+        embodiment = BareEmbodiment()
+    monkeypatch.setattr(sys, "platform", platform)
+
+    session, operator_input = cli._build_operator_session(policy, embodiment)
+
+    assert isinstance(session, OperatorSession)
+    assert (operator_input is session) is console_on
+    assert getattr(embodiment, "connect_calls", 0) == expected_connect_calls
+    assert getattr(embodiment, "defer_calls", 0) == expected_defer_calls
+    if expected_connect_calls:
+        assert getattr(embodiment, "connected_session", None) is session
+    assert capsys.readouterr().out == expected_output
+
+
+def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    order: list[str] = []
+    connected: list[OperatorSession] = []
+
+    class SessionAwareEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            order.append("connect")
+            connected.append(session)
+
+    embodiment_name = "session-aware-for-order-test"
+    reg.embodiment(embodiment_name)(SessionAwareEmbodiment)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        order.append("eval")
+        operator_input = kwargs.get("operator_input")
+        before_scoring = kwargs.get("before_scoring")
+        assert operator_input is connected[0]
+        assert getattr(before_scoring, "__self__", None) is operator_input
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                embodiment_name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert rc == 0
+    assert order == ["connect", "eval"]
+    assert capsys.readouterr().out.count(USAGE_END_ONLY) == 1
+
+
+def test_attended_opted_in_run_builds_console_calls_defer_and_prints_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-run-test"
+    embodiment_name = "deferred-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                embodiment_name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorSession)
+    assert _DeferredHardware.hook_calls == 1
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_opted_in_eval_set_uses_simulated_console_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = "console-policy-for-eval-set-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return True, [_step_limit_log(task="cubepick-reach", reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorSession)
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_console_stays_off_for_legacy_real_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _LegacyHardware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+    policy_name = "console-policy-for-legacy-hardware-test"
+    embodiment_name = "legacy-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_LegacyHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert out.count("predates the operator console") == 1
+    assert "still owns the end-of-episode keypress" in out
+    assert "feedback typing stays off" in out
+    assert USAGE not in out
+
+
+def test_attended_console_stays_off_on_windows_before_calling_defer_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-windows-test"
+    embodiment_name = "deferred-hardware-for-windows-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    assert _DeferredHardware.hook_calls == 0
+    out = capsys.readouterr().out
+    assert out.count("select cannot watch stdin on Windows") == 1
+    assert USAGE not in out
+
+
+@pytest.mark.parametrize(("tty", "extra_args"), [(False, ()), (True, ("--no-prompt",))])
+def test_operator_console_requires_attendance(
+    tty: bool,
+    extra_args: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = f"console-policy-unattended-{tty}"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: tty)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    "cubepick",
+                    "--log-dir",
+                    str(tmp_path),
+                    *extra_args,
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert operator_inputs == [None]
+    assert USAGE not in capsys.readouterr().out
+
+
+def test_policy_without_opt_in_skips_console_silently_before_platform_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert "operator console" not in out
+    assert USAGE not in out
+
+
 def test_operator_prompt_records_verdict_and_reprompts_on_typos(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3347,344 +4034,6 @@ def test_registered_task_operator_end_suppressed_without_tty_or_with_no_prompt(
     assert rc == 0
     assert _read_only_log(tmp_path / "logs").samples[0].operator_judgements == (None,)
     capsys.readouterr()
-
-
-@pytest.mark.parametrize(
-    ("termination_reason", "expected_verdict"),
-    [("success", "y"), ("failure", "n")],
-)
-def test_prompt_operator_adopts_definitive_embodiment_verdict(
-    termination_reason: str,
-    expected_verdict: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason=termination_reason,
-    )
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
-    )
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == expected_verdict
-    assert record.operator_note is None
-    (event,) = record.events
-    assert event.kind == "operator"
-    assert event.t == 0
-    assert event.data == {
-        "verdict": expected_verdict,
-        "source": "embodiment",
-        "note": None,
-    }
-
-
-@pytest.mark.parametrize(
-    ("terminated", "termination_reason"),
-    [
-        (False, None),
-        (False, "max_steps"),
-        (False, "policy_stop"),
-        (True, None),
-    ],
-)
-def test_prompt_operator_still_prompts_without_definitive_verdict(
-    terminated: bool,
-    termination_reason: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=terminated,
-        termination_reason=termination_reason,
-    )
-    prompts: list[str] = []
-    answers = iter(["y", ""])
-
-    def _answer(prompt: str) -> str:
-        prompts.append(prompt)
-        return next(answers)
-
-    monkeypatch.setattr("builtins.input", _answer)
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert prompts == [_PROMPT, _NOTES_PROMPT]
-    assert record.operator_judgement == "y"
-    (event,) = record.events
-    assert event.data == {"verdict": "y", "source": "prompt", "note": None}
-
-
-def test_prompt_operator_prompts_for_truncated_success_reason(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=False,
-        truncated=True,
-        termination_reason="success",
-    )
-    answers = iter(["n", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == "n"
-    (event,) = record.events
-    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
-
-
-def test_prompt_operator_warns_before_judging_step_limited_trial(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        truncated=True,
-        termination_reason="max_steps",
-    )
-    answers = iter(["n", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert "trial hit the step limit before terminating" in capsys.readouterr().out
-    assert record.operator_judgement == "n"
-
-
-@pytest.mark.parametrize(
-    ("termination_reason", "expected_score"),
-    [("success", True), ("failure", False)],
-)
-def test_operator_scorer_reads_adopted_embodiment_verdict(
-    termination_reason: str,
-    expected_score: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-    from inspect_robots.scorer import operator_scorer
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason=termination_reason,
-    )
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
-    )
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert operator_scorer()(record, None).value is expected_score
-
-
-def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
-    from inspect_robots.cli import _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    scene = Scene(id="s0", instruction="reach")
-
-    def _record() -> TrialRecord:
-        record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-        record.steps = [None, None, None]  # type: ignore[list-item]
-        return record
-
-    # A verdict is recorded verbatim with an operator event at the final step.
-    record = _record()
-    answers = iter(["Partial", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    _prompt_operator(record, scene)
-    assert record.operator_judgement == "partial"
-    (event,) = record.events
-    assert event.kind == "operator"
-    assert event.t == 3
-    assert event.data["verdict"] == "partial"
-
-    # skip: no judgement, no event.
-    record = _record()
-    answers = iter(["skip", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    _prompt_operator(record, scene)
-    assert record.operator_judgement is None
-    assert record.events == []
-
-    # EOF (operator hit Ctrl-D): treated as skip.
-    prompts: list[str] = []
-
-    def _eof(prompt: str) -> str:
-        prompts.append(prompt)
-        raise EOFError
-
-    record = _record()
-    monkeypatch.setattr("builtins.input", _eof)
-    _prompt_operator(record, scene)
-    assert record.operator_judgement is None
-    assert record.operator_note is None
-    assert record.events == []
-    assert prompts == [_PROMPT]
-
-
-@pytest.mark.parametrize(
-    (
-        "verdict",
-        "note_input",
-        "expected_judgement",
-        "expected_note",
-        "expected_event",
-    ),
-    [
-        (
-            "y",
-            "gripper closed early",
-            "y",
-            "gripper closed early",
-            {"verdict": "y", "source": "prompt", "note": "gripper closed early"},
-        ),
-        ("y", "", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
-        ("y", " \t ", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
-        (
-            "y",
-            "  Mixed CASE  ",
-            "y",
-            "Mixed CASE",
-            {"verdict": "y", "source": "prompt", "note": "Mixed CASE"},
-        ),
-        (
-            "skip",
-            "  camera unplugged  ",
-            None,
-            "camera unplugged",
-            {"verdict": "skip", "source": "prompt", "note": "camera unplugged"},
-        ),
-        ("skip", "", None, None, None),
-    ],
-)
-def test_prompt_operator_records_optional_grader_notes(
-    verdict: str,
-    note_input: str,
-    expected_judgement: str | None,
-    expected_note: str | None,
-    expected_event: dict[str, str | None] | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    answers = iter([verdict, note_input])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == expected_judgement
-    assert record.operator_note == expected_note
-    if expected_event is None:
-        assert record.events == []
-    else:
-        (event,) = record.events
-        assert event.data == expected_event
-
-
-def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    prompts: list[str] = []
-
-    def _answer(prompt: str) -> str:
-        prompts.append(prompt)
-        if prompt == _PROMPT:
-            return "n"
-        raise EOFError
-
-    monkeypatch.setattr("builtins.input", _answer)
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert prompts == [_PROMPT, _NOTES_PROMPT]
-    assert record.operator_judgement == "n"
-    assert record.operator_note is None
-    (event,) = record.events
-    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
-
-
-def test_prompt_on_operator_end_prompts_and_records_note(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from inspect_robots.cli import _prompt_operator_on_operator_end
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    answers = iter(["partial", "left gripper slipped"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason="operator_end",
-    )
-    _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
-    assert record.operator_judgement == "partial"
-    assert record.operator_note == "left gripper slipped"
-    capsys.readouterr()
-
-
-def test_prompt_on_operator_end_ignores_other_reasons(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator_on_operator_end
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("must not prompt: not operator_end")
-    )
-    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
-        record = TrialRecord(
-            scene_id="s0",
-            epoch=0,
-            seed=0,
-            terminated=True,
-            truncated=truncated,
-            termination_reason=reason,
-        )
-        _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
-        assert record.operator_judgement is None
 
 
 def test_outcome_phrase_maps_operator_end() -> None:
@@ -3932,9 +4281,11 @@ class _FakeRerunSink:
         recording_path: str | None = None,
         *,
         spawn: bool = False,
+        spawn_port: int = 9876,
         connect_url: str | None = None,
     ) -> None:
         self.spawn = spawn
+        self.spawn_port = spawn_port
         self.connect_url = connect_url
         self.steps = 0
         _FakeRerunSink.instances.append(self)
@@ -3975,6 +4326,7 @@ def test_config_rerun_attaches_live_viewer_sink(
     assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
     (sink,) = _fake_rerun.instances  # constructed exactly once
     assert sink.spawn is True  # live viewer, not just a recording
+    assert sink.spawn_port == 9876
     assert sink.steps > 0  # actually received rollout traffic
 
 
@@ -4025,6 +4377,107 @@ def test_rerun_connect_takes_precedence_over_rerun(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+
+
+def test_rerun_port_flag_spawns_viewer_on_that_port(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9877",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9877
+
+
+def test_config_rerun_port_reaches_spawned_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9878
+
+
+def test_rerun_port_flag_beats_config(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9879",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn_port == 9879
+
+
+def test_config_rerun_port_alone_does_not_enable_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_rerun_connect(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--rerun-port.*--rerun-connect"):
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-port",
+            "9877",
+            "--rerun-connect",
+        )
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_no_rerun(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--no-rerun.*--rerun-port"):
+        _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun", "--rerun-port", "9877")
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_rejects_out_of_range(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-port", "0")
+    assert excinfo.value.code == 2
+    assert _fake_rerun.instances == []
 
 
 def test_styled_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4535,6 +4988,113 @@ def test_guided_error_mentions_config_set() -> None:
 # --- config set / show (plan 0008 §3e) ----------------------------------------
 
 
+def test_config_show_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    path.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "policy: rig-b" in out
+    assert f"policy: rig-b  ({path})" in out
+
+
+def test_config_set_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    xdg = tmp_path / "decoy"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    assert main(["config", "set", "policy", "x", "--config", str(path)]) == 0
+
+    assert "policy = x" in path.read_text(encoding="utf-8")
+    assert not (xdg / "inspect-robots" / "config.ini").exists()
+
+
+def test_config_flag_beats_env_var(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path_a = tmp_path / "rig-a.ini"
+    path_b = tmp_path / "rig-b.ini"
+    path_a.write_text("[defaults]\npolicy = rig-a\n", encoding="utf-8")
+    path_b.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", str(path_a))
+
+    assert main(["config", "show", "--config", str(path_b)]) == 0
+
+    out = capsys.readouterr().out
+    assert f"policy: rig-b  ({path_b})" in out
+    assert "rig-a" not in out
+
+
+def test_config_flag_expands_tilde(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = tilde-rig\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", "~/rig.ini"]) == 0
+
+    assert f"policy: tilde-rig  ({path})" in capsys.readouterr().out
+
+
+def test_config_flag_anchors_relative_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = relative-rig\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+
+    assert main(["config", "show", "--config", "rig.ini"]) == 0
+
+    assert "policy: relative-rig" in capsys.readouterr().out
+    assert os.environ["INSPECT_ROBOTS_CONFIG"] == str(path)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--config", "p"],
+        ["eval-set", "t", "--config", "p"],
+        ["doctor", "--config", "p"],
+        ["setup", "--config", "p"],
+        ["config", "set", "policy", "x", "--config", "p"],
+        ["config", "show", "--config", "p"],
+    ],
+)
+def test_config_flag_is_wired_to_every_config_reading_subcommand(argv: list[str]) -> None:
+    args = cli.build_parser().parse_args(argv)
+
+    assert args.config == "p"
+
+
+def test_no_config_flag_leaves_environ_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
+
+    assert main(["list"]) == 0
+
+    assert "INSPECT_ROBOTS_CONFIG" not in os.environ
+
+
 def test_cli_config_set_writes_and_show_reads(
     _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -4577,6 +5137,18 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
     assert main(["config", "set", "rerun", "true"]) == 0
+
+
+def test_cli_config_set_rejects_bad_rerun_port(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="rerun_port must be an integer in 1-65535"):
+        main(["config", "set", "rerun_port", "sometimes"])
+
+    assert main(["config", "set", "rerun_port", "9877"]) == 0
+    capsys.readouterr()
+    assert main(["config", "show"]) == 0
+    assert "rerun_port: 9877" in capsys.readouterr().out
 
 
 def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:

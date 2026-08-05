@@ -41,6 +41,12 @@ EXPECTED = {
     "Embodiment",
     "EmbodimentBase",
     "EmbodimentInfo",
+    # attended operator input
+    "OperatorInput",
+    "OperatorConsole",
+    "OperatorSession",
+    "ConsolePoll",
+    "EndRequest",
     # types & spaces
     "ABSOLUTE_CONTROL_MODES",
     "Observation",

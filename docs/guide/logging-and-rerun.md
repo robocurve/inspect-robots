@@ -46,10 +46,13 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
-The sink lays out labeled joint series per arm, with commanded `action/*` and
-measured `state/*` together for each side and cameras, the LLM transcript, and
-reward alongside. Embodiments without `dim_labels` get one combined joints
-plot. The layout is re-sent at each trial boundary so it follows the live trial,
+The sink lays out two rows: camera views in left/top/right name order across
+the top, then a tabbed text panel (latest LLM message up front, the full
+transcript and the reward series behind tabs) beside one plot per arm, with
+commanded `action/*` and measured `state/*` together for each side.
+Embodiments without `dim_labels` get one combined joints plot; runs without
+cameras send only the second row.
+The layout is re-sent at each trial boundary so it follows the live trial,
 which resets viewer tweaks then; a single-trial `run` sends it exactly once.
 The layout is built from the declared spaces, so entities logged outside them
 (an undeclared state key, or a camera whose runtime name differs from its
@@ -76,6 +79,7 @@ Rerun.
 ```python
 RerunSink("run.rrd")                   # record to a file, view later
 RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
+RerunSink(spawn=True, spawn_port=9877) # chosen viewer port (CLI: --rerun-port 9877)
 RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
 RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
 ```
@@ -106,7 +110,8 @@ viewer on your own machine instead and stream to it: `rerun` on your laptop,
 `ssh -R 9876:localhost:9876 <robot>` for the tunnel, then
 `inspect-robots run ... --rerun-connect` (a bare `--rerun-connect` targets the
 tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
-and SDK versions must match for live connections.
+and SDK versions must match for live connections. Hosts driving two rigs give
+each config its own `rerun_port` so each run spawns its own viewer window.
 
 ## Frame side-cars
 
@@ -163,7 +168,7 @@ The agent policy records **exactly what each LLM call sent and received** —
 by default, for every run. The saved transcript alone is not that object:
 outgoing requests carry the tool schemas, only the newest `image_horizon`
 frames (older ones become elision stubs), rendered depth composites, and, on
-the Anthropic wire, `cache_control` breakpoints — none of which survive into
+the Messages wire, `cache_control` breakpoints — none of which survive into
 `policy_transcripts`. Wire capture stores the real thing, per attempt,
 including retries and the failed calls a run died on.
 
