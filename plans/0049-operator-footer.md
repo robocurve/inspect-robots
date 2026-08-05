@@ -74,8 +74,9 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   footer activates only on rows where the console turns on; the helper tells the
   session (see decision 3).
 - Tests: `tests/test_session.py` (exact-byte rendering tests to extend),
-  `tests/test_rollout_hardening.py` (channel-degrade discipline to mirror for
-  `end_trial`), `tests/test_registry_cli.py` (matrix rows unchanged).
+  `tests/test_rollout_observation_step.py` (the poll/begin_trial channel-degrade
+  tests to mirror for `end_trial`; the new rollout `end_trial` tests can live
+  beside them), `tests/test_registry_cli.py` (matrix rows unchanged).
 
 ## Design decisions (and why)
 
@@ -146,11 +147,13 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    plugin-driven close leaves a clean terminal; `end_trial()` does the same teardown
    idempotently as the backstop (decision 1); plain mode keeps its existing
    close-with-newline semantics.
-6. **`[sent]` confirmations come from `poll()`, not from the editor.** The editor
+6. **Confirmations come from `poll()`, not from the editor.** The editor
    cannot know whether a completed line is feedback, an end request, a verdict, or a
    usage typo — the console's parser decides. Footer-mode `poll()` delegates, then
    for each message in the returned `ConsolePoll.messages` writes
-   `write_line(f"[sent] {text}")`. End requests and verdict lines print nothing (the
+   `write_line(f"[{label}] {text}")` where `label` is the CLI-chosen decision-3(b)
+   value (`sent` on feedback rows, `noted` on end-only rows — do not hardcode
+   `sent`). End requests and verdict lines print nothing (the
    episode visibly ends); usage hints already arrive via the console's `output_fn`,
    which is `write_line`. The confirmation therefore appears at the next rollout
    poll, at most one control period after Enter — imperceptible.
@@ -163,9 +166,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    editor (echoing per decision 5), and append each completed raw line to a queue;
    then call `console.poll()`, whose session-provided seams are dispatching
    closures — `readable` returns "queue non-empty or real EOF seen", `read` pops
-   queued lines joined with `"\n"` (`""` only on real EOF, preserving the console's
-   EOF contract); in plain mode the same closures delegate straight to the fd
-   defaults. The fd defaults are `console.py`'s existing module-private
+   the queued lines concatenated **each with its terminating `"\n"`** (the console
+   completes lines only on `"\n" in buffer`, so a line handed over without its
+   newline would sit unparsed until the next Enter; `""` returns only on real EOF,
+   preserving the console's EOF contract); in plain mode the same closures delegate
+   straight to the fd defaults. The fd defaults are `console.py`'s existing module-private
    `_stdin_readable`/`_stdin_read` (imported — same package), injectable on the
    session as `fd_readable`/`fd_read` seams, so the session adds **no new
    pragma-no-cover fd lines** (amending decision 8: uncovered lines are the termios
