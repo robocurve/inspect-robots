@@ -160,8 +160,9 @@ For an accepting policy, a simulator enables the console directly and a
 real-hardware embodiment can enable it with the supported legacy
 `defer_operator_end()` hook. Older hardware keeps its existing keypress
 behavior, prints a notice, and leaves feedback typing off. Windows cannot poll
-stdin with this console, so a session-aware embodiment is not connected and an
-accepting legacy path prints the Windows notice instead.
+stdin with this console, so both paths print the Windows notice there: a
+session-aware embodiment is never connected, regardless of policy, and the
+legacy path prints it for an accepting policy.
 
 ## `inspect-robots setup`
 

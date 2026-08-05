@@ -110,7 +110,14 @@ class OperatorSession:
             raise EmbodimentFault(message) from exc
 
     def prompt_verdict(self, record: TrialRecord, scene: Scene) -> None:
-        """Capture or adopt the terminal operator's verdict on the trial record (R6)."""
+        """Capture or adopt the terminal operator's verdict on the trial record (R6).
+
+        A verdict already captured by the console is announced and preserved.
+        A terminated episode with a definitive embodiment verdict adopts and announces
+        that verdict instead of asking the operator to confirm the same outcome a second
+        time. Prompted verdicts are followed by one optional, stripped, case-preserved
+        grader note.
+        """
         from inspect_robots.transcript import operator_event
 
         del scene
@@ -153,7 +160,12 @@ class OperatorSession:
             record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
 
     def prompt_verdict_on_operator_end(self, record: TrialRecord, scene: Scene) -> None:
-        """Prompt or announce only for a trial the operator demonstrably ended (R6-safe)."""
+        """Prompt or announce only for a trial the operator demonstrably ended (R6-safe).
+
+        ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
+        here can never block an unattended run; every other reason (``max_steps``
+        included) keeps R6's non-blocking behavior for registered tasks.
+        """
         if record.termination_reason == OPERATOR_END and record.operator_judgement is None:
             self.prompt_verdict(record, scene)
         elif record.termination_reason == OPERATOR_END:
