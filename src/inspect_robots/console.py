@@ -17,6 +17,10 @@ USAGE = (
     "operator console: type a message + Enter to send it to the policy; Enter alone ends "
     "the episode; /y /n /p [note] ends it with a verdict"
 )
+USAGE_END_ONLY = (
+    "operator console: Enter ends the episode; /y /n /p [note] records a verdict; "
+    "typed notes are saved to the log"
+)
 
 
 @dataclass(frozen=True)

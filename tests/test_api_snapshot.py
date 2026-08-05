@@ -44,6 +44,7 @@ EXPECTED = {
     # attended operator input
     "OperatorInput",
     "OperatorConsole",
+    "OperatorSession",
     "ConsolePoll",
     "EndRequest",
     # types & spaces

@@ -48,6 +48,7 @@ from inspect_robots.scorer import (
     reached_goal_state,
     success_at_end,
 )
+from inspect_robots.session import OperatorSession
 from inspect_robots.spaces import (
     ABSOLUTE_CONTROL_MODES,
     ActionSemantics,
@@ -85,6 +86,7 @@ __all__ = [
     "ObservationSpace",
     "OperatorConsole",
     "OperatorInput",
+    "OperatorSession",
     "Policy",
     "PolicyBase",
     "PolicyConfig",

@@ -19,6 +19,12 @@ All notable changes to this project are documented here. The format is based on
   `give_up` cannot answer)
   ([plan 0047](plans/0047-stop-tool-hindsight.md), #305).
 
+- Public `OperatorSession` now owns attended-run operator input, verdict
+  prompts, readiness gates, status rendering, and scrollback output. Embodiments
+  can accept it through the optional `connect_operator_session(session)` hook
+  and stand down their own terminal I/O for that run
+  ([plan 0048](plans/0048-operator-session.md), #308).
+
 - CLI `run` and `eval-set` now take per-user advisory claims for declared
   device slots before hardware construction, reject concurrent evals aimed at
   the same rig, and release claims during embodiment teardown
@@ -114,6 +120,10 @@ All notable changes to this project are documented here. The format is based on
   included (#194).
 
 ### Changed
+
+- Verdict and grader-notes prompts moved from CLI internals to
+  `OperatorSession`; their behavior and transcript events are unchanged
+  ([plan 0048](plans/0048-operator-session.md), #308).
 
 - **Agent plugin:** with both `$TINKER_API_KEY` and `$OPENROUTER_API_KEY` set,
   an unset wire for `thinkingmachines/*` now prefers direct Tinker routing on

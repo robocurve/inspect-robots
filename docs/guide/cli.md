@@ -136,19 +136,33 @@ failure with "no operator judgement recorded".
 ### Live operator feedback
 
 On an attended run, an opted-in policy can also receive feedback while the
-episode is running. The CLI prints the operator-console usage hint when this
+episode is running. The CLI prints the operator console usage hint when this
 channel is active. Type a normal line and press Enter to deliver it at the
 policy's next inference. Bare Enter ends the episode, while `/y`, `/n`, or `/p`
 plus an optional note ends it and records the verdict immediately, without a
 second post-trial prompt. Feedback is saved per trial and appears in summaries
 and HTML reports. Piped stdin and `--no-prompt` disable the channel.
 
-The console activates only where stdin has one owner: POSIX platforms and
-either a simulator or a real-hardware embodiment that offers
-`defer_operator_end()`. That hook tells an embodiment to stop polling its own
-end-of-episode keypress while the framework console owns stdin. Older hardware
-embodiments keep their existing keypress behavior, print a notice, and leave
-feedback typing off until they add the hook.
+A session-aware embodiment offers `connect_operator_session(session)`. On
+POSIX, the CLI calls that hook once before evaluation and the session becomes
+the only owner of terminal input and status output. The console stays active
+for every policy because it must own the end-of-episode input. A policy that
+accepts messages gets the full feedback usage line. Other policies get the
+end-only mode:
+
+```text
+operator console: Enter ends the episode; /y /n /p [note] records a verdict; typed notes are saved to the log
+```
+
+Without that hook, the compatibility path preserves the previous gating. A
+policy that does not accept operator messages leaves the console off silently.
+For an accepting policy, a simulator enables the console directly and a
+real-hardware embodiment can enable it with the supported legacy
+`defer_operator_end()` hook. Older hardware keeps its existing keypress
+behavior, prints a notice, and leaves feedback typing off. Windows cannot poll
+stdin with this console, so both paths print the Windows notice there: a
+session-aware embodiment is never connected, regardless of policy, and the
+legacy path prints it for an accepting policy.
 
 ## `inspect-robots setup`
 

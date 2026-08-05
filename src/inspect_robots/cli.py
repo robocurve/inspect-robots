@@ -70,7 +70,7 @@ from inspect_robots._html import (
 from inspect_robots._html_index import IndexEntry, render_index
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
 from inspect_robots.conformance import device_slots
-from inspect_robots.console import USAGE, OperatorConsole
+from inspect_robots.console import USAGE, USAGE_END_ONLY
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
     _ADHOC_SCORER_FALLBACK,
@@ -84,6 +84,7 @@ from inspect_robots.defaults import (
     load_defaults,
 )
 from inspect_robots.registry import registered
+from inspect_robots.session import OperatorSession
 from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
@@ -91,8 +92,6 @@ if TYPE_CHECKING:
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
     from inspect_robots.spaces import Box
 
 
@@ -694,75 +693,6 @@ def _build_guardrails(
     return ChainApprover(*parts), active, warnings
 
 
-_PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
-# "Enter for none", not "Enter to skip": `skip` is a literal verdict token one
-# prompt earlier, and typing it here would record the word, not skip anything.
-_NOTES_PROMPT = "grader notes (Enter for none): "
-_PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
-_DEFINITIVE_REASONS = frozenset({"success", "failure"})
-
-
-def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
-    """Capture or adopt the terminal operator's verdict on the record (R6).
-
-    A verdict already captured by the console is announced and preserved.
-    A terminated episode with a definitive embodiment verdict adopts and announces that
-    verdict instead of asking the operator to confirm the same outcome a second time.
-    Prompted verdicts are followed by one optional, stripped, case-preserved grader note.
-    """
-    from inspect_robots.transcript import operator_event
-
-    del scene
-    if record.operator_judgement is not None:
-        print(f"operator verdict adopted from console: {record.operator_judgement}")
-        return
-    if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
-        verdict = "y" if record.termination_reason == "success" else "n"
-        record.operator_judgement = verdict
-        record.events.append(
-            operator_event(t=len(record.steps), verdict=verdict, source="embodiment")
-        )
-        print(f"operator verdict adopted from embodiment: {record.termination_reason}")
-        return
-    if record.truncated and record.termination_reason == "max_steps":
-        print("note: this trial hit the step limit before terminating")
-    while True:
-        try:
-            answer = input(_PROMPT).strip().lower()
-        except EOFError:
-            return
-        if answer in _PROMPT_ANSWERS:
-            break
-        print(f"unrecognized answer {answer!r}; expected one of y/n/partial/skip")
-    try:
-        note = input(_NOTES_PROMPT).strip() or None
-    except EOFError:
-        note = None
-    record.operator_note = note
-    if answer != "skip":
-        record.operator_judgement = answer
-    # A skipped trial with a note still gets an event: the human said something
-    # about this trial, and an event stream that recorded the verdict but not
-    # the sentence typed in the same breath would be lying by omission. The
-    # event then carries verdict="skip" with no judgement, which is why
-    # operator_event documents "skip" as "no judgement" for its consumers.
-    if answer != "skip" or note is not None:
-        record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
-
-
-def _prompt_operator_on_operator_end(record: TrialRecord, scene: Scene) -> None:
-    """Prompt or announce only for trials the operator demonstrably ended (R6-safe).
-
-    ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
-    here can never block an unattended run — every other reason (``max_steps``
-    included) keeps R6's non-blocking behavior for registered tasks.
-    """
-    if record.termination_reason == OPERATOR_END and record.operator_judgement is None:
-        _prompt_operator(record, scene)
-    elif record.termination_reason == OPERATOR_END:
-        print(f"operator verdict adopted from console: {record.operator_judgement}")
-
-
 def _attended(args: argparse.Namespace) -> bool:
     """True when the operator can be prompted: a real TTY and no ``--no-prompt``.
 
@@ -772,37 +702,57 @@ def _attended(args: argparse.Namespace) -> bool:
     return not args.no_prompt and sys.stdin.isatty()
 
 
-def _build_operator_console(policy: object, embodiment: Embodiment) -> OperatorConsole | None:
-    """Enable attended feedback only when the policy, platform, and embodiment are safe."""
-    if not getattr(policy, "accepts_operator_messages", False):
-        return None
+def _build_operator_session(
+    policy: object, embodiment: Embodiment
+) -> tuple[OperatorSession, OperatorSession | None]:
+    """Build the prompt owner and enable its live input channel only when safe."""
+    session = OperatorSession()
+    accepts_messages = bool(getattr(policy, "accepts_operator_messages", False))
+    connect_hook = getattr(embodiment, "connect_operator_session", None)
+    if callable(connect_hook):
+        if sys.platform == "win32":
+            session.write_line(
+                _styled(
+                    "operator console unavailable: select cannot watch stdin on Windows; "
+                    "feedback typing stays off",
+                    _YELLOW,
+                )
+            )
+            return session, None
+        connect_hook(session)
+        usage = USAGE if accepts_messages else USAGE_END_ONLY
+        label = "operator console:"
+        session.write_line(f"{_styled(label, _CYAN)} {usage.removeprefix(label + ' ')}")
+        return session, session
+
+    if not accepts_messages:
+        return session, None
     if sys.platform == "win32":
-        print(
+        session.write_line(
             _styled(
                 "operator console unavailable: select cannot watch stdin on Windows; "
                 "feedback typing stays off",
                 _YELLOW,
             )
         )
-        return None
+        return session, None
 
-    hook = getattr(embodiment, "defer_operator_end", None)
-    if callable(hook):
-        hook()
+    defer_hook = getattr(embodiment, "defer_operator_end", None)
+    if callable(defer_hook):
+        defer_hook()
     elif not embodiment.info.is_simulated:
-        print(
+        session.write_line(
             _styled(
                 "operator console unavailable: this embodiment predates the operator console "
                 "and still owns the end-of-episode keypress; feedback typing stays off",
                 _YELLOW,
             )
         )
-        return None
+        return session, None
 
-    console = OperatorConsole()
     label = "operator console:"
-    print(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
-    return console
+    session.write_line(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
+    return session, session
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -1375,16 +1325,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         before_scoring = None
         operator_input = None
         if _attended(args):
+            operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
             if is_adhoc and any(s.name == "operator" for s in task.scorers):
                 # Ad-hoc operator-scored runs: every non-definitive trial is
                 # prompted, exactly as before.
-                before_scoring = _prompt_operator
+                before_scoring = operator_session.prompt_verdict
             else:
                 # Any task, registered included: a trial the operator ended by
                 # keypress owes a verdict; everything else stays non-blocking
                 # and unattended-safe (R6).
-                before_scoring = _prompt_operator_on_operator_end
-            operator_input = _build_operator_console(resolved.policy, embodiment)
+                before_scoring = operator_session.prompt_verdict_on_operator_end
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1522,11 +1472,11 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         before_scoring = None
         operator_input = None
         if _attended(args):
+            operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
             # Registered tasks only here: prompt for exactly the trials a human
             # ended by keypress (OPERATOR_END); everything else stays
             # non-blocking and unattended-safe (R6).
-            before_scoring = _prompt_operator_on_operator_end
-            operator_input = _build_operator_console(resolved.policy, embodiment)
+            before_scoring = operator_session.prompt_verdict_on_operator_end
         try:
             success, logs = eval_set(
                 tasks,
