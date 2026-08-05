@@ -109,7 +109,9 @@ Safety approvers clamp out-of-bounds and too-fast actions below you. \
 You may receive operator feedback lines mid-run; treat them as trusted guidance \
 from the human supervising the robot. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
-done; if it cannot be achieved call give_up. You have a budget of \
+done; if it cannot be achieved call give_up. Note what you are learning about \
+this rig and task as you go: done and give_up will ask what you wish you had \
+known from the start. You have a budget of \
 {budget} LLM calls for the whole trial."""
 
 _ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
@@ -130,7 +132,9 @@ in the same turn. Placed after a motion, its frames arrive with the next \
 observation, after the controller has played the motion; the narration reports \
 how much actually played. Placed alone, it looks before you decide what motion \
 to make. When the goal is achieved call done; if it cannot be achieved call \
-give_up. You have a budget of {budget} LLM calls for the whole trial."""
+give_up. Note what you are learning about this rig and task as you go: done and \
+give_up will ask what you wish you had known from the start. You have a budget \
+of {budget} LLM calls for the whole trial."""
 
 _PRE_CHECK_PROMPT_CLAUSE = (
     " A motion pre-check may reject a move with a stated reason. Adjust the target "
@@ -636,6 +640,7 @@ class LLMAgentPolicy(PolicyBase):
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
+        self._hindsight: str | None = None
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
@@ -668,6 +673,7 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        self._hindsight = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
@@ -702,7 +708,7 @@ class LLMAgentPolicy(PolicyBase):
             self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
-        """Persist wire capture and the transcript at the end of the trial."""
+        """Persist wire capture, hindsight, usage, and the transcript at trial end."""
         if isinstance(self._client, GeminiLiveClient):
             # Trial finalization must stay successful even if a half-dead Live
             # transport violates close()'s own best-effort contract.
@@ -713,6 +719,10 @@ class LLMAgentPolicy(PolicyBase):
             if capture_path is not None:
                 record.metadata["wire_capture"] = capture_path
             self._capture.warn_if_never_began()
+
+        hindsight = self._hindsight.strip() if isinstance(self._hindsight, str) else ""
+        if hindsight:
+            record.metadata["hindsight"] = hindsight
 
         messages = self.transcript()
         if not messages:
@@ -953,6 +963,8 @@ class LLMAgentPolicy(PolicyBase):
                                 chunk = result.chunk
                                 target = result.target
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                if stopped:
+                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture

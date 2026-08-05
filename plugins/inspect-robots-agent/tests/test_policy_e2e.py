@@ -410,6 +410,86 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert "data:" not in serialized
 
 
+def test_done_hindsight_lands_in_trial_metadata(tmp_path: Path) -> None:
+    hindsight = "the overhead camera swaps the apparent left and right axes"
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": hindsight})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert logs[0].samples[0].trial_metadata[0]["hindsight"] == hindsight
+
+
+def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> None:
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script, max_llm_calls=1),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    metadata = logs[0].samples[0].trial_metadata[0]
+    assert "hindsight" not in metadata
+    # Pin that the trial really ended via the forced give_up, not max_steps:
+    # a give_up termination with the whole budget consumed cannot be a real
+    # give_up because the script contains no stop response.
+    assert logs[0].samples[0].termination_reasons == ("give_up",)
+    assert metadata["llm_usage"]["llm_calls"] == 1
+
+
+def test_none_sentinel_hindsight_is_not_persisted(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": "None"})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
+
+
+def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> None:
+    hindsight = "the gripper closes along the camera's vertical axis"
+    move = _tool_response("move_by", {"deltas": {"dx": 0.01}})
+    script = _Script(
+        [
+            move,
+            _tool_response("done", {"summary": "cube reached", "hindsight": hindsight}),
+            move,
+        ]
+    )
+    task = Task(
+        name="two-trial-hindsight-reset",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=40,
+        epochs=2,
+    )
+
+    logs = ir_eval(
+        task,
+        _policy(script, max_llm_calls=2),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    first, second = logs[0].samples[0].trial_metadata
+    assert first["hindsight"] == hindsight
+    assert "hindsight" not in second
+    # Trial 2 must have ended via the forced give_up (budget consumed on
+    # replayed moves; the script's trailing response is not a stop).
+    assert logs[0].samples[0].termination_reasons == ("done", "give_up")
+    assert second["llm_usage"]["llm_calls"] == 2
+
+
 @pytest.mark.parametrize("wire", ["chat", "responses", "messages"])
 def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     wire: str, tmp_path: Path
@@ -688,6 +768,17 @@ def test_system_prompts_treat_operator_feedback_as_trusted_guidance(template: st
         "the human supervising the robot."
     )
     assert expected in template
+
+
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_announce_the_hindsight_question(template: str) -> None:
+    rendered = template.format(name="test-robot", budget=10)
+    announcement = (
+        "Note what you are learning about this rig and task as you go: done and give_up will ask "
+        "what you wish you had known from the start."
+    )
+
+    assert announcement in rendered
 
 
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:

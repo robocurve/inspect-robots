@@ -142,7 +142,16 @@ For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
 per-step speed statement, so `max_speed_frac` does not apply to displacement
 modes. `done` and `give_up` end the trial through the core's policy-stop
-channel.
+channel. Both tools ask for a required `hindsight` argument: what the agent
+knows now that it wishes it had known at the start of the episode, as
+concrete transferable rig and task facts. The system prompt announces the
+question up front so the model tracks learnings during the rollout. The
+answer persists twice deliberately (the transcript naturally carries the tool
+call as well): as `stop_hindsight` in the stop action's meta, and as
+`trial_metadata["hindsight"]` in the JSON log next to `llm_usage`. Missing
+hindsight never fails execution (the budget-exhausted forced `give_up`
+cannot answer). Harvested hindsight is written to be usable as
+`prior_learnings` input on later runs, which closes the relearning loop.
 
 When `control_hz` is `None`, the plugin uses a 10 Hz fallback to compute step
 counts and the per-call playout cap, but leaves the emitted chunk rate unset.
@@ -271,7 +280,9 @@ stored frames remain complete and unchanged.
 Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
 file to the system prompt after any embodiment notes. The file is read once
 when the policy is constructed, and its resolved path and content hash are
-recorded in the eval configuration.
+recorded in the eval configuration. The `hindsight` answers that `done` and
+`give_up` collect into `trial_metadata` are the natural source material for
+this file: harvest them across runs, distill, and feed them back here.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
