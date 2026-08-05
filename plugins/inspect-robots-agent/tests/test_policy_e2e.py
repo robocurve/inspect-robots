@@ -436,6 +436,24 @@ def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> N
 
     metadata = logs[0].samples[0].trial_metadata[0]
     assert "hindsight" not in metadata
+    # Pin that the trial really ended via the forced give_up, not max_steps:
+    # a give_up termination with the whole budget consumed cannot be a real
+    # give_up because the script contains no stop response.
+    assert logs[0].samples[0].termination_reasons == ("give_up",)
+    assert metadata["llm_usage"]["llm_calls"] == 1
+
+
+def test_none_sentinel_hindsight_is_not_persisted(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": "None"})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
 
 
 def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> None:
@@ -466,6 +484,10 @@ def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> Non
     first, second = logs[0].samples[0].trial_metadata
     assert first["hindsight"] == hindsight
     assert "hindsight" not in second
+    # Trial 2 must have ended via the forced give_up (budget consumed on
+    # replayed moves; the script's trailing response is not a stop).
+    assert logs[0].samples[0].termination_reasons == ("done", "give_up")
+    assert second["llm_usage"]["llm_calls"] == 2
 
 
 @pytest.mark.parametrize("wire", ["chat", "responses", "messages"])

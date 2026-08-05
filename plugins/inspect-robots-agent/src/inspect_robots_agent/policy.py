@@ -708,7 +708,7 @@ class LLMAgentPolicy(PolicyBase):
             self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
-        """Persist wire capture and the transcript at the end of the trial."""
+        """Persist wire capture, hindsight, usage, and the transcript at trial end."""
         if isinstance(self._client, GeminiLiveClient):
             # Trial finalization must stay successful even if a half-dead Live
             # transport violates close()'s own best-effort contract.

@@ -328,7 +328,9 @@ class Toolset:
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
         meta = {"request_stop": True, "stop_reason": name, "stop_detail": detail}
         hindsight = arguments.get("hindsight")
-        if isinstance(hindsight, str) and hindsight.strip():
+        # The schema's "say 'none'" escape hatch must not pollute harvested
+        # metadata with literal sentinels.
+        if isinstance(hindsight, str) and hindsight.strip() and hindsight.strip().lower() != "none":
             meta["stop_hindsight"] = hindsight.strip()
         action = Action(
             data=data,

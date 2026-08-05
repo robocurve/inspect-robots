@@ -146,7 +146,8 @@ channel. Both tools ask for a required `hindsight` argument: what the agent
 knows now that it wishes it had known at the start of the episode, as
 concrete transferable rig and task facts. The system prompt announces the
 question up front so the model tracks learnings during the rollout. The
-answer persists twice: as `stop_hindsight` in the stop action's meta, and as
+answer persists twice deliberately (the transcript naturally carries the tool
+call as well): as `stop_hindsight` in the stop action's meta, and as
 `trial_metadata["hindsight"]` in the JSON log next to `llm_usage`. Missing
 hindsight never fails execution (the budget-exhausted forced `give_up`
 cannot answer). Harvested hindsight is written to be usable as
