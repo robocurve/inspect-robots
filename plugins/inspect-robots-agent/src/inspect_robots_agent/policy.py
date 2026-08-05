@@ -636,6 +636,7 @@ class LLMAgentPolicy(PolicyBase):
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
+        self._hindsight: str | None = None
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
@@ -668,6 +669,7 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        self._hindsight = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
@@ -713,6 +715,10 @@ class LLMAgentPolicy(PolicyBase):
             if capture_path is not None:
                 record.metadata["wire_capture"] = capture_path
             self._capture.warn_if_never_began()
+
+        hindsight = self._hindsight.strip() if isinstance(self._hindsight, str) else ""
+        if hindsight:
+            record.metadata["hindsight"] = hindsight
 
         messages = self.transcript()
         if not messages:
@@ -953,6 +959,8 @@ class LLMAgentPolicy(PolicyBase):
                                 chunk = result.chunk
                                 target = result.target
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                if stopped:
+                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture

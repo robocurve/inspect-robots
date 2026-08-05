@@ -145,7 +145,7 @@ pytest with the existing fake-client patterns in
 
 ## Task 2: policy stash and `trial_metadata` persistence
 
-- [ ] **Step 1: failing tests.** E2E, following the
+- [x] **Step 1: failing tests.** E2E, following the
   `test_goal_runs_to_done_and_config_lands_in_log` pattern and its
   attribute-style access (`logs[0].samples[0].trial_metadata[0]`): a
   scripted run whose `done` call carries `hindsight` produces a log where
@@ -167,7 +167,7 @@ pytest with the existing fake-client patterns in
   trial 2 loops the trailing move into budget exhaustion (budget is
   checked before each call at `policy.py:809`; `_calls_used` resets per
   trial at `policy.py:694`).
-- [ ] **Step 2: implement.** At the `policy.py:955` stop-chunk site, stash
+- [x] **Step 2: implement.** At the `policy.py:955` stop-chunk site, stash
   `chunk.actions[0].meta.get("stop_hindsight")` on the policy when
   `request_stop` is set. Clear the stash early in `reset()`
   (`policy.py:669`). In `on_trial_end`, write
@@ -175,7 +175,7 @@ pytest with the existing fake-client patterns in
   `on_trial_end` returns early when there is no transcript
   (`policy.py:717-719`); the hindsight write must happen BEFORE that early
   return, or a transcript-less trial silently drops it.
-- [ ] **Step 3: gates green, commit.**
+- [x] **Step 3: gates green, commit.**
 
 ## Task 3: system prompt announcement
 
