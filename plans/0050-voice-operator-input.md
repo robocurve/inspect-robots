@@ -171,7 +171,10 @@ Python 3.10+.
      generation counter and clears the output deque (both under one lock) and drains
      the thread-safe capture queue — nothing else. The worker records the generation
      current when a segment *opens*; at close and again after transcription it discards
-     any utterance whose open-generation is stale (an utterance the operator starts
+     any utterance whose open-generation is stale, and the final stale-check plus the
+     output-deque append form **one critical section under the same lock**
+     `begin_trial()` holds for bump+clear (a lock-free check-then-append would let a
+     pre-reset utterance slip in between the bump and the append) (an utterance the operator starts
      before reset — or whose transcription finishes after it, seconds on CPU with
      `small` — must die, not become the new trial's first message; a stale
      open-generation also makes the worker self-clear its open utterance and reset the
@@ -228,6 +231,8 @@ requirement).
 - [ ] `rollout.py`: when appending messages, compute `source = poll.sources[i] if i <
   len(poll.sources) else "console"`; pass it to the event and include it in the store
   dict (`{"t": t, "text": text, "source": source}`).
+- [ ] `types.py` (~line 35): the `extra["operator_messages"]` contract docstring gains
+  the `source` key.
 - [ ] `eval.py` (~line 470): the persisted-messages comprehension rebuilds dicts with
   hardcoded keys — carry provenance through:
   `{"t": event.t, "text": event.data["text"], "source": event.data.get("source",
@@ -329,7 +334,9 @@ requirement).
 - [ ] Tests with fake capture + fake transcriber: utterances flow to `poll()`; silence
   sends nothing; `begin_trial()` clears queued **and in-flight** utterances (an
   utterance whose segment *opened* before the generation bump is discarded, both when
-  it closes after the bump and when only its transcription finishes after); worker
+  it closes after the bump and when only its transcription finishes after — and the
+  stale-check + append critical section is structural, e.g. the accept helper takes
+  the shared lock and a test asserts check-and-append happen while it is held); worker
   error surfaces on next poll; `close()` idempotent and joins the thread; factory type
   validation (str and int `device`) and unknown-key `TypeError`.
 
