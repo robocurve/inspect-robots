@@ -56,7 +56,10 @@ pytest with the existing fake-client patterns in
     `uv run --no-sync ruff format --check plugins/inspect-robots-agent`.
   - `uv run mypy --config-file plugins/inspect-robots-agent/pyproject.toml plugins/inspect-robots-agent/src`
   - `uv run --no-sync pytest plugins/inspect-robots-agent/tests -q` with the
-    plugin's coverage flags (100% line coverage is the plugin bar).
+    CI coverage flags **including `--cov-fail-under=0`** (plugin coverage is
+    report-only per `.github/workflows/ci.yml:325-331` — there is no 100%
+    plugin gate, and omitting the flag would wrongly inherit the root
+    `fail_under = 100`, which is scoped to `source=["inspect_robots"]`).
 - No changes outside `plugins/inspect-robots-agent/` except
   `CHANGELOG.md` and this plan file. In particular the core CLI parser
   (`src/inspect_robots/defaults.py::_parse_value`) is deliberately untouched:
@@ -69,7 +72,8 @@ pytest with the existing fake-client patterns in
 
 ## Task 1: Constructor normalization + resolution
 
-**Files:** `policy.py`, `tests/test_policy_e2e.py`
+**Files:** `policy.py`, `tests/test_policy_e2e.py`,
+`tests/test_gemini_live.py`
 
 - [ ] Tests first, in `test_policy_e2e.py` (extend the existing
   `test_effort_defaults_low_and_is_tunable` cluster at ~:2473, renaming it to
@@ -87,6 +91,17 @@ pytest with the existing fake-client patterns in
   - `wire="gemini-live"` with `effort=None` → `ConfigError` (today `None`
     slips through because the guard tests `effort is not None`); with
     `effort="low"` → still `ConfigError`; with effort unset → constructs fine.
+- [ ] Rewrite the two existing tests this contract change breaks, both in
+  `tests/test_gemini_live.py`:
+  - `test_per_wire_default_resolution_and_explicit_none` (~:766): its
+    gemini-live `effort=None` construction (~:773-781) now raises — that
+    branch becomes an explicit `ConfigError` assertion; its
+    `config.effort == "low"` assertions for chat/responses/anthropic
+    (~:808-810) become `is None`. Fold whatever it still covers into the
+    passthrough matrix rather than duplicating it.
+  - `test_existing_invalid_effort_and_horizon_messages_are_preserved`
+    (~:834): pins the old error string ("or None to omit the field",
+    ~:843-846); update the expected wording to the new message.
 - [ ] Implement in `policy.py`:
   - Normalize before validation:
     `effort_level = "none" if effort is None else effort` for non-`_Unset`
@@ -100,6 +115,12 @@ pytest with the existing fake-client patterns in
     describe passthrough, and the `AgentPolicyConfig.effort` field: default
     `None`, docstring "resolved effort level; `None` means the field is
     omitted and the provider default applies".
+  - The chat-wire 4xx hint at `_llm.py:292-296` ("switch to /v1/responses …
+    or -P effort=none") stays **verbatim**: its trigger requires the server
+    text to name both `reasoning_effort` and `/v1/responses` (the GPT-5.x
+    tools rejection), and under the new semantics `-P effort=none` sends the
+    literal `"none"` that endpoint asks for — the hint becomes *more*
+    correct, not stale. Do not "fix" it; `test_llm.py:528-539` pins it.
 - [ ] Gates pass; commit.
 
 ## Task 2: Messages wire — `"none"` → thinking disabled
@@ -117,12 +138,20 @@ pytest with the existing fake-client patterns in
   - The effort-4xx guidance test (~:750) updates: the hint must name
     `minimal` as the OpenAI-only value and must no longer claim `none` is
     unsupported (it now maps to thinking-disabled client-side).
-- [ ] Implement in `_anthropic.py::complete`: branch on
+  - `speed="fast"` combined with `reasoning_effort="none"` → body carries
+    both `speed: "fast"` and `thinking: {"type": "disabled"}`. Decided
+    stance: **allow and pass through** — the plugin's philosophy after this
+    plan is passthrough, client-side combo guards contradict it, and if the
+    server rejects the pairing the existing `_rejection_guidance` speed
+    branch (~:215) already explains fast-mode constraints. The test pins the
+    passthrough so the stance is explicit.
+- [ ] Implement in `AnthropicClient.complete`: branch on
   `reasoning_effort == "none"` when building `body` — set
   `thinking: {"type": "disabled"}`, skip `output_config`; otherwise keep the
-  current adaptive + optional `output_config` behavior. Update the module
-  docstring (it currently documents always-adaptive) and the `_guided_fix`
-  effort wording at ~:226.
+  current adaptive + optional `output_config` behavior. Rewrite the inline
+  always-adaptive rationale comment at ~:120-123 (the module docstring does
+  not mention thinking and needs no change) and the `_rejection_guidance`
+  effort wording at ~:226-230.
 - [ ] Gates pass; commit.
 
 ## Task 3: Docs, changelog, version
@@ -138,8 +167,12 @@ pytest with the existing fake-client patterns in
   unset now inherits Inkling's own default (high per Tinker's cookbook) — the
   latency warning moves here. Update the GPT-5.x section (~:444-459): the
   `-P effort=none` advice there becomes literally correct; drop the quoting
-  caveat. Check the Anthropic section (~:426) still reads correctly now that
-  `none` is legal on `wire=messages`.
+  caveat. **Rewrite ~:420-421** ("This wire always requests adaptive
+  thinking… Use `-P wire=chat`" for pre-4.6 models): after Task 2 the wire
+  requests adaptive only when effort is not `"none"`, and `-P effort=none`
+  makes pre-4.6 models usable on `wire=messages`. Check the xhigh/max
+  sentence (~:426) still reads correctly now that `none` is legal on
+  `wire=messages`.
 - [ ] `pyproject.toml`: version 0.22.0 → 0.23.0.
 - [ ] `CHANGELOG.md`: **Changed** entry under Unreleased, "Agent plugin
   (0.23.0)", covering: unset effort passes through to the provider default
@@ -152,8 +185,14 @@ pytest with the existing fake-client patterns in
 ## Out of scope
 
 - Core CLI parser changes (`_parse_value`) — the coercion stays; the policy
-  absorbs it.
-- capx plugin parity — follow-up issue, filed at PR-open time.
+  absorbs it. Its docstring example (`src/inspect_robots/defaults.py:50-56`,
+  "sends the wire string none instead of omitting the parameter") goes stale
+  for this flag; recorded as a core follow-up on #317, not edited here.
+- Core log-view effort extractor (`src/inspect_robots/_html.py:626-636`)
+  reads `reasoning_effort`/`reasoning.effort`/`output_config.effort` only, so
+  an `effort=none` messages run renders as effort "n/a" in the wire view;
+  same core follow-up on #317.
+- capx plugin parity — follow-up issue #319, filed.
 - Any run-header/console printing of resolved effort — the value already
   lands in `EvalSpec.policy_config` in the eval log; surfacing it in the CLI
   banner is core-repo work and a separate discussion.
