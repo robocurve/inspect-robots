@@ -83,6 +83,7 @@ class Defaults:
     sim_embodiment: str | None = None
     sim_embodiment_source: str | None = None
     scorer: str | None = None
+    grader: str | None = None
     max_steps: int | None = None
     store_frames: bool = False
     rerun: bool = False
@@ -195,6 +196,7 @@ def _read_config(path: Path) -> Defaults:
         sim_embodiment=sim_embodiment,
         sim_embodiment_source=source if sim_embodiment else None,
         scorer=parser.get("defaults", "scorer", fallback=None),
+        grader=parser.get("defaults", "grader", fallback=None),
         max_steps=max_steps,
         store_frames=store_frames,
         rerun=rerun,
@@ -215,6 +217,7 @@ _CONFIG_KEYS = (
     "embodiment",
     "sim_embodiment",
     "scorer",
+    "grader",
     "max_steps",
     "store_frames",
     "rerun",

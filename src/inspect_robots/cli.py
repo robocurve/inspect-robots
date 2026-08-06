@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from inspect_robots.approver import Approver
     from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
+    from inspect_robots.grader import Grader
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box
@@ -131,6 +132,7 @@ _KIND_BY_PLURAL = {
     "policies": "policy",
     "embodiments": "embodiment",
     "scorers": "scorer",
+    "graders": "grader",
     "sinks": "sink",
     "operator_inputs": "operator_input",
 }
@@ -178,7 +180,14 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-prompt",
         action="store_true",
-        help="never ask the terminal operator for a success verdict or grader notes",
+        help="suppress the operator grader: never ask the terminal operator "
+        "for a success verdict or grader notes",
+    )
+    parser.add_argument(
+        "--grader",
+        help="registered grader that captures the post-trial judgement, or "
+        "'none' to disable grading (default: config, then operator when the "
+        "run is attended)",
     )
     parser.add_argument("--policy", help="registered policy name (default: user config)")
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
@@ -823,6 +832,53 @@ def _close_voice_input(voice_input: OperatorInput | None) -> None:
         close_hook()
 
 
+def _select_grader_name(args: argparse.Namespace, defaults: Defaults) -> str | None:
+    """Resolve the grader name: flag > config > attended default (plan 0049).
+
+    An explicit ``--grader`` is honored verbatim (``none`` disables grading;
+    the contradictory pair with ``--no-prompt`` is rejected in
+    ``_check_shared_run_conflicts``). A config-sourced ``operator`` needs a
+    run that can actually be attended: under ``--no-prompt`` or without a TTY
+    it downgrades to no grader with a stderr note, so a one-time config edit
+    can never block a later cron/CI run at a prompt.
+    """
+    if args.grader is not None:
+        return None if args.grader == "none" else args.grader
+    name: str | None = defaults.grader
+    if name is None:
+        return "operator" if _attended(args) else None
+    if name == "none":
+        return None
+    if name == "operator" and not _attended(args):
+        print(
+            "note: config grader 'operator' needs an attended terminal; "
+            "grading is off for this run",
+            file=sys.stderr,
+        )
+        return None
+    return name
+
+
+def _build_grader(
+    args: argparse.Namespace, defaults: Defaults, session: OperatorSession | None
+) -> Grader | None:
+    """Construct the run's grader, sharing the operator session when one exists.
+
+    Attendedness only picks the *default* name; an explicitly selected grader
+    is built even without a session (its own fallback behavior then applies,
+    e.g. the operator grader constructs a lazy session that degrades on dead
+    stdin).
+    """
+    name = _select_grader_name(args, defaults)
+    if name is None:
+        return None
+    grader = cast("Grader", _resolve_or_exit("grader", name))
+    connect = getattr(grader, "connect_session", None)
+    if session is not None and callable(connect):
+        connect(session)
+    return grader
+
+
 def _step_limit_count(log: EvalLog) -> int:
     """Count recorded trials whose termination reason is the step horizon."""
     return sum(
@@ -1218,6 +1274,10 @@ def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--max-action-delta tunes the guardrails that --disable-guardrails turns off — drop one"
         )
+    if args.no_prompt and args.grader == "operator":
+        raise SystemExit(
+            "--no-prompt suppresses the operator grader that --grader operator asks for — drop one"
+        )
     if args.max_action_delta is not None and not (
         math.isfinite(args.max_action_delta) and args.max_action_delta > 0
     ):
@@ -1391,19 +1451,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             args, embodiment.info.action_space, resolved.embodiment
         )
 
-        before_scoring = None
         operator_input = None
+        operator_session = None
         if _attended(args):
             operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
-            if is_adhoc and any(s.name == "operator" for s in task.scorers):
-                # Ad-hoc operator-scored runs: every non-definitive trial is
-                # prompted, exactly as before.
-                before_scoring = operator_session.prompt_verdict
-            else:
-                # Any task, registered included: a trial the operator ended by
-                # keypress owes a verdict; everything else stays non-blocking
-                # and unattended-safe (R6).
-                before_scoring = operator_session.prompt_verdict_on_operator_end
         voice_input = _build_voice_input(args, operator_input)
         if voice_input is not None:
             _start_voice_input(
@@ -1411,6 +1462,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 cast(OperatorSession, operator_input),
                 resolved.policy,
             )
+        # Attendedness picks the default grader, never gates grader wiring
+        # (plan 0049): an explicit --grader is built session-less and relies
+        # on its own fallback.
+        grader = _build_grader(args, defaults, operator_session)
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1449,7 +1504,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 operator_input=operator_input,
-                before_scoring=before_scoring,
+                grader=grader,
             )
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
@@ -1549,14 +1604,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
-        before_scoring = None
         operator_input = None
+        operator_session = None
         if _attended(args):
             operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
-            # Registered tasks only here: prompt for exactly the trials a human
-            # ended by keypress (OPERATOR_END); everything else stays
-            # non-blocking and unattended-safe (R6).
-            before_scoring = operator_session.prompt_verdict_on_operator_end
         voice_input = _build_voice_input(args, operator_input)
         if voice_input is not None:
             _start_voice_input(
@@ -1564,6 +1615,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 cast(OperatorSession, operator_input),
                 resolved.policy,
             )
+        # Attendedness picks the default grader, never gates grader wiring
+        # (plan 0049): an explicit --grader is built session-less and relies
+        # on its own fallback.
+        grader = _build_grader(args, defaults, operator_session)
         try:
             success, logs = eval_set(
                 tasks,
@@ -1578,7 +1633,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 ),
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
-                before_scoring=before_scoring,
+                grader=grader,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log

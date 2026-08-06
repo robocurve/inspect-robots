@@ -27,6 +27,7 @@ from inspect_robots.embodiment import (
     EmbodimentInfo,
 )
 from inspect_robots.eval import eval, eval_set
+from inspect_robots.grader import Grader, operator_grader
 from inspect_robots.log import (
     EvalLog,
     EvalResults,
@@ -38,6 +39,7 @@ from inspect_robots.log import (
 from inspect_robots.policy import Policy, PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.registry import (
     embodiment,
+    grader,
     operator_input,
     policy,
     registered,
@@ -91,6 +93,7 @@ __all__ = [
     "EvalResults",
     "EvalSpec",
     "EvalStats",
+    "Grader",
     "Observation",
     "ObservationSpace",
     "OperatorConsole",
@@ -117,7 +120,9 @@ __all__ = [
     "episode_length",
     "eval",
     "eval_set",
+    "grader",
     "min_distance_to_goal",
+    "operator_grader",
     "operator_input",
     "operator_scorer",
     "policy",

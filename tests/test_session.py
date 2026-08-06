@@ -558,7 +558,7 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof() -> None:
     assert event.data == {"verdict": "n", "source": "prompt", "note": None}
 
 
-def test_prompt_on_operator_end_prompts_and_records_note() -> None:
+def test_prompt_verdict_prompts_for_operator_ended_trial() -> None:
     session, _prompts, _output = _scripted_prompt_session(["partial", "left gripper slipped"])
     record = TrialRecord(
         scene_id="s0",
@@ -568,43 +568,24 @@ def test_prompt_on_operator_end_prompts_and_records_note() -> None:
         termination_reason="operator_end",
     )
 
-    session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
     assert record.operator_judgement == "partial"
     assert record.operator_note == "left gripper slipped"
 
 
-def test_prompt_on_operator_end_adopts_pre_set_console_verdict() -> None:
-    session = _RecordingLinesSession(lambda _prompt: pytest.fail("pre-set verdict must not prompt"))
+def test_prompt_verdict_notes_early_end_reason_before_asking() -> None:
+    session, prompts, output = _scripted_prompt_session(["y", ""])
     record = TrialRecord(
         scene_id="s0",
         epoch=0,
         seed=0,
-        terminated=True,
-        termination_reason="operator_end",
-        operator_judgement="partial",
-        operator_note="left gripper slipped",
+        truncated=True,
+        termination_reason="give_up",
     )
 
-    session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
-    assert record.operator_judgement == "partial"
-    assert record.operator_note == "left gripper slipped"
-    assert session.lines == ["operator verdict adopted from console: partial"]
-
-
-def test_prompt_on_operator_end_ignores_other_reasons() -> None:
-    session = OperatorSession(
-        input_fn=lambda _prompt: pytest.fail("must not prompt: not operator_end")
-    )
-    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
-        record = TrialRecord(
-            scene_id="s0",
-            epoch=0,
-            seed=0,
-            terminated=True,
-            truncated=truncated,
-            termination_reason=reason,
-        )
-        session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
-        assert record.operator_judgement is None
+    assert "note: this trial ended early ('give_up')\n" in output
+    assert prompts == [_PROMPT, _NOTES_PROMPT]
+    assert record.operator_judgement == "y"

@@ -33,6 +33,7 @@ from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneR
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
 from inspect_robots.session import OperatorSession
+from inspect_robots.types import ActionChunk, Observation
 
 
 class _ConsolePolicy(ScriptedPolicy):
@@ -215,7 +216,6 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondScene(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -1011,7 +1011,6 @@ def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondTask(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -3842,9 +3841,10 @@ def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
         del args
         order.append("eval")
         operator_input = kwargs.get("operator_input")
-        before_scoring = kwargs.get("before_scoring")
+        grader = kwargs.get("grader")
         assert operator_input is connected[0]
-        assert getattr(before_scoring, "__self__", None) is operator_input
+        assert getattr(grader, "name", None) == "operator"
+        assert getattr(grader, "_session", None) is operator_input
         return [_step_limit_log(reasons=("success",))]
 
     monkeypatch.setattr(inspect_robots, "eval", fake_eval)
@@ -4260,7 +4260,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_stays_silent_unless_operator_ends_episode(
+def test_registered_task_attended_adopts_definitive_verdict_without_prompting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -4280,7 +4280,7 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
         "builtins.input",
-        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
+        lambda _prompt: pytest.fail("a definitive embodiment verdict must be adopted, not asked"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -4301,8 +4301,10 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
         # Don't leak the ad-hoc registration into later tests' registry views.
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
-    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
-    capsys.readouterr()
+    # Plan 0049: attended registered tasks are graded by default; the scripted
+    # policy self-confirms success, so the verdict is adopted, never prompted.
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+    assert "operator verdict adopted from embodiment: success" in capsys.readouterr().out
 
 
 def test_registered_task_prompts_when_operator_ends_episode(
@@ -5100,7 +5102,7 @@ def test_embodiment_base_default_matches_an_absent_hook() -> None:
     from inspect_robots.embodiment import EmbodimentBase
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Action, Observation, StepResult
+    from inspect_robots.types import Action, StepResult
 
     class _BaseEmbodiment(EmbodimentBase):
         def __init__(self) -> None:
@@ -5747,3 +5749,305 @@ def test_doctor_closes_the_embodiment_it_constructs() -> None:
     embodiment_decorator("closable-doctor-cubepick")(_ClosableCubePick)
     assert main(["doctor", "--embodiment", "closable-doctor-cubepick"]) == 0
     assert closed == ["closed"]
+
+
+# Plan 0049 / issue #320: a trial the policy ends via done()/give_up() must be
+# graded on every attended path, whatever the scorer.
+
+
+class _DoneStopperPolicy(ScriptedPolicy):
+    """Request a policy stop ('done') on the first inference, like agent done()."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        """Stamp the agent-style stop request onto the scripted action."""
+        chunk = super().act(observation)
+        return ActionChunk(
+            actions=[
+                dataclasses.replace(a, meta={**a.meta, "request_stop": True, "stop_reason": "done"})
+                for a in chunk.actions
+            ]
+        )
+
+
+def _register_stopper(name: str) -> None:
+    reg.policy(name)(_DoneStopperPolicy)
+
+
+def _single_scene_task_factory() -> Any:
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import episode_length
+    from inspect_robots.task import Task
+
+    return Task(
+        name="stopper-task-for-test",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=episode_length(),
+        max_steps=40,
+    )
+
+
+def test_agent_stop_prompts_on_adhoc_run_with_non_operator_scorer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-adhoc"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", "stopped itself cleanly"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "note: this trial ended early ('done')" in capsys.readouterr().out
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.samples[0].operator_notes == ("stopped itself cleanly",)
+
+
+def test_agent_stop_prompts_on_registered_task_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-task"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["n", "gave up on contact"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("n",)
+    assert log.samples[0].operator_notes == ("gave up on contact",)
+    capsys.readouterr()
+
+
+def test_agent_stop_prompts_on_eval_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-eval-set"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["partial", "half the reach"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("partial",)
+    assert log.samples[0].operator_notes == ("half the reach",)
+    capsys.readouterr()
+
+
+def test_grader_none_suppresses_prompt_on_attended_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("--grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--grader",
+                "none",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_prompt_flag", "no_tty"])
+def test_config_operator_grader_downgrades_when_run_cannot_be_attended(
+    suppress: str,
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = operator\n")
+    policy_name = f"done-stopper-downgrade-{suppress}"
+    _register_stopper(policy_name)
+    extra: list[str] = []
+    if suppress == "no_prompt_flag":
+        _tty_stdin(monkeypatch)
+        extra = ["--no-prompt"]
+    else:
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("downgraded grader must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+                *extra,
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "grading is off for this run" in capsys.readouterr().err
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_config_grader_none_disables_grading(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = none\n")
+    policy_name = "done-stopper-config-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("config grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_no_prompt_with_explicit_operator_grader_is_a_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--no-prompt",
+                "--grader",
+                "operator",
+            ]
+        )
+
+
+def test_explicit_custom_config_grader_is_honored_unattended(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    graded: list[str] = []
+
+    class _MarkerGrader:
+        name = "marker"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            graded.append(record.scene_id)
+            record.operator_judgement = "y"
+
+    reg.grader("marker-for-test")(_MarkerGrader)
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = marker-for-test\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--max-steps",
+                "3",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["grader"].pop("marker-for-test", None)
+    assert rc == 0
+    assert graded == ["scene-0"]
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+
+
+def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list", "graders"]) == 0
+    assert "operator" in capsys.readouterr().out

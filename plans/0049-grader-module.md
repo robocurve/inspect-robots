@@ -150,7 +150,7 @@ class Grader(Protocol):
 
 ## Tasks
 
-- [ ] **grader.py + registry kind.** New module with the `Grader` protocol and
+- [x] **grader.py + registry kind.** New module with the `Grader` protocol and
   `operator_grader()`; `registry.py` gains kind `"grader"`, group
   `inspect_robots.graders`, and the `grader()` decorator; `_builtins.py`
   registers `operator`. Unit tests: protocol conformance, registry round-trip,
@@ -158,20 +158,20 @@ class Grader(Protocol):
   `input_fn`), `connect_session` rebinds the session, and the lazy
   default-session branch (no session, first `grade()`) is exercised
   explicitly.
-- [ ] **eval.py: `grader=` kwarg.** Accept object or registry name on `eval()`
+- [x] **eval.py: `grader=` kwarg.** Accept object or registry name on `eval()`
   and `eval_set()`; adapt to `before_scoring`; `ConfigError` when both are
   passed or when the resolved object fails `isinstance(g, Grader)`.
   Docstrings updated (state the once-per-scored-trial contract and the
   mutual exclusion). Tests: grader called exactly once per scored trial, never
   for errored trials, string resolution works, both-passed raises,
   non-conforming resolved object raises.
-- [ ] **session.py: early-end note + delete `prompt_verdict_on_operator_end`.**
+- [x] **session.py: early-end note + delete `prompt_verdict_on_operator_end`.**
   Add the decision-7 neutral note line to `prompt_verdict`; remove the narrow
   variant and its tests (`prompt_verdict_on_operator_end` appears on 3 lines
   in `tests/test_session.py`, 6 repo-wide); port
   any still-relevant assertions onto `prompt_verdict`. The deletion leaves
   `OPERATOR_END` imported but unused in `session.py` — drop the import.
-- [ ] **cli.py + defaults.py wiring.** Shared `--grader` arg; `[defaults]
+- [x] **cli.py + defaults.py wiring.** Shared `--grader` arg; `[defaults]
   grader` config key (`defaults.py`: `Defaults` field, parser, `_CONFIG_KEYS`);
   resolution per decisions 2–4; both `run` paths and `eval-set` build the
   grader and pass `grader=` to `eval()`/`eval_set()`. When the run is
@@ -186,7 +186,7 @@ class Grader(Protocol):
   `_KIND_BY_PLURAL` so `inspect-robots list` shows them. Help strings and any
   user-facing wording follow the repo writing-style rule (no em dashes, no
   slogans).
-- [ ] **Regression tests for issue #320 (the acceptance bar).** Attended
+- [x] **Regression tests for issue #320 (the acceptance bar).** Attended
   (injected `input_fn`/TTY seams), a policy that emits
   `action.meta["request_stop"]` (stop reason `done`): the operator is prompted
   and judgement + note land in the record/log on (a) ad-hoc run with a
@@ -196,7 +196,7 @@ class Grader(Protocol):
   downgrades a config-sourced `operator` grader (no prompt, stderr note), and
   a config-sourced `operator` with non-TTY stdin also downgrades (the
   decision-4 cron/CI case).
-- [ ] **Public API + docs.** Export `Grader`, `operator_grader`, and the
+- [x] **Public API + docs.** Export `Grader`, `operator_grader`, and the
   `grader` decorator via `__init__.py` `__all__`. Import ordering matters for
   the shadowing: `from inspect_robots.grader import ...` must run before
   `from inspect_robots.registry import ... grader ...` so the submodule
@@ -207,7 +207,7 @@ class Grader(Protocol):
   `CLAUDE.md` if it names the affected flows, and the docs pages that describe
   operator grading / CLI flags (`docs/`). Regenerate nothing by hand that
   `scripts/gen_api_docs.py` owns.
-- [ ] **Gates.** `ruff check .`, `ruff format --check .`, `mypy` (strict, src +
+- [x] **Gates.** `ruff check .`, `ruff format --check .`, `mypy` (strict, src +
   tests), `pytest --cov` at 100% (`--cov-fail-under=100`), core-only import
   unaffected (no new deps).
 
