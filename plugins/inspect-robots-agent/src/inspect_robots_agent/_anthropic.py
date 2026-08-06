@@ -117,10 +117,12 @@ class AnthropicClient:
         body: dict[str, Any] = {
             "model": self._provider.model,
             "max_tokens": self._max_output_tokens,
-            # Explicit, not omitted: omitting only means adaptive on Opus 5.
-            # On Opus 4.8 and 4.7 it means thinking off, which would silently
-            # halve this wire's target set and make the replay cache dead code.
-            "thinking": {"type": "adaptive"},
+            # The Messages API spells the true minimum as thinking-disabled.
+            # Otherwise request adaptive explicitly: omitting thinking means
+            # thinking off on Opus 4.8 and 4.7, not the provider default.
+            "thinking": (
+                {"type": "disabled"} if reasoning_effort == "none" else {"type": "adaptive"}
+            ),
             "messages": translated,
         }
         if system is not None:
@@ -135,7 +137,7 @@ class AnthropicClient:
             body["tools"] = _translate_tools(tools)
         if temperature is not None:
             body["temperature"] = temperature
-        if reasoning_effort is not None:
+        if reasoning_effort is not None and reasoning_effort != "none":
             body["output_config"] = {"effort": reasoning_effort}
         if self._speed is not None:
             body["speed"] = self._speed
@@ -225,8 +227,8 @@ class AnthropicClient:
             )
         if "effort" in lowered:
             return (
-                "\nfix: the Messages API accepts -P effort= low, medium, high, "
-                "xhigh, or max; none and minimal are OpenAI-only values"
+                "\nfix: the Messages API accepts -P effort=none (thinking disabled) or "
+                "low, medium, high, xhigh, and max; minimal is an OpenAI-only value"
             )
         return ""
 
