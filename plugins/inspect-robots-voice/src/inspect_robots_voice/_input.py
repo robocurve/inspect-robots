@@ -86,7 +86,8 @@ class VoiceInput:
         self._output: deque[str] = deque()
         self._lock = threading.Lock()
         self._generation = 0
-        self._worker_error: BaseException | None = None
+        self._last_generation = 0
+        self._worker_error: Exception | None = None
         self._stop = threading.Event()
         self._capture: _Capture | None = None
         self._transcriber: _Transcriber | None = None
@@ -157,16 +158,24 @@ class VoiceInput:
                 except queue.Empty:
                     continue
                 self._process_block(block)
-        except BaseException as exc:
+        except Exception as exc:
+            # Exception, not BaseException: the session's detach path catches only
+            # Exception, and anything wider must not escape into the rollout loop.
             with self._lock:
                 self._worker_error = exc
 
     def _process_block(self, block: npt.ArrayLike) -> None:
         with self._lock:
             generation = self._generation
-        if self._segmenter.is_open and self._open_generation != generation:
+        if generation != self._last_generation:
+            # Any generation change wipes segmenter state wholesale: not just an open
+            # segment, but pre-roll and sub-min-open candidates too, so up to ~400 ms
+            # of pre-reset audio can never be prepended to the new trial's first
+            # utterance. The worker owns the segmenter, so the reset happens here,
+            # never in begin_trial().
             self._segmenter.reset()
             self._open_generation = None
+            self._last_generation = generation
 
         was_open = self._segmenter.is_open
         utterance = self._segmenter.push(block)

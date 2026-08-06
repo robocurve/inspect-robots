@@ -215,6 +215,25 @@ def test_stale_open_utterance_is_worker_reset_before_next_push() -> None:
     assert voice._open_generation is None
 
 
+def test_closed_segmenter_preroll_is_worker_reset_on_generation_change() -> None:
+    """Pre-roll and sub-min-open candidates must not survive a trial boundary.
+
+    The gate is closed the whole time, so only a wholesale reset on generation change
+    keeps up to ~400 ms of pre-reset audio out of the new trial's first utterance.
+    """
+    segmenter = _ScriptedSegmenter([(False, None), (False, None), (False, None)])
+    voice = _voice(segmenter, _Transcriber("unused"))
+    voice._process_block(_BLOCK)
+    assert segmenter.reset_calls == 0
+    voice.begin_trial()
+
+    voice._process_block(_BLOCK)
+    assert segmenter.reset_calls == 1
+
+    voice._process_block(_BLOCK)
+    assert segmenter.reset_calls == 1
+
+
 class _CheckingDeque(deque[str]):
     def __init__(
         self,

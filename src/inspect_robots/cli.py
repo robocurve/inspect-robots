@@ -629,7 +629,9 @@ def _resolve_or_exit(
         return resolve(kind, name, **kwargs)
     except KeyError as exc:
         message = str(exc.args[0])
-        if kind == "operator_input":
+        # Only the registry's own unknown-name error earns the install hint; a
+        # KeyError escaping a factory must not masquerade as a missing plugin.
+        if kind == "operator_input" and message.startswith("no operator_input named"):
             message = f"{message}; fix: pip install inspect-robots-voice"
         raise SystemExit(message) from exc
     except ConfigError as exc:

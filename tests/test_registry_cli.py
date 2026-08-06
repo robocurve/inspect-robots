@@ -3439,6 +3439,10 @@ def test_missing_voice_plugin_exits_with_install_hint_only_on_key_error(
 ) -> None:
     policy_name = "voice-missing-plugin-policy"
     monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    # Force entry-point loading NOW: resolve() lazily loads entry points, and in a
+    # workspace dev env that would re-register the real voice plugin after the
+    # delitem below, opening an actual microphone instead of exiting.
+    reg.registered("operator_input")
     monkeypatch.delitem(reg._FACTORIES["operator_input"], "voice", raising=False)
     _tty_stdin(monkeypatch)
 

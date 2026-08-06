@@ -1,4 +1,4 @@
-# inspect-robots-voice:
+# inspect-robots-voice
 
 Local spoken operator feedback for attended
 [Inspect Robots](https://github.com/robocurve/inspect-robots) evaluations. The plugin keeps the
@@ -8,7 +8,7 @@ through the same operator-message channel as typed console feedback.
 Voice input is feedback-only. Spoken words cannot end a trial or record a verdict. Silence and
 likely Whisper hallucinations produce no message.
 
-## Install:
+## Install
 
 ```bash
 pip install inspect-robots-voice
@@ -16,7 +16,7 @@ pip install inspect-robots-voice
 
 PortAudio must be available for `sounddevice` on the machine connected to the microphone.
 
-## Run:
+## Run
 
 ```bash
 inspect-robots run --task my-task --policy agent --embodiment my-robot --voice
@@ -38,7 +38,7 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
     --voice -V model=medium -V device="USB Microphone" -V compute=int8
 ```
 
-## Filtering:
+## Filtering
 
 Audio is segmented locally with an adaptive energy gate. Each candidate then passes
 faster-whisper's bundled VAD plus duration, confidence, no-speech, and known silence-hallucination

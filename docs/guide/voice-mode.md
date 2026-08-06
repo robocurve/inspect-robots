@@ -1,4 +1,4 @@
-# Voice operator input:
+# Voice operator input
 
 Voice mode keeps a microphone open during an attended evaluation and sends accepted speech
 through the same operator-message path as typed console feedback. Each accepted utterance is
@@ -8,7 +8,7 @@ the policy's next inference when the policy accepts operator messages.
 Voice mode is available for both `run` and `eval-set`. It requires an interactive terminal and
 does not work with `--no-prompt`.
 
-## Install:
+## Install
 
 Install the first-party voice plugin on the machine connected to the microphone:
 
@@ -19,7 +19,7 @@ pip install inspect-robots-voice
 The plugin uses `sounddevice`, so PortAudio must also be available on that machine. Named
 faster-whisper models may be downloaded when voice input starts for the first time.
 
-## Run:
+## Run
 
 Pass `--voice` to enable the microphone for the whole evaluation:
 
@@ -33,7 +33,7 @@ exits before the first trial when the model cannot load or the requested microph
 opened. A failure after startup disables only voice input. Typed console input continues to
 work.
 
-## Configure:
+## Configure
 
 Repeat `-V key=value` to configure the voice plugin. Values use the same scalar coercion as
 `-P` and `-E`.
@@ -57,7 +57,7 @@ whose name contains that value, ignoring case. Missing or ambiguous names fail w
 available input-device table. `-V` without `--voice` is an error, which helps catch flags copied
 onto a non-voice invocation.
 
-## Silence filtering:
+## Silence filtering
 
 The plugin does not send every audio block to the policy. A local adaptive energy gate opens
 after at least 100 ms above the learned noise threshold, prepends 300 ms of audio, and closes
@@ -69,7 +69,7 @@ shorter than 0.4 seconds, blank text, segments with no-speech probability above 
 with average log probability below -1.0, and exact silence hallucinations such as `Thank you.`,
 `you`, and `Thanks for watching!`. Rejected candidates disappear silently.
 
-## Feedback-only behavior:
+## Feedback-only behavior
 
 Spoken input can add context, but it cannot end an episode or record a verdict. Episode end,
 `/y`, `/n`, `/p`, and post-trial scoring remain keyboard actions. This limits a
