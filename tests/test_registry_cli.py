@@ -3445,6 +3445,7 @@ def test_missing_voice_plugin_exits_with_install_hint_only_on_key_error(
     reg.registered("operator_input")
     monkeypatch.delitem(reg._FACTORIES["operator_input"], "voice", raising=False)
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
 
     with pytest.raises(SystemExit) as excinfo:
         main(_voice_cli_argv("run", tmp_path, policy=policy_name))
@@ -3462,6 +3463,7 @@ def test_bad_voice_argument_is_reported_against_v_not_as_missing_plugin(
     monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
     monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: object())
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
 
     with pytest.raises(SystemExit) as excinfo:
         main(
@@ -3541,6 +3543,7 @@ def test_voice_lifecycle_and_coerced_args_for_both_eval_commands(
     monkeypatch.setattr(inspect_robots, "eval", fake_eval)
     monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
     argv = _voice_cli_argv(
         command,
         tmp_path,
@@ -3603,6 +3606,7 @@ def test_hookless_voice_input_still_runs(
         lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
     )
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
 
     assert main(_voice_cli_argv("run", tmp_path, policy=policy_name)) == 0
     assert capsys.readouterr().out.count("operator console:") == 1
@@ -3656,6 +3660,7 @@ def test_voice_startup_error_exits_with_original_message_and_closes(
     voice = FailingVoiceInput()
     monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: voice)
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
 
     with pytest.raises(SystemExit) as excinfo:
         main(_voice_cli_argv("run", tmp_path, policy=policy_name))
@@ -3692,6 +3697,7 @@ def test_end_only_voice_mode_prints_log_only_notice(
         lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
     )
     _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
     argv = _voice_cli_argv("run", tmp_path, policy="scripted")
     embodiment_index = argv.index("cubepick")
     argv[embodiment_index] = embodiment_name
