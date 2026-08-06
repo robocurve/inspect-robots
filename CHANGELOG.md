@@ -196,6 +196,12 @@ All notable changes to this project are documented here. The format is based on
   `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
   four render sites now show `n/a` for a null metric (#253).
 
+- **`--fail-on-error` now rejects out-of-range values instead of silently
+  reinterpreting them.** A negative reached `errors >= fail_on_error` and halted
+  on the first error exactly like `1`, and a NaN failed every comparison so the
+  run never halted at all. Both are now a guided CLI error; `0` remains the
+  documented "never halt" value. Follow-up to #254.
+
 ### Changed
 
 - Camera frames in HTML reports now render as captioned responsive grid rows,
