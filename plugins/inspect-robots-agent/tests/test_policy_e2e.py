@@ -2510,7 +2510,8 @@ def test_effort_passthrough_matrix(tmp_path: Path) -> None:
         _policy(_Script([]), effort="turbo")
     assert str(invalid.value) == (
         "effort must be one of ['high', 'low', 'max', 'medium', 'minimal', 'none', "
-        "'xhigh'], got 'turbo'.\nfix: omit -P effort= to use the provider default"
+        "'xhigh'], or a number in [0.0, 1.0) on servers that take a fractional "
+        "effort, got 'turbo'.\nfix: omit -P effort= to use the provider default"
     )
 
     live_kwargs: dict[str, Any] = {
@@ -2526,6 +2527,27 @@ def test_effort_passthrough_matrix(tmp_path: Path) -> None:
         LLMAgentPolicy(**live_kwargs, effort="low")
     live = LLMAgentPolicy(**live_kwargs)
     assert live.config.effort is None
+
+
+def test_fractional_effort_is_passed_through_and_bounded(tmp_path: Path) -> None:
+    # Tinker's OpenAI-compatible endpoint reads effort as a fraction, so a number
+    # reaches the wire as a number instead of being snapped to a named level.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    policy = _policy(script, effort=0.7)
+    logs = ir_eval(_task(), policy, CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == 0.7
+    assert logs[0].eval.policy_config["effort"] == 0.7
+
+    # `-P effort=0` parses to int 0, which is zero effort, not an omitted field.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort=0), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == 0.0
+
+    # 1.0 is past the top of the range every probed server accepts, and a bool is
+    # a mistyped flag rather than a fraction (`-P effort=false` parses to False).
+    for rejected in (1.0, -0.1, float("nan"), float("inf"), True, False, "0.7"):
+        with pytest.raises(ConfigError, match=r"a number in \[0\.0, 1\.0\)"):
+            _policy(_Script([]), effort=rejected)
 
 
 def test_registry_resolves_agent_policy() -> None:

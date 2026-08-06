@@ -77,6 +77,13 @@ _GEMINI_LIVE_BASE = (
 # "minimal", and its endpoint requires streaming for the cap xhigh/max
 # need; Tinker accepts xhigh/max without streaming. Rejections get guided errors.
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+# Some servers also take a continuous effort alongside the named levels: Tinker's
+# OpenAI-compatible endpoint accepts a fraction (probed 2026-08-06 — 0.0 through
+# 0.99 return 200, 0.995 and above 422). A fraction is passed through untouched
+# rather than quantized into a level, so a sweep keeps the resolution the server
+# offers. The range is half-open by construction: 1.0 means "past max effort",
+# and servers that cap lower reject it with a guided 4xx.
+_EFFORT_FRACTION_LIMIT = 1.0
 _WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live"})
 _WIRE_ALIASES = {"anthropic": "messages"}
 _AGENT_NATIVE_WIRES = frozenset({"chat", "messages"})
@@ -145,6 +152,33 @@ _PRE_CHECK_PROMPT_CLAUSE = (
 _ON_DEMAND_NUDGE = (
     "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
 )
+
+
+def _validated_effort(effort: object) -> str | float:
+    """Return the wire value for an accepted effort, else raise ``ConfigError``.
+
+    Accepts a named level verbatim, or a number in ``[0.0, 1.0)`` normalized to
+    ``float`` for the servers that read effort as a fraction. ``bool`` is not a
+    number here: ``-P effort=false`` parses to ``False``, which would otherwise
+    silently mean zero effort instead of failing as the typo it is.
+    """
+    if isinstance(effort, str):
+        if effort in _EFFORT_LEVELS:
+            return effort
+    # The range check rejects nan and inf too: every nan comparison is False, and
+    # inf fails the upper bound.
+    elif (
+        isinstance(effort, int | float)
+        and not isinstance(effort, bool)
+        and 0.0 <= effort < _EFFORT_FRACTION_LIMIT
+    ):
+        return float(effort)
+    raise ConfigError(
+        f"effort must be one of {sorted(_EFFORT_LEVELS)}, or a number in "
+        f"[0.0, {_EFFORT_FRACTION_LIMIT}) on servers that take a fractional "
+        f"effort, got {effort!r}.\n"
+        "fix: omit -P effort= to use the provider default"
+    )
 
 
 def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -235,8 +269,9 @@ class AgentPolicyConfig(PolicyConfig):
     max_output_tokens: int | None = None
     max_llm_calls: int = 100
     #: Resolved effort level; ``None`` means the field is omitted and the
-    #: provider default applies.
-    effort: str | None = None
+    #: provider default applies. A number is a fractional effort, recorded as
+    #: sent rather than snapped to a level.
+    effort: str | float | None = None
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
@@ -287,7 +322,7 @@ class LLMAgentPolicy(PolicyBase):
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
-        effort: str | None | _Unset = _UNSET,
+        effort: str | float | None | _Unset = _UNSET,
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
@@ -376,15 +411,9 @@ class LLMAgentPolicy(PolicyBase):
             wire = _WIRE_ALIASES.get(wire, wire)
             if wire not in _WIRE_FORMATS:
                 raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
-        resolved_effort: str | None = None
+        resolved_effort: str | float | None = None
         if not isinstance(effort, _Unset):
-            effort_level = "none" if effort is None else effort
-            if effort_level not in _EFFORT_LEVELS:
-                raise ConfigError(
-                    f"effort must be one of {sorted(_EFFORT_LEVELS)}, got {effort!r}.\n"
-                    "fix: omit -P effort= to use the provider default"
-                )
-            resolved_effort = effort_level
+            resolved_effort = _validated_effort("none" if effort is None else effort)
         if wire == "gemini-live" and effort is not _UNSET:
             raise ConfigError(
                 "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
