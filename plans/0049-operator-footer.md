@@ -157,7 +157,15 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    ask).
 5. **Rendering model: the input row is the footer-window constant; the status row is
    optional.** The input row is drawn (empty `> `) at footer `begin_trial()` and
-   exists for the whole footer window; the status row exists only while
+   exists for the whole footer window. Before drawing it, footer `begin_trial()`
+   closes any plain-open status line using the existing plain semantics (write
+   `"\n"`, reset `_status_open` — session.py:79-83): a prior plain trial's ticker
+   line survives the zero-byte plain `end_trial()` (and a plugin can call
+   `status()` during `embodiment.reset()`, which runs before `begin_trial()`), and
+   drawing the footer onto it would append `> ` to the stale line AND start the
+   renderer in the two-row branch with no footer status row above — desyncing
+   every relative repaint into scrollback. This closing write is on the footer
+   path only, so plain byte-identity is untouched. The status row exists only while
    `_status_open` — and on most attended runs it NEVER opens (no core code calls
    `session.status()`; only plugins like the yam ticker do), so the one-row state
    is the default, not an edge case. The cursor lives at the end of the input line.
@@ -270,7 +278,10 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   dispatching `readable`/`read` closures satisfy the console's EOF contract (`""`
   only on real EOF); footer `begin_trial()` discards stale fd bytes with no echo and
   clears editor + queue. Renderer, exact byte sequences in BOTH states of the
-  decision-5 machine: input row drawn at footer `begin_trial()`; one-row
+  decision-5 machine: input row drawn at footer `begin_trial()`; footer
+  `begin_trial()` on a session with a plain-open status line emits the closing
+  `"\n"` then a clean `> ` row, and the next `status(line)` takes the one-row
+  branch (no `ESC[A` into scrollback); one-row
   `write_line` (no cursor-up — prior scrollback untouched); first `status(line)`
   creates the status row from the one-row state; two-row status update; two-row
   `write_line` insert (input row cleared first); input echo in both states,
