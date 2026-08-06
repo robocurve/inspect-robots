@@ -2470,31 +2470,62 @@ def test_on_demand_prompt_and_no_tool_nudge_describe_chaining() -> None:
     )
 
 
-def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
+def test_effort_passthrough_matrix(tmp_path: Path) -> None:
     script = _Script([_tool_response("done", {"summary": "ok"})])
     logs = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
-    # Robot control is latency-sensitive: low effort by default (guardrails
-    # sit below the model, so this trades thinking time, not safety).
-    assert script.requests[0]["reasoning_effort"] == "low"
-    assert logs[0].eval.policy_config["effort"] == "low"
-
-    script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort="high"), CubePickEmbodiment(), log_dir=str(tmp_path))
-    assert script.requests[0]["reasoning_effort"] == "high"
-
-    script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort=None), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert "reasoning_effort" not in script.requests[0]
+    assert logs[0].eval.policy_config["effort"] is None
 
-    # "none" is a wire value, distinct from None (omit the field): GPT-5.x
-    # rejects function tools on chat completions unless reasoning_effort is
-    # explicitly "none", and omitting the field 400s the same way.
     script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort=None),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
     assert script.requests[0]["reasoning_effort"] == "none"
+    assert logs[0].eval.policy_config["effort"] == "none"
 
-    with pytest.raises(ConfigError, match=r"or None to omit the field, got 'turbo'"):
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort="none"),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert script.requests[0]["reasoning_effort"] == "none"
+    assert logs[0].eval.policy_config["effort"] == "none"
+
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort="high"),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert script.requests[0]["reasoning_effort"] == "high"
+    assert logs[0].eval.policy_config["effort"] == "high"
+
+    with pytest.raises(ConfigError) as invalid:
         _policy(_Script([]), effort="turbo")
+    assert str(invalid.value) == (
+        "effort must be one of ['high', 'low', 'max', 'medium', 'minimal', 'none', "
+        "'xhigh'], got 'turbo'.\nfix: omit -P effort= to use the provider default"
+    )
+
+    live_kwargs: dict[str, Any] = {
+        "model": "m",
+        "base_url": "ws://stub.test",
+        "wire": "gemini-live",
+        "wire_capture": False,
+        "env": {},
+    }
+    with pytest.raises(ConfigError, match="effort is not supported"):
+        LLMAgentPolicy(**live_kwargs, effort=None)
+    with pytest.raises(ConfigError, match="effort is not supported"):
+        LLMAgentPolicy(**live_kwargs, effort="low")
+    live = LLMAgentPolicy(**live_kwargs)
+    assert live.config.effort is None
 
 
 def test_registry_resolves_agent_policy() -> None:

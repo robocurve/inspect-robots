@@ -233,7 +233,9 @@ class AgentPolicyConfig(PolicyConfig):
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
     max_llm_calls: int = 100
-    effort: str | None = "low"
+    #: Resolved effort level; ``None`` means the field is omitted and the
+    #: provider default applies.
+    effort: str | None = None
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
@@ -373,15 +375,16 @@ class LLMAgentPolicy(PolicyBase):
             wire = _WIRE_ALIASES.get(wire, wire)
             if wire not in _WIRE_FORMATS:
                 raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
-        if effort is not _UNSET and effort is not None and effort not in _EFFORT_LEVELS:
-            raise ConfigError(
-                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
-                f"the field, got {effort!r}"
-            )
-        resolved_effort: str | None = None if wire == "gemini-live" else "low"
+        resolved_effort: str | None = None
         if not isinstance(effort, _Unset):
-            resolved_effort = effort
-        if wire == "gemini-live" and effort is not _UNSET and effort is not None:
+            effort_level = "none" if effort is None else effort
+            if effort_level not in _EFFORT_LEVELS:
+                raise ConfigError(
+                    f"effort must be one of {sorted(_EFFORT_LEVELS)}, got {effort!r}.\n"
+                    "fix: omit -P effort= to use the provider default"
+                )
+            resolved_effort = effort_level
+        if wire == "gemini-live" and effort is not _UNSET:
             raise ConfigError(
                 "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
             )
@@ -601,9 +604,8 @@ class LLMAgentPolicy(PolicyBase):
             self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
-        # Robot control is latency-sensitive: default to low reasoning effort
-        # (the arm stands still while the model thinks; safety guardrails sit
-        # below the model, so effort trades thinking time, not safety).
+        # Preserve the operator's requested effort exactly; when it is unset,
+        # omit the field so the provider's own default applies.
         self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
