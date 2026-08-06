@@ -380,8 +380,9 @@ With effort unset, Inkling inherits Tinker's own default, documented as high in
 the thinking-effort cookbook. That can increase control latency because the arm
 stands still while the model thinks; pass `-P effort=low` for latency-sensitive
 runs or to pin the plugin's pre-0.23 behavior. The endpoint accepts `low`,
-`medium`, `high`, `xhigh`, and `max`; `effort=none` is translated to disabled
-thinking, while `minimal` remains unsupported.
+`medium`, `high`, `xhigh`, and `max`; `minimal` is unsupported. `effort=none`
+is sent as disabled thinking, which Tinker's endpoint has not been observed to
+accept — expect a wire rejection until confirmed otherwise.
 
 Tinker currently reports `input_tokens: 0` because input usage appears in its
 cache-creation and cache-read counters. EvalLog input-token statistics and the

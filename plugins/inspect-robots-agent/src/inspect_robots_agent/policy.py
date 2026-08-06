@@ -72,8 +72,9 @@ _GEMINI_LIVE_BASE = (
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
-# The Messages wire reuses the set as output_config.effort. Anthropic rejects
-# "none"/"minimal", and its endpoint requires streaming for the cap xhigh/max
+# The Messages wire reuses the set: "none" becomes thinking-disabled client-side
+# and the rest go out as output_config.effort, of which Anthropic rejects
+# "minimal", and its endpoint requires streaming for the cap xhigh/max
 # need; Tinker accepts xhigh/max without streaming. Rejections get guided errors.
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 _WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live"})
