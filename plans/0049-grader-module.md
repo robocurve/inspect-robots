@@ -122,8 +122,11 @@ class Grader(Protocol):
 6. **Behavior change, accepted:** attended registered-task and eval-set runs
    start prompting after each non-definitive trial (previously prompt-free
    unless the operator pressed the end key). The operator is standing at the
-   rig in an attended run; `--grader none` (or `--no-prompt`) restores the old
-   behavior. With `epochs > 1` this means one prompt per epoch trial — the
+   rig in an attended run. `--no-prompt` restores a prompt-free run;
+   `--grader none` goes further than the old behavior — it also drops the
+   pre-existing OPERATOR_END prompt, leaving only verdicts typed inline at
+   the end keypress (captured in `rollout.py`). With `epochs > 1` the new
+   default means one prompt per epoch trial — the
    operator-facing cost of the change, consistent with existing ad-hoc
    behavior. Unattended behavior is unchanged everywhere.
 7. **Early-end context line:** `prompt_verdict` gains one note (mirroring the
@@ -164,14 +167,19 @@ class Grader(Protocol):
   non-conforming resolved object raises.
 - [ ] **session.py: early-end note + delete `prompt_verdict_on_operator_end`.**
   Add the decision-7 neutral note line to `prompt_verdict`; remove the narrow
-  variant and its tests (`tests/test_session.py` has ~14 references); port
+  variant and its tests (`prompt_verdict_on_operator_end` appears on 3 lines
+  in `tests/test_session.py`, 6 repo-wide); port
   any still-relevant assertions onto `prompt_verdict`. The deletion leaves
   `OPERATOR_END` imported but unused in `session.py` — drop the import.
 - [ ] **cli.py + defaults.py wiring.** Shared `--grader` arg; `[defaults]
   grader` config key (`defaults.py`: `Defaults` field, parser, `_CONFIG_KEYS`);
   resolution per decisions 2–4; both `run` paths and `eval-set` build the
-  grader (connecting the `OperatorSession` via `connect_session`) and pass
-  `grader=` to `eval()`/`eval_set()`; delete the scorer-sniffing gate and both
+  grader and pass `grader=` to `eval()`/`eval_set()`. When the run is
+  attended, an `OperatorSession` exists and is connected via
+  `connect_session`; on the explicit `--grader operator` non-TTY path no
+  session is constructed and the grader's lazy default-session branch is the
+  intended mechanism — do **not** gate grader wiring on `_attended`
+  (attendedness only picks the default name); delete the scorer-sniffing gate and both
   `before_scoring =` wirings; `--no-prompt --grader operator` exits with an
   error in `_check_shared_run_conflicts`, and `--no-prompt` downgrades a
   config-sourced `operator` to `none` with a stderr note. Add `"graders"` to
