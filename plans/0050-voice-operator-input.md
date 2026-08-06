@@ -63,6 +63,16 @@ Python 3.10+.
   next inference; a poll exception disables the channel for the trial with a warning.
 - `transcript.py:52`: `operator_message_event(t, text)` → `Event(kind="operator_message",
   data={"text": text})`.
+- `eval.py:470-476`: the persisted `SceneResult.operator_messages` are **rebuilt** from
+  transcript events with hardcoded keys `{"t": event.t, "text": event.data["text"]}` —
+  provenance must be threaded here too or it never reaches the `EvalLog`.
+- `cli.py:128`: `inspect-robots list` renders kinds from the **hardcoded**
+  `_KIND_BY_PLURAL` dict (and the subparser uses `choices=sorted(_KIND_BY_PLURAL)`), not
+  from `registry.KINDS`.
+- `cli.py` `-P`/`-E`/`-T` parsing (`_parse_kvs` → `defaults._parse_value`) **coerces**
+  values: `4` → int, `true`/`false` → bool, `none` → None; factories receive a scalar
+  union, not raw strings. `_resolve_or_exit` (~line 600) wraps `resolve()`'s bare
+  `KeyError`/`ConfigError`/`TypeError` into clean CLI errors.
 - `cli.py:696`: `_attended()` = TTY and not `--no-prompt`. `cli.py:705`
   `_build_operator_session(policy, embodiment)` returns `(session, operator_input | None)`
   — `None` on win32, on policies without `accepts_operator_messages` (when the embodiment
@@ -103,8 +113,10 @@ Python 3.10+.
    is installed, and third parties can ship alternative sources (push-to-talk pedal, a
    phone app) with zero core changes. The CLI resolves `resolve("operator_input",
    "voice", **voice_args)`.
-5. **CLI surface: `--voice` plus repeatable `-V k=v`,** mirroring `-P`/`-E`/`-T`. Keys
-   are passed through to the factory as strings; the factory coerces and **rejects
+5. **CLI surface: `--voice` plus repeatable `-V k=v`,** mirroring `-P`/`-E`/`-T` and
+   parsed by the same `_parse_kvs` machinery — so values arrive **coerced** (`device=4`
+   is an `int`, not `"4"`). The factory accepts the parser's scalar union
+   (str | int | float | bool | None), validates each supported key's type, and **rejects
    unknown keys loudly** (typo protection). Supported keys: `model` (Whisper size or
    path, default `small`), `device` (sounddevice index or name substring, default system
    default), `language` (default `en`), `compute` (CTranslate2 compute type, default
@@ -114,10 +126,17 @@ Python 3.10+.
    (`_build_operator_session` returned a non-`None` operator input — this simultaneously
    covers win32, `accepts_operator_messages=False` policies on hook-less embodiments, and
    legacy hardware embodiments, reusing the session's own notices); requires the plugin
-   installed (error carries `pip install inspect-robots-voice`). `-V` without `--voice`
-   is an error. A voice *startup* failure (no mic, unknown device, model download
-   failure) aborts before any trial, printing the sounddevice device list on device
-   errors.
+   installed (unknown-name `KeyError` from `resolve()` — and only that error — gets the
+   `pip install inspect-robots-voice` hint via `_resolve_or_exit`-style handling, so a
+   `ValueError` from a bad `-V` key is never misreported as "plugin not installed").
+   `-V` without `--voice` is an error. A voice *startup* failure (no mic, unknown
+   device, model download failure) aborts before any trial, printing the sounddevice
+   device list on device errors. **End-only mode is permitted and lossy on purpose:**
+   an embodiment with `connect_operator_session` plus a policy without
+   `accepts_operator_messages` yields a live channel in end-only mode; there, voice
+   utterances are echoed and saved to the log but the policy never sees them (exactly
+   like typed notes in that mode), and the CLI prints one notice line saying so, so the
+   operator does not believe the model hears them.
 7. **Plugin internals: three seams and an orchestrator, all injectable.**
    - `_segmenter.py` — pure function of arrays, no I/O, the unit with real logic.
      Adaptive RMS energy gate: utterance opens when short-window energy exceeds
@@ -136,13 +155,23 @@ Python 3.10+.
      segmenter, closed utterances through the transcriber, accepted text into a
      thread-safe output deque; `poll()` drains non-blocking and returns
      `ConsolePoll(messages=..., sources=("voice", ...))` with `end=None`;
-     `begin_trial()` clears queued utterances (pre-trial chatter never leaks in, same
-     semantics as the console); `start()` loads the model, opens the stream, and returns
-     a human-readable "listening on <device> (model=<m>)" line for the CLI to print;
-     `close()` is idempotent, stops thread and stream, never raises.
+     `begin_trial()` guarantees pre-trial chatter never leaks in **including in-flight
+     work**: a monotonically increasing generation counter (guarded by the same lock as
+     the output deque) is bumped by `begin_trial()`, which also clears the output deque,
+     the capture queue, and the segmenter's open utterance; the worker stamps each
+     utterance with the generation current *when its segment closed* and discards
+     results whose generation is stale by the time transcription finishes (transcription
+     of `small` on CPU takes seconds — an utterance spoken before reset but transcribed
+     after must die, not become the new trial's first message); `start()` loads the
+     model, opens the stream, and returns a human-readable "listening on <device>
+     (model=<m>)" line for the CLI to print; `close()` is idempotent, stops thread and
+     stream, never raises.
    - Worker exceptions are captured and re-raised from the **next `poll()`** — that is
      precisely the path the session already handles (decision 1), so a dead voice
-     pipeline degrades to one warning line and a detached source.
+     pipeline degrades to one warning line and a detached source. Detachment is
+     **permanent for the run** (unlike rollout's per-trial `console_ok` reset) and does
+     **not** stop the capture/worker threads — only the CLI's `finally` `close()` does;
+     the session never re-attaches and never closes sources it did not create.
    - Backpressure: the capture queue is bounded (~30 s of audio); when full the oldest
      audio is dropped and a `warnings.warn` fires once per run. The control loop never
      waits on ASR (same contract as `RerunSink`: drop under pressure, never delay
@@ -183,9 +212,13 @@ requirement).
 - [ ] `rollout.py`: when appending messages, compute `source = poll.sources[i] if i <
   len(poll.sources) else "console"`; pass it to the event and include it in the store
   dict (`{"t": t, "text": text, "source": source}`).
+- [ ] `eval.py` (~line 470): the persisted-messages comprehension rebuilds dicts with
+  hardcoded keys — carry provenance through:
+  `{"t": event.t, "text": event.data["text"], "source": event.data.get("source",
+  "console")}`. Without this the tag never reaches the `EvalLog`.
 - [ ] Tests: event carries source; default stays `"console"`; rollout round-trip with a
-  fake `OperatorInput` returning `sources`; `EvalLog` write/read preserves the key;
-  old-log read (no `source`) still works.
+  fake `OperatorInput` returning `sources`; `EvalLog` write/read preserves the key
+  **through `eval()`** (not just the event); old-log read (no `source`) still works.
 
 ### Task 2: `OperatorSession.attach_input` (core)
 
@@ -206,8 +239,9 @@ requirement).
   operator_inputs"` to `_GROUPS`, and an `operator_input()` decorator; module docstring
   group list updated.
 - [ ] `__init__.py` `__all__` + `tests/test_api_snapshot.py`: export `operator_input`.
-- [ ] Confirm `inspect-robots list` renders the new kind (it iterates `KINDS`
-  generically; adjust the test fixture list if it enumerates kinds).
+- [ ] `cli.py`: add `"operator_inputs": "operator_input"` to `_KIND_BY_PLURAL` (the
+  `list` command and its `choices=` are driven by this hardcoded dict, not by
+  `registry.KINDS`); test that `inspect-robots list operator_inputs` renders.
 
 ### Task 4: CLI `--voice` / `-V` (core)
 
@@ -216,14 +250,20 @@ requirement).
 - [ ] Guard + build helper (shared by `run`/`eval-set`): error paths (each a
   `SystemExit` with a one-line reason) — `-V` without `--voice`; `--voice` without
   attended mode; `--voice` when the operator input channel is `None`; `--voice` when
-  `resolve("operator_input", "voice", ...)` raises unknown-name (message includes
-  `pip install inspect-robots-voice`).
-- [ ] Wiring: parse `-V` with the existing k=v parser; `resolve(...)` the factory;
-  `start()` before `eval()` and print the returned listening line via
-  `session.write_line`; `session.attach_input(voice, label="voice")`; `close()` in the
-  existing `finally`. Startup exceptions abort the run with the message as-is.
-- [ ] Tests: full guard matrix; lifecycle (start printed, attach called, close called on
-  success and on eval failure) with a fake registered operator input; `-V` parsing.
+  `resolve("operator_input", "voice", ...)` raises `KeyError` (unknown name) — reuse or
+  mirror `_resolve_or_exit`, attaching the `pip install inspect-robots-voice` hint on
+  the `KeyError` path only, so a factory `ValueError` from a bad `-V` key surfaces
+  as-is.
+- [ ] Wiring: parse `-V` with the existing `_parse_kvs` (values arrive as the coerced
+  scalar union — decision 5); `resolve(...)` the factory; `start()` before `eval()` and
+  print the returned listening line via `session.write_line`;
+  `session.attach_input(voice, label="voice")`; in end-only mode also print the
+  voice-notes-log-only notice (decision 6); `close()` in the existing `finally`.
+  Startup exceptions abort the run with the message as-is.
+- [ ] Tests: full guard matrix (incl. bad `-V` key not misreported as missing plugin);
+  lifecycle (start printed, attach called, close called on success and on eval failure)
+  with a fake registered operator input; `-V` parsing incl. coerced values; end-only
+  notice.
 
 ### Task 5: plugin package `plugins/inspect-robots-voice/` (scaffolding + segmenter)
 
@@ -232,7 +272,8 @@ requirement).
   entry point `[project.entry-points."inspect_robots.operator_inputs"] voice =
   "inspect_robots_voice:voice_input"`; mypy/ruff config mirroring the agent plugin;
   README (writing-style rules apply).
-- [ ] Add to the uv workspace; `uv lock`.
+- [ ] `uv lock` (the workspace members glob `plugins/*` picks the package up
+  automatically).
 - [ ] `_segmenter.py`: `EnergyGate` per decision 7 (constructor takes sample rate,
   open ratio, hangover, pre-roll, min-open, max-utterance, EMA alpha; `push(block) ->
   ndarray | None`).
@@ -260,17 +301,21 @@ requirement).
   (returns `ConsolePoll` with `sources`), `begin_trial()`, `start()` (loads model, opens
   stream, returns the listening line), `close()` (idempotent), worker-error capture
   re-raised on next `poll()`.
-- [ ] `__init__.py`: `voice_input(**kwargs)` factory — string coercion, unknown-key
-  rejection, docstring documenting the `-V` keys.
+- [ ] `__init__.py`: `voice_input(**kwargs)` factory — accepts the CLI's coerced scalar
+  union per key (decision 5), validates types, unknown-key rejection, docstring
+  documenting the `-V` keys.
 - [ ] Tests with fake capture + fake transcriber: utterances flow to `poll()`; silence
-  sends nothing; `begin_trial()` clears; worker error surfaces on next poll; `close()`
-  idempotent and joins the thread; factory coercion and unknown-key error.
+  sends nothing; `begin_trial()` clears queued **and in-flight** utterances (a
+  transcription finishing after the generation bump is discarded); worker error
+  surfaces on next poll; `close()` idempotent and joins the thread; factory type
+  validation (str and int `device`) and unknown-key error.
 
 ### Task 8: CI + release plumbing
 
-- [ ] `ci.yml`: `test-plugin-voice` job cloned from the xpolicylab pattern (ubuntu,
-  py3.11, `uv sync --locked --all-packages --extra dev`, ruff/format/mypy/pytest scoped
-  to the plugin); add it to `ci-ok.needs`.
+- [ ] `ci.yml`: `plugin-voice` job (naming matches the existing `plugin-*` jobs) cloned
+  from the xpolicylab pattern (ubuntu, py3.11, `uv sync --locked --all-packages --extra
+  dev`, ruff/format/mypy/pytest scoped to the plugin); add it to **both** needs lists —
+  `ci-ok` (line ~407) and `alert-red-main` (line ~420).
 - [ ] `release.yml`: `publish-voice` job cloned from the existing plugin publish jobs
   (`skip-existing: true`). Note in the PR body that the PyPI trusted-publisher
   environment must be created by the repo owner before the first publish takes effect.
