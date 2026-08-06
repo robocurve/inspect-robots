@@ -627,6 +627,8 @@ class RerunSink:
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Initialize recording, disabling this noncritical sink after startup failure."""
+        if self._worker is not None and self._worker.is_alive():
+            self._shutdown()
         self._blueprint_prefix = None
         self._blueprint_warned = False
         rr = self._ensure_rerun()
