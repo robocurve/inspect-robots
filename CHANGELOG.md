@@ -179,6 +179,12 @@ All notable changes to this project are documented here. The format is based on
   "Function call is missing a thought_signature", erroring the trial (#229,
   #230). Non-Gemini requests are unchanged.
 
+
+- **`inspect-robots view --serve --port N` no longer crashes with an uncaught
+  `OverflowError` when `N` is outside 0-65535.** The port is range-checked
+  alongside the existing `--port requires --serve` guard; an in-range but
+  unavailable port keeps its current `OSError` handling (#249).
+
 - **`fail_on_error` as a proportion no longer halts on the first error.** The
   ratio was computed against the trials completed so far, so the first errored
   trial was always 1/1 = 100% and tripped any threshold below 1, making

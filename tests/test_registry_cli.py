@@ -2019,6 +2019,21 @@ def test_view_serve_options_require_serve(
         main(["view", str(logs), flag, value])
 
 
+@pytest.mark.parametrize("port", ["-1", "65536", "99999"])
+def test_view_serve_rejects_out_of_range_port(port: str, tmp_path: Path) -> None:
+    """An out-of-range --port must exit cleanly, not raise OverflowError (#249)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["view", str(logs), "--serve", "--port", port])
+
+    # Pin the whole message: the flag states its own range instead of letting
+    # socket's "bind(): port must be 0-65535" surface as a traceback.
+    assert str(excinfo.value) == f"--port must be between 0 and 65535, got {port}"
+
+
 def test_view_serve_requires_logs_directory(tmp_path: Path) -> None:
     path = _write_log(_step_limit_log(), tmp_path, "run.json")
 
