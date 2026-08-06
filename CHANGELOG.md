@@ -9,10 +9,59 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.22.0):** `done` and `give_up` now ask for a required
+  `hindsight` argument: what the agent wishes it had known at the start of
+  the episode, as concrete transferable rig and task facts. The system
+  prompt announces the question up front; the answer persists as
+  `stop_hindsight` action meta and as `trial_metadata["hindsight"]` in the
+  JSON log, written to be usable as `prior_learnings` input on later runs.
+  Missing hindsight never fails execution (the budget-exhausted forced
+  `give_up` cannot answer)
+  ([plan 0047](plans/0047-stop-tool-hindsight.md), #305).
+
+- Public `OperatorSession` now owns attended-run operator input, verdict
+  prompts, readiness gates, status rendering, and scrollback output. Embodiments
+  can accept it through the optional `connect_operator_session(session)` hook
+  and stand down their own terminal I/O for that run
+  ([plan 0048](plans/0048-operator-session.md), #308).
+
+- CLI `run` and `eval-set` now take per-user advisory claims for declared
+  device slots before hardware construction, reject concurrent evals aimed at
+  the same rig, and release claims during embodiment teardown
+  ([plan 0045](plans/0045-hardware-claim-guard.md), #281).
+
+- `RerunSink` gains `spawn_port`, alongside the `rerun_port` config key and
+  `--rerun-port`, giving each rig its own live viewer on multi-rig hosts
+  ([plan 0044](plans/0044-rerun-viewer-port.md), #280).
+
+- `INSPECT_ROBOTS_CONFIG` and the per-subcommand `--config` flag now select the
+  config file, enabling per-rig configs on multi-rig hosts. The setup wizard
+  writes the selected file ([plan 0042](plans/0042-config-file-selection.md),
+  #274).
+
+- **Agent plugin (0.21.0):** `thinkingmachines/*` models with
+  `$TINKER_API_KEY` now resolve directly to Tinker's Messages endpoint with
+  `wire=messages` inferred. `wire=anthropic` remains a permanent alias for
+  `wire=messages` (the recorded `policy_config` canonicalizes the alias to
+  `messages`); construction guards now diagnose explicit wire conflicts,
+  Messages endpoint routing mistakes, and possible silent tool drops on an
+  explicit Chat Completions endpoint (plan 0044, #278).
+
+- `FrameStore` now persists each post-action observation once and exposes it
+  through `StepRecord.result_image_refs`. Stored records strip camera arrays
+  from both pre-action and post-action observations, and the terminal visual
+  state is recoverable for offline scoring.
+
 - The Rerun sink now sends a per-trial blueprint that groups labeled action
   dimensions by arm, overlays aligned measured state, and lays out cameras,
   transcript, events, and reward alongside the joint plots
   ([plan 0041](plans/0041-rerun-arm-blueprint.md), #265).
+
+- **Approver interventions in observations:** safety approver rewrites (such as
+  clamping or delta-limiting) since the previous decision are now windowed into
+  `observation.extra["approvals"]`. `LLMAgentPolicy` renders them as aggregated prompt
+  lines (e.g. `approver: 3 step(s) modified (clamped ×3).`), enabling LLM/VLA models
+  to recognize safety interventions and adapt targets (#187, #217).
 
 - **Agent plugin (0.20.0):** `-P wire=gemini-live` now serves
   `google/gemini-robotics-er-2-streaming-preview` through Google's stateful
@@ -72,6 +121,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Verdict and grader-notes prompts moved from CLI internals to
+  `OperatorSession`; their behavior and transcript events are unchanged
+  ([plan 0048](plans/0048-operator-session.md), #308).
+
+- **Agent plugin:** with both `$TINKER_API_KEY` and `$OPENROUTER_API_KEY` set,
+  an unset wire for `thinkingmachines/*` now prefers direct Tinker routing on
+  `wire=messages` over OpenRouter on `wire=chat`. An explicit conflicting wire
+  now requires dropping `-P wire=` or deliberately selecting a gateway with
+  `-P base_url=...` and `-P api_key_env=NAME` (plan 0044, #278).
+
 - The `llm/latest` Rerun pane now shows only the step's assistant message(s);
   the full conversation remains in the `llm` TextLog stream
   ([plan 0037](plans/0037-rerun-latest-assistant-only.md), #243).
@@ -89,6 +148,17 @@ All notable changes to this project are documented here. The format is based on
   unaffected.
 
 ### Fixed
+
+- `inspect-robots setup` now treats a by-id camera name as ambiguous whenever
+  another physical camera can claim the same udev identity, including
+  same-model cameras with missing serials. It lists and stores port-stable
+  by-path names instead and refuses carried or manually entered ambiguous
+  by-id paths ([plan 0046](plans/0046-ambiguous-byid-fallback.md), #299).
+
+- The CAN pinning suggestion no longer degrades to a bare warning when adapter
+  serials are shared or missing. It emits port-pinned `KERNELS` rules instead
+  when the adapters sit on distinct USB ports
+  ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
 
 - `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
   and unplug-identifies cameras as physical USB devices. A camera whose color
@@ -109,9 +179,22 @@ All notable changes to this project are documented here. The format is based on
   "Function call is missing a thought_signature", erroring the trial (#229,
   #230). Non-Gemini requests are unchanged.
 
+- **`fail_on_error` as a proportion no longer halts on the first error.** The
+  ratio was computed against the trials completed so far, so the first errored
+  trial was always 1/1 = 100% and tripped any threshold below 1, making
+  `0<x<1` behave identically to `True`. The denominator is now the planned
+  trial count (#254).
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
+
+- **`inspect`/`view` no longer crash on a log's own sanitized non-finite
+  metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
+  stays RFC 8259 valid, but the CLI and HTML renderers formatted every metric
+  with `.4g`, which raises on `None`. A log the sink itself wrote could crash
+  `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
+  four render sites now show `n/a` for a null metric (#253).
 
 ### Changed
 
@@ -162,6 +245,11 @@ All notable changes to this project are documented here. The format is based on
   payloads that previously grew until the API's request-size ceiling (HTTP
   413). Stored history, transcripts, and frame side-cars are unchanged.
   Restore the old unbounded behavior with `-P image_horizon=none` (#188).
+
+### Fixed
+
+- **Agent plugin:** `images=on_demand` mode now permits re-requesting a camera with `take_pic` if its frame was elided by `image_horizon`, preventing untrue "already shown" refusals (#192).
+
 
 ### Added
 

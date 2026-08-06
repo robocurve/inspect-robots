@@ -16,6 +16,9 @@ if defaults.embodiment_args_owner == "my_embodiment":
 ``inspect_robots.registry.registered`` and check its class instead of
 comparing names.)
 
+``INSPECT_ROBOTS_CONFIG`` selects the config file itself before the standard
+config-home derivation.
+
 A missing file yields empty defaults. A malformed or type-invalid file raises
 ``SystemExit`` naming the file, with a plain one-line message that callers may
 catch.
@@ -33,6 +36,7 @@ from typing import Any
 
 __all__ = ["Defaults", "config_path", "load_defaults"]
 
+_ENV_CONFIG = "INSPECT_ROBOTS_CONFIG"
 _ENV_POLICY = "INSPECT_ROBOTS_POLICY"
 _ENV_EMBODIMENT = "INSPECT_ROBOTS_EMBODIMENT"
 _ENV_SIM_EMBODIMENT = "INSPECT_ROBOTS_SIM_EMBODIMENT"
@@ -82,6 +86,7 @@ class Defaults:
     max_steps: int | None = None
     store_frames: bool = False
     rerun: bool = False
+    rerun_port: int | None = None
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
@@ -98,10 +103,14 @@ class Defaults:
 def config_path(env: Mapping[str, str]) -> Path | None:
     """Return the user config file path derived from ``env``.
 
-    The result is ``<config-home>/inspect-robots/config.ini``, whether or not
-    the file exists. Return ``None`` when neither ``XDG_CONFIG_HOME`` nor
-    ``HOME`` is set; a variable set to the empty string counts as unset.
+    ``INSPECT_ROBOTS_CONFIG`` names the config file itself and takes precedence
+    over ``XDG_CONFIG_HOME`` and ``HOME``. Otherwise, the result is
+    ``<config-home>/inspect-robots/config.ini``, whether or not the file exists.
+    Return ``None`` when none of those variables is set; a variable set to the
+    empty string counts as unset.
     """
+    if override := env.get(_ENV_CONFIG):
+        return Path(override)
     if xdg := env.get("XDG_CONFIG_HOME"):
         home = Path(xdg)
     elif user_home := env.get("HOME"):
@@ -161,6 +170,20 @@ def _read_config(path: Path) -> Defaults:
             raise _die(path, f"[defaults] rerun must be true or false, got {raw_rerun!r}")
         rerun = parsed_rerun
 
+    rerun_port: int | None = None
+    if raw_port := parser.get("defaults", "rerun_port", fallback=None):
+        parsed_port = _parse_value(raw_port)
+        if (
+            not isinstance(parsed_port, int)
+            or isinstance(parsed_port, bool)
+            or not 1 <= parsed_port <= 65535
+        ):
+            raise _die(
+                path,
+                f"[defaults] rerun_port must be an integer in 1-65535, got {raw_port!r}",
+            )
+        rerun_port = parsed_port
+
     policy = parser.get("defaults", "policy", fallback=None)
     embodiment = parser.get("defaults", "embodiment", fallback=None)
     sim_embodiment = parser.get("defaults", "sim_embodiment", fallback=None)
@@ -175,6 +198,7 @@ def _read_config(path: Path) -> Defaults:
         max_steps=max_steps,
         store_frames=store_frames,
         rerun=rerun,
+        rerun_port=rerun_port,
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
@@ -194,6 +218,7 @@ _CONFIG_KEYS = (
     "max_steps",
     "store_frames",
     "rerun",
+    "rerun_port",
 )
 
 
@@ -210,6 +235,10 @@ def _set_default(env: Mapping[str, str], key: str, value: str) -> Path:
         parsed = _parse_value(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
             raise SystemExit(f"max_steps must be an integer >= 1, got {value!r}")
+    if key == "rerun_port":
+        parsed = _parse_value(value)
+        if not isinstance(parsed, int) or isinstance(parsed, bool) or not 1 <= parsed <= 65535:
+            raise SystemExit(f"rerun_port must be an integer in 1-65535, got {value!r}")
     if key in ("store_frames", "rerun") and not isinstance(_parse_value(value), bool):
         raise SystemExit(f"{key} must be true or false, got {value!r}")
 

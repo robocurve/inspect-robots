@@ -21,6 +21,10 @@ they came from are printed before the robot moves. Two flags exist only for
 instruction runs: `--max-steps N` (horizon, default 300) and `--scorer NAME`
 (default `operator`).
 
+If another eval holds a declared device, startup exits with
+`device 'can0' is already claimed by another inspect-robots process (PID 123):
+two evals must not drive one rig`.
+
 The sugar only fires when the first argument contains whitespace, so a
 mistyped subcommand (`inspect-robots isnpect`) errors out instead of starting
 a rollout; a single-word instruction needs the explicit
@@ -33,7 +37,21 @@ Resolved in order (first hit wins):
 1. explicit flags: `--policy` / `--embodiment`
 2. environment: `INSPECT_ROBOTS_POLICY` / `INSPECT_ROBOTS_EMBODIMENT`
 3. the user config file `~/.config/inspect-robots/config.ini`
-   (`$XDG_CONFIG_HOME` is honored):
+   (`$XDG_CONFIG_HOME` is honored).
+
+#### Several rigs on one host
+
+The config file itself is selected in this order: `--config PATH`,
+`$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
+`HOME`. Use a separate file for each rig without changing the config home for
+the whole process:
+
+```bash
+inspect-robots setup --config ~/.config/inspect-robots/rig-b.ini
+inspect-robots run --task my-benchmark --config ~/.config/inspect-robots/rig-b.ini
+```
+
+The selected file uses INI:
 
 ```ini
 [defaults]
@@ -60,9 +78,13 @@ same-named config key. An `[*.args]` section belongs to the component named
 in `[defaults]`: it applies whenever that same component is the one selected
 (by default, by flag, or by env var), and is ignored with a stderr note when
 a *different* component is selected. Your YAM rig's `rest_pose` never reaches
-`--embodiment kitchen`. There is deliberately no project-local config file:
-a checked-in file choosing which policy drives your hardware would be a trust
-footgun.
+`--embodiment kitchen`. There is deliberately no project-local config file.
+Because `.env` values load into the environment, a directory's `.env` can pin
+`INSPECT_ROBOTS_CONFIG` for everything run there. Treat a checked-in `.env`
+that selects hardware with the same suspicion as a checked-in config: either
+can choose which policy drives your hardware. Use an absolute path in `.env`:
+the value is literal, so `~` is not expanded and a config write would create a
+real `~` directory.
 
 ### Running in simulation: `--sim`
 
@@ -111,6 +133,37 @@ never adopts an embodiment verdict or prompts for any other ending, so
 unattended runs stay non-blocking. An unjudged trial honestly scores as
 failure with "no operator judgement recorded".
 
+### Live operator feedback
+
+On an attended run, an opted-in policy can also receive feedback while the
+episode is running. The CLI prints the operator console usage hint when this
+channel is active. Type a normal line and press Enter to deliver it at the
+policy's next inference. Bare Enter ends the episode, while `/y`, `/n`, or `/p`
+plus an optional note ends it and records the verdict immediately, without a
+second post-trial prompt. Feedback is saved per trial and appears in summaries
+and HTML reports. Piped stdin and `--no-prompt` disable the channel.
+
+A session-aware embodiment offers `connect_operator_session(session)`. On
+POSIX, the CLI calls that hook once before evaluation and the session becomes
+the only owner of terminal input and status output. The console stays active
+for every policy because it must own the end-of-episode input. A policy that
+accepts messages gets the full feedback usage line. Other policies get the
+end-only mode:
+
+```text
+operator console: Enter ends the episode; /y /n /p [note] records a verdict; typed notes are saved to the log
+```
+
+Without that hook, the compatibility path preserves the previous gating. A
+policy that does not accept operator messages leaves the console off silently.
+For an accepting policy, a simulator enables the console directly and a
+real-hardware embodiment can enable it with the supported legacy
+`defer_operator_end()` hook. Older hardware keeps its existing keypress
+behavior, prints a notice, and leaves feedback typing off. Windows cannot poll
+stdin with this console, so both paths print the Windows notice there: a
+session-aware embodiment is never connected, regardless of policy, and the
+legacy path prints it for an accepting policy.
+
 ## `inspect-robots setup`
 
 The interactive first-run wizard: it prompts for each `[defaults]` key with
@@ -119,9 +172,10 @@ policy or embodiment is not registered in the current environment, and then
 helps assign camera devices. It lists every color-capable camera that udev
 names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
-names when a by-id link is missing or when two cameras share one serial.
-Multi-interface cameras such as the RealSense D435 can lose udev's name race
-between their depth and RGB interfaces.
+names when a by-id link is missing or when multiple physical cameras can claim
+the same by-id identity. This includes cameras with duplicate serials and
+same-model cameras with missing serials. Multi-interface cameras such as the
+RealSense D435 can lose udev's name race between their depth and RGB interfaces.
 
 Answer `u` and unplug the camera when asked to identify the physical USB
 device that disappeared, including cameras the by-id listing cannot name. The
@@ -132,7 +186,12 @@ When the selected registered embodiment declares device slots, those slots
 drive one device interview for cameras, CAN interfaces, and serial devices.
 CAN slots list SocketCAN interfaces and support unplug-to-identify; rigs with
 multiple USB adapters named `can0`, `can1`, and so on also receive a udev
-pinning suggestion so replug order cannot swap physical devices.
+pinning suggestion so replug order cannot swap physical devices. The suggestion
+pins by adapter serial when serials are present and distinct, and otherwise
+emits USB-port `KERNELS` rules. The fallback is needed for rigs with several
+identical `gs_usb` adapters such as Innomaker's, because every unit reports
+`SN0001`. A port-pinned name stays valid only while the adapter keeps the same
+physical USB port.
 
 ```bash
 inspect-robots setup
@@ -161,6 +220,7 @@ embodiment = yam_arms     # same plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
+rerun_port = 9877         # viewer port for this rig (default 9876)
 store_frames = true       # save each run's camera frames under logs/frames/
 
 [embodiment.args]

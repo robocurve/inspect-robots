@@ -58,6 +58,7 @@ from types import FrameType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
 from inspect_robots import __version__
+from inspect_robots._claims import DeviceClaim, claim_devices
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
     _chat_content,
@@ -68,6 +69,8 @@ from inspect_robots._html import (
 )
 from inspect_robots._html_index import IndexEntry, render_index
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
+from inspect_robots.conformance import device_slots
+from inspect_robots.console import USAGE, USAGE_END_ONLY
 from inspect_robots.defaults import (
     _ADHOC_MAX_STEPS_FALLBACK,
     _ADHOC_SCORER_FALLBACK,
@@ -80,6 +83,8 @@ from inspect_robots.defaults import (
     _set_default,
     load_defaults,
 )
+from inspect_robots.registry import registered
+from inspect_robots.session import OperatorSession
 from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
@@ -87,8 +92,6 @@ if TYPE_CHECKING:
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
     from inspect_robots.spaces import Box
 
 
@@ -219,6 +222,26 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _port_number(text: str) -> int:
+    """Parse a TCP port number for an argparse option."""
+    port = int(text)
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be in 1-65535")
+    return port
+
+
+def _add_config_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach the --config override to a subcommand that reads the config file."""
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="use this config file instead of "
+        "<config-home>/inspect-robots/config.ini (sets $INSPECT_ROBOTS_CONFIG "
+        "for the invocation; useful for hosts driving more than one rig)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser and its subcommands."""
     parser = argparse.ArgumentParser(
@@ -245,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("-T", dest="task_args", action="append", metavar="k=v")
     _add_shared_eval_args(p_run)
+    _add_config_arg(p_run)
     p_run.add_argument(
         "--max-steps",
         type=int,
@@ -276,6 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
         "(e.g. your laptop via an SSH reverse tunnel: ssh -R 9876:localhost:9876 ...); "
         f"URL defaults to {DEFAULT_RERUN_CONNECT_URL}",
     )
+    p_run.add_argument(
+        "--rerun-port",
+        type=_port_number,
+        default=None,
+        metavar="PORT",
+        help="spawn the live Rerun viewer on this port (implies --rerun; "
+        "a per-rig rerun_port config key sets the default)",
+    )
 
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
     p_eval_set.add_argument(
@@ -285,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="registered task name(s); shell-quoted globs match by prefix, e.g. 'kitchenbench/*'",
     )
     _add_shared_eval_args(p_eval_set)
+    _add_config_arg(p_eval_set)
     p_eval_set.add_argument(
         "--retry-attempts",
         type=int,
@@ -445,19 +478,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    _add_config_arg(p_doctor)
 
-    sub.add_parser(
+    p_setup = sub.add_parser(
         "setup",
         help="interactive first-run wizard: pick defaults and discover camera devices, "
         "then write config.ini",
     )
+    _add_config_arg(p_setup)
 
     p_config = sub.add_parser("config", help="view or set user defaults (config.ini)")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     p_set = config_sub.add_parser("set", help="persist a [defaults] key to the config file")
     p_set.add_argument("key", choices=_CONFIG_KEYS)
     p_set.add_argument("value")
-    config_sub.add_parser("show", help="print resolved defaults and their sources")
+    _add_config_arg(p_set)
+    p_show = config_sub.add_parser("show", help="print resolved defaults and their sources")
+    _add_config_arg(p_show)
     return parser
 
 
@@ -656,69 +693,6 @@ def _build_guardrails(
     return ChainApprover(*parts), active, warnings
 
 
-_PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure) "
-# "Enter for none", not "Enter to skip": `skip` is a literal verdict token one
-# prompt earlier, and typing it here would record the word, not skip anything.
-_NOTES_PROMPT = "grader notes (Enter for none): "
-_PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
-_DEFINITIVE_REASONS = frozenset({"success", "failure"})
-
-
-def _prompt_operator(record: TrialRecord, scene: Scene) -> None:
-    """Capture or adopt the terminal operator's verdict on the record (R6).
-
-    A terminated episode with a definitive embodiment verdict adopts and announces that
-    verdict instead of asking the operator to confirm the same outcome a second time.
-    Prompted verdicts are followed by one optional, stripped, case-preserved grader note.
-    """
-    from inspect_robots.transcript import operator_event
-
-    del scene
-    if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
-        verdict = "y" if record.termination_reason == "success" else "n"
-        record.operator_judgement = verdict
-        record.events.append(
-            operator_event(t=len(record.steps), verdict=verdict, source="embodiment")
-        )
-        print(f"operator verdict adopted from embodiment: {record.termination_reason}")
-        return
-    if record.truncated and record.termination_reason == "max_steps":
-        print("note: this trial hit the step limit before terminating")
-    while True:
-        try:
-            answer = input(_PROMPT).strip().lower()
-        except EOFError:
-            return
-        if answer in _PROMPT_ANSWERS:
-            break
-        print(f"unrecognized answer {answer!r}; expected one of y/n/partial/skip")
-    try:
-        note = input(_NOTES_PROMPT).strip() or None
-    except EOFError:
-        note = None
-    record.operator_note = note
-    if answer != "skip":
-        record.operator_judgement = answer
-    # A skipped trial with a note still gets an event: the human said something
-    # about this trial, and an event stream that recorded the verdict but not
-    # the sentence typed in the same breath would be lying by omission. The
-    # event then carries verdict="skip" with no judgement, which is why
-    # operator_event documents "skip" as "no judgement" for its consumers.
-    if answer != "skip" or note is not None:
-        record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
-
-
-def _prompt_operator_on_operator_end(record: TrialRecord, scene: Scene) -> None:
-    """Prompt only for trials the operator demonstrably ended (R6-safe).
-
-    ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
-    here can never block an unattended run — every other reason (``max_steps``
-    included) keeps R6's non-blocking behavior for registered tasks.
-    """
-    if record.termination_reason == OPERATOR_END:
-        _prompt_operator(record, scene)
-
-
 def _attended(args: argparse.Namespace) -> bool:
     """True when the operator can be prompted: a real TTY and no ``--no-prompt``.
 
@@ -726,6 +700,59 @@ def _attended(args: argparse.Namespace) -> bool:
     ``eval-set`` — the same anti-drift argument as ``_add_shared_eval_args``.
     """
     return not args.no_prompt and sys.stdin.isatty()
+
+
+def _build_operator_session(
+    policy: object, embodiment: Embodiment
+) -> tuple[OperatorSession, OperatorSession | None]:
+    """Build the prompt owner and enable its live input channel only when safe."""
+    session = OperatorSession()
+    accepts_messages = bool(getattr(policy, "accepts_operator_messages", False))
+    connect_hook = getattr(embodiment, "connect_operator_session", None)
+    if callable(connect_hook):
+        if sys.platform == "win32":
+            session.write_line(
+                _styled(
+                    "operator console unavailable: select cannot watch stdin on Windows; "
+                    "feedback typing stays off",
+                    _YELLOW,
+                )
+            )
+            return session, None
+        connect_hook(session)
+        usage = USAGE if accepts_messages else USAGE_END_ONLY
+        label = "operator console:"
+        session.write_line(f"{_styled(label, _CYAN)} {usage.removeprefix(label + ' ')}")
+        return session, session
+
+    if not accepts_messages:
+        return session, None
+    if sys.platform == "win32":
+        session.write_line(
+            _styled(
+                "operator console unavailable: select cannot watch stdin on Windows; "
+                "feedback typing stays off",
+                _YELLOW,
+            )
+        )
+        return session, None
+
+    defer_hook = getattr(embodiment, "defer_operator_end", None)
+    if callable(defer_hook):
+        defer_hook()
+    elif not embodiment.info.is_simulated:
+        session.write_line(
+            _styled(
+                "operator console unavailable: this embodiment predates the operator console "
+                "and still owns the end-of-episode keypress; feedback typing stays off",
+                _YELLOW,
+            )
+        )
+        return session, None
+
+    label = "operator console:"
+    session.write_line(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
+    return session, session
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -1109,6 +1136,7 @@ class _ResolvedComponents(NamedTuple):
     embodiment: Any
     embodiment_name: str
     embodiment_source: str
+    claim: DeviceClaim
 
 
 def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
@@ -1167,14 +1195,21 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
     embodiment_kvs = {**embodiment_defaults, **_parse_kvs(args.embodiment_args)}
 
     policy = _resolve_or_exit("policy", policy_name, **policy_kvs)
-    if args.sim:
-        embodiment = _resolve_or_exit(
-            "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
-        )
-    else:
-        embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    factories = registered("embodiment")
+    slots = device_slots(factories[embodiment_name]) if embodiment_name in factories else ()
+    claim = claim_devices(slots, embodiment_kvs, os.environ)
+    try:
+        if args.sim:
+            embodiment = _resolve_or_exit(
+                "embodiment", embodiment_name, "sim_embodiment.args", **embodiment_kvs
+            )
+        else:
+            embodiment = _resolve_or_exit("embodiment", embodiment_name, **embodiment_kvs)
+    except BaseException:
+        claim.release()
+        raise
     return _ResolvedComponents(
-        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source
+        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source, claim
     )
 
 
@@ -1215,6 +1250,16 @@ def _build_and_announce_guardrails(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.rerun_port is not None and args.rerun_connect is not None:
+        raise SystemExit(
+            "--rerun-port spawns a local viewer and --rerun-connect streams "
+            "to a remote one: pass only one"
+        )
+    if args.rerun_port is not None and args.rerun is False:
+        raise SystemExit(
+            "--no-rerun disables the live viewer and --rerun-port requests one: pass only one"
+        )
+
     from dataclasses import replace
 
     from inspect_robots import eval
@@ -1278,16 +1323,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
 
         before_scoring = None
+        operator_input = None
         if _attended(args):
+            operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
             if is_adhoc and any(s.name == "operator" for s in task.scorers):
                 # Ad-hoc operator-scored runs: every non-definitive trial is
                 # prompted, exactly as before.
-                before_scoring = _prompt_operator
+                before_scoring = operator_session.prompt_verdict
             else:
                 # Any task, registered included: a trial the operator ended by
                 # keypress owes a verdict; everything else stays non-blocking
                 # and unattended-safe (R6).
-                before_scoring = _prompt_operator_on_operator_end
+                before_scoring = operator_session.prompt_verdict_on_operator_end
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1297,13 +1344,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
             sinks.append(RerunSink(connect_url=args.rerun_connect))
             print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}")
-        elif args.rerun if args.rerun is not None else defaults.rerun:
-            from inspect_robots.logging.rerun_sink import RerunSink
+        else:
+            spawn_wanted = args.rerun_port is not None or (
+                args.rerun if args.rerun is not None else defaults.rerun
+            )
+            if spawn_wanted:
+                from inspect_robots.logging.rerun_sink import RerunSink
 
-            # spawn=True opens the live viewer; the sink itself degrades to a
-            # warn-once no-op when rerun-sdk is not installed.
-            sinks.append(RerunSink(spawn=True))
-            print(f"{_styled('rerun:', _CYAN)} live viewer")
+                # spawn=True opens the live viewer; the sink itself degrades to a
+                # warn-once no-op when rerun-sdk is not installed.
+                port = args.rerun_port if args.rerun_port is not None else defaults.rerun_port
+                if port is None:
+                    sinks.append(RerunSink(spawn=True))
+                else:
+                    sinks.append(RerunSink(spawn=True, spawn_port=port))
+                print(f"{_styled('rerun:', _CYAN)} live viewer")
         try:
             logs = eval(
                 task,
@@ -1317,6 +1372,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 store_frames=(
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
+                operator_input=operator_input,
                 before_scoring=before_scoring,
             )
         except KeyboardInterrupt:
@@ -1332,7 +1388,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # torque in close(); skipping this leaves a robot energized. The span
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
-        embodiment.close()
+        try:
+            embodiment.close()
+        finally:
+            resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1411,11 +1470,13 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
             args, embodiment.info.action_space, resolved.embodiment
         )
         before_scoring = None
+        operator_input = None
         if _attended(args):
+            operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
             # Registered tasks only here: prompt for exactly the trials a human
             # ended by keypress (OPERATOR_END); everything else stays
             # non-blocking and unattended-safe (R6).
-            before_scoring = _prompt_operator_on_operator_end
+            before_scoring = operator_session.prompt_verdict_on_operator_end
         try:
             success, logs = eval_set(
                 tasks,
@@ -1429,6 +1490,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 retry_attempts=args.retry_attempts,
+                operator_input=operator_input,
                 before_scoring=before_scoring,
             )
         except KeyboardInterrupt:
@@ -1455,7 +1517,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # Same "close what we open" contract as _cmd_run: the CLI resolved the
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
-        embodiment.close()
+        try:
+            embodiment.close()
+        finally:
+            resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
@@ -1515,10 +1580,12 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {value:.4g}")
+        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(f"{k}={v:.4g}" for k, v in sorted(scene.reduced.items()))
+        reduced = "  ".join(
+            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
+        )
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:
@@ -2132,6 +2199,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
         ("rerun", defaults.rerun, None),
+        ("rerun_port", defaults.rerun_port, None),
     ]
     for key, value, source in rows:
         shown = "(unset)" if value is None else value
@@ -2162,6 +2230,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(_apply_instruction_sugar(argv_list))
+    if config_override := getattr(args, "config", None):
+        # os.environ, not a local mapping: external plugins (inspect-robots-yam's
+        # default loader) re-read the config from os.environ while constructing
+        # components, and subprocesses inherit it.
+        override_path = Path(config_override).expanduser()
+        if not override_path.is_absolute():
+            override_path = Path.cwd() / override_path
+        os.environ["INSPECT_ROBOTS_CONFIG"] = str(override_path)
     if args.command == "list":
         return _cmd_list(args.what)
     if args.command == "run":

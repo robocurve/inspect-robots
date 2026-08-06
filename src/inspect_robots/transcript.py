@@ -1,7 +1,7 @@
 """A typed transcript of rollout events.
 
 Each trial records an ordered stream of events (reset, inference, step, approval,
-operator judgement, error). This is the robotics analog of Inspect AI's
+operator feedback, operator judgement, error). This is the robotics analog of Inspect AI's
 transcript and is the data a results viewer renders. Events are deliberately
 lightweight: a ``kind``, the step index ``t`` (``-1`` for pre-loop events), and a
 small data payload.
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-EventKind = str  # "reset" | "inference" | "step" | "approval" | "operator" | "error"
+EventKind = str  # Includes reset, inference, step, approval, operator_message, operator, error.
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,14 @@ def step_event(t: int, terminated: bool, truncated: bool, reason: str | None) ->
 def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
     """Record whether the safety gate changed the proposed action at step ``t``."""
     return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
+
+
+def operator_message_event(t: int, text: str) -> Event:
+    """Record live feedback typed at the console during the trial.
+
+    This is distinct from the post-hoc operator verdict event.
+    """
+    return Event(kind="operator_message", t=t, data={"text": text})
 
 
 def operator_event(t: int, verdict: str, source: str = "prompt", note: str | None = None) -> Event:

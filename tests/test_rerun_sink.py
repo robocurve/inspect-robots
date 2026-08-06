@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import socket
 import subprocess
 import sys
@@ -104,7 +105,7 @@ def test_spawn_uses_bounded_memory_limit_after_plain_init() -> None:
 
     assert fake.calls == [
         ("init", ("inspect_robots", {})),
-        ("spawn", {"memory_limit": "2GiB"}),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876}),
     ]
 
 
@@ -116,7 +117,25 @@ def test_custom_spawn_memory_limit_is_forwarded_verbatim() -> None:
 
     sink.on_eval_start(None)  # type: ignore[arg-type]
 
-    assert fake.calls[-1] == ("spawn", {"memory_limit": "4GiB"})
+    assert fake.calls[-1] == ("spawn", {"memory_limit": "4GiB", "port": 9876})
+
+
+def test_custom_spawn_port_is_forwarded_verbatim() -> None:
+    """A caller-provided viewer port reaches rr.spawn unchanged."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True, spawn_port=9877)
+    sink._rr = fake
+
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+
+    assert fake.calls[-1] == ("spawn", {"memory_limit": "2GiB", "port": 9877})
+
+
+@pytest.mark.parametrize("spawn_port", [0, 65536])
+def test_spawn_port_out_of_range_raises(spawn_port: int) -> None:
+    """Viewer spawn ports outside the valid TCP range are rejected."""
+    with pytest.raises(ValueError, match="spawn_port"):
+        RerunSink(spawn=True, spawn_port=spawn_port)
 
 
 def test_default_startup_never_spawns_a_viewer() -> None:
@@ -288,7 +307,7 @@ class _BlueprintRecorder:
             "TextDocumentView",
             "TextLogView",
             "Vertical",
-            "Grid",
+            "Tabs",
             "Horizontal",
             "Blueprint",
         ):
@@ -466,6 +485,12 @@ def _sent_tree(root: object) -> list[_BlueprintNode]:
     return nodes
 
 
+def _node(value: object) -> _BlueprintNode:
+    """Narrow a recorded child to a node so structure asserts can nest."""
+    assert isinstance(value, _BlueprintNode)
+    return value
+
+
 def test_joint_groups_split_on_label_prefix() -> None:
     labels = tuple(
         f"{side}_{part}" for side in ("left", "right") for part in ("j0", "j1", "gripper")
@@ -479,6 +504,23 @@ def test_joint_groups_split_on_label_prefix() -> None:
     assert rerun_sink_module._joint_groups(("ax", "by"), 2) == [("joints", [0, 1])]
     assert rerun_sink_module._joint_groups(("l_a", "up", "r_b"), 3) == [("joints", [0, 1, 2])]
     assert rerun_sink_module._joint_groups(("l_a", "r_b"), 3) == [("joints", [0, 1, 2])]
+
+
+def test_camera_order_ranks_left_top_right() -> None:
+    """Ranked prefixes lead in spatial order; unranked names trail alphabetically."""
+    assert rerun_sink_module._camera_order(("top_cam", "right_cam", "left_cam")) == [
+        "left_cam",
+        "top_cam",
+        "right_cam",
+    ]
+    assert rerun_sink_module._camera_order(("top", "right", "left")) == ["left", "top", "right"]
+    assert rerun_sink_module._camera_order(("zed", "wrist_cam", "top_cam")) == [
+        "top_cam",
+        "wrist_cam",
+        "zed",
+    ]
+    assert rerun_sink_module._camera_order(("Top_cam", "left_cam")) == ["left_cam", "Top_cam"]
+    assert rerun_sink_module._camera_order(()) == []
 
 
 def test_blueprint_sent_per_trial_prefix_with_per_group_views(
@@ -508,10 +550,30 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
     reachable_names = {
         view.kwargs.get("name") for view in reachable if view.kind == "TimeSeriesView"
     }
-    assert {"left", "right", "reward"} <= reachable_names
+    assert {"left", "right", "reward"} == reachable_names
     assert any(view.kind == "Spatial2DView" for view in reachable)
     assert any(view.kind == "TextLogView" for view in reachable)
     assert any(view.kind == "TextDocumentView" for view in reachable)
+    # Two rows: cameras across the top, then the text tabs beside the plots.
+    # The tab order matters: the latest-message document is the default tab.
+    vertical = _node(_node(recorder.sent[0]).args[0])
+    assert vertical.kind == "Vertical"
+    camera_row, plot_row = (_node(child) for child in vertical.args)
+    assert camera_row.kind == "Horizontal"
+    assert [_node(child).kind for child in camera_row.args] == ["Spatial2DView"]
+    assert plot_row.kind == "Horizontal"
+    assert [_node(child).kind for child in plot_row.args] == [
+        "Tabs",
+        "TimeSeriesView",
+        "TimeSeriesView",
+    ]
+    tabs = _node(plot_row.args[0])
+    assert [_node(child).kind for child in tabs.args] == [
+        "TextDocumentView",
+        "TextLogView",
+        "TimeSeriesView",
+    ]
+    assert _node(tabs.args[2]).kwargs.get("contents") == ["+ trial/s0/e0/reward"]
     time_series = _views(recorder, "TimeSeriesView")
     left = next(view for view in time_series if view.kwargs.get("name") == "left")
     right = next(view for view in time_series if view.kwargs.get("name") == "right")
@@ -544,20 +606,55 @@ def test_blueprint_sent_per_trial_prefix_with_per_group_views(
         view.kwargs.get("contents") == ["+ trial/s0/e0/llm/latest"]
         for view in _views(recorder, "TextDocumentView")
     )
-    assert any(view.kwargs.get("contents") == ["+ trial/s0/e0/reward"] for view in time_series)
+    # The reward series lives behind the text tabs, not in a plot slot:
+    # agent-policy runs never log rewards, so a permanently visible reward
+    # panel would sit empty.
+    assert [_node(child).kwargs.get("name") for child in plot_row.args[1:]] == ["left", "right"]
 
     sink.on_trial_start("s1", 0)
     _blueprint_step(sink, 1)
     assert sink.flush(timeout=5.0)
     assert len(recorder.sent) == 2
     assert any(
-        view.kwargs.get("contents") == ["+ trial/s1/e0/reward"]
-        for view in _views(recorder, "TimeSeriesView")
+        view.kwargs.get("contents") == ["+ trial/s1/e0/llm/latest"]
+        for view in _views(recorder, "TextDocumentView")
     )
 
     _blueprint_step(sink, 2)
     assert sink.flush(timeout=5.0)
     assert len(recorder.sent) == 2
+    sink.on_eval_end(None)  # type: ignore[arg-type]
+
+
+def test_blueprint_camera_row_is_ordered_left_top_right(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declared camera order (YAM lists top first) does not drive the row."""
+    recorder = _BlueprintRecorder()
+    _install_fake_rerun(monkeypatch, blueprint=recorder)
+    sink = RerunSink()
+    sink.bind_spaces(
+        _labeled_action_space(),
+        ObservationSpace(
+            cameras=tuple(
+                CameraSpec(name=name, height=4, width=4)
+                for name in ("top_cam", "wrist_cam", "right_cam", "left_cam")
+            )
+        ),
+    )
+    sink.on_eval_start(None)  # type: ignore[arg-type]
+    sink.on_trial_start("s0", 0)
+    _blueprint_step(sink)
+    assert sink.flush(timeout=5.0)
+
+    camera_row = _node(_node(_node(recorder.sent[0]).args[0]).args[0])
+    assert camera_row.kind == "Horizontal"
+    assert [_node(view).kwargs.get("name") for view in camera_row.args] == [
+        "left_cam",
+        "top_cam",
+        "right_cam",
+        "wrist_cam",
+    ]
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
@@ -573,6 +670,11 @@ def test_transcript_first_payload_sends_blueprint(monkeypatch: pytest.MonkeyPatc
     assert sink.flush(timeout=5.0)
 
     assert len(recorder.sent) == 1
+    # A camera-less run sends the plot row as the root, not a Vertical with
+    # an empty top row.
+    row = _node(_node(recorder.sent[0]).args[0])
+    assert row.kind == "Horizontal"
+    assert _node(row.args[0]).kind == "Tabs"
     sink.on_eval_end(None)  # type: ignore[arg-type]
 
 
@@ -1451,6 +1553,13 @@ def test_real_rerun_accepts_the_transcript_document_call() -> None:
     if not hasattr(rr, "TextDocument"):
         pytest.skip("pre-TextDocument rerun-sdk lacks the archetype")
     rr.TextDocument("**[INFO]** assistant: hi  \nthere", media_type="text/markdown")
+
+
+@pytest.mark.skipif(not _RERUN_INSTALLED, reason="requires rerun-sdk")
+def test_real_rerun_spawn_signature_accepts_forwarded_kwargs() -> None:
+    """The real SDK spawn signature accepts every keyword the sink forwards."""
+    rr = pytest.importorskip("rerun")
+    assert {"port", "memory_limit"} <= set(inspect.signature(rr.spawn).parameters)
 
 
 @pytest.mark.skipif(not _RERUN_INSTALLED, reason="rerun-sdk not installed")

@@ -14,7 +14,7 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.types import Observation
-from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_agent import AgentPolicyConfig, LLMAgentPolicy
 from inspect_robots_agent._anthropic import (
     _DEFAULT_MAX_OUTPUT_TOKENS,
     AnthropicClient,
@@ -23,7 +23,7 @@ from inspect_robots_agent._anthropic import (
     _with_cache_breakpoint,
 )
 from inspect_robots_agent._capture import WireCapture
-from inspect_robots_agent._llm import Provider
+from inspect_robots_agent._llm import ChatClient, Provider
 from inspect_robots_agent._png import png_data_url
 
 # -- fixtures --------------------------------------------------------------------
@@ -927,10 +927,158 @@ def _policy(**kwargs: Any) -> LLMAgentPolicy:
     return LLMAgentPolicy(**kwargs)
 
 
-def test_policy_records_wire_speed_and_resolved_max_output_tokens() -> None:
-    policy = _policy(wire="anthropic", speed="fast")
+def test_thinkingmachines_infers_messages_wire_and_preserves_full_model_id() -> None:
+    policy = LLMAgentPolicy(
+        model="thinkingmachines/Inkling",
+        env={"TINKER_API_KEY": "tk"},
+    )
 
-    assert policy.config.wire == "anthropic"
+    assert isinstance(policy._client, AnthropicClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "messages"
+    assert policy.config.base_url == (
+        "https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1"
+    )
+    assert policy.config.model == "thinkingmachines/Inkling"
+
+
+def test_environment_model_infers_the_same_thinkingmachines_wire() -> None:
+    policy = LLMAgentPolicy(
+        env={
+            "INSPECT_ROBOTS_MODEL": "thinkingmachines/Inkling-Small",
+            "TINKER_API_KEY": "tk",
+        }
+    )
+
+    assert isinstance(policy._client, AnthropicClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "messages"
+    assert policy.config.model == "thinkingmachines/Inkling-Small"
+
+
+def test_existing_anthropic_direct_provider_stays_on_chat_by_default() -> None:
+    policy = LLMAgentPolicy(
+        model="anthropic/claude-opus-5",
+        env={"ANTHROPIC_API_KEY": "sk-ant"},
+    )
+
+    assert isinstance(policy._client, ChatClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "chat"
+    assert policy.config.base_url == "https://api.anthropic.com/v1"
+
+
+def test_thinkingmachines_messages_ladder_names_its_missing_key() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines/Inkling",
+            wire="messages",
+            env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+    assert "fix: set $TINKER_API_KEY" in str(excinfo.value)
+
+
+def test_thinkingmachines_variant_ladder_prefers_suffix_fix_over_key_advice() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines/Inkling:free",
+            wire="messages",
+            env={"TINKER_API_KEY": "tk", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+    message = str(excinfo.value)
+    assert "fix: drop the OpenRouter variant suffix (-P model=thinkingmachines/Inkling)" in message
+    assert "set $TINKER_API_KEY" not in message
+
+
+def test_bare_thinkingmachines_prefix_gets_a_full_command_fix() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines/",
+            wire="messages",
+            env={"TINKER_API_KEY": "tk", "OPENROUTER_API_KEY": "sk-or"},
+        )
+
+    assert "fix: pass a full model id (-P model=thinkingmachines/Inkling)" in str(excinfo.value)
+
+
+def test_explicit_messages_wire_accepts_thinkingmachines() -> None:
+    """An agreeing explicit wire must not trip the conflict guard."""
+    policy = LLMAgentPolicy(
+        model="thinkingmachines/Inkling",
+        wire="messages",
+        env={"TINKER_API_KEY": "tk"},
+    )
+
+    assert isinstance(policy._client, AnthropicClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "messages"
+    assert policy.config.model == "thinkingmachines/Inkling"
+
+
+def test_bare_thinkingmachines_id_gets_a_full_command_fix() -> None:
+    """A provider prefix used as a bare model id must not be prefixed again."""
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines",
+            wire="messages",
+            env={"OPENROUTER_API_KEY": "sk-or"},
+        )
+
+    message = str(excinfo.value)
+    assert "fix: pass a full model id (-P model=thinkingmachines/Inkling)" in message
+    assert "anthropic/thinkingmachines" not in message
+
+
+def test_anthropic_wire_alias_is_accepted_and_recorded_canonically() -> None:
+    policy = LLMAgentPolicy(
+        model="anthropic/claude-opus-5",
+        wire="anthropic",
+        env={"ANTHROPIC_API_KEY": "sk-ant"},
+    )
+
+    assert isinstance(policy._client, AnthropicClient)
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.wire == "messages"
+
+
+@pytest.mark.parametrize("wire", ["chat", "responses", "gemini-live"])
+def test_thinkingmachines_explicit_wire_conflict_is_guided(wire: str) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        LLMAgentPolicy(
+            model="thinkingmachines/Inkling",
+            wire=wire,
+            env={"TINKER_API_KEY": "tk"},
+        )
+
+    message = str(excinfo.value)
+    expected = (
+        f"wire={wire!r} cannot drive thinkingmachines/* — the provider's direct "
+        "endpoint serves only the Messages API.\n"
+        "fix: drop -P wire= (thinkingmachines/* defaults to wire=messages)"
+    )
+    if wire in {"chat", "responses"}:
+        expected += (
+            ", or pass -P base_url=... (+ -P api_key_env=NAME) to route this wire "
+            "through a gateway such as OpenRouter deliberately"
+        )
+    assert message == expected
+
+
+def test_unknown_wire_lists_only_canonical_names() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _policy(wire="unknown")
+
+    assert str(excinfo.value) == (
+        "wire must be one of ['chat', 'gemini-live', 'messages', 'responses'], got 'unknown'"
+    )
+
+
+def test_policy_records_wire_speed_and_resolved_max_output_tokens() -> None:
+    policy = _policy(wire="messages", speed="fast")
+
+    assert policy.config.wire == "messages"
     assert policy.config.speed == "fast"
     assert policy.config.max_output_tokens == _DEFAULT_MAX_OUTPUT_TOKENS
 
@@ -944,7 +1092,7 @@ def test_policy_passes_speed_and_cap_through_to_the_request() -> None:
     """
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = _policy(
-        wire="anthropic",
+        wire="messages",
         speed="fast",
         max_output_tokens=2000,
         transport=httpx.MockTransport(handler),
@@ -960,7 +1108,7 @@ def test_policy_passes_speed_and_cap_through_to_the_request() -> None:
 
 def test_policy_passes_the_default_cap_when_unset() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
-    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+    policy = _policy(wire="messages", transport=httpx.MockTransport(handler))
 
     policy._client.complete([_USER], [])
 
@@ -972,7 +1120,7 @@ def test_policy_passes_the_default_cap_when_unset() -> None:
 
 def test_policy_sends_the_prefix_stripped_model_id() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
-    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+    policy = _policy(wire="messages", transport=httpx.MockTransport(handler))
 
     policy._client.complete([_USER], [])
 
@@ -989,10 +1137,10 @@ def test_chat_wire_records_no_max_output_tokens() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"wire": "anthropic", "speed": "turbo"}, "speed must be one of"),
-        ({"wire": "anthropic", "max_output_tokens": 0}, "must be an int >= 1"),
-        ({"wire": "anthropic", "max_output_tokens": 1e5}, "must be an int >= 1"),
-        ({"wire": "anthropic", "max_output_tokens": True}, "must be an int >= 1"),
+        ({"wire": "messages", "speed": "turbo"}, "speed must be one of"),
+        ({"wire": "messages", "max_output_tokens": 0}, "must be an int >= 1"),
+        ({"wire": "messages", "max_output_tokens": 1e5}, "must be an int >= 1"),
+        ({"wire": "messages", "max_output_tokens": True}, "must be an int >= 1"),
         ({"wire": "antropic"}, "wire must be one of"),
     ],
 )
@@ -1008,8 +1156,9 @@ def test_invalid_configurations_raise(kwargs: dict[str, Any], match: str) -> Non
 def test_wire_gated_params_raise_config_error_so_the_cli_renders_them(
     kwargs: dict[str, Any],
 ) -> None:
-    with pytest.raises(ConfigError, match=r"only supported on wire='anthropic'"):
+    with pytest.raises(ConfigError, match=r"only supported on wire='messages'") as excinfo:
         _policy(**kwargs)
+    assert "fix: pass -P wire=messages" in str(excinfo.value)
 
 
 def test_misspelled_wire_reports_the_wire_not_the_speed() -> None:
@@ -1022,7 +1171,7 @@ def test_openrouter_fallback_is_refused_with_guidance() -> None:
     with pytest.raises(ConfigError, match=r"fix: set \$ANTHROPIC_API_KEY"):
         LLMAgentPolicy(
             model="anthropic/claude-opus-5",
-            wire="anthropic",
+            wire="messages",
             env={"OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1032,7 +1181,7 @@ def test_bare_model_id_is_told_to_add_the_prefix_not_to_set_the_key() -> None:
     with pytest.raises(ConfigError, match=r"-P model=anthropic/claude-opus-5"):
         LLMAgentPolicy(
             model="claude-opus-5",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1040,7 +1189,7 @@ def test_bare_model_id_is_told_to_add_the_prefix_not_to_set_the_key() -> None:
 def test_explicit_base_url_suppresses_the_openrouter_guard() -> None:
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="http://gateway.test/v1",
         env={"OPENROUTER_API_KEY": "sk-or", "ANTHROPIC_API_KEY": "sk-ant"},
     )
@@ -1049,10 +1198,10 @@ def test_explicit_base_url_suppresses_the_openrouter_guard() -> None:
 
 
 def test_non_anthropic_prefix_is_not_told_to_set_the_anthropic_key() -> None:
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="meta-llama/llama-3",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1066,7 +1215,7 @@ def test_variant_suffix_is_told_to_drop_it_not_to_set_the_key() -> None:
     ):
         LLMAgentPolicy(
             model="anthropic/claude-opus-5:free",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1083,7 +1232,7 @@ def test_bare_variant_id_is_fixed_in_one_step() -> None:
     ):
         LLMAgentPolicy(
             model="claude-opus-5:free",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1094,7 +1243,7 @@ def test_variant_strip_keeps_fine_tune_colons() -> None:
     with pytest.raises(ConfigError, match=r"-P model=anthropic/ft:gpt-4o-mini\b"):
         LLMAgentPolicy(
             model="ft:gpt-4o-mini:free",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1110,7 +1259,7 @@ def test_falsy_api_key_env_does_not_send_the_openrouter_key_to_a_gateway(
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="https://gw.example/v1",
         api_key_env=api_key_env,  # type: ignore[arg-type]
         transport=httpx.MockTransport(handler),
@@ -1123,7 +1272,7 @@ def test_falsy_api_key_env_does_not_send_the_openrouter_key_to_a_gateway(
 
 
 def test_chat_wire_gateway_keeps_the_openrouter_default() -> None:
-    # The ANTHROPIC_API_KEY default is gated on wire='anthropic'. Dropping
+    # The ANTHROPIC_API_KEY default is gated on wire='messages'. Dropping
     # that clause would ship the Anthropic key to every chat-wire gateway,
     # where OpenRouter is the documented default.
     seen, handler = _capture({"choices": [{"message": {"content": "ok"}}]})
@@ -1143,19 +1292,19 @@ def test_chat_wire_gateway_keeps_the_openrouter_default() -> None:
 def test_foreign_prefix_with_a_variant_is_terminal_in_one_step() -> None:
     # Dropping the suffix would leave 'openai/gpt-5.6', still refused. The
     # prefix is the real problem, so say so first.
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="openai/gpt-5.6:free",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
 
 def test_foreign_prefix_with_an_empty_body_does_not_name_an_empty_id() -> None:
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
         LLMAgentPolicy(
             model="openai/:free",
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1170,7 +1319,7 @@ def test_ids_with_nothing_usable_left_get_a_whole_command(model: str) -> None:
     ):
         LLMAgentPolicy(
             model=model,
-            wire="anthropic",
+            wire="messages",
             env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1181,7 +1330,7 @@ def test_empty_base_url_still_hits_the_guard() -> None:
     with pytest.raises(ConfigError, match=r"resolved to OpenRouter"):
         LLMAgentPolicy(
             model="anthropic/claude-opus-5",
-            wire="anthropic",
+            wire="messages",
             base_url="",
             env={"OPENROUTER_API_KEY": "sk-or"},
         )
@@ -1190,7 +1339,7 @@ def test_empty_base_url_still_hits_the_guard() -> None:
 def test_model_from_the_environment_resolves_like_the_argument() -> None:
     with pytest.raises(ConfigError, match=r"fix: prefix the model id"):
         LLMAgentPolicy(
-            wire="anthropic",
+            wire="messages",
             env={
                 "INSPECT_ROBOTS_MODEL": "claude-opus-5",
                 "ANTHROPIC_API_KEY": "sk-ant",
@@ -1208,7 +1357,7 @@ def test_another_direct_provider_is_refused_not_sent_to_its_endpoint() -> None:
     ):
         LLMAgentPolicy(
             model="openai/gpt-5.6",
-            wire="anthropic",
+            wire="messages",
             env={"OPENAI_API_KEY": "sk-oai", "OPENROUTER_API_KEY": "sk-or"},
         )
 
@@ -1216,15 +1365,15 @@ def test_another_direct_provider_is_refused_not_sent_to_its_endpoint() -> None:
 def test_direct_provider_guidance_uses_the_requested_id_not_the_stripped_one() -> None:
     # resolve_provider strips 'groq/', so branching on the resolved id would
     # read it as bare and suggest the nonsense 'anthropic/llama-3'.
-    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ model id"):
-        LLMAgentPolicy(model="groq/llama-3", wire="anthropic", env={"GROQ_API_KEY": "sk-groq"})
+    with pytest.raises(ConfigError, match=r"fix: use an anthropic/ or thinkingmachines/ model id"):
+        LLMAgentPolicy(model="groq/llama-3", wire="messages", env={"GROQ_API_KEY": "sk-groq"})
 
 
 def test_gateway_defaults_the_key_env_to_anthropic() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="http://gateway.test/v1",
         transport=httpx.MockTransport(handler),
         env={"OPENROUTER_API_KEY": "sk-or", "ANTHROPIC_API_KEY": "sk-ant"},
@@ -1259,7 +1408,7 @@ def test_act_drives_a_multi_turn_trial_and_replays_thinking() -> None:
 
     policy = LLMAgentPolicy(
         model="anthropic/claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         transport=httpx.MockTransport(handler),
         env=dict(_ENV),
     )
@@ -1307,7 +1456,7 @@ def test_explicit_api_key_env_wins_over_the_default() -> None:
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(
         model="claude-opus-5",
-        wire="anthropic",
+        wire="messages",
         base_url="http://gateway.test/v1",
         api_key_env="OPENROUTER_API_KEY",
         transport=httpx.MockTransport(handler),
@@ -1343,7 +1492,7 @@ def test_act_marks_the_eviction_anchor_on_the_anthropic_wire() -> None:
         return httpx.Response(200, json=payload)
 
     embodiment = CubePickEmbodiment()
-    policy = _policy(wire="anthropic", transport=httpx.MockTransport(handler))
+    policy = _policy(wire="messages", transport=httpx.MockTransport(handler))
     policy.bind(embodiment.info)
     scene = Scene(id="s0", instruction="reach")
     policy.reset(scene)

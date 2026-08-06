@@ -6,6 +6,7 @@ from pathlib import Path
 
 import inspect_robots
 from inspect_robots import defaults
+from inspect_robots.defaults import _set_default as set_default
 
 
 def _write_config(config_home: Path, body: str) -> Path:
@@ -31,6 +32,25 @@ def test_config_path_xdg_wins_over_home(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert (
         defaults.config_path({"XDG_CONFIG_HOME": str(xdg), "HOME": str(home)})
+        == xdg / "inspect-robots" / "config.ini"
+    )
+
+
+def test_config_path_env_override_wins_over_xdg_and_home(tmp_path: Path) -> None:
+    override_path = tmp_path / "rig-b.ini"
+    assert defaults.config_path(
+        {
+            "INSPECT_ROBOTS_CONFIG": str(override_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+            "HOME": str(tmp_path / "home"),
+        }
+    ) == Path(override_path)
+
+
+def test_config_path_env_override_empty_string_counts_as_unset(tmp_path: Path) -> None:
+    xdg = tmp_path / "xdg"
+    assert (
+        defaults.config_path({"INSPECT_ROBOTS_CONFIG": "", "XDG_CONFIG_HOME": str(xdg)})
         == xdg / "inspect-robots" / "config.ini"
     )
 
@@ -71,6 +91,40 @@ def test_public_load_defaults_round_trips_embodiment_args(tmp_path: Path) -> Non
         "can_channel": "can0",
     }
     assert loaded.embodiment_args_owner == "yam-bimanual"
+
+
+def test_load_defaults_reads_the_override_file(tmp_path: Path) -> None:
+    _write_config(tmp_path / "xdg", "[defaults]\npolicy = decoy\n")
+    override_path = tmp_path / "rig-b.ini"
+    override_path.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+
+    loaded = defaults.load_defaults(
+        {
+            "INSPECT_ROBOTS_CONFIG": str(override_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+        }
+    )
+
+    assert loaded.policy == "rig-b"
+    assert loaded.policy_source == str(override_path)
+
+
+def test_set_default_writes_the_override_file(tmp_path: Path) -> None:
+    override_path = tmp_path / "rig-b.ini"
+    xdg = tmp_path / "xdg"
+
+    written = set_default(
+        {
+            "INSPECT_ROBOTS_CONFIG": str(override_path),
+            "XDG_CONFIG_HOME": str(xdg),
+        },
+        "policy",
+        "x",
+    )
+
+    assert written == override_path
+    assert "policy = x" in override_path.read_text(encoding="utf-8")
+    assert not (xdg / "inspect-robots" / "config.ini").exists()
 
 
 def test_config_path_empty_string_env_counts_as_unset(tmp_path: Path) -> None:
