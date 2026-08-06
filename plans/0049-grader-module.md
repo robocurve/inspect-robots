@@ -98,18 +98,22 @@ class Grader(Protocol):
    TTY and no `--no-prompt`), `none` when unattended. This preserves R6's hard
    invariant — CI/unattended runs never block on a prompt — while making every
    attended run graded by default.
-4. **Explicit choice wins, except against `--no-prompt`:** an explicit
-   `--grader` (or config value) is honored regardless of TTY-ness — a VLM
-   grader must be able to run unattended, and the operator grader already
-   degrades safely on dead stdin (`prompt_verdict` swallows `EOFError` and
-   returns). `--no-prompt` is the one override: its documented promise is that
-   the run never asks the terminal operator anything, so it always suppresses
-   the `operator` grader specifically — a config-sourced
-   `[defaults] grader = operator` downgrades to `none` with a stderr note,
-   while the explicit flag pair `--no-prompt --grader operator` is rejected
-   with `SystemExit` (a contradiction typed in one command line). The check
-   lives in `_check_shared_run_conflicts` so `run` and `eval-set` share it.
-   Non-operator graders are unaffected by `--no-prompt`.
+4. **Explicit flag wins; config-sourced `operator` needs an attended
+   terminal:** an explicit `--grader` is honored regardless of TTY-ness — a
+   VLM grader must be able to run unattended, and a user who types
+   `--grader operator` into a TTY-less invocation gets the safe degradation
+   (`prompt_verdict` swallows `EOFError` on dead stdin and returns). A
+   **config-sourced** `[defaults] grader = operator` is weaker intent and is
+   downgraded to `none` with a stderr note whenever the run cannot actually
+   be attended: under `--no-prompt` **or** when `sys.stdin.isatty()` is
+   false. Without the TTY half, a one-time config edit would make every later
+   cron/CI run block forever at `input()` when stdin is an open pipe —
+   violating decision 3's hard invariant. The one rejected contradiction is
+   the explicit flag pair `--no-prompt --grader operator`
+   (`SystemExit`, checked in `_check_shared_run_conflicts` so `run` and
+   `eval-set` share it). Non-operator graders are unaffected by
+   `--no-prompt`, and its help text must say it suppresses "the operator
+   grader", not all prompting.
 5. **The scorer-name sniffing gate is deleted**, as is
    `prompt_verdict_on_operator_end` (both call sites replaced by the grader
    wiring; the method's only job was the narrow OPERATOR_END-only policy this
@@ -135,8 +139,11 @@ class Grader(Protocol):
    follow-up, not this PR.
 9. **`inspect-robots list`** does **not** pick the kind up automatically: it
    iterates `_KIND_BY_PLURAL` (`cli.py`), and the `list` positional's
-   `choices` come from the same map. Add a `"graders"` entry there;
-   `_PLURAL_BY_KIND`/`_ENV_BY_KIND` need no grader entry.
+   `choices` come from the same map. Add a `"graders"` entry there
+   (`_PLURAL_BY_KIND` is derived from it by comprehension and follows
+   automatically). CLI grader resolution goes through `_resolve_or_exit`,
+   **not** `_pick_component` — the latter's no-default error path indexes
+   `_ENV_BY_KIND[kind]`, which has no `"grader"` entry.
 
 ## Tasks
 
@@ -145,7 +152,9 @@ class Grader(Protocol):
   `inspect_robots.graders`, and the `grader()` decorator; `_builtins.py`
   registers `operator`. Unit tests: protocol conformance, registry round-trip,
   `operator_grader().grade` delegates to `prompt_verdict` (injected
-  `input_fn`), `connect_session` rebinds the session.
+  `input_fn`), `connect_session` rebinds the session, and the lazy
+  default-session branch (no session, first `grade()`) is exercised
+  explicitly.
 - [ ] **eval.py: `grader=` kwarg.** Accept object or registry name on `eval()`
   and `eval_set()`; adapt to `before_scoring`; `ConfigError` when both are
   passed or when the resolved object fails `isinstance(g, Grader)`.
@@ -155,8 +164,9 @@ class Grader(Protocol):
   non-conforming resolved object raises.
 - [ ] **session.py: early-end note + delete `prompt_verdict_on_operator_end`.**
   Add the decision-7 neutral note line to `prompt_verdict`; remove the narrow
-  variant and its tests; port any still-relevant assertions onto
-  `prompt_verdict`.
+  variant and its tests (`tests/test_session.py` has ~14 references); port
+  any still-relevant assertions onto `prompt_verdict`. The deletion leaves
+  `OPERATOR_END` imported but unused in `session.py` — drop the import.
 - [ ] **cli.py + defaults.py wiring.** Shared `--grader` arg; `[defaults]
   grader` config key (`defaults.py`: `Defaults` field, parser, `_CONFIG_KEYS`);
   resolution per decisions 2–4; both `run` paths and `eval-set` build the
@@ -174,10 +184,16 @@ class Grader(Protocol):
   and judgement + note land in the record/log on (a) ad-hoc run with a
   **non-operator** scorer, (b) registered task via `run --task`, (c)
   `eval-set`. Plus: unattended run never prompts and records `None` (R6),
-  `--grader none` suppresses the prompt on an attended run, and `--no-prompt`
-  downgrades a config-sourced `operator` grader (no prompt, stderr note).
+  `--grader none` suppresses the prompt on an attended run, `--no-prompt`
+  downgrades a config-sourced `operator` grader (no prompt, stderr note), and
+  a config-sourced `operator` with non-TTY stdin also downgrades (the
+  decision-4 cron/CI case).
 - [ ] **Public API + docs.** Export `Grader`, `operator_grader`, and the
-  `grader` decorator via `__init__.py` `__all__`; update
+  `grader` decorator via `__init__.py` `__all__`. Import ordering matters for
+  the shadowing: `from inspect_robots.grader import ...` must run before
+  `from inspect_robots.registry import ... grader ...` so the submodule
+  import completes first and the decorator name wins in the package
+  namespace (alphabetical placement gives this for free). Update
   `tests/test_api_snapshot.py` in the same commit. Update `src/inspect_robots/CLAUDE.md`
   module map (new `grader.py` row; `session.py`/`cli.py` rows), root
   `CLAUDE.md` if it names the affected flows, and the docs pages that describe
