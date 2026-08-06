@@ -20,7 +20,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "inspect-robots>=0.43",
+    "inspect-robots>=0.44",
     "numpy>=1.24",
     "sounddevice>=0.4.6",
     "faster-whisper>=1.0",

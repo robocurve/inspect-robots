@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- **Core (0.43.0):** operator messages now preserve console or attached-input
+- **Core (0.44.0):** operator messages now preserve console or attached-input
   provenance through transcripts, policy observations, and evaluation logs.
   `OperatorSession.attach_input()` merges feedback-only sources without risking
   the typed console, the registry exposes an `operator_input` plugin kind, and
