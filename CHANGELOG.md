@@ -160,6 +160,14 @@ All notable changes to this project are documented here. The format is based on
   when the adapters sit on distinct USB ports
   ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
 
+- **`Task` now rejects duplicate scene ids.** Scene ids become per-trial
+  identity downstream — the rollout builds `"{scene.id}-e{epoch}"`, which
+  `FrameStore` turns into a filename — so two scenes sharing an id wrote to the
+  same frame paths and the second silently overwrote the first, losing half a
+  run's stored frames while the log still reported both trials. The same
+  assumption keys the summarize digest's transcripts. Construction now raises
+  `ConfigError` naming the duplicate id (#289).
+
 - `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
   and unplug-identifies cameras as physical USB devices. A camera whose color
   node lost udev's by-id name race (multi-interface cameras such as the
