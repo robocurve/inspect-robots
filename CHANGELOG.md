@@ -121,6 +121,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Agent plugin (0.23.0):** an unset `effort` now omits the field and inherits
+  the provider default (breaking; add `-P effort=low` to pin the previous
+  behavior). `effort=none` sends the true minimum on every HTTP wire, including
+  `thinking: {"type": "disabled"}` on Messages; programmatic `None` normalizes
+  to `"none"`, and Gemini Live now rejects explicit `effort=none` instead of
+  silently accepting it ([plan 0049](plans/0049-effort-passthrough.md), #317).
+
 - Verdict and grader-notes prompts moved from CLI internals to
   `OperatorSession`; their behavior and transcript events are unchanged
   ([plan 0048](plans/0048-operator-session.md), #308).
