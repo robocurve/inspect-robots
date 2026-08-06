@@ -143,6 +143,12 @@ plus an optional note ends it and records the verdict immediately, without a
 second post-trial prompt. Feedback is saved per trial and appears in summaries
 and HTML reports. Piped stdin and `--no-prompt` disable the channel.
 
+Install `inspect-robots-voice` and pass `--voice` to add local microphone
+transcription to an attended run. Repeat `-V key=value` for voice settings such
+as the model, microphone device, language, and compute type. Voice input is
+feedback-only, so episode end and verdicts remain keyboard actions. See
+[Voice operator input](voice-mode.md) for setup and filtering details.
+
 A session-aware embodiment offers `connect_operator_session(session)`. On
 POSIX, the CLI calls that hook once before evaluation and the session becomes
 the only owner of terminal input and status output. The console stays active
@@ -238,6 +244,7 @@ Show registered components (builtins + installed plugins):
 inspect-robots list                 # all kinds
 inspect-robots list policies        # just one kind
 inspect-robots list embodiments
+inspect-robots list operator_inputs
 ```
 
 ## `inspect-robots run`
@@ -250,6 +257,8 @@ constructor arguments with `-T` (task), `-P` (policy), and `-E` (embodiment) as
 inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P chunk_size=8 \
              --embodiment cubepick --log-dir logs --seed 0
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+             --voice -V model=small -V device="USB Microphone"
 ```
 
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
@@ -263,7 +272,8 @@ the path of the written log is printed.
 
 `--policy`/`--embodiment` may be omitted when defaults are configured (see
 the zero-config section above); `--instruction "..."` replaces `--task` to
-run a single ad-hoc scene.
+run a single ad-hoc scene. `--voice` adds local spoken feedback on attended
+runs; repeat `-V key=value` to configure the installed voice plugin.
 
 The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
@@ -290,7 +300,8 @@ embodiment, for example `[120s -> 1200 steps at 10 Hz]`.
 Multiple patterns may match the same task; it still runs once. A pattern that
 matches nothing is an error listing every registered task. `--policy` and
 `--embodiment` (and `-P`/`-E`, `--sim`, `--epochs`, `--fail-on-error`,
-`--store-frames`, `--disable-guardrails`, `--max-action-delta`) apply exactly
+`--store-frames`, `--disable-guardrails`, `--max-action-delta`, `--voice`, and
+`-V`) apply exactly
 as they do for `run`, to every matched task — there is no per-task `-T` in
 this release. The embodiment is resolved once for the whole set, not once per
 task, so a real robot is not reconnected between tasks.

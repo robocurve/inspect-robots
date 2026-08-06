@@ -1,4 +1,4 @@
-"""Registry and decorators for tasks, policies, embodiments, scorers, and sinks.
+"""Registry and decorators for framework extension components.
 
 Mirrors Inspect AI's extension model: components register by name via decorators
 and are resolved from strings (so ``eval(policy="scripted")`` and the CLI work).
@@ -8,7 +8,7 @@ being imported first.
 
 Entry-point groups:
 ``inspect_robots.tasks``, ``inspect_robots.policies``, ``inspect_robots.embodiments``,
-``inspect_robots.scorers``, ``inspect_robots.sinks``.
+``inspect_robots.scorers``, ``inspect_robots.sinks``, ``inspect_robots.operator_inputs``.
 """
 
 from __future__ import annotations
@@ -18,8 +18,15 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
-Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink"
-KINDS: tuple[Kind, ...] = ("task", "policy", "embodiment", "scorer", "sink")
+Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink" | "operator_input"
+KINDS: tuple[Kind, ...] = (
+    "task",
+    "policy",
+    "embodiment",
+    "scorer",
+    "sink",
+    "operator_input",
+)
 
 _GROUPS: dict[Kind, str] = {
     "task": "inspect_robots.tasks",
@@ -27,6 +34,7 @@ _GROUPS: dict[Kind, str] = {
     "embodiment": "inspect_robots.embodiments",
     "scorer": "inspect_robots.scorers",
     "sink": "inspect_robots.sinks",
+    "operator_input": "inspect_robots.operator_inputs",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -74,6 +82,11 @@ def scorer(name: str | None = None) -> Callable[[F], F]:
 def sink(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a log-sink factory under ``name``."""
     return register("sink", name)
+
+
+def operator_input(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register an operator-input factory under ``name``."""
+    return register("operator_input", name)
 
 
 def _ensure_loaded() -> None:
