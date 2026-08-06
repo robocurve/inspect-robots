@@ -21,7 +21,7 @@ a received `effort=None` — reachable only via the CLI's `none`/`null`
 coercion or a deliberate programmatic call — normalizes to the string
 `"none"` before validation; `_UNSET` resolves to `None`, which every wire
 client already treats as "omit the field". Downstream, the only wire that
-needs a code change is messages: `_AnthropicClient.complete`
+needs a code change is messages: `AnthropicClient.complete`
 (`_anthropic.py:117-141`) maps `reasoning_effort == "none"` to
 `thinking: {"type": "disabled"}` with no `output_config`, and keeps
 `thinking: {"type": "adaptive"}` for `None` and the named levels (explicit
@@ -98,7 +98,10 @@ pytest with the existing fake-client patterns in
     branch becomes an explicit `ConfigError` assertion; its
     `config.effort == "low"` assertions for chat/responses/anthropic
     (~:808-810) become `is None`. Fold whatever it still covers into the
-    passthrough matrix rather than duplicating it.
+    passthrough matrix rather than duplicating it — with one exception: its
+    per-wire `image_horizon` default assertions (~:803-810, live → `None`,
+    HTTP wires → `2`) cover behavior this plan does not touch and must
+    survive the rewrite in `test_gemini_live.py`, not move files.
   - `test_existing_invalid_effort_and_horizon_messages_are_preserved`
     (~:834): pins the old error string ("or None to omit the field",
     ~:843-846); update the expected wording to the new message.
