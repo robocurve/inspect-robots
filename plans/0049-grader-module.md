@@ -43,7 +43,8 @@ class Grader(Protocol):
     def grade(self, record: TrialRecord, scene: Scene) -> None: ...
 ```
 
-- A grader runs **once per scored trial** (never for errored trials), after the
+- A grader runs **only for trials that will be scored** (never for errored or
+  cancelled trials — any non-success status is skipped, `eval.py`), after the
   rollout returns and before scorers run — exactly the existing
   `before_scoring` seam in `eval.py`. It may be interactive (human prompt) or
   expensive (a future VLM call over final frames), and it **mutates the
@@ -53,7 +54,10 @@ class Grader(Protocol):
   only ever be implemented correctly as a grader; it stays untouched here and
   a VLM grader ships later as a plugin.)
 - Builtin: `operator_grader(session: OperatorSession | None = None)`, whose
-  `grade()` delegates to `OperatorSession.prompt_verdict` — keeping every
+  `grade()` delegates to `OperatorSession.prompt_verdict`. When constructed
+  without a session (e.g. `eval(grader="operator")` from the Python API, where
+  nothing calls `connect_session`), it lazily constructs a default
+  `OperatorSession` on first `grade()` — keeping every
   behavior that method already has: adopt a console-captured verdict, adopt a
   definitive embodiment verdict (`success`/`failure`) without re-asking, note
   the `max_steps` case, EOFError-safe prompting.
@@ -77,22 +81,35 @@ class Grader(Protocol):
    `before_scoring` stays public and documented (it is the lower-level hook and
    the internal plumbing); passing **both** `grader` and `before_scoring`
    raises `ConfigError` — two writers for one seam is always a caller bug.
+   `eval()` validates a resolved or passed grader with
+   `isinstance(g, Grader)` (the protocol is `runtime_checkable`) and raises
+   `ConfigError` on mismatch, so a broken entry point fails at configuration
+   time, not deep inside scoring. The literal `"none"` is CLI/config
+   vocabulary only (see decision 2); the API spelling is `grader=None`.
 2. **CLI selection:** shared `--grader NAME` argument on `run` and `eval-set`
    (same anti-drift helper as the other shared eval args), plus a
    `[defaults] grader` config key. Resolution order:
    `--grader` > `[defaults] grader` > built-in default. The literal name
    `none` disables grading (`--grader none` is the escape hatch; also valid in
-   config).
+   config). `none` is resolved by the CLI **before** any registry lookup, so it
+   is effectively a reserved name — a plugin registering a grader called
+   `none` is shadowed; document it as reserved.
 3. **Default:** `operator` when the run is attended (`_attended(args)`: a real
    TTY and no `--no-prompt`), `none` when unattended. This preserves R6's hard
    invariant — CI/unattended runs never block on a prompt — while making every
    attended run graded by default.
-4. **Explicit choice always wins:** an explicit `--grader` (or config value) is
-   honored verbatim regardless of attendedness — a VLM grader must be able to
-   run unattended, and the operator grader already degrades safely on dead
-   stdin (`prompt_verdict` swallows `EOFError` and returns). One contradiction
-   is rejected loudly: `--no-prompt --grader operator` is a `SystemExit` error
-   (the flag promises no prompts; the grader exists to prompt).
+4. **Explicit choice wins, except against `--no-prompt`:** an explicit
+   `--grader` (or config value) is honored regardless of TTY-ness — a VLM
+   grader must be able to run unattended, and the operator grader already
+   degrades safely on dead stdin (`prompt_verdict` swallows `EOFError` and
+   returns). `--no-prompt` is the one override: its documented promise is that
+   the run never asks the terminal operator anything, so it always suppresses
+   the `operator` grader specifically — a config-sourced
+   `[defaults] grader = operator` downgrades to `none` with a stderr note,
+   while the explicit flag pair `--no-prompt --grader operator` is rejected
+   with `SystemExit` (a contradiction typed in one command line). The check
+   lives in `_check_shared_run_conflicts` so `run` and `eval-set` share it.
+   Non-operator graders are unaffected by `--no-prompt`.
 5. **The scorer-name sniffing gate is deleted**, as is
    `prompt_verdict_on_operator_end` (both call sites replaced by the grader
    wiring; the method's only job was the narrow OPERATOR_END-only policy this
@@ -102,17 +119,24 @@ class Grader(Protocol):
    start prompting after each non-definitive trial (previously prompt-free
    unless the operator pressed the end key). The operator is standing at the
    rig in an attended run; `--grader none` (or `--no-prompt`) restores the old
+   behavior. With `epochs > 1` this means one prompt per epoch trial — the
+   operator-facing cost of the change, consistent with existing ad-hoc
    behavior. Unattended behavior is unchanged everywhere.
-7. **Policy-stop context line:** `prompt_verdict` gains one note (mirroring the
-   existing `max_steps` note): when the trial ended as a policy-requested stop
-   (truncated, reason neither `max_steps` nor an adopted definitive reason),
-   it prints `note: the policy ended this trial ('<reason>')` before asking —
-   the operator should know the robot stopped itself before judging it.
+7. **Early-end context line:** `prompt_verdict` gains one note (mirroring the
+   existing `max_steps` note): when the trial is truncated with a reason other
+   than `max_steps`, it prints `note: this trial ended early ('<reason>')`
+   before asking. The wording is deliberately neutral: `TrialRecord` cannot
+   distinguish a policy-requested stop from an embodiment truncation (both
+   set the same two fields in `rollout.py`), so claiming "the policy ended
+   this" could be false for an embodiment truncation. The reason string
+   (`done`, `give_up`, `time_limit`, ...) carries the specifics.
 8. **No log-schema change:** the judgement/note/event already land in the
    `EvalLog`; recording the grader *name* in the log header is a possible
    follow-up, not this PR.
-9. **`inspect-robots list`** picks up the new kind automatically if it
-   iterates `KINDS`; verify and include graders in the listing either way.
+9. **`inspect-robots list`** does **not** pick the kind up automatically: it
+   iterates `_KIND_BY_PLURAL` (`cli.py`), and the `list` positional's
+   `choices` come from the same map. Add a `"graders"` entry there;
+   `_PLURAL_BY_KIND`/`_ENV_BY_KIND` need no grader entry.
 
 ## Tasks
 
@@ -124,26 +148,34 @@ class Grader(Protocol):
   `input_fn`), `connect_session` rebinds the session.
 - [ ] **eval.py: `grader=` kwarg.** Accept object or registry name on `eval()`
   and `eval_set()`; adapt to `before_scoring`; `ConfigError` when both are
-  passed. Docstrings updated (state the once-per-scored-trial contract and the
+  passed or when the resolved object fails `isinstance(g, Grader)`.
+  Docstrings updated (state the once-per-scored-trial contract and the
   mutual exclusion). Tests: grader called exactly once per scored trial, never
-  for errored trials, string resolution works, both-passed raises.
-- [ ] **session.py: policy-stop note + delete `prompt_verdict_on_operator_end`.**
-  Add the decision-7 note line to `prompt_verdict`; remove the narrow variant
-  and its tests; port any still-relevant assertions onto `prompt_verdict`.
+  for errored trials, string resolution works, both-passed raises,
+  non-conforming resolved object raises.
+- [ ] **session.py: early-end note + delete `prompt_verdict_on_operator_end`.**
+  Add the decision-7 neutral note line to `prompt_verdict`; remove the narrow
+  variant and its tests; port any still-relevant assertions onto
+  `prompt_verdict`.
 - [ ] **cli.py + defaults.py wiring.** Shared `--grader` arg; `[defaults]
   grader` config key (`defaults.py`: `Defaults` field, parser, `_CONFIG_KEYS`);
   resolution per decisions 2–4; both `run` paths and `eval-set` build the
   grader (connecting the `OperatorSession` via `connect_session`) and pass
   `grader=` to `eval()`/`eval_set()`; delete the scorer-sniffing gate and both
   `before_scoring =` wirings; `--no-prompt --grader operator` exits with an
-  error. Verify `inspect-robots list` shows graders.
+  error in `_check_shared_run_conflicts`, and `--no-prompt` downgrades a
+  config-sourced `operator` to `none` with a stderr note. Add `"graders"` to
+  `_KIND_BY_PLURAL` so `inspect-robots list` shows them. Help strings and any
+  user-facing wording follow the repo writing-style rule (no em dashes, no
+  slogans).
 - [ ] **Regression tests for issue #320 (the acceptance bar).** Attended
   (injected `input_fn`/TTY seams), a policy that emits
   `action.meta["request_stop"]` (stop reason `done`): the operator is prompted
   and judgement + note land in the record/log on (a) ad-hoc run with a
   **non-operator** scorer, (b) registered task via `run --task`, (c)
-  `eval-set`. Plus: unattended run never prompts and records `None` (R6), and
-  `--grader none` suppresses the prompt on an attended run.
+  `eval-set`. Plus: unattended run never prompts and records `None` (R6),
+  `--grader none` suppresses the prompt on an attended run, and `--no-prompt`
+  downgrades a config-sourced `operator` grader (no prompt, stderr note).
 - [ ] **Public API + docs.** Export `Grader`, `operator_grader`, and the
   `grader` decorator via `__init__.py` `__all__`; update
   `tests/test_api_snapshot.py` in the same commit. Update `src/inspect_robots/CLAUDE.md`
