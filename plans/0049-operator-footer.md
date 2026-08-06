@@ -100,7 +100,13 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    attrs so the atexit fallback can never replay a stale saved state over a later
    trial's raw window. `KeyboardInterrupt` is converted by `rollout()` to its
    cancelled-trial path and re-raised **through** the same `finally`
-   (rollout.py:458-463), so Ctrl-C restores too.
+   (rollout.py:458-463), so Ctrl-C restores too. Guard scope: `end_trial()` runs
+   whenever `operator_input is not None` and the hook exists — it does NOT check
+   `console_ok`. Only the catch-warn part mirrors poll's discipline, not its guard: a
+   footer-mode `poll()` that raises (the pump is the likeliest raiser) flips
+   `console_ok` False, and skipping restore on that flag would leave the verdict
+   prompt running in cbreak with echo off — the exact scenario the teardown exists
+   for.
 2. **Footer mode gates on: console channel enabled AND `sys.stdin.isatty()` AND
    termios importable AND raw-mode entry succeeded.** Any failure (non-tty, Windows,
    exotic terminal, `termios.error`) falls back to plain mode silently at
@@ -170,11 +176,18 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    completes lines only on `"\n" in buffer`, so a line handed over without its
    newline would sit unparsed until the next Enter; `""` returns only on real EOF,
    preserving the console's EOF contract); in plain mode the same closures delegate
-   straight to the fd defaults. The fd defaults are `console.py`'s existing module-private
-   `_stdin_readable`/`_stdin_read` (imported — same package), injectable on the
-   session as `fd_readable`/`fd_read` seams, so the session adds **no new
-   pragma-no-cover fd lines** (amending decision 8: uncovered lines are the termios
-   syscalls plus nothing new). This keeps `OperatorConsole` byte-for-byte untouched:
+   to the fd seams. Seam types: `fd_readable: () -> bool` defaults to `console.py`'s
+   existing pragma'd module-private `_stdin_readable` (imported — same package);
+   `fd_read: () -> bytes` is **bytes-typed** so the editor can buffer raw bytes
+   across split UTF-8 sequences (decision 4) — its default is a new one-line
+   module-private helper `_stdin_read_bytes()` returning
+   `os.read(sys.stdin.fileno(), 65536)` (pragma'd body; the one new fd pragma line,
+   see decision 8). Console.py's str-typed `_stdin_read` cannot be the default: it
+   decodes per chunk, destroying split sequences before the editor sees them. The
+   plain-mode dispatching `read` closure decodes each chunk itself with
+   `decode("utf-8", errors="replace")` — the same str per chunk that the console's
+   own default produces today, and pure covered logic over the injected `fd_read`.
+   This keeps `OperatorConsole` byte-for-byte untouched:
    the fd-desync rationale of plan 0042 decision 9 targets the buffered
    TextIOWrapper, which this pump is not. Footer-mode `session.begin_trial()`:
    drain the fd raw with **no echo** (stale pre-trial bytes must not paint into a
@@ -188,10 +201,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 8. **Raw-mode syscalls are the only NEW uncovered lines.** `_enter_cbreak()` /
    `_restore()` module-private helpers own `termios.tcgetattr`/`tcsetattr`
    (`# pragma: no cover` bodies, lazy `import termios`), injectable as
-   `raw_mode_fn`-style seams on the session for tests. The session's fd access
-   reuses `console.py`'s already-pragma'd module-private `_stdin_readable` /
-   `_stdin_read` as the defaults behind its `fd_readable`/`fd_read` seams
-   (decision 7) — no new fd pragma lines in session.py. The editor, renderer,
+   `raw_mode_fn`-style seams on the session for tests. The session's fd access:
+   `fd_readable` reuses `console.py`'s already-pragma'd module-private
+   `_stdin_readable`; `fd_read` defaults to the new bytes-typed
+   `_stdin_read_bytes()` (decision 7), whose one-line body is the only new fd
+   pragma line — decoding lives in covered closure code. The editor, renderer,
    dispatching closures, `end_trial` paths, and mode fallback are all pure logic
    over injected callables — fully covered.
 
@@ -228,7 +242,7 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 ### Task 2: raw-mode window — `begin_trial()`/`end_trial()` + rollout hook
 
 **Files:** `src/inspect_robots/session.py`, `src/inspect_robots/rollout.py`,
-`tests/test_session.py`, `tests/test_rollout_hardening.py`
+`tests/test_session.py`, `tests/test_rollout_observation_step.py`
 
 - [ ] **Step 1: failing tests.** Session: footer entered only when enabled+tty+raw-ok
   AND the console is session-built (caller-injected `console=...` → documented no-op);
@@ -240,7 +254,10 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   KeyboardInterrupt cancelled-trial path; skipped without error when the hook is
   absent (plain `OperatorConsole`); a raising `end_trial` warns and never masks the
   trial's own outcome (mirror the `poll()` degrade tests in
-  `tests/test_rollout_observation_step.py`).
+  `tests/test_rollout_observation_step.py`); `end_trial` still called after a
+  raising `poll()` flipped `console_ok` False mid-trial (decision 1 guard scope);
+  `end_trial()` on a session that never entered footer mode writes zero bytes and
+  does not touch `_status_open` (plain-mode byte-identity backstop).
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 3: CLI opt-in + `[sent]` confirmations
