@@ -72,7 +72,8 @@ Python 3.10+.
 - `cli.py` `-P`/`-E`/`-T` parsing (`_parse_kvs` → `defaults._parse_value`) **coerces**
   values: `4` → int, `true`/`false` → bool, `none` → None; factories receive a scalar
   union, not raw strings. `_resolve_or_exit` (~line 600) wraps `resolve()`'s bare
-  `KeyError`/`ConfigError`/`TypeError` into clean CLI errors.
+  `KeyError`/`ConfigError`/`TypeError` into clean CLI errors — it does **not** catch
+  `ValueError`, and its per-kind flag map needs an `"operator_input": "-V"` entry.
 - `cli.py:696`: `_attended()` = TTY and not `--no-prompt`. `cli.py:705`
   `_build_operator_session(policy, embodiment)` returns `(session, operator_input | None)`
   — `None` on win32, on policies without `accepts_operator_messages` (when the embodiment
@@ -120,15 +121,24 @@ Python 3.10+.
    unknown keys loudly** (typo protection). Supported keys: `model` (Whisper size or
    path, default `small`), `device` (sounddevice index or name substring, default system
    default), `language` (default `en`), `compute` (CTranslate2 compute type, default
-   `auto`). Both `run` and `eval-set` get the flags (shared-args helper).
+   `auto`). Unknown or mis-typed keys raise `TypeError` (the natural signal for bad
+   constructor kwargs, already caught by `_resolve_or_exit`), never `ValueError` — a
+   `ValueError` would escape as a raw traceback. Both `run` and `eval-set` get the
+   flags (shared-args helper). **`start()`/`close()` are duck-typed optional hooks**,
+   not part of the `OperatorInput` protocol: the CLI calls each via
+   `getattr`+`callable` when present, printing the listening line only when `start()`
+   returned a string — same convention as `connect_operator_session` /
+   `transcript_delta`, so a minimal third-party source (poll + begin_trial only) works
+   with zero core changes.
 6. **All `--voice` guards fire before the run starts, loudly:** requires attended mode
    (TTY and no `--no-prompt`); requires the resolved live input channel
    (`_build_operator_session` returned a non-`None` operator input — this simultaneously
    covers win32, `accepts_operator_messages=False` policies on hook-less embodiments, and
    legacy hardware embodiments, reusing the session's own notices); requires the plugin
    installed (unknown-name `KeyError` from `resolve()` — and only that error — gets the
-   `pip install inspect-robots-voice` hint via `_resolve_or_exit`-style handling, so a
-   `ValueError` from a bad `-V` key is never misreported as "plugin not installed").
+   `pip install inspect-robots-voice` hint via `_resolve_or_exit` with an
+   `"operator_input": "-V"` flag-map entry, so a `TypeError` from a bad `-V` key is
+   reported against `-V` and never misreported as "plugin not installed").
    `-V` without `--voice` is an error. A voice *startup* failure (no mic, unknown
    device, model download failure) aborts before any trial, printing the sounddevice
    device list on device errors. **End-only mode is permitted and lossy on purpose:**
@@ -155,14 +165,20 @@ Python 3.10+.
      segmenter, closed utterances through the transcriber, accepted text into a
      thread-safe output deque; `poll()` drains non-blocking and returns
      `ConsolePoll(messages=..., sources=("voice", ...))` with `end=None`;
-     `begin_trial()` guarantees pre-trial chatter never leaks in **including in-flight
-     work**: a monotonically increasing generation counter (guarded by the same lock as
-     the output deque) is bumped by `begin_trial()`, which also clears the output deque,
-     the capture queue, and the segmenter's open utterance; the worker stamps each
-     utterance with the generation current *when its segment closed* and discards
-     results whose generation is stale by the time transcription finishes (transcription
-     of `small` on CPU takes seconds — an utterance spoken before reset but transcribed
-     after must die, not become the new trial's first message); `start()` loads the
+     `begin_trial()` discards pre-trial chatter **including in-flight work**, with the
+     worker as the *sole owner* of segmenter and capture-drain state (no cross-thread
+     mutation of worker internals): `begin_trial()` bumps a monotonically increasing
+     generation counter and clears the output deque (both under one lock) and drains
+     the thread-safe capture queue — nothing else. The worker records the generation
+     current when a segment *opens*; at close and again after transcription it discards
+     any utterance whose open-generation is stale (an utterance the operator starts
+     before reset — or whose transcription finishes after it, seconds on CPU with
+     `small` — must die, not become the new trial's first message; a stale
+     open-generation also makes the worker self-clear its open utterance and reset the
+     segmenter's noise/pre-roll state without `begin_trial()` touching it). Residual
+     leakage is bounded by one capture block (tens of ms of pre-reset audio the
+     PortAudio callback may enqueue just after the drain) — below the min-open
+     threshold, so it cannot form an utterance on its own; `start()` loads the
      model, opens the stream, and returns a human-readable "listening on <device>
      (model=<m>)" line for the CLI to print; `close()` is idempotent, stops thread and
      stream, never raises.
@@ -225,7 +241,9 @@ requirement).
 - [ ] `session.py`: `attach_input(source: OperatorInput, *, label: str)` registers an
   additional source. `poll()` polls the console first, then each attached source; for
   each attached-source message, `write_line(f"{label}: {text}")` then append to
-  `messages`/`sources` (console messages get source `"console"`); attached-source `end`
+  `messages`/`sources` — the session **stamps the attach `label` as the source and
+  ignores any `sources` the inner poll returned** (the session is the provenance
+  authority; console messages get source `"console"`); attached-source `end`
   is ignored (feedback-only, documented); a source whose `poll()`/`begin_trial()` raises
   is detached with one `write_line` warning (`"{label} input disabled after
   {type}: {exc}"`) and the console keeps working. `begin_trial()` fans out.
@@ -250,20 +268,24 @@ requirement).
 - [ ] Guard + build helper (shared by `run`/`eval-set`): error paths (each a
   `SystemExit` with a one-line reason) — `-V` without `--voice`; `--voice` without
   attended mode; `--voice` when the operator input channel is `None`; `--voice` when
-  `resolve("operator_input", "voice", ...)` raises `KeyError` (unknown name) — reuse or
-  mirror `_resolve_or_exit`, attaching the `pip install inspect-robots-voice` hint on
-  the `KeyError` path only, so a factory `ValueError` from a bad `-V` key surfaces
-  as-is.
+  `resolve("operator_input", "voice", ...)` raises `KeyError` (unknown name) — use
+  `_resolve_or_exit` with a new `"operator_input": "-V"` flag-map entry, attaching the
+  `pip install inspect-robots-voice` hint on the `KeyError` path only; a factory
+  `TypeError` (bad `-V` key, decision 5) lands on the existing clean `TypeError` path
+  and is reported against `-V`.
 - [ ] Wiring: parse `-V` with the existing `_parse_kvs` (values arrive as the coerced
-  scalar union — decision 5); `resolve(...)` the factory; `start()` before `eval()` and
-  print the returned listening line via `session.write_line`;
+  scalar union — decision 5); `resolve(...)` the factory; `start()`/`close()` invoked
+  as duck-typed optional hooks (`getattr`+`callable` — decision 5), `start()` before
+  `eval()`, printing the returned listening line via `session.write_line` only when it
+  returned a string;
   `session.attach_input(voice, label="voice")`; in end-only mode also print the
   voice-notes-log-only notice (decision 6); `close()` in the existing `finally`.
   Startup exceptions abort the run with the message as-is.
-- [ ] Tests: full guard matrix (incl. bad `-V` key not misreported as missing plugin);
-  lifecycle (start printed, attach called, close called on success and on eval failure)
-  with a fake registered operator input; `-V` parsing incl. coerced values; end-only
-  notice.
+- [ ] Tests: full guard matrix (incl. bad `-V` key raising `TypeError` reported against
+  `-V`, not as missing plugin); lifecycle (start printed, attach called, close called
+  on success and on eval failure) with a fake registered operator input, plus a
+  hook-less fake (no `start`/`close`) that still runs; `-V` parsing incl. coerced
+  values; end-only notice.
 
 ### Task 5: plugin package `plugins/inspect-robots-voice/` (scaffolding + segmenter)
 
@@ -302,13 +324,14 @@ requirement).
   stream, returns the listening line), `close()` (idempotent), worker-error capture
   re-raised on next `poll()`.
 - [ ] `__init__.py`: `voice_input(**kwargs)` factory — accepts the CLI's coerced scalar
-  union per key (decision 5), validates types, unknown-key rejection, docstring
-  documenting the `-V` keys.
+  union per key (decision 5), validates types; unknown or mis-typed keys raise
+  `TypeError` (decision 5), docstring documenting the `-V` keys.
 - [ ] Tests with fake capture + fake transcriber: utterances flow to `poll()`; silence
-  sends nothing; `begin_trial()` clears queued **and in-flight** utterances (a
-  transcription finishing after the generation bump is discarded); worker error
-  surfaces on next poll; `close()` idempotent and joins the thread; factory type
-  validation (str and int `device`) and unknown-key error.
+  sends nothing; `begin_trial()` clears queued **and in-flight** utterances (an
+  utterance whose segment *opened* before the generation bump is discarded, both when
+  it closes after the bump and when only its transcription finishes after); worker
+  error surfaces on next poll; `close()` idempotent and joins the thread; factory type
+  validation (str and int `device`) and unknown-key `TypeError`.
 
 ### Task 8: CI + release plumbing
 
