@@ -143,9 +143,20 @@ def test_optional_fields_omitted_when_unset() -> None:
     _client(handler).complete([_USER], [])
 
     body = json.loads(seen[0].content)
+    assert body["thinking"] == {"type": "adaptive"}
     assert "tools" not in body
     assert "output_config" not in body
     assert "system" not in body
+
+
+def test_none_effort_disables_thinking_without_output_config() -> None:
+    seen, handler = _capture(_anthropic_response(_text("hi"), stop_reason="end_turn"))
+
+    _client(handler).complete([_USER], [], reasoning_effort="none")
+
+    body = json.loads(seen[0].content)
+    assert body["thinking"] == {"type": "disabled"}
+    assert "output_config" not in body
 
 
 def test_temperature_forwarded_when_set() -> None:
@@ -163,6 +174,17 @@ def test_fast_mode_sends_speed_and_beta_header() -> None:
 
     assert json.loads(seen[0].content)["speed"] == "fast"
     assert seen[0].headers["anthropic-beta"] == "fast-mode-2026-02-01"
+
+
+def test_fast_mode_passes_through_with_none_effort() -> None:
+    seen, handler = _capture(_anthropic_response(_text("hi"), stop_reason="end_turn"))
+
+    _client(handler, speed="fast").complete([_USER], [], reasoning_effort="none")
+
+    body = json.loads(seen[0].content)
+    assert body["speed"] == "fast"
+    assert body["thinking"] == {"type": "disabled"}
+    assert "output_config" not in body
 
 
 def test_empty_api_key_omits_header() -> None:
@@ -751,8 +773,11 @@ def test_effort_4xx_names_the_accepted_values() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="output_config.effort: invalid value 'minimal'")
 
-    with pytest.raises(RuntimeError, match=r"none and minimal are OpenAI-only values"):
+    with pytest.raises(RuntimeError) as excinfo:
         _client(handler).complete([_USER], [], reasoning_effort="minimal")
+
+    assert "minimal is an OpenAI-only value" in str(excinfo.value)
+    assert "none and minimal" not in str(excinfo.value)
 
 
 def test_temperature_guidance_only_when_temperature_was_sent() -> None:
