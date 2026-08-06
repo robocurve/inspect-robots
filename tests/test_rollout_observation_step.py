@@ -204,7 +204,7 @@ def test_operator_message_reaches_only_the_next_chunked_inference() -> None:
     _run(policy, CubePickEmbodiment(), max_steps=4, operator_input=operator_input)
 
     assert [observation.extra["operator_messages"] for observation in policy.observations] == [
-        [{"t": 0, "text": "keep the wrist level"}],
+        [{"t": 0, "text": "keep the wrist level", "source": "console"}],
         [],
     ]
 
@@ -222,8 +222,8 @@ def test_operator_messages_across_steps_keep_their_drain_step() -> None:
     _run(policy, CubePickEmbodiment(), max_steps=3, operator_input=operator_input)
 
     assert [observation.extra["operator_messages"] for observation in policy.observations] == [
-        [{"t": 0, "text": "first"}],
-        [{"t": 1, "text": "second"}],
+        [{"t": 0, "text": "first", "source": "console"}],
+        [{"t": 1, "text": "second", "source": "console"}],
     ]
 
 
@@ -272,7 +272,13 @@ def test_messages_in_an_ending_poll_are_recorded_as_transcript_events() -> None:
     policy = _ProbePolicy()
     embodiment = _TrackingEmbodiment()
     operator_input = FakeOperatorInput(
-        [ConsolePoll(messages=("gripper slipped",), end=EndRequest())]
+        [
+            ConsolePoll(
+                messages=("gripper slipped",),
+                end=EndRequest(),
+                sources=("voice",),
+            )
+        ]
     )
 
     record = _run(policy, embodiment, max_steps=3, operator_input=operator_input)
@@ -280,9 +286,29 @@ def test_messages_in_an_ending_poll_are_recorded_as_transcript_events() -> None:
     message_events = [event for event in record.events if event.kind == "operator_message"]
     assert len(message_events) == 1
     assert message_events[0].t == 0
-    assert message_events[0].data == {"text": "gripper slipped"}
+    assert message_events[0].data == {"text": "gripper slipped", "source": "voice"}
     assert embodiment.step_calls == 0
     assert policy.observations == []
+
+
+def test_message_sources_are_parallel_with_console_fallback() -> None:
+    policy = _ProbePolicy()
+    operator_input = FakeOperatorInput(
+        [ConsolePoll(messages=("spoken", "typed"), sources=("voice",))]
+    )
+
+    record = _run(policy, CubePickEmbodiment(), max_steps=1, operator_input=operator_input)
+
+    assert policy.observations[0].extra["operator_messages"] == [
+        {"t": 0, "text": "spoken", "source": "voice"},
+        {"t": 0, "text": "typed", "source": "console"},
+    ]
+    assert [
+        event.data["source"] for event in record.events if event.kind == "operator_message"
+    ] == [
+        "voice",
+        "console",
+    ]
 
 
 def test_begin_trial_runs_once_after_embodiment_reset() -> None:

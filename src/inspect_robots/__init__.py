@@ -36,7 +36,16 @@ from inspect_robots.log import (
     read_eval_log,
 )
 from inspect_robots.policy import Policy, PolicyBase, PolicyConfig, PolicyInfo
-from inspect_robots.registry import embodiment, policy, registered, resolve, scorer, sink, task
+from inspect_robots.registry import (
+    embodiment,
+    operator_input,
+    policy,
+    registered,
+    resolve,
+    scorer,
+    sink,
+    task,
+)
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import (
@@ -109,6 +118,7 @@ __all__ = [
     "eval",
     "eval_set",
     "min_distance_to_goal",
+    "operator_input",
     "operator_scorer",
     "policy",
     "reached_goal_state",

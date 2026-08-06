@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import pytest
 
-from inspect_robots.console import USAGE, ConsolePoll, OperatorConsole, OperatorInput
+from inspect_robots.console import USAGE, ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
@@ -40,6 +40,31 @@ class _RecordingLinesSession(OperatorSession):
         self.lines.append(text)
 
 
+class _ScriptedAttachedInput:
+    def __init__(
+        self,
+        polls: list[ConsolePoll | Exception],
+        *,
+        begin_error: Exception | None = None,
+    ) -> None:
+        self.polls = list(polls)
+        self.begin_error = begin_error
+        self.poll_calls = 0
+        self.begin_calls = 0
+
+    def poll(self) -> ConsolePoll:
+        self.poll_calls += 1
+        item = self.polls.pop(0) if self.polls else ConsolePoll()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def begin_trial(self) -> None:
+        self.begin_calls += 1
+        if self.begin_error is not None:
+            raise self.begin_error
+
+
 def _scripted_prompt_session(
     answers: list[str],
 ) -> tuple[OperatorSession, list[str], list[str]]:
@@ -58,12 +83,93 @@ def test_console_protocol_methods_delegate_to_composed_console() -> None:
     console = _RecordingConsole()
     session = OperatorSession(console=console)
 
-    assert session.poll() == ConsolePoll(messages=("recorded",))
+    poll = session.poll()
+    assert poll == ConsolePoll(messages=("recorded",))
+    assert poll.sources == ()
     session.begin_trial()
 
     assert console.poll_calls == 1
     assert console.begin_trial_calls == 1
     assert isinstance(session, OperatorInput)
+
+
+def test_attached_inputs_merge_after_console_with_session_stamped_sources() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+    voice = _ScriptedAttachedInput(
+        [
+            ConsolePoll(
+                messages=("first", "second"),
+                end=EndRequest(verdict="y"),
+                sources=("untrusted", "untrusted"),
+            )
+        ]
+    )
+    phone = _ScriptedAttachedInput([ConsolePoll(messages=("third",))])
+    session.attach_input(voice, label="voice")
+    session.attach_input(phone, label="phone")
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(
+        messages=("recorded", "first", "second", "third"),
+        end=None,
+        sources=("console", "voice", "voice", "phone"),
+    )
+    assert output == ["voice: first\n", "voice: second\n", "phone: third\n"]
+
+
+def test_poll_failure_permanently_detaches_only_that_source() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+    broken = _ScriptedAttachedInput(
+        [RuntimeError("microphone failed"), ConsolePoll(messages=("must not return",))]
+    )
+    healthy = _ScriptedAttachedInput(
+        [ConsolePoll(messages=("one",)), ConsolePoll(messages=("two",))]
+    )
+    session.attach_input(broken, label="voice")
+    session.attach_input(healthy, label="phone")
+
+    first = session.poll()
+    second = session.poll()
+
+    assert first.sources == ("console", "phone")
+    assert second.sources == ("console", "phone")
+    assert broken.poll_calls == 1
+    assert healthy.poll_calls == 2
+    assert output == [
+        "voice input disabled after RuntimeError: microphone failed\n",
+        "phone: one\n",
+        "phone: two\n",
+    ]
+
+
+def test_begin_trial_failure_permanently_detaches_only_that_source() -> None:
+    output: list[str] = []
+    console = _RecordingConsole()
+    session = OperatorSession(console=console, write=output.append)
+    broken = _ScriptedAttachedInput(
+        [ConsolePoll(messages=("must not return",))],
+        begin_error=ValueError("reset failed"),
+    )
+    healthy = _ScriptedAttachedInput([ConsolePoll(messages=("fresh",))])
+    session.attach_input(broken, label="voice")
+    session.attach_input(healthy, label="phone")
+
+    session.begin_trial()
+    poll = session.poll()
+
+    assert console.begin_trial_calls == 1
+    assert broken.begin_calls == 1
+    assert broken.poll_calls == 0
+    assert healthy.begin_calls == 1
+    assert poll.messages == ("recorded", "fresh")
+    assert poll.sources == ("console", "phone")
+    assert output == [
+        "voice input disabled after ValueError: reset failed\n",
+        "phone: fresh\n",
+    ]
 
 
 def test_default_console_routes_usage_through_write_seam() -> None:

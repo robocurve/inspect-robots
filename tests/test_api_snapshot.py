@@ -33,6 +33,7 @@ EXPECTED = {
     "min_distance_to_goal",
     "reached_goal_state",
     "operator_scorer",
+    "operator_input",
     # the two swappable inputs
     "Policy",
     "PolicyBase",

@@ -470,7 +470,11 @@ def _run_eval(
                 termination_reasons.append(record.termination_reason)
                 operator_messages.append(
                     tuple(
-                        {"t": event.t, "text": event.data["text"]}
+                        {
+                            "t": event.t,
+                            "text": event.data["text"],
+                            "source": event.data.get("source", "console"),
+                        }
                         for event in record.events
                         if event.kind == "operator_message"
                     )

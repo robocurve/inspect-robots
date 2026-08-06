@@ -9,6 +9,19 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core (0.43.0):** operator messages now preserve console or attached-input
+  provenance through transcripts, policy observations, and evaluation logs.
+  `OperatorSession.attach_input()` merges feedback-only sources without risking
+  the typed console, the registry exposes an `operator_input` plugin kind, and
+  attended `run` and `eval-set` commands accept `--voice` with repeatable `-V`
+  configuration ([plan 0050](plans/0050-voice-operator-input.md), #313).
+
+- **Voice plugin (0.1.0):** new `inspect-robots-voice` package provides local
+  microphone capture, adaptive energy segmentation, faster-whisper
+  transcription filtering, trial-safe threaded delivery, and the `voice`
+  operator-input entry point ([plan 0050](plans/0050-voice-operator-input.md),
+  #313).
+
 - **Agent plugin (0.22.0):** `done` and `give_up` now ask for a required
   `hindsight` argument: what the agent wishes it had known at the start of
   the episode, as concrete transferable rig and task facts. The system

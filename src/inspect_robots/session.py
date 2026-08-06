@@ -8,7 +8,7 @@ import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from inspect_robots.console import ConsolePoll, OperatorConsole
+from inspect_robots.console import ConsolePoll, OperatorConsole, OperatorInput
 from inspect_robots.errors import EmbodimentFault
 from inspect_robots.types import OPERATOR_END
 
@@ -53,6 +53,7 @@ class OperatorSession:
         self._console = (
             console if console is not None else OperatorConsole(output_fn=self.write_line)
         )
+        self._attached_inputs: list[tuple[OperatorInput, str]] = []
 
     def _write(self, text: str) -> None:
         if self._write_fn is not None:
@@ -67,12 +68,48 @@ class OperatorSession:
         return input(prompt)
 
     def poll(self) -> ConsolePoll:
-        """Return the composed console's next non-blocking input batch."""
-        return self._console.poll()
+        """Poll the console first, then merge every healthy attached input in order."""
+        console_poll = self._console.poll()
+        if not self._attached_inputs:
+            return console_poll
+
+        messages = list(console_poll.messages)
+        sources = ["console"] * len(messages)
+        healthy_inputs: list[tuple[OperatorInput, str]] = []
+        for source, label in self._attached_inputs:
+            try:
+                attached_poll = source.poll()
+            except Exception as exc:
+                self.write_line(f"{label} input disabled after {type(exc).__name__}: {exc}")
+                continue
+            healthy_inputs.append((source, label))
+            for text in attached_poll.messages:
+                self.write_line(f"{label}: {text}")
+                messages.append(text)
+                sources.append(label)
+        self._attached_inputs = healthy_inputs
+        return ConsolePoll(messages=tuple(messages), end=console_poll.end, sources=tuple(sources))
 
     def begin_trial(self) -> None:
-        """Ask the composed console to discard input predating the next trial."""
+        """Ask every healthy input to discard feedback predating the next trial."""
         self._console.begin_trial()
+        healthy_inputs: list[tuple[OperatorInput, str]] = []
+        for source, label in self._attached_inputs:
+            try:
+                source.begin_trial()
+            except Exception as exc:
+                self.write_line(f"{label} input disabled after {type(exc).__name__}: {exc}")
+                continue
+            healthy_inputs.append((source, label))
+        self._attached_inputs = healthy_inputs
+
+    def attach_input(self, source: OperatorInput, *, label: str) -> None:
+        """Attach a feedback-only input and stamp its messages with ``label``.
+
+        The session ignores the source's own provenance and any end request. A source that
+        raises while polling or beginning a trial is permanently detached for this run.
+        """
+        self._attached_inputs.append((source, label))
 
     def status(self, line: str | None) -> None:
         """Render one in-place status line, or idempotently close an open line."""

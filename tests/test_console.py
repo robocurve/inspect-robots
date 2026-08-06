@@ -36,7 +36,7 @@ def test_result_values_are_frozen_with_empty_defaults() -> None:
     poll = ConsolePoll()
 
     assert end == EndRequest(verdict=None, note=None)
-    assert poll == ConsolePoll(messages=(), end=None)
+    assert poll == ConsolePoll(messages=(), end=None, sources=())
     with pytest.raises(dataclasses.FrozenInstanceError):
         end.verdict = "y"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):

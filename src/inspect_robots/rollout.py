@@ -300,9 +300,12 @@ def rollout(
                         stacklevel=2,
                     )
             if poll is not None:
-                for text in poll.messages:
-                    store.setdefault(_OPERATOR_MSGS_KEY, []).append({"t": t, "text": text})
-                    record.events.append(operator_message_event(t, text))
+                for i, text in enumerate(poll.messages):
+                    source = poll.sources[i] if i < len(poll.sources) else "console"
+                    store.setdefault(_OPERATOR_MSGS_KEY, []).append(
+                        {"t": t, "text": text, "source": source}
+                    )
+                    record.events.append(operator_message_event(t, text, source))
 
             prev_inferences = len(store.get(_INFER_KEY, []))
             all_approvals = store.get(_APPROVALS_KEY, [])

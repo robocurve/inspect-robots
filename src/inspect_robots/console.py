@@ -33,10 +33,15 @@ class EndRequest:
 
 @dataclass(frozen=True)
 class ConsolePoll:
-    """All complete feedback and the first end request drained in one non-blocking poll."""
+    """All feedback and the first end request drained in one non-blocking poll.
+
+    ``sources``, when non-empty, is parallel to ``messages``; an empty tuple means every
+    message came from the console.
+    """
 
     messages: tuple[str, ...] = ()
     end: EndRequest | None = None
+    sources: tuple[str, ...] = ()
 
 
 @runtime_checkable

@@ -2,8 +2,8 @@
 
 Subcommands:
 
-- ``inspect-robots list [tasks|policies|embodiments|scorers|sinks]`` — show registered
-  components (builtins + installed plugins).
+- ``inspect-robots list [tasks|policies|embodiments|scorers|sinks|operator_inputs]`` — show
+  registered components (builtins + installed plugins).
 - ``inspect-robots run --task T --policy P --embodiment E`` — run an eval, resolving
   components from the registry. Pass constructor args with ``-T/-P/-E k=v``;
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
@@ -89,6 +89,7 @@ from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
@@ -131,6 +132,7 @@ _KIND_BY_PLURAL = {
     "embodiments": "embodiment",
     "scorers": "scorer",
     "sinks": "sink",
+    "operator_inputs": "operator_input",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -182,6 +184,18 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
     parser.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="enable attended-only microphone feedback (requires inspect-robots-voice)",
+    )
+    parser.add_argument(
+        "-V",
+        dest="voice_args",
+        action="append",
+        metavar="k=v",
+        help="pass an argument to the inspect-robots-voice input (requires --voice)",
+    )
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=None, help="override each task's epoch count")
@@ -614,13 +628,23 @@ def _resolve_or_exit(
     try:
         return resolve(kind, name, **kwargs)
     except KeyError as exc:
-        raise SystemExit(str(exc.args[0])) from exc
+        message = str(exc.args[0])
+        # Only the registry's own unknown-name error earns the install hint; a
+        # KeyError escaping a factory must not masquerade as a missing plugin.
+        if kind == "operator_input" and message.startswith("no operator_input named"):
+            message = f"{message}; fix: pip install inspect-robots-voice"
+        raise SystemExit(message) from exc
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
     except TypeError as exc:
         if args_section is None:
             args_section = f"{kind}.args"
-        flag = {"task": "-T", "policy": "-P", "embodiment": "-E"}.get(kind, "the CLI args flag")
+        flag = {
+            "task": "-T",
+            "policy": "-P",
+            "embodiment": "-E",
+            "operator_input": "-V",
+        }.get(kind, "the CLI args flag")
         raise SystemExit(
             f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
         ) from exc
@@ -753,6 +777,50 @@ def _build_operator_session(
     label = "operator console:"
     session.write_line(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
     return session, session
+
+
+def _build_voice_input(
+    args: argparse.Namespace, operator_input: OperatorSession | None
+) -> OperatorInput | None:
+    """Validate voice flags and construct the registered input when requested."""
+    if args.voice_args and not args.voice:
+        raise SystemExit("-V requires --voice")
+    if not args.voice:
+        return None
+    if not _attended(args):
+        raise SystemExit("--voice requires attended mode (a TTY without --no-prompt)")
+    if operator_input is None:
+        raise SystemExit("--voice requires a live operator input channel")
+    return cast(
+        "OperatorInput",
+        _resolve_or_exit("operator_input", "voice", **_parse_kvs(args.voice_args)),
+    )
+
+
+def _start_voice_input(
+    voice_input: OperatorInput, session: OperatorSession, policy: object
+) -> None:
+    """Start and attach a voice input, honoring its optional startup hook."""
+    start_hook = getattr(voice_input, "start", None)
+    if callable(start_hook):
+        try:
+            listening_line = start_hook()
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
+        if isinstance(listening_line, str):
+            session.write_line(listening_line)
+    session.attach_input(voice_input, label="voice")
+    if not bool(getattr(policy, "accepts_operator_messages", False)):
+        session.write_line("voice notes go to the log only; the policy does not receive them")
+
+
+def _close_voice_input(voice_input: OperatorInput | None) -> None:
+    """Close a constructed voice input through its optional shutdown hook."""
+    if voice_input is None:
+        return
+    close_hook = getattr(voice_input, "close", None)
+    if callable(close_hook):
+        close_hook()
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -1308,6 +1376,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
+    voice_input: OperatorInput | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1335,6 +1404,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 # keypress owes a verdict; everything else stays non-blocking
                 # and unattended-safe (R6).
                 before_scoring = operator_session.prompt_verdict_on_operator_end
+        voice_input = _build_voice_input(args, operator_input)
+        if voice_input is not None:
+            _start_voice_input(
+                voice_input,
+                cast(OperatorSession, operator_input),
+                resolved.policy,
+            )
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1389,9 +1465,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
         try:
-            embodiment.close()
+            _close_voice_input(voice_input)
         finally:
-            resolved.claim.release()
+            try:
+                embodiment.close()
+            finally:
+                resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1463,6 +1542,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
+    voice_input: OperatorInput | None = None
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
@@ -1477,6 +1557,13 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
             # ended by keypress (OPERATOR_END); everything else stays
             # non-blocking and unattended-safe (R6).
             before_scoring = operator_session.prompt_verdict_on_operator_end
+        voice_input = _build_voice_input(args, operator_input)
+        if voice_input is not None:
+            _start_voice_input(
+                voice_input,
+                cast(OperatorSession, operator_input),
+                resolved.policy,
+            )
         try:
             success, logs = eval_set(
                 tasks,
@@ -1518,9 +1605,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
         try:
-            embodiment.close()
+            _close_voice_input(voice_input)
         finally:
-            resolved.claim.release()
+            try:
+                embodiment.close()
+            finally:
+                resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
