@@ -147,7 +147,7 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    practice, but the editor must tolerate split sequences: buffer bytes, decode
    with `errors="replace"` at display time for the echo, and decode each completed
    line **once** with `errors="replace"` at queue handoff — the console's `read`
-   seam is str-typed (`read: Callable[[], str]`, console.py:86), so bytes cannot
+   seam is str-typed (`read: Callable[[], str]`, console.py:85), so bytes cannot
    pass through it, and a strict decode there would turn malformed paste bytes into
    a raising `poll()` that kills the channel; decoding only complete lines
    preserves content exactly where today's per-64KiB-chunk decode could not. Paste
@@ -155,22 +155,35 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    processing is loop-per-byte over arbitrarily large reads. No history, no arrow
    keys, no cursor movement (YAGNI; the plan-0048 arc can add them later if operators
    ask).
-5. **Rendering model: the cursor lives at the end of the input line.** All updates
-   are relative two-line repaints using `\r` and ANSI `\x1b[A` (cursor up) /
-   `\x1b[K` (clear to end): status update = save input, move up, clear, write status,
-   move down, rewrite input; scrollback insert = move up, clear, write text + newline,
-   write status + newline, rewrite input. Repaints always clear before writing, which
-   also self-heals after any stray third-party print (one smudged frame, then clean).
-   BOTH rows clip to the terminal width (injectable `width_fn` defaulting to
-   `shutil.get_terminal_size().columns`, re-read at each repaint so resizes re-clip):
-   the input row clips to `width - 4` showing the tail; the status row clips to
-   `width - 1`. An unclipped row that wraps to two physical lines desyncs every
-   relative `\r`/`ESC[A` movement afterward — clipping is correctness, not
-   cosmetics. A `write_line` insert must `\r ESC[K`-clear the input row FIRST, then
-   write the scrollback text, status row, and input row in order. In footer mode
-   `status(None)` tears down both lines (clear input line, clear status line) so a
-   plugin-driven close leaves a clean terminal; `end_trial()` does the same teardown
-   idempotently as the backstop (decision 1); plain mode keeps its existing
+5. **Rendering model: the input row is the footer-window constant; the status row is
+   optional.** The input row is drawn (empty `> `) at footer `begin_trial()` and
+   exists for the whole footer window; the status row exists only while
+   `_status_open` — and on most attended runs it NEVER opens (no core code calls
+   `session.status()`; only plugins like the yam ticker do), so the one-row state
+   is the default, not an edge case. The cursor lives at the end of the input line.
+   All updates are relative repaints using `\r` and ANSI `\x1b[A` (cursor up) /
+   `\x1b[K` (clear to end), and every sequence branches on `_status_open`:
+   - **Two-row state** (status open): status update = save input, move up, clear,
+     write status, move down, rewrite input; scrollback insert = `\r ESC[K`-clear
+     the input row FIRST, move up, clear, write text + newline, write status +
+     newline, rewrite input; `status(None)` = clear input row, move up, clear
+     status row, write input row there (the footer collapses upward one line into
+     the one-row state; typing continues on the retained input row).
+   - **One-row state** (status never opened, or closed): scrollback insert = clear
+     input row, write text + newline, redraw input row — NO cursor-up, there is no
+     status row above and moving up would `ESC[K` real scrollback; the first
+     `status(line)` = clear input row, write status + newline, redraw input row
+     (creates the status row above, entering the two-row state).
+   Repaints always clear before writing, which also self-heals after any stray
+   third-party print (one smudged frame, then clean). BOTH rows clip to the
+   terminal width (injectable `width_fn` defaulting to
+   `shutil.get_terminal_size().columns`, re-read at each repaint so resizes
+   re-clip): the input row clips to `width - 4` showing the tail; the status row
+   clips to `width - 1`. An unclipped row that wraps to two physical lines desyncs
+   every relative `\r`/`ESC[A` movement afterward — clipping is correctness, not
+   cosmetics. `end_trial()` tears down whatever exists (clear input row; clear
+   status row too if open) idempotently as the backstop (decision 1), leaving a
+   clean terminal for the verdict prompt; plain mode keeps its existing
    close-with-newline semantics.
 6. **Confirmations come from `poll()`, not from the editor.** The editor
    cannot know whether a completed line is feedback, an end request, a verdict, or a
@@ -256,11 +269,16 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   completed line reaches the console parser verbatim on the same `poll()`; the
   dispatching `readable`/`read` closures satisfy the console's EOF contract (`""`
   only on real EOF); footer `begin_trial()` discards stale fd bytes with no echo and
-  clears editor + queue. Renderer: exact byte sequences for status update,
-  write_line insert (input row cleared first), input echo, teardown on
-  `status(None)` AND on `end_trial()`, tail-clipping of the input row at
-  `width - 4`, clipping of the status row at `width - 1`, re-clip after a
-  `width_fn` change. Plain-mode tests untouched.
+  clears editor + queue. Renderer, exact byte sequences in BOTH states of the
+  decision-5 machine: input row drawn at footer `begin_trial()`; one-row
+  `write_line` (no cursor-up — prior scrollback untouched); first `status(line)`
+  creates the status row from the one-row state; two-row status update; two-row
+  `write_line` insert (input row cleared first); input echo in both states,
+  including typing after `status(None)`; `status(None)` collapses two-row to
+  one-row (input row retained); `end_trial()` teardown from the one-row state,
+  the two-row state, and (idempotently) after a prior teardown; tail-clipping of
+  the input row at `width - 4`, clipping of the status row at `width - 1`,
+  re-clip after a `width_fn` change. Plain-mode tests untouched.
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 2: raw-mode window — `begin_trial()`/`end_trial()` + rollout hook
