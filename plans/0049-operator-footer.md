@@ -127,9 +127,15 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    policy), `[noted]` on end-only rows (`USAGE_END_ONLY` says lines are saved to the
    log; "sent" would imply delivery to the policy that is not happening).
 4. **Line editing is deliberately minimal:** printable characters append, backspace
-   (`\x7f`/`\x08`) deletes one, Ctrl-U kills the line, `\n`/`\r` completes it
-   (echoing `\r` as line completion matches raw-mode Enter), everything else
-   non-printable is ignored. Multi-byte UTF-8 arrives whole from `os.read` chunks in
+   (`\x7f`/`\x08`) deletes one **character** — strip trailing UTF-8 continuation
+   bytes (`0x80`–`0xBF`) plus one lead byte, never a lone byte, or backspace after
+   "é" leaves a dangling lead byte that mangles the delivered message — Ctrl-U kills
+   the line, `\n`/`\r` completes it (echoing `\r` as line completion matches
+   raw-mode Enter), everything else non-printable is ignored. Ignoring `\x1b` alone
+   is not enough: in cbreak an arrow key arrives as `\x1b [ A` whose tail bytes are
+   printable and would append as literal `[A` junk — so on `\x1b[` discard bytes
+   until the CSI final byte (`0x40`–`0x7E`), and on a bare `\x1b` discard the next
+   byte. Multi-byte UTF-8 arrives whole from `os.read` chunks in
    practice, but the editor must tolerate split sequences: buffer bytes, decode with
    `errors="replace"` only at display time, and hand the console the raw completed
    line so message content is preserved exactly as today. Paste works because chunk
@@ -228,7 +234,10 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 
 - [ ] **Step 1: failing tests.** Editor + pump (decision 7): scripted `fd_readable`/
   `fd_read` sequences drive `poll()` — append/backspace/Ctrl-U/Enter incl. split
-  UTF-8 and 64KiB paste; bytes without a newline echo but deliver nothing; the
+  UTF-8 and 64KiB paste; backspace after a multi-byte character removes the whole
+  character (buffer and echo both clean); arrow-key/Delete escape sequences
+  (`\x1b[A`, `\x1b[3~`, bare `\x1b` + byte) are swallowed whole — no junk in the
+  buffer or the echo; bytes without a newline echo but deliver nothing; the
   completed line reaches the console parser verbatim on the same `poll()`; the
   dispatching `readable`/`read` closures satisfy the console's EOF contract (`""`
   only on real EOF); footer `begin_trial()` discards stale fd bytes with no echo and
