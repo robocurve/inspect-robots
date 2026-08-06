@@ -127,7 +127,7 @@ def test_row_without_page_has_no_data_href_attribute() -> None:
 def test_delegated_row_click_listener_is_present_once() -> None:
     document = render_index([_entry("run.json")])
 
-    assert document.count('addEventListener("click"') == 1
+    assert document.count('addEventListener("click"') == 2
     assert 'event.target.closest("tr[data-href]")' in document
     assert 'event.target.closest("a")' in document
     assert "getSelection().toString()" in document
@@ -160,6 +160,20 @@ def test_served_index_has_exact_meta_refresh() -> None:
     document = render_index([_entry("run.json")], refresh_seconds=60)
 
     assert '<meta http-equiv="refresh" content="60">' in document
+
+
+def test_index_has_run_number_and_sortable_headers() -> None:
+    document = render_index(
+        [
+            _entry("old.json", created="2026-07-29T12:00:00Z"),
+            _entry("new.json", created="2026-07-30T12:00:00Z"),
+        ]
+    )
+
+    assert '<th data-col="0">Run #</th>' in document
+    assert '<td class="run-num" data-val="1">#1</td>' in document
+    assert '<td class="run-num" data-val="2">#2</td>' in document
+    assert "Header click-to-sort" in document
 
 
 def test_long_error_is_truncated_with_full_escaped_tooltip() -> None:
