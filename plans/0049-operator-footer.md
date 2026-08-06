@@ -56,14 +56,15 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 
 ## Reference: current wiring (main @ 6c022ead)
 
-- `src/inspect_robots/session.py` — the whole module (162 lines): `_flush_stdin_fd`,
+- `src/inspect_robots/session.py` — the whole module (172 lines): `_flush_stdin_fd`,
   `OperatorSession.__init__` seams (`console`, `input_fn`, `write`, `flush_fn`),
   `_write`/`_input` late-binding, `poll`/`begin_trial` delegation, `status`/`write_line`
   state machine (`_status_open`, `_status_line`), `gate`, verdict prompts.
 - `src/inspect_robots/console.py` — `OperatorConsole(readable, read, output_fn)`;
-  `poll()` assembles lines from chunks (`:90-113`); `begin_trial()` drains (`:115-124`).
-  The console's default `read` is fd-level `os.read` (`:55-56`); the session currently
-  builds its default console with only `output_fn=self.write_line`.
+  `poll()` assembles lines from chunks (`:94-117`); `begin_trial()` drains (`:119-129`).
+  `_stdin_readable` is at `:55-56`; the console's default `read` is the str-typed
+  fd-level `_stdin_read` (`:59-60`); the session currently builds its default
+  console with only `output_fn=self.write_line`.
 - `src/inspect_robots/rollout.py:276-285` — `operator_input.begin_trial()` inside a
   try/except that disables the channel on failure; `:291-301` — the per-iteration poll
   with the same degrade discipline; `:458-463` — KeyboardInterrupt conversion
@@ -133,12 +134,24 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    the line, `\n`/`\r` completes it (echoing `\r` as line completion matches
    raw-mode Enter), everything else non-printable is ignored. Ignoring `\x1b` alone
    is not enough: in cbreak an arrow key arrives as `\x1b [ A` whose tail bytes are
-   printable and would append as literal `[A` junk — so on `\x1b[` discard bytes
-   until the CSI final byte (`0x40`–`0x7E`), and on a bare `\x1b` discard the next
-   byte. Multi-byte UTF-8 arrives whole from `os.read` chunks in
-   practice, but the editor must tolerate split sequences: buffer bytes, decode with
-   `errors="replace"` only at display time, and hand the console the raw completed
-   line so message content is preserved exactly as today. Paste works because chunk
+   printable and would append as literal `[A` junk — so on `\x1b` followed by `[`
+   or `O` (CSI **and SS3**: xterm-family terminals send F1–F4 as `\x1bOP`…`\x1bOS`,
+   and arrows arrive as `\x1bOA`…`\x1bOD` whenever application-cursor mode is left
+   set) discard bytes until the final byte (`0x40`–`0x7E`); on any other bare
+   `\x1b` discard the next byte. The discard state is editor state persisting
+   across `fd_read` chunks AND across polls: the pump can land a read between
+   `\x1b[` and its final byte (select goes quiet mid-sequence), the tail arriving a
+   whole control period later — a chunk-local scan would append the stray final
+   byte, the same desync split UTF-8 gets below. Multi-byte UTF-8 arrives whole
+   from `os.read` chunks in
+   practice, but the editor must tolerate split sequences: buffer bytes, decode
+   with `errors="replace"` at display time for the echo, and decode each completed
+   line **once** with `errors="replace"` at queue handoff — the console's `read`
+   seam is str-typed (`read: Callable[[], str]`, console.py:86), so bytes cannot
+   pass through it, and a strict decode there would turn malformed paste bytes into
+   a raising `poll()` that kills the channel; decoding only complete lines
+   preserves content exactly where today's per-64KiB-chunk decode could not. Paste
+   works because chunk
    processing is loop-per-byte over arbitrarily large reads. No history, no arrow
    keys, no cursor movement (YAGNI; the plan-0048 arc can add them later if operators
    ask).
@@ -235,9 +248,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 - [ ] **Step 1: failing tests.** Editor + pump (decision 7): scripted `fd_readable`/
   `fd_read` sequences drive `poll()` — append/backspace/Ctrl-U/Enter incl. split
   UTF-8 and 64KiB paste; backspace after a multi-byte character removes the whole
-  character (buffer and echo both clean); arrow-key/Delete escape sequences
-  (`\x1b[A`, `\x1b[3~`, bare `\x1b` + byte) are swallowed whole — no junk in the
-  buffer or the echo; bytes without a newline echo but deliver nothing; the
+  character (buffer and echo both clean); arrow-key/Delete/F-key escape sequences
+  (`\x1b[A`, `\x1b[3~`, SS3 `\x1bOP`, bare `\x1b` + byte) are swallowed whole — no
+  junk in the buffer or the echo — including an escape sequence split across two
+  `fd_read` chunks and across two `poll()` calls (discard state persists); bytes
+  without a newline echo but deliver nothing; the
   completed line reaches the console parser verbatim on the same `poll()`; the
   dispatching `readable`/`read` closures satisfy the console's EOF contract (`""`
   only on real EOF); footer `begin_trial()` discards stale fd bytes with no echo and
