@@ -162,6 +162,8 @@ All notable changes to this project are documented here. The format is based on
   declared/range-derived limits while policy compatibility deliberately ignores
   embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
 
+- Public user-defaults API: `inspect_robots.defaults` now re-exports `init_dotenv` so plugins can load `.env` configurations without importing private modules (#301).
+
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
