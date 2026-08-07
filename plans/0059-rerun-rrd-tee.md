@@ -17,7 +17,13 @@
 > old-SDK fallback is a third phantom-path source and must also clear
 > `resolved_recording_path`, with a test; §2's leftover causal sentence attributed
 > the SDK-absent guarantee to the except handler, which never runs on that path)
-> plus 6 nits, folded in below.
+> plus 6 nits, folded in below. R4 (vs main @ 6008edb1) found NO design issues; its
+> one substantive finding was environmental (plan number 0058 taken on main by
+> PR #338, renumbered to 0059 and rebased) and its 6 nits (reused-sink FileSink
+> release documented, record-only status line named in the over-promise note,
+> blueprint-replay claim softened pending a manual check, help-text quote boundary,
+> `_set_sinks_warned` in the constructor list, connect-fallback arc heads-up) are
+> folded in.
 
 **Goal:** Close #340. The live Rerun viewer (`inspect-robots run --rerun`) is the popular
 way to watch a rollout, but a live-viewed run persists no `.rrd`: `RerunSink` treats
@@ -28,8 +34,10 @@ added `rr.set_sinks(GrpcSink(...), FileSink(path))`, which tees one recording st
 live viewer and a `.rrd` file simultaneously, and `rr.spawn(connect=False)` launches the
 viewer process without grabbing the sink. After this change, every `run` that uses the
 live view (or `--rerun-connect`) also writes a `.rrd` into the log dir by default; the
-`.rrd` replays in `rerun <file>` exactly what the live view showed, per-trial blueprint
-layout included, because it is literally the same stream.
+`.rrd` replays in `rerun <file>` what the live view showed, from the same stream. The
+per-trial blueprint rides the stream and should replay too; verify that manually on
+the rig once during implementation and keep the docs claim no stronger than what that
+check shows (the real-SDK test round-trips data, not blueprint application).
 
 Out of scope: `eval-set` (it has no rerun flags today and grows none here), raising the
 `rerun-sdk>=0.20` floor (tee is feature-detected, matching the existing
@@ -97,12 +105,21 @@ pattern in `tests/test_rerun_sink.py`.
        covers it — without this clear the CLI would report a `.rrd` that was
        never attached), and fall back to live mode only. The CLI status line
        prints "(+ .rrd)" at construction time and therefore over-promises in this
-       fallback and when rerun-sdk is absent entirely; in both cases the sink's
-       own warning is the correction, accepted as is (the post-eval path report,
-       by contrast, never lies: all three phantom sources clear the path).
+       fallback and when rerun-sdk is absent entirely, and the record-only
+       status line (`rerun: recording .rrd`) over-promises the same way on an
+       SDK-less rig; in all cases the sink's own warning is the correction,
+       accepted as is (the post-eval path report, by contrast, never lies: all
+       three phantom sources clear the path). If the fallback dispatches
+       differently for spawn vs connect internally, each arc needs its own test;
+       the branch gate will surface this.
    - Shutdown path is untouched: `_probe_recording_flush` already flushes the global
      recording, which flushes every teed sink; the final file finalization on process
-     exit is the same mechanism the existing `recording_path` mode relies on.
+     exit is the same mechanism the existing `recording_path` mode relies on. For a
+     sink reused across programmatic evals, eval N's `FileSink` is released when
+     eval N+1's `rr.init` replaces the global stream, with completeness provided by
+     `on_eval_end`'s flush probe; say so in the sink docstring. Fixed
+     `recording_path` + tee reused across evals truncates and rewrites the same
+     file per eval, identical to today's `rr.save` semantics.
    - Module docstring: rewrite the second sentence ("can write a ``.rrd`` recording,
      spawn a local viewer, **or** connect...") to describe the tee and its 0.24 gate,
      update the constructor-comment rationale at the exclusivity check (it
@@ -119,12 +136,14 @@ pattern in `tests/test_rerun_sink.py`.
    a per-rig config key (`src/inspect_robots/defaults.py`).
 
    - New flag on `p_run`: `--rerun-save` with `argparse.BooleanOptionalAction`,
-     `default=None`, help: also save the stream as a `.rrd` next to the eval log
-     (default: on whenever the rerun viewer is active; `--no-rerun-save` or a
-     `rerun_save = false` config line disables; without a viewer, `--rerun-save`
-     records to a `.rrd` only — phrased that way because on a rig whose config
-     sets `rerun = true` the flag tees an already-spawning viewer rather than
-     staying viewer-less).
+     `default=None`. Help text (ends here, rationale below is NOT part of it):
+     "also save the stream as a .rrd next to the eval log (default: on whenever
+     the rerun viewer is active; without a viewer, --rerun-save records to a
+     .rrd only; --no-rerun-save or a rerun_save config key overrides)".
+     Rationale for the "without a viewer" phrasing: on a rig whose config sets
+     `rerun = true` the flag tees an already-spawning viewer rather than staying
+     viewer-less, so the help must not promise "records without opening a
+     viewer" unconditionally.
    - Resolution: `save_wanted = args.rerun_save if args.rerun_save is not None else
      defaults.rerun_save` (config default `True`).
    - Sink construction (the `cli.py:1567-1586` block):
@@ -171,7 +190,8 @@ file-only failures is complexity the failure likelihood does not buy.
 ### 1. Sink: constructor + naming
 
 - [ ] `RerunSink.__init__`: add `recording_dir` (keyword-only), initialize
-      `self.resolved_recording_path: Path | None = None` in the constructor (a
+      `self.resolved_recording_path: Path | None = None` and the
+      `self._set_sinks_warned = False` guard in the constructor (a
       constructed-but-never-started sink must not raise `AttributeError`), drop
       the spawn×recording and connect×recording `ValueError`s, add
       `recording_path`×`recording_dir` exclusivity, keep spawn×connect. Update the
@@ -255,10 +275,13 @@ file-only failures is complexity the failure likelihood does not buy.
       way to keep a replayable `.rrd` (its "frames still record with store_frames"
       guidance stays). README: one line where the live view is pitched.
       `src/inspect_robots/CLAUDE.md` module map: refresh the `cli.py`,
-      `defaults.py`, and `logging/` rows for the new flag/key/tee. Follow the
-      public-facing writing style rules (no em dashes, no mid-sentence bold).
+      `defaults.py`, and `logging/` rows for the new flag/key/tee, citing THIS
+      plan as 0059 and merging with (not replacing) main's updated `logging/`
+      row text, which already cites "plans 0055 and 0058" for LiveLogSink live
+      frames. Follow the public-facing writing style rules (no em dashes, no
+      mid-sentence bold).
 - [ ] CHANGELOG `[Unreleased]` → Added: default `.rrd` capture for live-viewed runs,
-      `--rerun-save/--no-rerun-save`, `rerun_save` config key, plan link.
+      `--rerun-save/--no-rerun-save`, `rerun_save` config key, link to plan 0059.
 - [ ] Gates: `ruff check .`, `ruff format --check .`, `mypy`, `pytest --cov` at 100%.
 
 ## Test inventory (delta)
