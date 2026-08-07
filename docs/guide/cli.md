@@ -155,6 +155,23 @@ plus an optional note ends it and records the verdict immediately, without a
 second post-trial prompt. Feedback is saved per trial and appears in summaries
 and HTML reports. Piped stdin and `--no-prompt` disable the channel.
 
+On an attended run with the console enabled and a real POSIX TTY, the session
+renders a two-row footer. The timer and controls repaint in place above a stable
+`> ` line that the session owns, so ticker updates never tear the operator's
+typing:
+
+```text
+  [sent] you might wanna move the right arm out of the way
+  t = 61s / 120s | Enter ends the episode
+  > is there anything I can hand you█
+```
+
+After Enter, feedback moves into scrollback as `[sent] ...`. End-only rows use
+`[noted] ...`. Keystroke echo is pumped at the rollout poll cadence, so on a
+self-paced robot it can lag up to one control step. Third-party prints can
+smudge one frame; the next repaint heals it. Off-TTY, Windows, and piped-stdin
+rendering is unchanged.
+
 Install `inspect-robots-voice` and pass `--voice` to add local microphone
 transcription to an attended run. Repeat `-V key=value` for voice settings such
 as the model, microphone device, language, and compute type. Voice input is

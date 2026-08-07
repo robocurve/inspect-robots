@@ -48,6 +48,12 @@ All notable changes to this project are documented here. The format is based on
   and stand down their own terminal I/O for that run
   ([plan 0048](plans/0048-operator-session.md), #308).
 
+- Attended runs with a real POSIX TTY now render operator feedback in a fixed
+  two-row footer, with an in-place status line above a session-owned input line.
+  Sent feedback moves into scrollback, while off-TTY and Windows rendering stays
+  unchanged ([plan 0048](plans/0048-operator-session.md),
+  [plan 0051](plans/0051-operator-footer.md), #308).
+
 - CLI `run` and `eval-set` now take per-user advisory claims for declared
   device slots before hardware construction, reject concurrent evals aimed at
   the same rig, and release claims during embodiment teardown

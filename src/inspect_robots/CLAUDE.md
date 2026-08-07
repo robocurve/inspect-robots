@@ -9,7 +9,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 |--------|----------------|
 | `types.py` | `Observation`, `Action`, `ActionChunk`, `StepResult` (frozen, NumPy-native); operator-message extras carry `t`, `text`, and `source` provenance |
 | `console.py` | frozen poll results with optional per-message source labels, the `OperatorInput` Protocol, and the threadless fd-level stdin polling primitive |
-| `session.py` | attended-run owner that polls the console first, merges and stamps attached feedback-only input sources, permanently detaches a failing source, and owns verdict prompts, readiness gates, status rendering, and scrollback output |
+| `session.py` | attended-run owner that polls the console first, merges and stamps attached feedback-only input sources, permanently detaches a failing source, and owns verdict prompts, readiness gates, scrollback output, and the attended-TTY two-row footer with its owned input line, in-place status, and per-trial cbreak window |
 | `spaces.py` | `Box`, `ObservationSpace`, `ActionSemantics`, `StateSpec` + canonical state vocab |
 | `policy.py` | `Policy` Protocol + `PolicyBase` ABC, `PolicyInfo`, `PolicyConfig`; optional duck-typed `bind(embodiment_info)` hook for embodiment-adaptive policies plus `transcript()` and `transcript_delta()` hooks for complete and live per-trial audit records |
 | `embodiment.py` | `Embodiment` Protocol + `EmbodimentBase` ABC, `EmbodimentInfo`, capability flags; optional duck-typed `bind_task(envelope)` hook for horizon-aware adapters (called by `eval()` after compat with a resolved step envelope; optional input — never fires on direct `rollout()`, keep a fallback) |
@@ -19,7 +19,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `grader.py` | `Grader` Protocol — judgement *capture*, the other half of R6 (plan 0049): runs once per scored trial via the `before_scoring` seam, mutates the record, scorers stay pure readers; builtin `operator` grader wraps `OperatorSession.prompt_verdict` with a lazy default session and a `connect_session(session)` hook |
 | `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
 | `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |
-| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding, delivered-once sourced operator input, best-effort normalized policy-transcript capture, and the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
+| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding, delivered-once sourced operator input, best-effort normalized policy-transcript capture, the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge, and a duck-typed best-effort `end_trial()` hook in the per-trial `finally`; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/sourced operator_message/operator/error) |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
