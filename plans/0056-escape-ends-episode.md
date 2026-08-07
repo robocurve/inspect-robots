@@ -9,7 +9,9 @@
 > corrected test inventory). R2 found 3 more (/stop note rides the message path instead
 > of EndRequest.note; arming restricted to byte-feeding pumps so a quiet pump cannot
 > re-stamp the grace into never elapsing; ESC+newline leaves the editor buffer
-> untouched). All folded in. R3 pending.
+> untouched). R3 found 2 stale-text contradictions from earlier revisions plus 1 design
+> gap (`/stop <text>` would confirm as `[sent]` though never delivered; ending polls now
+> confirm as `[noted]`). All folded in. R4 pending.
 
 **Goal:** Close #333. On attended runs with the operator console (`policy=agent` being the
 motivating case), pressing Enter on an empty input line currently ends the episode. Enter
@@ -49,8 +51,21 @@ is out of scope. The issue and CHANGELOG note this so the decision is discoverab
 **Architecture:** Two seams change, both already covered by injectable tests.
 
 1. `console._parse` (pure function) — owns the new line grammar: empty line -> usage
-   reminder; `"\x1b"` line -> `EndRequest()`; `/stop [note]` -> `EndRequest(note=...)`;
-   `/y /n /p` unchanged; unknown `/cmd` unchanged.
+   reminder; `"\x1b"` line -> `EndRequest()`; `/stop` -> `EndRequest()` and
+   `/stop <text>` -> the text as an ordinary operator *message* plus `EndRequest()`
+   (never `EndRequest.note` — see the Goal bullet); `/y /n /p` unchanged; unknown
+   `/cmd` unchanged.
+
+   **Confirmation labeling:** `_confirm_console_messages` currently echoes every
+   console message as `[<footer label>]`, i.e. `[sent]` on message-accepting sessions.
+   A message arriving in the same poll as an end request is recorded to the log but
+   never delivered to the policy (rollout records messages, then breaks on the end
+   before the next inference), so `[sent]` would be a false delivery claim for
+   `/stop <text>`. Rule: when `poll.end is not None`, `_confirm_console_messages` uses
+   the label `noted` instead of the session's footer label. End-only sessions already
+   use `noted`, so nothing changes there; message-accepting sessions truthfully report
+   `[noted] <text>` for text that ends the episode. Covered by a session-level footer
+   test for `/stop <text>`.
 2. `session._LineEditor` + `session._pump_input` — owns bare-Esc detection at two
    levels.
 
@@ -90,8 +105,11 @@ is out of scope. The issue and CHANGELOG note this so the decision is discoverab
    arrow-key tail into a spurious end request. 150 ms is one-to-a-few polls on fast
    loops and rounds up to the next poll on slow ones. The accepted residual trade-offs,
    stated in the `_LineEditor`/pump docstrings: a sequence tail delayed beyond the grace
-   still misreads as bare Esc, and on a very slow self-paced loop a lone Esc waits for
-   the next poll. An operator who wants zero latency presses Esc twice.
+   still misreads as bare Esc; on a very slow self-paced loop a lone Esc waits for the
+   next poll; and a printable key pressed while an Esc is pending resolves it as an
+   alt-combo (inherited behavior, but under the new gesture it silently cancels the
+   intended end and eats the keystroke). An operator who wants zero latency presses Esc
+   twice.
 
 **Mode-aware usage plumbing.** `OperatorConsole` gains a `usage: str = USAGE`
 constructor arg stored and printed by `poll` (replacing the hardcoded module constant),
@@ -147,9 +165,9 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
     scripts an empty first line as the winning end and asserts `output == [USAGE]`;
     post-change the winning end must come from `/stop` or `"\x1b"` and the usage output
     changes.
-  - `tests/test_session.py:1285` (`test_footer_poll_does_not_confirm_end_requests_or_verdicts`)
-    parametrizes `(b"\n", EndRequest())` and asserts no extra output; the `b"\n"` case
-    must move to `b"/stop\n"` (or `b"\x1b\x1b"`).
+  - `tests/test_session.py:1292` (`test_footer_poll_does_not_confirm_end_requests_or_verdicts`;
+    the `(b"\n", EndRequest())` tuple is at `:1288`) — the `b"\n"` case must move to
+    `b"/stop\n"`.
 - Tests that pin behavior this plan preserves, all three staying unmodified:
   `tests/test_session.py:1394` (ESC+byte alt-combo swallow — still true for non-ESC,
   non-newline bytes), `:1404` (in-pump split CSI), `:1414` (cross-poll split CSI whose
@@ -187,8 +205,9 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
       "or /stop" hedge matters: in the plain-mode fallback a lone Esc does nothing
       until Enter); keep the feedback and verdict phrasing and the
       `"operator console: "` prefix — `cli.py` `removeprefix`s it for styling.
-- [ ] Update module/class docstrings that promise Enter-ends-episode (`console.py:85`
-      stays: it describes line completion, which is unchanged).
+- [ ] Docstrings: `console.py` needs no docstring edits beyond the `USAGE` constants
+      (neither the module docstring nor `OperatorConsole`'s promises
+      Enter-ends-episode; `:85` describes line completion, which is unchanged).
 - [ ] Tests: update `test_whitespace_only_line_requests_an_unscored_end` (usage
       reminder, no end) and `test_first_end_request_wins_while_later_lines_still_parse`
       (first end via `/stop` or `"\x1b"`); add `/stop`, `/STOP note`, `"\x1b\n"`,
@@ -213,6 +232,10 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
       seam (default `time.monotonic`), consistent with the existing seam style.
 - [ ] Reset the armed flag and stamp alongside editor resets (`_enter_footer`,
       `_reset_footer_state`).
+- [ ] `_confirm_console_messages`: when `poll.end is not None`, confirm console
+      messages with the label `noted` instead of the session footer label (a message in
+      an ending poll is recorded, never delivered; `[sent]` would be a false delivery
+      claim for `/stop <text>`).
 - [ ] Tests (fake clock via `now_fn`): bare ESC fires on a quiet poll past the grace;
       a quiet poll before the grace does not fire AND a second consecutive quiet poll
       past the grace does (guards against a quiet-pump re-stamp bug that would make the
@@ -220,7 +243,10 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
       (existing `:1414` unmodified); double-ESC in one chunk emits one sentinel at feed
       time with the second ESC resolving via the grace; ESC-then-`\r` (same chunk and
       across polls) fires at feed time, completes no line, and leaves a previously
-      typed partial in the buffer untouched; ESC as the last byte after typed text
+      typed partial in the buffer untouched (the input row repaints the stale partial
+      for one frame until `end_trial` clears it; cosmetic, pinned by the test);
+      session-level footer `/stop <text>` confirms as `[noted]` even on a
+      message-accepting (`sent`-labeled) session; ESC as the last byte after typed text
       preserves the partial and still fires via the grace; EOF while armed fires
       nothing; ESC+letter same-chunk alt-combo still swallows (existing `:1394`
       unmodified); update `test_footer_poll_does_not_confirm_end_requests_or_verdicts`
@@ -235,7 +261,7 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
 - [ ] CHANGELOG Unreleased: behavior change entry (bare Enter no longer ends attended
       episodes; Esc or `/stop` does).
 - [ ] `src/inspect_robots/CLAUDE.md`: touch the `console.py` and `session.py` rows to
-      mention the Esc-to-end gesture and the one-poll bare-Esc grace.
+      mention the Esc-to-end gesture and the time-floored (150 ms) bare-Esc grace.
 
 ### 4. Verification
 
