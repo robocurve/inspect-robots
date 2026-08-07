@@ -159,6 +159,7 @@ class OperatorSession:
         self._owns_console = console is None
         self._footer_requested = False
         self._footer_active = False
+        self._footer_label: str | None = None
         self._isatty_fn: Callable[[], bool] = (
             isatty_fn if isatty_fn is not None else sys.stdin.isatty
         )
@@ -324,8 +325,8 @@ class OperatorSession:
         else:
             self._write(f"\r\x1b[K{text}\n\r\x1b[K> {self._clipped_input_text()}")
 
-    def enable_footer(self) -> None:
-        """Opt into the two-row footer renderer (decision 3).
+    def enable_footer(self, *, label: str) -> None:
+        """Opt into the two-row footer renderer with its feedback confirmation label.
 
         A documented no-op when this session was built with a caller-injected
         ``console=...``: the footer requires the session-built console whose seams
@@ -333,6 +334,7 @@ class OperatorSession:
         """
         if self._owns_console:
             self._footer_requested = True
+            self._footer_label = label
             if not self._atexit_registered:
                 self._atexit_register(self._restore_terminal)
                 self._atexit_registered = True
@@ -361,6 +363,7 @@ class OperatorSession:
             self._pump_input()
         console_poll = self._console.poll()
         if not self._attached_inputs:
+            self._confirm_console_messages(console_poll)
             return console_poll
 
         messages = list(console_poll.messages)
@@ -378,7 +381,17 @@ class OperatorSession:
                 messages.append(text)
                 sources.append(label)
         self._attached_inputs = healthy_inputs
-        return ConsolePoll(messages=tuple(messages), end=console_poll.end, sources=tuple(sources))
+        poll = ConsolePoll(messages=tuple(messages), end=console_poll.end, sources=tuple(sources))
+        self._confirm_console_messages(poll)
+        return poll
+
+    def _confirm_console_messages(self, poll: ConsolePoll) -> None:
+        if not self._footer_active:
+            return
+        assert self._footer_label is not None
+        for index, message in enumerate(poll.messages):
+            if not poll.sources or poll.sources[index] == "console":
+                self.write_line(f"[{self._footer_label}] {message}")
 
     def begin_trial(self) -> None:
         """Re-decide footer eligibility, then discard feedback predating the next trial."""

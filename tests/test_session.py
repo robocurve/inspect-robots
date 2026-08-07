@@ -614,7 +614,10 @@ class _ScriptedFd:
 
 
 def _footer_session(
-    output: list[str], fd: _ScriptedFd | None = None, width: int = 200
+    output: list[str],
+    fd: _ScriptedFd | None = None,
+    width: int = 200,
+    label: str = "sent",
 ) -> tuple[OperatorSession, _ScriptedFd]:
     """Build a footer-enabled session, run ``begin_trial()``, then drop its input-row draw."""
     fd = fd if fd is not None else _ScriptedFd()
@@ -627,7 +630,7 @@ def _footer_session(
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label=label)
     session.begin_trial()
     output.clear()
     return session, fd
@@ -650,7 +653,7 @@ def test_enable_footer_is_noop_on_caller_injected_console() -> None:
         restore_fn=lambda _state: None,
     )
 
-    session.enable_footer()
+    session.enable_footer(label="sent")
     session.begin_trial()
 
     assert output == []
@@ -682,7 +685,7 @@ def test_footer_begin_trial_draws_empty_input_row() -> None:
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
 
@@ -703,7 +706,7 @@ def test_footer_begin_trial_closes_plain_open_status_then_one_row_branch() -> No
     )
     session.status("t = 3s")
     output.clear()
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
 
@@ -728,7 +731,7 @@ def test_footer_begin_trial_drain_stops_on_real_eof() -> None:
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
 
@@ -758,7 +761,7 @@ def test_footer_default_width_fn_reads_terminal_size(monkeypatch: pytest.MonkeyP
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
     session.begin_trial()
     output.clear()
     fd.chunks = [b"abcdefgh"]
@@ -780,7 +783,7 @@ def test_footer_begin_trial_discards_stale_bytes_with_no_echo_and_clears_state()
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
 
@@ -950,7 +953,7 @@ def test_footer_non_tty_gate_falls_back_to_plain_mode_without_raw_entry() -> Non
         raw_mode_fn=enter_raw_mode,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
     session.end_trial()
@@ -972,7 +975,7 @@ def test_footer_missing_termios_gate_falls_back_to_plain_mode_silently() -> None
         raw_mode_fn=missing_termios,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
     session.end_trial()
@@ -1000,7 +1003,7 @@ def test_footer_failed_raw_entry_falls_back_then_retries_next_trial() -> None:
         raw_mode_fn=enter_raw_mode,
         restore_fn=restored.append,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     session.begin_trial()
     session.end_trial()
@@ -1029,8 +1032,8 @@ def test_footer_restore_runs_once_and_atexit_cannot_replay_cleared_state() -> No
         atexit_register=lambda callback: callbacks.append(callback),
     )
 
-    session.enable_footer()
-    session.enable_footer()
+    session.enable_footer(label="sent")
+    session.enable_footer(label="sent")
     session.begin_trial()
     session.end_trial()
     session.end_trial()
@@ -1058,7 +1061,7 @@ def test_footer_end_trial_restores_raw_mode_when_renderer_teardown_raises() -> N
         raw_mode_fn=lambda: state,
         restore_fn=restored.append,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
     session.begin_trial()
     fail_writes = True
 
@@ -1085,7 +1088,7 @@ def test_footer_begin_trial_restores_raw_mode_when_renderer_entry_raises() -> No
         raw_mode_fn=lambda: state,
         restore_fn=restored.append,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
 
     with pytest.raises(RuntimeError, match="terminal write failed"):
         session.begin_trial()
@@ -1142,7 +1145,7 @@ def test_footer_reclips_after_width_fn_change() -> None:
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
     )
-    session.enable_footer()
+    session.enable_footer(label="sent")
     session.begin_trial()
     output.clear()
     fd.chunks = [b"abcdef"]
@@ -1229,7 +1232,63 @@ def test_footer_pump_enter_completes_line_reaching_console_same_poll(terminator:
     poll = session.poll()
 
     assert poll.messages == ("hello",)
-    assert output[-1] == "\r\x1b[K> "
+    assert output[-1] == "\r\x1b[K[sent] hello\n\r\x1b[K> "
+
+
+@pytest.mark.parametrize("label", ["sent", "noted"])
+def test_footer_poll_confirms_each_console_feedback_message_with_selected_label(
+    label: str,
+) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, label=label)
+    fd.chunks = [b"first\nsecond\n"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(messages=("first", "second"))
+    assert poll.sources == ()
+    assert output == [
+        "\r\x1b[K> ",
+        f"\r\x1b[K[{label}] first\n\r\x1b[K> ",
+        f"\r\x1b[K[{label}] second\n\r\x1b[K> ",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "expected_end"),
+    [
+        (b"\n", EndRequest()),
+        (b"/p careful placement\n", EndRequest(verdict="partial", note="careful placement")),
+    ],
+)
+def test_footer_poll_does_not_confirm_end_requests_or_verdicts(
+    raw_input: bytes, expected_end: EndRequest
+) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [raw_input]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(end=expected_end)
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_poll_confirms_console_source_but_only_echoes_voice_source() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"typed\n"]
+    voice = _ScriptedAttachedInput([ConsolePoll(messages=("spoken",), sources=("untrusted",))])
+    session.attach_input(voice, label="voice")
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(messages=("typed", "spoken"), sources=("console", "voice"))
+    assert output == [
+        "\r\x1b[K> ",
+        "\r\x1b[Kvoice: spoken\n\r\x1b[K> ",
+        "\r\x1b[K[sent] typed\n\r\x1b[K> ",
+    ]
 
 
 def test_footer_pump_bytes_without_newline_echo_but_deliver_nothing() -> None:
