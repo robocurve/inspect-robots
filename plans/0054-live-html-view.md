@@ -2,6 +2,8 @@
 
 > Status: PLANNED — issue #329. Implements turn-by-turn browser viewing of an
 > in-progress run and the bright CLI tip pointing operators at it.
+> CHANGELOG entry links this file as `[plan 0054](plans/0054-live-html-view.md)`
+> per the established convention (renumbered from 0053, taken on main).
 
 ## Problem
 
@@ -67,11 +69,17 @@ unchanged.
     `policy=agent`, deltas carry the assistant turns, notes, and the
     `operator feedback (step N): ...` user lines that voice/console input
     becomes (`plugins/inspect-robots-agent/.../policy.py:_operator_lines`).
-    A write here is invisible to control: the hook fires right after an
-    inference that just took seconds, so a synchronous throttled write is
-    acceptable and no worker thread is needed (R1: position taken — the
-    RerunSink worker exists for per-step streaming, which this sink does not
-    do).
+    For slow-turn policies (agent, capx — the only in-tree
+    `transcript_delta` implementors) a write here is invisible to control:
+    the hook fires right after an inference that just took seconds. The
+    throttle is what keeps this safe in general: a future high-rate policy
+    defining `transcript_delta` would call this at control rate, and the
+    1s cap bounds full-log rewrites (R2). Staleness bound, stated so nobody
+    "fixes" it with a flush thread: a throttle-suppressed delta is never
+    lost (deltas accumulate) but becomes visible only at the next write —
+    at worst the trial's final turn waits for `on_trial_end`'s forced
+    write. With 1.0s intervals and multi-second turns this is rare and
+    acceptable (R2).
   - `on_trial_end(record)` — replace the in-progress entry with the record's
     data: `termination_reason`, `operator_judgement`/`operator_note`,
     delivered operator messages, the normalized `record.policy_transcript`
@@ -84,7 +92,16 @@ unchanged.
   the operator verdict prompt (the *target scenario* for this feature) skips
   it and would leak a phantom "running" log. Therefore: the sink exposes
   `path` (like `JsonLogSink.path`), and `_cmd_run`/`_cmd_eval_set` unlink it
-  in their existing `finally` blocks when it still exists. **Sink order is
+  in their existing `finally` blocks. **Binding discipline** (R2): the sink
+  variable is pre-bound to `None` *before* the `try` (mirroring
+  `voice_input` at cli.py:1441) — sink construction happens inside the
+  `try`, so a `finally` referencing a name bound there would raise
+  `UnboundLocalError` on early failures (`--epochs`, guardrail build, voice
+  start, grader build) and mask the original exception. Guard shape:
+  `if live_sink is not None and live_sink.path is not None:
+  live_sink.path.unlink(missing_ok=True)` — `missing_ok` makes the
+  post-success double-unlink a no-op and the guard covers the
+  pre-`on_eval_start` `path is None` case. **Sink order is
   pinned and tested:** `LiveLogSink` is appended *after* `JsonLogSink`, so
   `_Broadcast.on_eval_end` writes the final log before the live file is
   removed — there is never a moment with neither file on disk.
@@ -135,32 +152,55 @@ unchanged.
 
 - New module constant `_SERVE_LIVE_RERENDER_SECONDS = 2` beside
   `_SERVE_RERENDER_SECONDS = 60`.
-- `_serve_view_directory` ticks every `_SERVE_LIVE_RERENDER_SECONDS` and
-  tracks the live set (`log_dir.glob("*.live.json")`) across ticks. A full
-  incremental re-render runs when: the live set is non-empty, **the live set
-  changed since the last tick** (appearance *or* disappearance — so the final
-  page and corrected index appear within 2s of run completion, not up to 60s
-  later; R1), or 60s have accumulated (today's cadence when nothing is live).
+- **Stateless cadence rule** (R1, restated per R2 so the two off-by-one-tick
+  behaviors cannot be implemented inconsistently): every render pass
+  computes `live = bool(log_dir.glob("*.live.json"))` itself; the index (and
+  running pages) get `refresh_seconds = _SERVE_LIVE_RERENDER_SECONDS if live
+  else _SERVE_RERENDER_SECONDS`. The **initial** render before serving uses
+  the same rule (today it hardcodes 60s — a run already live at serve
+  startup must not hand `--open` a 60s-refresh index). The tick loop decides
+  only *whether* to run a pass: the live set differs from the previous
+  pass's (baseline: empty set, so an already-live run renders fast on the
+  first tick), the live set is non-empty, or 60s have accumulated.
   `_serve_sleep` stays the injection point for tests.
-- **Index refresh matches the live cadence** (R1): while the live set is
-  non-empty the index is rendered with
-  `refresh_seconds=_SERVE_LIVE_RERENDER_SECONDS` (it is the page `--open`
-  lands on); the transition tick after completion re-renders it back to the
-  60s refresh.
 - `_render_log_page` / `_render_view_directory` pass
   `refresh_seconds=_SERVE_LIVE_RERENDER_SECONDS` down to `render_html` only
   for logs with `status == "started"` **and** only in serve mode (a static
   `view` of a stale live log must not meta-refresh forever).
-- **Orphaned live pages become redirects** (R1): when a previously-rendered
-  `*.live.json` vanishes, its `.html` page is rewritten as a zero-delay
-  redirect stub to `index.html` — an operator's auto-refreshing tab lands on
-  the index (where the final page now is) instead of a dead "running" page
-  frozen forever (deleting would 404 the refreshing tab, which is worse).
-- **Exact mtime gating** (R1): after rendering a page, `os.utime` the page to
-  the source log's pre-read mtime so the `<` comparison can never
-  permanently miss a write that landed during rendering or within the same
-  coarse-mtime second (self-healing normally papers over this; a forced
-  trial-end write followed by a long inference pause would not).
+- **Orphaned live pages become redirects, derived from the filesystem** (R1,
+  mechanism corrected R2): every pass, `out_dir.glob("*.live.html")` minus
+  pages backed by a current `log_dir/*.live.json` are rewritten as
+  zero-delay redirect stubs to `index.html` — an operator's auto-refreshing
+  tab lands on the index (where the final page now is) instead of a dead
+  "running" page frozen forever (deleting would 404 the refreshing tab,
+  which is worse). Filesystem-derived, not tracked in loop memory: a serve
+  *restart* after a crash must still stub the orphans it never saw vanish.
+  Idempotent — skip files that already are stubs.
+- **Exact mtime gating** (R1, precision fixed R2): `stat` the log once
+  before reading; after rendering, `os.utime(page, ns=(st.st_atime_ns,
+  st.st_mtime_ns))` — nanosecond pinning, since float-seconds pinning
+  reintroduces the coarse-granularity hole. A write landing within the
+  filesystem's timestamp granularity of the pre-read stamp can still compare
+  equal, so logs with `status == "started"` use `<=` instead of `<`
+  (self-healing writes cover the rest; the forced trial-end write followed
+  by a long inference pause is the case `<=` closes).
+- **Torn-read hardening** (R2): live pages and redirect stubs are written
+  via temp file + `os.replace` (matching the sink's discipline) — a 2s
+  writer racing a 2s browser poll makes half-written reads plausible,
+  and Windows readers can make in-place overwrites misbehave.
+- **Vanishing live logs are not errors** (R2): `on_eval_end` unlinks the
+  live file between the directory glob and `read_eval_log`/`stat`; a
+  `FileNotFoundError` on a `*.live.json` is skipped silently (that file's
+  normal end of life), never surfaced as a red "unreadable" index row.
+- **Quiet re-renders** (R2): the `[i/n] rendering ...` stderr line is gated
+  by the existing `quiet` flag — a 2s cadence must not scroll the serve
+  terminal thirty lines a minute.
+- **Empty or missing log dir tolerated under `--serve`** (R2): today an
+  empty dir is `SystemExit` and the initial render is outside the loop's
+  try/except — the advertised tip command would *fail on a fresh rig* if
+  the operator copy-pastes it before the first live write lands (session +
+  voice/ASR startup can take 10+ s). Under `--serve`, render a "no logs
+  yet" index and keep ticking; the fast tick picks the live file up.
 - Accepted cost: while a live log exists, the directory pass re-parses every
   log JSON every 2s. Mtime gating keeps re-rendering (the expensive part)
   incremental; typical log dirs make the parse pass cheap. Called out in the
@@ -175,13 +215,20 @@ unchanged.
   the CLI wiring was unimplementable as written). Public-API signature
   addition: docstring, docs, CHANGELOG. `_cmd_eval_set` passes
   `[JsonLogSink, LiveLogSink]`, relying on the sink's documented
-  reusability across the set's sequential runs.
+  reusability across the set's sequential runs. R2 verified: `eval_set`
+  passes one shared `log_dir` to every task (no per-task dirs), and
+  `JsonLogSink` is already reuse-safe (fresh filename + `path` per
+  `on_eval_end`) — but this changes eval-set from a fresh `JsonLogSink` per
+  task to shared instances, so the `eval_set` docstring must state the
+  reuse contract for caller-supplied sinks. `eval_set` catches nothing per
+  task, so the CLI `finally` leak guard is load-bearing there too.
 - New `--no-live-log` flag on both commands opts out (a tmpfs-averse or
   NFS-hostile rig may want zero mid-run writes).
 - Both commands unlink `sink.path` in their existing `finally` blocks when
   the file still exists (the leak guard from §1).
-- **The tip:** printed with the other run announcements (next to the `rerun:`
-  line), when the resolved policy registry name is `agent`:
+- **The tip:** printed with the other run announcements (after
+  `_build_and_announce_guardrails` — `_cmd_eval_set` has no `rerun:` line to
+  anchor on; R2), when the resolved policy registry name is `agent`:
 
   ```
   live: watch this run in your browser →  inspect-robots view logs --serve --open
@@ -218,16 +265,29 @@ unchanged.
   transcript delta accumulation and `on_trial_end` replacement; errored-trial
   propagation; unlink on end (and `missing_ok` when already gone); write
   failure disables sink without raising; sanitize reuse (non-finite floats).
-- **Integration:** `CubePick` + scripted policy with a `LiveLogSink` — assert
-  a mid-run snapshot parses as a valid `EvalLog` with `status="started"` and
-  the final state removes the live file.
+- **Integration:** `CubePick` with a `LiveLogSink` — mechanism specified
+  (R2), since no `mock/` policy defines `transcript_delta` (only agent/capx
+  do) and "mid-run" needs a deterministic observation point: use a small
+  test policy (or wrapper) exposing `transcript_delta()`, and append a probe
+  sink *after* the `LiveLogSink` whose `on_trial_end`/`log_policy_messages`
+  call `read_eval_log(live_sink.path)` and stash the parsed log —
+  `_Broadcast` fans out synchronously in list order, so the probe always
+  observes the state right after the live sink's forced write. No
+  sleep-based races. Assert the snapshot is a valid `status="started"` log
+  and the final state removes the live file.
 - **Renderer:** refresh meta + banner emitted only when `refresh_seconds`
   set; `running` badge; pending score cells; escaping.
 - **Serve loop:** with `_serve_sleep` stubbed — fast tick re-renders when a
   live file exists; re-render fires on live-set *disappearance* (final page +
   index within one tick); 60s cadence preserved otherwise; index refresh
-  follows the live cadence and reverts; orphaned live page rewritten as a
-  redirect stub; `os.utime` mtime pinning (fake clock).
+  follows the stateless live rule (including the initial render with a live
+  file already present); orphan stubs derived from the filesystem (including
+  the serve-restart case: a pre-existing `.live.html` with no backing log is
+  stubbed on the first pass); stub idempotence; `FileNotFoundError` on a
+  vanished live log skipped silently; `[i/n] rendering` line gated by
+  `quiet`; empty/missing log dir under `--serve` serves a "no logs yet"
+  index instead of exiting; temp+replace page writes; `os.utime` ns pinning
+  and the `<=` gate for started logs (fake clock).
 - **CLI:** tip printed exactly when the resolved policy is `agent` (and
   suppressed with `--no-live-log`); sink wired by default *after*
   `JsonLogSink` (ordering asserted); flag removes it; `finally` unlinks a
