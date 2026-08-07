@@ -57,7 +57,7 @@ decision 4 for the `<3.14` marker).
 - Writing-style rules for public-facing text (README, docs): no em dashes in prose, no
   decorative emoji, headers use colons.
 
-## Reference: current wiring (main @ 1731997c)
+## Reference: current wiring (main @ d32337f7)
 
 - `logging/sink.py`: `LogSink` protocol (`on_eval_start` / `on_trial_start` / `log_step` /
   `on_trial_end` / `on_eval_end`) + `NullSink` base. Duck-typed extension
@@ -93,7 +93,7 @@ decision 4 for the `<3.14` marker).
 - `cli.py`: `--voice` / repeatable `-V k=v` precedent (lines ~197-206), `_parse_kvs`
   coercion, `_resolve_or_exit` + kind→flag hint map (~line 652), missing-plugin hint for
   operator_input (~line 643), `_build_voice_input` / `_start_voice_input` /
-  `_close_voice_input` lifecycle helpers (~lines 793-832), the single sinks-assembly
+  `_close_voice_input` lifecycle helpers (~lines 793-844), the single sinks-assembly
   site in `_cmd_run` (~lines 1474-1494), embodiment claim inside `_resolve_components`
   (~line 1439) **before** the try/finally that closes voice.
 - Voice plugin: `_input.py` `VoiceInput` shows the `start()`/`close()` duck-typed
@@ -215,8 +215,10 @@ decision 4 for the `<3.14` marker).
      `finally` after a drained `on_eval_end` is a no-op.
    - The worker checks the stop event between queue pop and synthesis, immediately
      after synthesis, and between playback chunks (frames written to a
-     `sounddevice.OutputStream` in small chunks), so the ~5s join ceiling is a true
-     worst case even mid-`Kokoro.create()` is only waited out, never mid-playback.
+     `sounddevice.OutputStream` in small chunks), so the stop event bounds
+     everything except one in-flight `Kokoro.create()`, which is waited out (~1-2s for
+     two sentences) — the ~5s join ceiling is a true worst case, and playback is never
+     waited on.
 9. **What is spoken, verbatim: move/capture `note`, `done` `summary`, `give_up`
    `reason`.** `hindsight` is retrospective self-critique addressed to future attempts,
    not operator narration — never spoken. Assistant free text, observations, tool
@@ -339,8 +341,9 @@ decision 4 for the `<3.14` marker).
   unchanged; `eval-set` rejects `--speak`. Coverage of every new branch, explicitly:
   `start()` raising → `SystemExit`; a resolved sink with no callable `start`; a sink
   with no callable `close`; and the false arm of the new hint condition (a `KeyError`
-  escaping a sink factory must NOT get the pip hint — mirror the operator_input
-  precedent test at tests/test_registry_cli.py ~3436). Keep core coverage at 100%.
+  escaping a sink factory must NOT get the pip hint — the hint-on-registry-KeyError
+  precedent is tests/test_registry_cli.py ~3436 and the adjacent no-hint TypeError
+  test ~3458; the factory-KeyError case has no precedent and is written fresh). Keep core coverage at 100%.
 
 ### Task 5: docs + changelog + module maps
 
