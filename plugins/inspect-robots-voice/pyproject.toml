@@ -59,7 +59,7 @@ known-first-party = ["inspect_robots", "inspect_robots_voice"]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*"]
+module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*", "kokoro_onnx.*"]
 ignore_missing_imports = true
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]

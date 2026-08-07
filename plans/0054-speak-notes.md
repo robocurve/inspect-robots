@@ -247,7 +247,7 @@ decision 4 for the `<3.14` marker).
 
 ### Task 1: plugin engine seam `_tts.py`
 
-- [ ] `plugins/inspect-robots-voice/src/inspect_robots_voice/_tts.py`: private module.
+- [x] `plugins/inspect-robots-voice/src/inspect_robots_voice/_tts.py`: private module.
   `TtsEngine` Protocol: `synthesize(text: str) -> tuple[npt.NDArray[np.float32], int]`
   (float32 mono samples, sample rate — bare `np.ndarray` fails the plugin's strict
   mypy `disallow_any_generics`; every existing plugin module uses `npt.NDArray`).
@@ -257,12 +257,12 @@ decision 4 for the `<3.14` marker).
   `__init__`** behind a guarded try (ImportError message covers both "not installed" and
   the `python_version >= 3.14` marker case, per design decision 4), holds the `Kokoro`
   instance, `synthesize` calls `create(text, voice=..., speed=..., lang=...)`.
-- [ ] Same module: `resolve_model_files(model: str | None, voices: str | None) ->
+- [x] Same module: `resolve_model_files(model: str | None, voices: str | None) ->
   tuple[str, str]` — explicit paths pass through (missing file → `FileNotFoundError`
   naming the path); otherwise cache-dir logic + download + sha256 verify + atomic rename
   as per design decision 5. Module-level constants: URLs, filenames, pinned sha256s
   (cross-checked per design decision 5 before hardcoding).
-- [ ] Tests (`tests/test_tts.py`): explicit-path passthrough and missing-file error;
+- [x] Tests (`tests/test_tts.py`): explicit-path passthrough and missing-file error;
   cache hit skips download (monkeypatched fetch asserts not-called); download path writes
   `.part` then renames; sha256 mismatch deletes and raises with both digests; no
   module-top import of `kokoro_onnx` (mirror the existing lazy-import test pattern);
