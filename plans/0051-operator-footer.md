@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Critique status:** 10 fresh-context rounds; R10 returned no substantive issues
+> against main @ 4e5cc772 (2026-08-06). R4-R9 findings and fixes are in this
+> branch's `plan:` commit history.
+
 **Goal:** PR 3 of the plan-0048 arc (#308). On attended runs with the console enabled and
 a real TTY, `OperatorSession` renders a fixed two-line footer: a status line that rewrites
 in place and never moves, and a `> ` input line the session itself echoes into. Typing is
@@ -83,11 +87,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   `:466`, which is where `end_trial()` goes. The degrade tests to mirror live in
   `tests/test_rollout_observation_step.py` (NOT test_rollout_hardening.py, which
   has no console tests).
-- `src/inspect_robots/cli.py` — `_build_operator_session` (`:729-781`, decision-9
+- `src/inspect_robots/cli.py` — `_build_operator_session` (`:729-779`, decision-9
   ladder; `USAGE_END_ONLY` chosen at `:747`): the footer activates only on rows
   where the console turns on; the helper tells the session (see decision 3).
   Voice wiring (`_build_voice_input`/`_start_voice_input`/`_close_voice_input`,
-  `:782-817`) attaches a `label="voice"` input around the session — the footer
+  `:782-823`) attaches a `label="voice"` input around the session — the footer
   must compose with it (decisions 6/7).
 - Tests: `tests/test_session.py` (exact-byte rendering tests to extend),
   `tests/test_rollout_observation_step.py` (the poll/begin_trial channel-degrade
