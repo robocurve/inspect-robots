@@ -2,8 +2,9 @@
 
 > Status: PLANNED — issue #329. Implements turn-by-turn browser viewing of an
 > in-progress run and the bright CLI tip pointing operators at it.
-> CHANGELOG entry links this file as `[plan 0054](plans/0054-live-html-view.md)`
-> per the established convention (renumbered from 0053, taken on main).
+> CHANGELOG entry links this file as `[plan 0055](plans/0055-live-html-view.md)`
+> per the established convention (renumbered twice: 0053 and then 0054 were
+> both taken on main by concurrent work).
 
 ## Problem
 
