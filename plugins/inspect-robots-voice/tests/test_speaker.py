@@ -494,6 +494,31 @@ def test_blocking_waits_for_inflight_then_enqueues_and_plays() -> None:
     assert [float(chunk[0]) for chunk, _ in playback.writes] == [1.0] * 3 + [2.0] * 3
 
 
+def test_blocking_skips_gate_for_deltas_without_speakable_text() -> None:
+    engine = _TaggedEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback, mode="blocking")
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "first"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+    returned = threading.Event()
+
+    def deliver_noteless_delta() -> None:
+        sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "   "}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=deliver_noteless_delta)
+    hook_thread.start()
+    assert returned.wait(timeout=0.5)
+    hook_thread.join(timeout=1.0)
+    with sink._condition:
+        assert list(sink._queue) == []
+    playback.release[0].set()
+    sink.close()
+
+    assert engine.calls == ["first"]
+
+
 def test_blocking_fails_open_when_worker_dies() -> None:
     class FailingBlockingEngine(_BlockingEngine):
         def synthesize(self, text: str) -> tuple[npt.NDArray[np.float32], int]:
