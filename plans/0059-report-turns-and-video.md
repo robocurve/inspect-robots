@@ -30,15 +30,17 @@ message); string-content user messages (agent nudges like "Respond with
 exactly one tool call.", capx execution reports, take_pic frame deliveries)
 render as ordinary visible messages *inside* the current turn and never
 start one (R1: capx has no tool calls at all — its assistant prose IS the
-content — and nudges would otherwise open junk turns). Leading non-user
-messages form a headerless preamble turn. Per turn, the default (human)
-layer renders, in order:
+content — and nudges would otherwise open junk turns). The **preamble
+turn** is everything before the first list-shaped user message — including
+string-content user messages like capx's "Goal: ..." opener (R2) — and is
+always headerless. Per turn, the default (human) layer renders, in order:
 
-- **`step N` mini-header** — N from the turn's frame references (the label
-  step; present even when a frame lost the budget, since the label text
-  remains — on live pages too). A turn with no frame reference gets a
-  header from its matched operator message's structured `t` field when one
-  exists, else no header. No prompt-text parsing anywhere (R1).
+- **`step N` mini-header** — N is the turn's **first** frame reference's
+  step (R2: pinned for multi-step turns; the label step is present even
+  when a frame lost the budget, since the label text remains — on live
+  pages too). Turns without frame references are headerless — a
+  fallback-matched feedback message never mints a header, and the preamble
+  is always headerless (R2). No prompt-text parsing anywhere (R1).
 - **frames** — captions reduced to the camera name (the step moved to the
   header). **Identity contract** (R1, load-bearing for the 0058 live
   cache): turns group the original message dicts and reference the
@@ -52,9 +54,13 @@ layer renders, in order:
   for the agent policy and only for *delivered* messages — `/stop` notes
   and post-final-inference messages never reach a transcript, and non-chat
   policies have none). Each message is matched to the latest turn whose
-  frame step is ≤ its `t` (falling back to the first turn); the chip shows
-  the text and its source label. The raw delivered lines inside the
-  observation blob stay verbatim in the POV dropdown.
+  frame step is ≤ its `t`; ties across turns sharing a step resolve to the
+  latest in document order. **A chat transcript with zero frame-step turns
+  (capx: its camera labels carry no `(step N)`) routes the trial's
+  messages to the residual block instead** — first-turn dumping would
+  destroy all temporal placement (R2). The chip shows the text and its
+  source label. The raw delivered lines inside the observation blob stay
+  verbatim in the POV dropdown.
 - **assistant text content** — stays visible in the default layer (R1:
   hiding it empties every capx turn and loses agent deliberation prose).
 - **agent note** — already extracted by `_agent_notes` (note / done-summary
@@ -96,8 +102,8 @@ their real badge. Completed logs are untouched.
 The prominent `feedback_block` leaves `_scene_section`'s top. Because the
 structured `operator_messages` now drive the inline chips (§1), the block
 survives only as a **residual**: it renders (in its current list form,
-below the transcript rather than above it) exactly the messages that could
-not be placed inline — i.e. trials with no chat transcript (non-chat
+below the transcripts and above the wire details rather than at the top;
+R2) exactly the messages that could not be placed inline — i.e. trials with no chat transcript (non-chat
 policies, transcript capture failures). When every message was placed
 inline, the block renders nothing (R1: deleting it outright would make
 feedback invisible for xpolicylab/scripted runs, and `/stop [note]`
@@ -122,10 +128,21 @@ common single-scene rig run this is the top of the report):
   never fires on player clicks (R1). Controls: play/pause, camera tabs, a
   range-input scrubber labeled with the step number; autoplay on load,
   looping, ~4 fps. Player position and pause state persist across the 2s
-  live reload via `sessionStorage` keyed by (page, trial, camera) — a
-  served flipbook that restarts every refresh is unusable as a scrubber
-  (R1). With fewer than 2 frames for every camera the block renders
-  nothing.
+  live reload via `sessionStorage` keyed by
+  (`location.pathname`, trial, camera) (R2: pathname is unique within one
+  served directory; cross-directory same-port bleed is harmless pause
+  state) — a served flipbook that restarts every refresh is unusable as a
+  scrubber (R1). With fewer than 2 frames for every camera the block
+  renders nothing.
+- **Video block placement** (R2): inside each trial's existing
+  `<details class="transcript">`, immediately after its `<summary>` — a
+  collapsed trial costs nothing (no decode of invisible videos), and
+  `_scene_section`'s surrounding order (feedback residual, transcripts,
+  wires) is otherwise unchanged. **Only the active camera tab plays**:
+  inactive tabs are paused with `preload="metadata"`, and the flipbook
+  script owns tab switching for both tiers (R2: N cameras × M trials of
+  perpetually looping hidden H.264 melts the viewing laptop; the no-JS
+  constraint applies to the POV dropdown only).
 - **MP4 tier (completed pages, ffmpeg present, never under `--serve`):**
   when `shutil.which("ffmpeg")` succeeds, the log status is not
   `"started"`, **and the render is not a serve pass** (R1: serve re-renders
@@ -138,7 +155,14 @@ common single-scene rig run this is the top of the report):
   `video` command and the renderer (same stderr-tempfile and per-stream
   failure-isolation discipline, plan 0016; ffmpeg writes a temp **file**
   that is read back — `-f mp4` cannot stream to a pipe, and faststart is
-  irrelevant for a fully in-memory `data:` URL; R1). Streams are
+  irrelevant for a fully in-memory `data:` URL; the temp file is unlinked
+  after read-back on success as well as on failure; R1/R2).
+  **`encode_camera_mp4` never raises `SystemExit`** — it returns `None` on
+  any failure including `Popen` launch errors; the `video` command's
+  wrapper reinstates its existing `SystemExit`-on-launch-failure behavior
+  (R2: the directory pass catches only `Exception` per log, so a verbatim
+  reuse of `encode_stream`'s posture would let one broken ffmpeg shim
+  abort the entire `view` render). Streams are
   enumerated by globbing `f"{trial_prefix}_*.npy"` and parsing
   `camera_step` from the remainder after stripping the known trial prefix
   (R1: `discover_streams`' un-splittable key cannot give per-trial
@@ -149,14 +173,22 @@ common single-scene rig run this is the top of the report):
   existing `default_fps` guards).
   Accepted, documented cost: a first `view` of a large directory encodes
   every completed log's videos once; the mtime gate makes it a one-time
-  cost per log.
+  cost per log. **Suppressed-tier pages stay upgradeable** (R2): when the
+  MP4 tier was suppressed for a completed log (serve pass or
+  `--no-video`), the directory pass skips the `os.utime` mtime stamp for
+  that page, so the next eligible plain `view` re-renders it with video —
+  otherwise the standard rig path (run finishes under `--serve`, tick
+  renders it flipbook-only, stamps it) would permanently block the
+  upgrade.
 - **Budgeting:** embedded MP4s are charged to a dedicated
   `_VIDEO_BUDGET_BYTES = 30_000_000` per page of **encoded base64
   characters** (R1: matching the frame-budget precedent, which charges
-  payload chars, not raw bytes) — not the frame budget (the video replaces
-  the need for more stills, and H.264 across near-identical robot frames
-  is far denser than PNG). Over budget → that camera degrades to the
-  flipbook. `--no-video` on `view` skips the MP4 tier entirely (flipbook
+  payload chars, not raw bytes), spent in document order, first-wins,
+  like the frame budget (R2) — not the frame budget itself (the video
+  replaces the need for more stills, and H.264 across near-identical
+  robot frames is far denser than PNG). Over budget → that camera
+  degrades to the flipbook, with a small header chip naming the degrade
+  reason (budget vs no ffmpeg would otherwise be indistinguishable; R2). `--no-video` on `view` skips the MP4 tier entirely (flipbook
   remains); `--no-frames` (no `_FrameContext`) disables both tiers.
 - **Live pages always use the flipbook** — never invoke ffmpeg on the 2s
   tick. Because live pages already embed newest-first frames (plan 0058),
@@ -189,8 +221,9 @@ common single-scene rig run this is the top of the report):
   camera-name-only.
 - **Feedback chips:** sourced from `scene.operator_messages`; `/stop`-style
   undelivered tail message appears inline (matched by `t`); multi-source
-  labels; non-chat trial's messages land in the residual block; fully
-  placed messages leave the residual empty.
+  labels; non-chat trial's messages land in the residual block; a
+  zero-frame-step chat transcript (capx shape) routes to the residual too;
+  fully placed messages leave the residual empty.
 - **Pretty calls:** dict-of-numbers → per-key chips (4-decimal formatting),
   `deltas` as well as `targets`, scalars, array arguments (take_pic
   cameras), multiple calls per message, note exclusion, hindsight rendered
@@ -216,7 +249,12 @@ common single-scene rig run this is the top of the report):
   camera never referenced in the transcript; real ffmpeg invocation stays
   covered by the existing `video`-command tests through the shared helper
   — its `_FakePopen` gains a writes-the-output-file behavior for the
-  temp-file read-back path (R1: today it never writes `out_path`).
+  temp-file read-back path (R1: today it never writes `out_path`);
+  `Popen` raising `OSError` under the renderer → flipbook degrade and
+  `view` exits 0 (R2); suppressed-tier completed pages skip the mtime
+  stamp and upgrade on the next eligible pass (R2); video block nests
+  inside the trial details after its summary; only the active camera tab
+  autoplays (inactive paused, `preload="metadata"`).
 - **CLI:** `--no-video` parsing and forwarding; serve tick unaffected
   (cadence tests untouched).
 - Docs: `docs/guide/live-view.md` and the viewer section of
