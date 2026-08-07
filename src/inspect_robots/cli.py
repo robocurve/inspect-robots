@@ -49,7 +49,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from functools import partial
@@ -159,6 +159,7 @@ _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 _SERVE_RERENDER_SECONDS = 60
 _SERVE_LIVE_RERENDER_SECONDS = 2
+_LIVE_FRAMES_BUDGET_MB = 8.0
 _serve_sleep = time.sleep
 
 
@@ -467,11 +468,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_view.add_argument(
+        "--live-frames-budget",
+        type=float,
+        default=_LIVE_FRAMES_BUDGET_MB,
+        metavar="MB",
+        help=(
+            "maximum inline frame payload for each running page while serving "
+            f"(default: {_LIVE_FRAMES_BUDGET_MB:g}; 0 is unlimited and is not "
+            "recommended while serving)"
+        ),
+    )
+    p_view.add_argument(
         "--force",
         action="store_true",
         help=(
             "re-render existing pages in directory mode; use after changing "
-            "--no-frames or --frames-budget (ignored for one file)"
+            "--no-frames, --frames-budget, or --live-frames-budget (ignored for one file)"
         ),
     )
     p_view.add_argument(
@@ -1444,20 +1456,41 @@ def _build_and_announce_guardrails(
     return approver
 
 
-def _announce_live_view(args: argparse.Namespace, resolved: _ResolvedComponents) -> None:
+def _headless_session(env: Mapping[str, str], platform: str = sys.platform) -> bool:
+    """Return whether the operator is expected to be remote from this process."""
+    # _setup.py asks if a viewer window can open here; this asks if the human is elsewhere.
+    if env.get("SSH_CONNECTION"):
+        return True
+    return platform.startswith("linux") and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+
+
+def _announce_live_view(
+    args: argparse.Namespace,
+    resolved: _ResolvedComponents,
+    env: Mapping[str, str] = os.environ,
+) -> None:
     """Print the copyable browser-view command for agent runs with live logging."""
     if resolved.policy_name != "agent" or args.no_live_log:
         return
     log_dir = shlex.quote(args.log_dir)
+    headless = _headless_session(env)
+    command_tail = "--serve --host 0.0.0.0" if headless else "--serve --open"
     print(
         _styled(
-            f"live: watch this run in your browser →  inspect-robots view {log_dir} --serve --open",
+            f"live: watch this run in your browser →  inspect-robots view {log_dir} {command_tail}",
             _BOLD_BRIGHT_MAGENTA,
         )
     )
+    url = ""
+    if headless:
+        fields = env.get("SSH_CONNECTION", "").split()
+        host = fields[2] if len(fields) == 4 else socket.gethostname()
+        if ":" in host and not (host.startswith("[") and host.endswith("]")):
+            host = f"[{host}]"
+        url = f"; open http://{host}:8300/"
     print(
         _styled(
-            "      each agent turn, notes, and operator/voice input, updating live",
+            "      each agent turn, notes, and operator/voice input, updating live" + url,
             _DIM,
         )
     )
@@ -1906,6 +1939,7 @@ def _render_log_page(
     *,
     no_frames: bool,
     frames_budget: float,
+    live_frames_budget: float | None = None,
     refresh_seconds: int | None = None,
     atomic: bool = False,
 ) -> int:
@@ -1921,6 +1955,10 @@ def _render_log_page(
         log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
+        live_frames_budget_bytes=(
+            None if live_frames_budget is None else int(live_frames_budget * 1_000_000)
+        ),
+        wire_media_elided=log.status == "started",
         refresh_seconds=refresh_seconds,
     )
     if atomic and out_path is not None:
@@ -2108,6 +2146,9 @@ def _render_view_directory(
                     page_path,
                     no_frames=args.no_frames,
                     frames_budget=args.frames_budget,
+                    live_frames_budget=(
+                        args.live_frames_budget if args.serve and log.status == "started" else None
+                    ),
                     refresh_seconds=(
                         _SERVE_LIVE_RERENDER_SECONDS
                         if args.serve and log.status == "started"
@@ -2319,6 +2360,8 @@ def _cmd_view(args: argparse.Namespace) -> int:
 
     if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
         raise SystemExit("--frames-budget must be a non-negative finite number")
+    if not (math.isfinite(args.live_frames_budget) and args.live_frames_budget >= 0):
+        raise SystemExit("--live-frames-budget must be a non-negative finite number")
 
     log_path = Path(args.log)
     if args.serve and not log_path.exists():

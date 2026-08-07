@@ -540,15 +540,18 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
-def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
+def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
     tmp_path: Path,
 ) -> None:
     class _SpaceAware(NullSink):
         def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str]] = []
+            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
 
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.calls.append(("bind_frames_dir", frames_dir))
 
         def on_eval_start(self, spec: EvalSpec) -> None:
             del spec
@@ -556,6 +559,7 @@ def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
 
     class _OddAttr(NullSink):
         bind_spaces = "not a hook"
+        bind_frames_dir = "not a hook"
 
     embodiment = CubePickEmbodiment()
     aware = _SpaceAware()
@@ -577,10 +581,37 @@ def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
             embodiment.info.action_space,
             embodiment.info.observation_space,
         ),
+        ("bind_frames_dir", None),
         ("on_eval_start",),
     ]
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
+    assert getattr(no_hook, "bind_frames_dir", None) is None
+    assert odd.bind_frames_dir == "not a hook"
+
+
+def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:
+    """The optional hook receives the same string persisted on the final log."""
+
+    class _FrameAware(NullSink):
+        def __init__(self) -> None:
+            self.frames_dir: str | None = None
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.frames_dir = frames_dir
+
+    sink = _FrameAware()
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+
+    assert sink.frames_dir == log.stats.frames_dir
+    assert sink.frames_dir is not None
 
 
 def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:

@@ -15,8 +15,9 @@ inspect-robots run --task cubepick-reach --policy agent --embodiment cubepick
 
 The index and the running report refresh every two seconds. The report shows
 completed trials and the current policy transcript, including agent turns,
-notes, and operator or voice feedback. Stored camera frames appear in the
-final report once the run completes, not in the running snapshot.
+notes, and operator or voice feedback. When frame storage is enabled, running
+pages show the most recent camera frames that fit the live frame budget. The
+final report shows the full set under the normal report frame budget.
 
 Scores appear only in the final log. Scoring happens after the live sink sees a
 trial end, so score cells remain `pending` while the run is active. When the

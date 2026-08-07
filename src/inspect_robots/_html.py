@@ -7,7 +7,7 @@ import html
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +45,19 @@ class _FrameBudget:
     embedded: int = 0
     payload_bytes: int = 0
     truncated: bool = False
+    cache: dict[tuple[str, str, int], str] | None = None
+
+
+@dataclass(frozen=True)
+class _FrameReference:
+    """Identify one transcript placeholder and its exact stored-frame key."""
+
+    parts: list[object]
+    label_index: int
+    placeholder_index: int
+    trial_prefix: str
+    camera: str
+    step: int
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,7 @@ class _WireContext:
     budget: _FrameBudget
     emitted: set[str]
     denied: set[str]
+    elide_media: bool = False
 
 
 _STYLES = """
@@ -372,74 +386,116 @@ def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[n
 
 def _frame_image(frame_ctx: _FrameContext, name: str, step: int) -> str | None:
     """Render one correlated frame if it is valid and fits the shared budget."""
+    budget = frame_ctx.budget
+    if budget.cache is not None:
+        source = budget.cache.get((frame_ctx.trial_prefix, name, step))
+        if source is None:
+            return None
+        return _frame_markup(source, name, step)
     array = _load_frame(frame_ctx, name, step)
     if array is None:
         return None
     source = png_data_url(array)
     payload_size = len(source.partition(",")[2])
-    budget = frame_ctx.budget
     if budget.limit and budget.payload_bytes + payload_size > budget.limit:
         budget.truncated = True
         return None
     budget.payload_bytes += payload_size
     budget.embedded += 1
+    return _frame_markup(source, name, step)
+
+
+def _frame_markup(source: str, name: str, step: int) -> str:
+    """Return the shared image markup for one already encoded frame."""
     return (
         f'<img class="frame" loading="lazy" alt="camera {_escape(name)} step {step}" '
         f'src="{source}">'
     )
 
 
-def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
+def _frame_references(transcript: object, trial_prefix: str) -> tuple[_FrameReference, ...]:
+    """Enumerate renderable user placeholders in stable transcript order."""
+    if not _is_chat_transcript(transcript):
+        return ()
+    references: list[_FrameReference] = []
+    for raw_message in cast(list[object], transcript):
+        if not isinstance(raw_message, dict) or raw_message.get("role") != "user":
+            continue
+        raw_content = raw_message.get("content")
+        if not isinstance(raw_content, list):
+            continue
+        parts = cast(list[object], raw_content)
+        pending: tuple[str, int, int] | None = None
+        for index, part in enumerate(parts):
+            if not (isinstance(part, dict) and part.get("type") == "text"):
+                continue
+            raw_text = part.get("text", "")
+            if not isinstance(raw_text, str):
+                continue
+            label = _FRAME_LABEL_RE.fullmatch(raw_text)
+            if label is not None:
+                pending = (label.group("name"), int(label.group("step")), index)
+            elif raw_text == _FRAME_PLACEHOLDER and pending is not None:
+                camera, step, label_index = pending
+                references.append(
+                    _FrameReference(
+                        parts,
+                        label_index,
+                        index,
+                        trial_prefix,
+                        camera,
+                        step,
+                    )
+                )
+                pending = None
+    return tuple(references)
+
+
+def _render_frame_parts(
+    parts: list[object],
+    frame_ctx: _FrameContext,
+    references: Sequence[_FrameReference],
+) -> str:
     """Render user content parts as text runs split only by successful frame embeds."""
     runs: list[str] = []
-    buffered: list[str] = []
-    pending: tuple[str, int, int] | None = None
+    buffered: list[tuple[int, str]] = []
+    matches = {reference.placeholder_index: reference for reference in references}
     embedded = 0
     row_open = False
-    for part in parts:
+    for index, part in enumerate(parts):
         if isinstance(part, dict) and part.get("type") == "text":
             raw_text = part.get("text", "")
             part_text = str(raw_text)
-            if isinstance(raw_text, str):
-                label = _FRAME_LABEL_RE.fullmatch(raw_text)
-                if label is not None:
-                    label_index = len(buffered)
-                    buffered.append(part_text)
-                    pending = (
-                        label.group("name"),
-                        int(label.group("step")),
-                        label_index,
+            reference = matches.get(index)
+            if reference is not None:
+                image = _frame_image(frame_ctx, reference.camera, reference.step)
+                if image is not None:
+                    label_part = cast(dict[str, object], parts[reference.label_index])
+                    label_text = label_part.get("text", "")
+                    caption = str(label_text)[:-1]
+                    buffered = [item for item in buffered if item[0] != reference.label_index]
+                    joined = "\n".join(text for _, text in buffered)
+                    if joined:
+                        if row_open:
+                            runs.append("</div>")
+                            row_open = False
+                        runs.append(f'<div class="content">{_escape(joined)}</div>')
+                    if not row_open:
+                        runs.append('<div class="frame-row">')
+                        row_open = True
+                    runs.append(
+                        '<figure class="frame-cell">'
+                        f"<figcaption>{_escape(caption)}</figcaption>"
+                        f"{image}</figure>"
                     )
+                    buffered = []
+                    embedded += 1
                     continue
-                elif raw_text == _FRAME_PLACEHOLDER and pending is not None:
-                    name, step, label_index = pending
-                    pending = None
-                    image = _frame_image(frame_ctx, name, step)
-                    if image is not None:
-                        caption = buffered[label_index][:-1]
-                        del buffered[label_index]
-                        joined = "\n".join(buffered)
-                        if joined:
-                            if row_open:
-                                runs.append("</div>")
-                                row_open = False
-                            runs.append(f'<div class="content">{_escape(joined)}</div>')
-                        if not row_open:
-                            runs.append('<div class="frame-row">')
-                            row_open = True
-                        runs.append(
-                            '<figure class="frame-cell">'
-                            f"<figcaption>{_escape(caption)}</figcaption>"
-                            f"{image}</figure>"
-                        )
-                        buffered = []
-                        embedded += 1
-                        continue
-            buffered.append(part_text)
+            buffered.append((index, part_text))
         else:
-            buffered.append("[image]")
+            buffered.append((index, "[image]"))
     if embedded == 0 or buffered:
-        joined = "\n".join(buffered)
+        joined = "\n".join(text for _, text in buffered)
         if embedded == 0 or joined:
             if row_open:
                 runs.append("</div>")
@@ -450,7 +506,11 @@ def _render_frame_parts(parts: list[object], frame_ctx: _FrameContext) -> str:
     return "".join(runs)
 
 
-def _render_message(raw_message: object, frame_ctx: _FrameContext | None = None) -> str:
+def _render_message(
+    raw_message: object,
+    frame_ctx: _FrameContext | None = None,
+    frame_references: Sequence[_FrameReference] = (),
+) -> str:
     """Render one tolerant chat message without trusting its role or content."""
     if not isinstance(raw_message, dict):
         return ""
@@ -462,7 +522,12 @@ def _render_message(raw_message: object, frame_ctx: _FrameContext | None = None)
 
     role_class = role if role in {"user", "assistant", "tool"} else "unknown"
     if frame_ctx is not None and role == "user" and isinstance(raw_message.get("content"), list):
-        body = _render_frame_parts(cast(list[object], raw_message["content"]), frame_ctx)
+        parts = cast(list[object], raw_message["content"])
+        body = _render_frame_parts(
+            parts,
+            frame_ctx,
+            [reference for reference in frame_references if reference.parts is parts],
+        )
     else:
         body = "" if content is None else f'<div class="content">{_escape(content)}</div>'
     if role == "tool":
@@ -483,9 +548,10 @@ def _render_chat_transcript(
     transcript: list[object], frame_ctx: _FrameContext | None = None
 ) -> str:
     """Render a defensive role-oriented conversation."""
+    references = () if frame_ctx is None else _frame_references(transcript, frame_ctx.trial_prefix)
     return (
         '<div class="conversation">'
-        + "".join(_render_message(message, frame_ctx) for message in transcript)
+        + "".join(_render_message(message, frame_ctx, references) for message in transcript)
         + "</div>"
     )
 
@@ -539,6 +605,39 @@ def _trial_frame_context(
     )
 
 
+def _document_frame_references(log: EvalLog) -> tuple[_FrameReference, ...]:
+    """Enumerate correlated references across scenes and trials in document order."""
+    references: list[_FrameReference] = []
+    for scene in log.samples:
+        for trial, transcript in enumerate(scene.policy_transcripts):
+            references.extend(_frame_references(transcript, _safe(f"{scene.scene_id}-e{trial}")))
+    return tuple(references)
+
+
+def _prime_live_frame_cache(log: EvalLog, frame_ctx: _FrameContext) -> None:
+    """Allocate the shared live budget to valid frames from newest to oldest."""
+    budget = frame_ctx.budget
+    cache = cast(dict[tuple[str, str, int], str], budget.cache)
+    attempted: set[tuple[str, str, int]] = set()
+    for reference in reversed(_document_frame_references(log)):
+        key = (reference.trial_prefix, reference.camera, reference.step)
+        if key in attempted:
+            continue
+        attempted.add(key)
+        trial_ctx = _FrameContext(frame_ctx.frames_dir, reference.trial_prefix, budget)
+        array = _load_frame(trial_ctx, reference.camera, reference.step)
+        if array is None:
+            continue
+        source = png_data_url(array)
+        payload_size = len(source.partition(",")[2])
+        if budget.limit and budget.payload_bytes + payload_size > budget.limit:
+            budget.truncated = True
+            break
+        budget.payload_bytes += payload_size
+        budget.embedded += 1
+        cache[key] = source
+
+
 def _render_trial_transcript(
     transcript: object,
     frame_ctx: _FrameContext | None,
@@ -584,6 +683,8 @@ def _render_wire_blob(token: str, context: _WireContext) -> str:
         return (
             f'<span class="wire-broken">{_escape(f"[broken blob reference: $blob:{token}]")}</span>'
         )
+    if context.elide_media:
+        return '<span class="wire-placeholder">[blob elided: live page]</span>'
     anchor = f"wire-{_safe(context.trial_id)}-{token[:12]}"
     if token in context.emitted:
         return f'<a href="#{_escape(anchor)}">[blob {_escape(token[:12])}]</a>'
@@ -725,6 +826,8 @@ def _render_trial_wire(
     trial: int,
     log_path: Path | None,
     budget: _FrameBudget,
+    *,
+    elide_media: bool = False,
 ) -> str:
     """Render one trial's guarded wire capture, or nothing when unavailable."""
     loaded = _load_wire_rows(scene, trial, log_path)
@@ -740,6 +843,7 @@ def _render_trial_wire(
         budget=budget,
         emitted=set(),
         denied=set(),
+        elide_media=elide_media,
     )
     static = ""
     if first_tools is not _MISSING:
@@ -772,6 +876,7 @@ def _scene_section(
     log_path: Path | None,
     frame_ctx: _FrameContext | None = None,
     scores_pending: bool = False,
+    wire_media_elided: bool = False,
 ) -> str:
     """Render one complete scene card and its available trial transcripts."""
     instruction = (
@@ -850,7 +955,14 @@ def _scene_section(
         if transcript is not None
     )
     wires = "".join(
-        _render_trial_wire(scene, trial, log_path, budget) for trial in range(len(scene.epochs))
+        _render_trial_wire(
+            scene,
+            trial,
+            log_path,
+            budget,
+            elide_media=wire_media_elided,
+        )
+        for trial in range(len(scene.epochs))
     )
     return (
         '<section class="scene">'
@@ -868,6 +980,8 @@ def render_html(
     log_path: Path | None = None,
     frames_dir: Path | None = None,
     frames_budget_bytes: int = 50_000_000,
+    live_frames_budget_bytes: int | None = None,
+    wire_media_elided: bool = False,
     refresh_seconds: int | None = None,
 ) -> str:
     """Return one self-contained HTML document describing the complete evaluation log."""
@@ -924,8 +1038,19 @@ def render_html(
     transcript_count = sum(
         transcript is not None for scene in log.samples for transcript in scene.policy_transcripts
     )
-    budget = _FrameBudget(limit=frames_budget_bytes)
+    effective_budget = frames_budget_bytes
+    if live_frames_budget_bytes is not None:
+        finite_limits = [
+            limit for limit in (frames_budget_bytes, live_frames_budget_bytes) if limit != 0
+        ]
+        effective_budget = min(finite_limits) if finite_limits else 0
+    budget = _FrameBudget(
+        limit=effective_budget,
+        cache={} if live_frames_budget_bytes is not None else None,
+    )
     frame_ctx = None if frames_dir is None else _FrameContext(frames_dir, "", budget)
+    if frame_ctx is not None and live_frames_budget_bytes is not None:
+        _prime_live_frame_cache(log, frame_ctx)
     scenes = "".join(
         _scene_section(
             scene,
@@ -934,6 +1059,7 @@ def render_html(
             log_path=log_path,
             frame_ctx=frame_ctx,
             scores_pending=log.status == "started",
+            wire_media_elided=wire_media_elided,
         )
         for scene in log.samples
     )
@@ -944,7 +1070,7 @@ def render_html(
         ""
         if not budget.truncated
         else '<span class="chip">embedded media truncated at '
-        f"{frames_budget_bytes / 1_000_000:g} MB ({budget.embedded} embedded)</span>"
+        f"{effective_budget / 1_000_000:g} MB ({budget.embedded} embedded)</span>"
     )
     meta_tail = (
         f"<span>inspect-robots {_escape(log.eval.inspect_robots_version)}</span>"
