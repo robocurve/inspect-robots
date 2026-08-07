@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
 import queue
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -151,3 +153,22 @@ def test_callback_enqueues_without_warning_when_capacity_remains() -> None:
     capture._callback(np.array([[1.0], [2.0]]), 2, object(), object())
 
     assert np.array_equal(audio_queue.get_nowait(), np.array([1.0, 2.0], dtype=np.float32))
+
+
+def test_missing_portaudio_error_carries_install_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PortAudio load failure names the per-OS package commands, not just the symptom."""
+    real_import = builtins.__import__
+
+    def failing_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "sounddevice":
+            raise OSError("PortAudio library not found")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+
+    with pytest.raises(OSError, match="libportaudio2"):
+        MicrophoneCapture(None, 16_000, audio_queue)
