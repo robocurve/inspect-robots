@@ -50,7 +50,7 @@ Repeat `-V key=value` to configure the voice plugin. Values use the same scalar 
 | --- | --- | --- | --- |
 | `model` | `parakeet-tdt-0.6b-v3` | both | Parakeet alias or `nemo-` name, or a faster-whisper model size or local path |
 | `device` | system default | both | sounddevice input index or case-insensitive name substring |
-| `language` | `none` | whisper | explicit transcription language; Parakeet auto-detects language |
+| `language` | `none` | whisper | explicit transcription language (Whisper uses `en` when unset); Parakeet auto-detects |
 | `compute` | `auto` | whisper | CTranslate2 compute type |
 | `asr_device` | `cpu` | whisper | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
 

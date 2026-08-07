@@ -31,7 +31,7 @@ Voice mode requires an attended terminal. Repeat `-V key=value` to configure it:
 | --- | --- | --- | --- |
 | `model` | `parakeet-tdt-0.6b-v3` | both | Parakeet alias or `nemo-` name, or a faster-whisper model size or local path |
 | `device` | system default | both | sounddevice input index or case-insensitive name substring |
-| `language` | `none` | whisper | explicit transcription language; Parakeet auto-detects language |
+| `language` | `none` | whisper | explicit transcription language (Whisper uses `en` when unset); Parakeet auto-detects |
 | `compute` | `auto` | whisper | CTranslate2 compute type |
 | `asr_device` | `cpu` | whisper | `cpu`, `cuda`, or `auto` |
 
