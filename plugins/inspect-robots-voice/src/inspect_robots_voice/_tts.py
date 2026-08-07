@@ -64,7 +64,9 @@ class KokoroEngine:
 
 def _fetch(url: str, destination: Path) -> None:
     print(f"speaker: downloading {destination.name} from {url}", file=sys.stderr)
-    with urllib.request.urlopen(url) as response, destination.open("wb") as output:
+    # The socket timeout bounds connect and every read, so a stalled mirror
+    # fails loudly instead of hanging an unattended run at startup forever.
+    with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as output:
         while chunk := response.read(1024 * 1024):
             output.write(chunk)
 
@@ -98,8 +100,12 @@ def _resolve_file(
 
     path = cache_dir / filename
     if path.is_file():
-        _verify(path, expected)
-        return str(path)
+        if _sha256(path) == expected:
+            return str(path)
+        # A corrupted or stale cache entry must not wedge every later run:
+        # discard it and fall through to a fresh verified download.
+        print(f"speaker: cached {filename} failed sha256 check; redownloading", file=sys.stderr)
+        path.unlink()
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     part = path.with_name(f"{path.name}.part")

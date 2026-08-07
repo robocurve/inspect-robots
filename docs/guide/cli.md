@@ -181,7 +181,7 @@ feedback-only, so episode end and verdicts remain keyboard actions. See
 The plugin also provides `run --speak` for local narration of streamed policy
 notes and terminal summaries. Repeat `-S key=value` to select the output voice,
 speed, volume, device, language, or offline model paths. Speaking works without
-a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes-speak)
+a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes---speak)
 for model setup and the microphone echo caveat.
 
 A session-aware embodiment offers `connect_operator_session(session)`. On

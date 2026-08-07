@@ -150,21 +150,31 @@ class SpeakerSink(NullSink):
     def start(self) -> None:
         """Build audio resources and start exactly one daemon narration worker."""
         with self._condition:
-            if self._disabled or (self._thread is not None and self._thread.is_alive()):
+            if (
+                self._disabled
+                or self._closed
+                or (self._thread is not None and self._thread.is_alive())
+            ):
                 return
         engine = self._engine_factory()
         playback = self._playback_factory()
-        self._stop.clear()
-        self._closed = False
-        self._playback = playback
-        thread = threading.Thread(
-            target=self._worker,
-            args=(engine, playback),
-            name="inspect-robots-speaker",
-            daemon=True,
-        )
-        self._thread = thread
-        thread.start()
+        with self._condition:
+            if not self._closed:
+                self._stop.clear()
+                self._playback = playback
+                thread = threading.Thread(
+                    target=self._worker,
+                    args=(engine, playback),
+                    name="inspect-robots-speaker",
+                    daemon=True,
+                )
+                self._thread = thread
+                thread.start()
+                return
+        # close() won the race during the (possibly long) engine build; a closed
+        # sink must stay closed rather than resurrect a worker.
+        with suppress(BaseException):
+            playback.close()
 
     def log_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         """Enqueue spoken fields from one transcript delta without blocking on audio."""

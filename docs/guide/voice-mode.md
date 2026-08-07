@@ -93,7 +93,8 @@ The speaker reads each `note` from move and capture tool calls as the policy str
 reads the `summary` from `done` and the `reason` from `give_up`. It never reads `hindsight`,
 assistant free text, observations, tool results, or grader messages.
 
-Repeat `-S key=value` to configure speech:
+Repeat `-S key=value` to configure speech. Passing `-S` without `--speak` is an error, which
+helps catch flags copied onto a non-speaking invocation:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

@@ -66,6 +66,30 @@ def test_cache_hit_is_verified_and_skips_download(
     assert resolve_model_files(None, None) == (str(model), str(voices))
 
 
+def test_stale_cache_entry_is_discarded_and_redownloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cache = tmp_path / "inspect-robots-voice"
+    cache.mkdir()
+    stale = cache / tts._KOKORO_FILENAME
+    stale.write_bytes(b"stale model")
+    fresh_payload = b"fresh model"
+
+    def fake_fetch(url: str, destination: Path) -> None:
+        del url
+        destination.write_bytes(fresh_payload)
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(tts, "_fetch", fake_fetch)
+    monkeypatch.setattr(tts, "_KOKORO_SHA256", _digest(fresh_payload))
+
+    model, _voices = resolve_model_files(None, str(_existing(tmp_path / "voices.bin")))
+
+    assert Path(model) == stale
+    assert Path(model).read_bytes() == fresh_payload
+    assert "failed sha256 check; redownloading" in capsys.readouterr().err
+
+
 def test_download_uses_part_files_then_atomically_renames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

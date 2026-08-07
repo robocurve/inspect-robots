@@ -3421,6 +3421,14 @@ def test_eval_set_rejects_speak_flag(capsys: pytest.CaptureFixture[str]) -> None
     assert "unrecognized arguments: --speak" in capsys.readouterr().err
 
 
+def test_eval_set_rejects_speaker_kv_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "-S", "voice=af_sarah"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: -S" in capsys.readouterr().err
+
+
 def test_missing_speaker_plugin_exits_with_install_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
