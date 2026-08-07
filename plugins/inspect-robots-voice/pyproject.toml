@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-voice"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local spoken operator feedback for attended Inspect Robots evaluations."
 dynamic = ["readme"]
 requires-python = ">=3.10"
@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     "inspect-robots>=0.44",
     "numpy>=1.24",
+    "onnx-asr[cpu,hub]>=0.12,<1",
     "sounddevice>=0.4.6",
     "faster-whisper>=1.0",
 ]
@@ -58,7 +59,7 @@ known-first-party = ["inspect_robots", "inspect_robots_voice"]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["sounddevice.*", "faster_whisper.*"]
+module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*"]
 ignore_missing_imports = true
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]

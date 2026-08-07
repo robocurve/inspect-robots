@@ -1,4 +1,4 @@
-"""Lazy faster-whisper transcription with silence and confidence rejection."""
+"""Select local transcription backends and filter unreliable Whisper output."""
 
 from __future__ import annotations
 
@@ -45,7 +45,35 @@ class _Model(Protocol):
     ) -> tuple[Iterable[_Segment], object]: ...
 
 
+class _Transcriber(Protocol):
+    def transcribe(self, audio: npt.ArrayLike) -> str | None: ...
+
+
 ModelFactory = Callable[[str, str, str], _Model]
+
+
+def _is_audio_too_short(samples: npt.NDArray[np.float32]) -> bool:
+    return len(samples) / _SAMPLE_RATE < _MIN_AUDIO_SECONDS
+
+
+def _is_hallucination(text: str) -> bool:
+    return text.casefold() in _HALLUCINATIONS
+
+
+def _classify_model(model: str) -> str | None:
+    if "/" in model or "\\" in model:
+        return None
+    normalized = model.casefold()
+    if normalized in {"parakeet", "parakeet-tdt-0.6b-v3"}:
+        return "nemo-parakeet-tdt-0.6b-v3"
+    if normalized.startswith("nemo-"):
+        return model.lower()
+    if "parakeet" in normalized:
+        raise TypeError(
+            f"unsupported parakeet model {model!r}; supported parakeet names are "
+            "'parakeet', 'parakeet-tdt-0.6b-v3', or a name starting with 'nemo-'"
+        )
+    return None
 
 
 def _load_model(model: str, compute: str, asr_device: str) -> _Model:
@@ -61,19 +89,19 @@ class WhisperTranscriber:
         self,
         model: str,
         compute: str,
-        language: str,
+        language: str | None,
         asr_device: str = "cpu",
         *,
         _model_factory: ModelFactory | None = None,
     ) -> None:
         factory = _load_model if _model_factory is None else _model_factory
         self._model = factory(model, compute, asr_device)
-        self._language = language
+        self._language = "en" if language is None else language
 
     def transcribe(self, audio: npt.ArrayLike) -> str | None:
         """Return accepted text, or ``None`` for silence and unreliable candidates."""
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
-        if len(samples) / _SAMPLE_RATE < _MIN_AUDIO_SECONDS:
+        if _is_audio_too_short(samples):
             return None
         raw_segments, _info = self._model.transcribe(
             samples,
@@ -88,6 +116,19 @@ class WhisperTranscriber:
             return None
         if any(segment.avg_logprob < _MIN_AVG_LOGPROB for segment in segments):
             return None
-        if text.casefold() in _HALLUCINATIONS:
+        if _is_hallucination(text):
             return None
         return text
+
+
+def resolve_transcriber(
+    model: str, compute: str, language: str | None, asr_device: str
+) -> _Transcriber:
+    """Construct the transcription backend selected by the raw model name."""
+    parakeet_model = _classify_model(model)
+    if parakeet_model is None:
+        return WhisperTranscriber(model, compute, language, asr_device)
+
+    from inspect_robots_voice._parakeet import ParakeetTranscriber
+
+    return ParakeetTranscriber(parakeet_model)

@@ -11,14 +11,16 @@ merges its non-blocking polls with the typed console.
 | `src/inspect_robots_voice/__init__.py` | public factory, `-V` scalar type validation, and package exports |
 | `src/inspect_robots_voice/_capture.py` | sounddevice input-device resolution and bounded PortAudio callback queue with drop-oldest backpressure |
 | `src/inspect_robots_voice/_segmenter.py` | pure NumPy adaptive energy gate with pre-roll, hangover, and hard utterance cap |
-| `src/inspect_robots_voice/_transcriber.py` | faster-whisper wrapper and silence, confidence, duration, and hallucination rejection |
+| `src/inspect_robots_voice/_transcriber.py` | faster-whisper wrapper, backend selection, and shared duration and hallucination rejection |
+| `src/inspect_robots_voice/_parakeet.py` | onnx-asr Parakeet wrapper with timestamped confidence rejection |
 | `src/inspect_robots_voice/_input.py` | worker-thread orchestration, generation-safe trial resets, output polling, and lifecycle hooks |
 | `tests/` | deterministic unit tests using fake devices, models, capture, transcribers, segmenters, and threading events |
 
 ## Invariants
 
-- `sounddevice` and `faster_whisper` are lazy imports. Never import either at module scope. Tests
-  must run without PortAudio, audio hardware, model downloads, or importing those packages.
+- `sounddevice`, `faster_whisper`, and `onnx_asr` are lazy imports. Never import them at module
+  scope. Tests must run without PortAudio, audio hardware, model downloads, or importing those
+  packages.
 - `EnergyGate` is pure NumPy and has no I/O. The worker is the sole owner of its state and of
   capture-queue draining during normal operation.
 - `begin_trial()` changes the generation and clears accepted output under the shared lock, then

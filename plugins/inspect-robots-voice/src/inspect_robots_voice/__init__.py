@@ -8,10 +8,11 @@ model dependencies are loaded only when voice input starts.
 from __future__ import annotations
 
 from inspect_robots_voice._input import VoiceInput
+from inspect_robots_voice._transcriber import _classify_model
 
 __all__ = ["VoiceInput", "voice_input"]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 ScalarValue = str | int | float | bool | None
 
@@ -19,20 +20,19 @@ ScalarValue = str | int | float | bool | None
 def voice_input(**kwargs: ScalarValue) -> VoiceInput:
     """Build voice input from validated ``-V`` options.
 
-    Supported keys are ``model`` (string, default ``"small"``), ``device`` (string or integer,
-    default system input), ``language`` (string, default ``"en"``), ``compute`` (string,
-    default ``"auto"``), and ``asr_device`` (string, default ``"cpu"``; pass ``"cuda"`` or
-    ``"auto"`` to run Whisper on a GPU, which needs the CUDA runtime libraries installed).
-    Unknown or incorrectly typed keys raise :class:`TypeError`.
+    Supported keys are ``model`` (string, default ``"parakeet-tdt-0.6b-v3"``), ``device``
+    (string or integer, default system input), ``language`` (string or ``None``, default
+    ``None``), ``compute`` (string, default ``"auto"``), and ``asr_device`` (string, default
+    ``"cpu"``). Unknown, incompatible, or incorrectly typed values raise :class:`TypeError`.
     """
     allowed = {"model", "device", "language", "compute", "asr_device"}
     unknown = sorted(set(kwargs) - allowed)
     if unknown:
         raise TypeError(f"unexpected voice argument(s): {', '.join(unknown)}")
 
-    model = kwargs.get("model", "small")
+    model = kwargs.get("model", "parakeet-tdt-0.6b-v3")
     device = kwargs.get("device")
-    language = kwargs.get("language", "en")
+    language = kwargs.get("language")
     compute = kwargs.get("compute", "auto")
     asr_device = kwargs.get("asr_device", "cpu")
     if not isinstance(model, str):
@@ -43,12 +43,26 @@ def voice_input(**kwargs: ScalarValue) -> VoiceInput:
         or (isinstance(device, int) and not isinstance(device, bool))
     ):
         raise TypeError("device must be a string, integer, or none")
-    if not isinstance(language, str):
-        raise TypeError("language must be a string")
+    if language is not None and not isinstance(language, str):
+        raise TypeError("language must be a string or none")
     if not isinstance(compute, str):
         raise TypeError("compute must be a string")
     if not isinstance(asr_device, str):
         raise TypeError("asr_device must be a string")
+    parakeet_model = _classify_model(model)
+    if parakeet_model is not None:
+        if language is not None:
+            raise TypeError(
+                "parakeet models auto-detect language; drop -V language or pick a whisper model"
+            )
+        if asr_device != "cpu":
+            raise TypeError(
+                "the parakeet backend runs on the CPU; use a whisper model for -V asr_device=cuda"
+            )
+        if compute != "auto":
+            raise TypeError(
+                "compute applies to whisper models; the parakeet backend is fixed to int8"
+            )
     return VoiceInput(
         model=model, device=device, language=language, compute=compute, asr_device=asr_device
     )

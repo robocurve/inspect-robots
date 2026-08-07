@@ -9,6 +9,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Voice plugin (0.3.0):** Parakeet TDT 0.6B v3 through onnx-asr is now the
+  default transcription backend. Its lower published word error rate and faster
+  CPU inference replace faster-whisper `small`, while `-V model=small` remains
+  the escape hatch to the previous behavior. This default change is breaking:
+  explicit Whisper-only options such as `-V language=fr`, `-V compute=int8`,
+  and `-V asr_device=cuda` now also require selecting a Whisper model, where
+  0.2.0 accepted them without an explicit model. Parakeet TDT 0.6B v3 weights
+  are provided by NVIDIA under the CC-BY-4.0 license and download from the
+  Hugging Face hub on first use
+  ([plan 0053](plans/0053-voice-parakeet-backend.md),
+  [#324](https://github.com/robocurve/inspect-robots/issues/324)).
+
 - **Voice plugin (0.2.0):** Whisper now runs on CPU by default with a new
   `asr_device` option (`-V asr_device=cuda` opts into GPU); a missing PortAudio
   library fails with per-OS install commands instead of a bare loader error; a
