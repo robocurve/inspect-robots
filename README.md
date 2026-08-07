@@ -144,6 +144,24 @@ inspect-robots run --policy agent --rerun-connect \
     --instruction "place the fork on the plate"
 ```
 
+### Talk to the policy while it runs
+
+With the [voice plugin](plugins/inspect-robots-voice/) installed, `--voice`
+keeps the microphone open for the whole run and delivers each spoken remark to
+the policy at its next inference, transcribed locally (no keys, no network).
+Silence sends nothing, and voice is feedback-only: ending an episode and
+recording verdicts stay on the keyboard.
+
+```bash
+pip install inspect-robots-voice
+inspect-robots run --policy agent -P model=anthropic/claude-opus-5 \
+    --voice \
+    --instruction "place the fork on the plate"
+```
+
+Typed console feedback keeps working alongside; both land in the transcript
+and the eval log with their source recorded.
+
 ### Retry with learning
 
 Summarize a failed log into a learnings file, then pass those notes to the
