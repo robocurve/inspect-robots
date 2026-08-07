@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import builtins
 import io
+import os
+import shutil
 import sys
 from collections.abc import Callable
 
@@ -589,3 +591,519 @@ def test_prompt_verdict_notes_early_end_reason_before_asking() -> None:
     assert "note: this trial ended early ('give_up')\n" in output
     assert prompts == [_PROMPT, _NOTES_PROMPT]
     assert record.operator_judgement == "y"
+
+
+# --- Footer mode: line editor + pump + two-state renderer (plan 0051, task 1) -------------
+
+
+class _ScriptedFd:
+    """Feed pre-scripted raw byte chunks to the footer pump's fd seams.
+
+    ``chunks`` is public and mutable so a test can queue more bytes between two
+    ``poll()`` calls (exercising state that must persist across polls).
+    """
+
+    def __init__(self, chunks: list[bytes] | None = None) -> None:
+        self.chunks: list[bytes] = list(chunks) if chunks is not None else []
+
+    def readable(self) -> bool:
+        return bool(self.chunks)
+
+    def read(self) -> bytes:
+        return self.chunks.pop(0)
+
+
+def _footer_session(
+    output: list[str], fd: _ScriptedFd | None = None, width: int = 200
+) -> tuple[OperatorSession, _ScriptedFd]:
+    """Build a footer-enabled session, run ``begin_trial()``, then drop its input-row draw."""
+    fd = fd if fd is not None else _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: width,
+    )
+    session.enable_footer()
+    session.begin_trial()
+    output.clear()
+    return session, fd
+
+
+def test_enable_footer_is_noop_on_caller_injected_console() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+
+    session.enable_footer()
+    session.begin_trial()
+
+    assert output == []
+
+
+def test_default_console_dispatch_closures_delegate_to_fd_seams_when_footer_inactive() -> None:
+    output: list[str] = []
+    chunks = [b"/oops\n"]
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: bool(chunks),
+        fd_read=lambda: chunks.pop(0),
+    )
+
+    assert session.poll() == ConsolePoll()
+    assert output == [f"{USAGE}\n"]
+
+
+def test_footer_begin_trial_draws_empty_input_row() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_begin_trial_closes_plain_open_status_then_one_row_branch() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+    )
+    session.status("t = 3s")
+    output.clear()
+    session.enable_footer()
+
+    session.begin_trial()
+
+    assert output == ["\n\r\x1b[K> "]
+    output.clear()
+
+    session.status("t = 4s")
+
+    assert output == ["\r\x1b[Kt = 4s\n\r\x1b[K> "]
+    assert "\x1b[A" not in output[0]
+
+
+def test_footer_begin_trial_drain_stops_on_real_eof() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd([b""])
+    session = OperatorSession(
+        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+    poll = session.poll()
+    assert poll == ConsolePoll()
+
+
+def test_footer_status_none_on_already_closed_status_is_noop() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status(None)
+
+    assert output == []
+
+
+def test_footer_default_width_fn_reads_terminal_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((10, 24)))
+    session = OperatorSession(write=output.append, fd_readable=fd.readable, fd_read=fd.read)
+    session.enable_footer()
+    session.begin_trial()
+    output.clear()
+    fd.chunks = [b"abcdefgh"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> cdefgh"]
+
+
+def test_footer_begin_trial_discards_stale_bytes_with_no_echo_and_clears_state() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd([b"stale", b"\n"])
+    session = OperatorSession(
+        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+    assert fd.chunks == []
+    assert session.poll().messages == ()
+
+
+def test_footer_one_row_write_line_has_no_cursor_up() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.write_line("hello")
+
+    assert output == ["\r\x1b[Khello\n\r\x1b[K> "]
+    assert "\x1b[A" not in output[0]
+
+
+def test_footer_first_status_creates_status_row_from_one_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("t = 3s")
+
+    assert output == ["\r\x1b[Kt = 3s\n\r\x1b[K> "]
+
+
+def test_footer_two_row_status_update() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 3s")
+    output.clear()
+
+    session.status("t = 4s")
+
+    assert output == ["\x1b[A\r\x1b[Kt = 4s\x1b[B\r\x1b[K> "]
+
+
+def test_footer_two_row_write_line_clears_input_row_first() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+
+    session.write_line("operator message")
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[Koperator message\nt = 4s\n\r\x1b[K> "]
+
+
+def test_footer_status_none_collapses_two_row_to_one_row_retaining_input() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+    fd.chunks = [b"h", b"i"]
+    session.poll()
+    output.clear()
+
+    session.status(None)
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[K> hi"]
+
+    # The one-row branch is active again: no cursor-up in a follow-up status(line).
+    output.clear()
+    session.status("t = 5s")
+    assert output == ["\r\x1b[Kt = 5s\n\r\x1b[K> hi"]
+
+
+def test_footer_input_echo_one_row_state() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"h"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> h"]
+
+
+def test_footer_input_echo_two_row_state() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+    fd.chunks = [b"h"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> h"]
+
+
+def test_footer_end_trial_teardown_one_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.end_trial()
+
+    assert output == ["\r\x1b[K"]
+
+
+def test_footer_end_trial_teardown_two_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+
+    session.end_trial()
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[K"]
+
+
+def test_footer_end_trial_teardown_is_idempotent() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.end_trial()
+    output.clear()
+    session.end_trial()
+
+    assert output == []
+
+
+def test_footer_end_trial_noop_when_footer_never_entered_leaves_plain_status_untouched() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+    session.status("t = 3s")
+    output.clear()
+
+    session.end_trial()
+
+    assert output == []
+    # The plain-open status line survives: end_trial() must not touch it when footer
+    # mode was never entered (the plain-mode byte-identity backstop).
+    session.status(None)
+    assert output == ["\n"]
+
+
+def test_footer_input_row_tail_clips_at_width_minus_4() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, width=10)
+    fd.chunks = [b"abcdefgh"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> cdefgh"]
+
+
+def test_footer_status_row_clips_at_width_minus_1() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output, width=6)
+
+    session.status("0123456789")
+
+    assert output == ["\r\x1b[K56789\n\r\x1b[K> "]
+
+
+def test_footer_reclips_after_width_fn_change() -> None:
+    output: list[str] = []
+    width = {"cols": 200}
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: width["cols"],
+    )
+    session.enable_footer()
+    session.begin_trial()
+    output.clear()
+    fd.chunks = [b"abcdef"]
+    session.poll()
+    assert output == ["\r\x1b[K> abcdef"]
+    output.clear()
+
+    width["cols"] = 8
+    fd.chunks = [b"g"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> defg"]
+
+
+def test_footer_pump_backspace_deletes_one_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"b"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x7f"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> a"]
+
+
+def test_footer_pump_backspace_on_empty_buffer_is_noop() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x7f"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_backspace_after_multibyte_char_removes_whole_character() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"caf", "é".encode()]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x7f"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> caf"]
+
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("caf",)
+
+
+def test_footer_pump_ctrl_u_kills_line() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"abc"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x15"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_ignores_other_control_bytes() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"\x01", b"\n"]
+
+    poll = session.poll()
+
+    assert poll.messages == ("a",)
+
+
+@pytest.mark.parametrize("terminator", [b"\n", b"\r"])
+def test_footer_pump_enter_completes_line_reaching_console_same_poll(terminator: bytes) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"hello", terminator]
+
+    poll = session.poll()
+
+    assert poll.messages == ("hello",)
+    assert output[-1] == "\r\x1b[K> "
+
+
+def test_footer_pump_bytes_without_newline_echo_but_deliver_nothing() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"h", b"i"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll()
+    assert output == ["\r\x1b[K> h", "\r\x1b[K> hi"]
+
+
+def test_footer_pump_split_utf8_across_chunks_decodes_cleanly_at_completion() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    lead, cont = "é".encode()[0:1], "é".encode()[1:2]
+    fd.chunks = [lead, cont, b"\n"]
+
+    poll = session.poll()
+
+    assert poll.messages == ("é",)
+
+
+def test_footer_pump_handles_64kib_paste_chunk() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, width=50)
+    pasted = b"a" * 65536
+    fd.chunks = [pasted]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> " + "a" * 46]
+    output.clear()
+
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+
+    assert poll.messages == (pasted.decode(),)
+
+
+def test_footer_pump_swallows_arrow_key_csi_sequence() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"\x1b[A", b"b"]
+
+    poll = session.poll()
+
+    assert output == ["\r\x1b[K> a", "\r\x1b[K> a", "\r\x1b[K> ab"]
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("ab",)
+
+
+def test_footer_pump_swallows_csi_sequence_with_intermediate_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b[3~"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_swallows_ss3_sequence() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1bOP"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_swallows_bare_esc_plus_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1bq", b"z"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> ", "\r\x1b[K> z"]
+
+
+def test_footer_pump_escape_sequence_split_across_two_fd_read_chunks() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b", b"[", b"A", b"z"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> ", "\r\x1b[K> ", "\r\x1b[K> ", "\r\x1b[K> z"]
+
+
+def test_footer_pump_escape_sequence_split_across_two_poll_calls() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"[A"]
+    poll = session.poll()
+
+    assert output == ["\r\x1b[K> "]
+    assert poll == ConsolePoll()
+
+    output.clear()
+    fd.chunks = [b"z", b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("z",)
+
+
+def test_footer_dispatch_eof_contract_returns_empty_string_only_on_real_eof() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b""]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll()
