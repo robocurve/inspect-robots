@@ -320,7 +320,8 @@ unchanged.
   vanished live log skipped silently; `[i/n] rendering` line gated by
   `quiet`; empty/missing log dir under `--serve` serves a "no logs yet"
   index instead of exiting; temp+replace page writes; `os.utime` ns pinning
-  and the `<=` gate for started logs (fake clock).
+  on the completed-log mtime gate (fake clock); started logs re-render
+  every pass unconditionally.
 - **CLI:** tip printed exactly when the resolved policy is `agent` (and
   suppressed with `--no-live-log`); sink wired by default *after*
   `JsonLogSink` (ordering asserted); flag removes it; `finally` unlinks a
