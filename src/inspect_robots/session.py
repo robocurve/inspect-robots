@@ -263,6 +263,8 @@ class OperatorSession:
 
     def _try_enter_footer(self) -> None:
         """Re-evaluate the per-trial gate ladder and silently retain plain mode on failure."""
+        if self._footer_active:
+            return
         if not self._footer_requested or not self._owns_console:
             return
         try:
@@ -330,7 +332,9 @@ class OperatorSession:
 
         A documented no-op when this session was built with a caller-injected
         ``console=...``: the footer requires the session-built console whose seams
-        are the decision-7 dispatching closures wired in ``__init__``.
+        are the decision-7 dispatching closures wired in ``__init__``. The first
+        enabling call also registers this session's idempotent terminal-restore
+        with ``atexit`` as a crash net.
         """
         if self._owns_console:
             self._footer_requested = True

@@ -1043,6 +1043,34 @@ def test_footer_restore_runs_once_and_atexit_cannot_replay_cleared_state() -> No
     assert restored == [state]
 
 
+def test_footer_begin_trial_reentry_is_guarded_and_preserves_saved_snapshot() -> None:
+    output: list[str] = []
+    state = object()
+    raw_calls = 0
+    restored: list[object] = []
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return state
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=restored.append,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+
+    session.begin_trial()
+
+    assert raw_calls == 1
+    session.end_trial()
+    assert restored == [state]
+
+
 def test_footer_end_trial_restores_raw_mode_when_renderer_teardown_raises() -> None:
     output: list[str] = []
     state = object()
