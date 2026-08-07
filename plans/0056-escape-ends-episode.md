@@ -11,7 +11,9 @@
 > re-stamp the grace into never elapsing; ESC+newline leaves the editor buffer
 > untouched). R3 found 2 stale-text contradictions from earlier revisions plus 1 design
 > gap (`/stop <text>` would confirm as `[sent]` though never delivered; ending polls now
-> confirm as `[noted]`). All folded in. R4 pending.
+> confirm as `[noted]`). R4 found 2 (docs edit list missed `:169` and the trailing-text
+> and bare-Enter discoverability; grace-vs-feed ordering made explicit with a
+> discriminating fake-clock test). All folded in. R5 pending.
 
 **Goal:** Close #333. On attended runs with the operator console (`policy=agent` being the
 motivating case), pressing Enter on an empty input line currently ends the episode. Enter
@@ -22,7 +24,7 @@ run:
 - **Esc ends the episode.** In footer mode (attended TTY, cbreak) the session reads raw
   bytes, so a bare `0x1b` keypress is detectable and distinguishable from arrow-key
   escape sequences.
-- **`/stop [note]` ends the episode from any mode.** In plain line mode stdin is
+- **`/stop [text]` ends the episode from any mode.** In plain line mode stdin is
   canonical, so an Esc keypress reaches the process only after a newline flushes the
   buffer; an explicit command is the discoverable fallback. Trailing text is NOT an
   `EndRequest.note`: rollout persists `end.note` only alongside a verdict
@@ -105,10 +107,11 @@ is out of scope. The issue and CHANGELOG note this so the decision is discoverab
    arrow-key tail into a spurious end request. 150 ms is one-to-a-few polls on fast
    loops and rounds up to the next poll on slow ones. The accepted residual trade-offs,
    stated in the `_LineEditor`/pump docstrings: a sequence tail delayed beyond the grace
-   still misreads as bare Esc; on a very slow self-paced loop a lone Esc waits for the
-   next poll; and a printable key pressed while an Esc is pending resolves it as an
-   alt-combo (inherited behavior, but under the new gesture it silently cancels the
-   intended end and eats the keystroke). An operator who wants zero latency presses Esc
+   still misreads as bare Esc (and its tail then types literally into the buffer); on
+   a very slow self-paced loop a lone Esc waits for the next poll; and a printable key
+   pressed while an Esc is pending resolves it as an alt-combo (inherited behavior,
+   but under the new gesture it silently cancels the intended end and eats the
+   keystroke). An operator who wants zero latency presses Esc
    twice.
 
 **Mode-aware usage plumbing.** `OperatorConsole` gains a `usage: str = USAGE`
@@ -201,10 +204,11 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
       console; `cli._build_operator_session` passes `console_usage=USAGE_END_ONLY` when
       the policy does not accept messages (construct the session after computing
       `accepts_messages`).
-- [ ] Rewrite `USAGE` and `USAGE_END_ONLY`: "Esc (or /stop) ends the episode" (the
-      "or /stop" hedge matters: in the plain-mode fallback a lone Esc does nothing
-      until Enter); keep the feedback and verdict phrasing and the
-      `"operator console: "` prefix — `cli.py` `removeprefix`s it for styling.
+- [ ] Rewrite `USAGE` and `USAGE_END_ONLY`: "Esc (or /stop [note]) ends the episode"
+      (the "or /stop" hedge matters: in the plain-mode fallback a lone Esc does
+      nothing until Enter; the "[note]" hint is how an operator discovers trailing
+      text); keep the feedback and verdict phrasing and the `"operator console: "`
+      prefix — `cli.py` `removeprefix`s it for styling.
 - [ ] Docstrings: `console.py` needs no docstring edits beyond the `USAGE` constants
       (neither the module docstring nor `OperatorConsole`'s promises
       Enter-ends-episode; `:85` describes line completion, which is unchanged).
@@ -223,11 +227,15 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
 - [ ] `_LineEditor`: expose `escape_pending` (read) and `take_bare_escape()` (consume);
       update the class docstring with the resolution rules and the accepted Alt+Enter /
       delayed-tail trade-offs.
-- [ ] `_pump_input`: track whether this pump saw bytes; ONLY a pump that fed bytes and
-      ended `escape_pending` arms and stamps `self._now_fn()`; a quiet pump never
-      stamps — if armed and `now_fn() - stamp >= _ESC_GRACE_S` (0.15 s module
-      constant), consume via `take_bare_escape()` and enqueue one `"\x1b"` sentinel
-      line; never fire on EOF; disarm whenever the editor is no longer pending.
+- [ ] `_pump_input`: track whether this pump saw bytes. A pump that fed bytes NEVER
+      runs the grace test — feed resolution always wins; if it ended `escape_pending`
+      it arms and stamps `self._now_fn()`. ONLY a quiet pump (zero bytes) runs the
+      grace test, and it never stamps: if armed and `now_fn() - stamp >= _ESC_GRACE_S`
+      (0.15 s module constant), consume via `take_bare_escape()` and enqueue one
+      `"\x1b"` sentinel line. Never fire on EOF; disarm whenever the editor is no
+      longer pending. (Testing the grace before draining would, on a late CSI tail
+      past the grace, emit a spurious sentinel and then type literal `[A` into the
+      buffer — the ordering is load-bearing.)
 - [ ] `OperatorSession.__init__` gains the injectable `now_fn: Callable[[], float]`
       seam (default `time.monotonic`), consistent with the existing seam style.
 - [ ] Reset the armed flag and stamp alongside editor resets (`_enter_footer`,
@@ -242,7 +250,9 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
       grace never elapse); ESC-tail split across polls within the grace still discards
       (existing `:1414` unmodified); double-ESC in one chunk emits one sentinel at feed
       time with the second ESC resolving via the grace; ESC-then-`\r` (same chunk and
-      across polls) fires at feed time, completes no line, and leaves a previously
+      across polls; the across-polls case must advance the fake clock beyond
+      `_ESC_GRACE_S` between the polls, pinning that feed resolution beats the grace
+      test) fires at feed time, completes no line, and leaves a previously
       typed partial in the buffer untouched (the input row repaints the stale partial
       for one frame until `end_trial` clears it; cosmetic, pinned by the test);
       session-level footer `/stop <text>` confirms as `[noted]` even on a
@@ -255,8 +265,12 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
 ### 3. Docs, changelog, module map
 
 - [ ] `docs/guide/cli.md`: prose (`:152-153`), footer example status line (`:165`), and
-      quoted usage line (`:195`) switch to the Esc / `/stop` gesture; one sentence on
-      why Cmd+Enter is not offered (terminals do not forward Cmd). Follow the
+      quoted usage line (`:195`) switch to the Esc / `/stop` gesture; one sentence that
+      bare Enter now prints the usage reminder instead of ending the run; one sentence
+      that `/stop <text>` records the trailing text to the log; update `:169` (the
+      `[sent]`/`[noted]` scrollback explanation) to note that text ending the episode
+      confirms as `[noted]` even on a sent-labeled session; one sentence on why
+      Cmd+Enter is not offered (terminals do not forward Cmd). Follow the
       writing-style rules.
 - [ ] CHANGELOG Unreleased: behavior change entry (bare Enter no longer ends attended
       episodes; Esc or `/stop` does).
