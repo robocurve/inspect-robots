@@ -170,10 +170,14 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
 
 ### Task 3: backend selection + factory validation
 
-- [ ] `_transcriber.py`: `resolve_transcriber(model, compute, language, asr_device)`
-  — parakeet-name detection (case-insensitive substring), alias canonicalization per
-  decision 1, `TypeError`s per decision 5 for parakeet + whisper-only options;
-  returns `ParakeetTranscriber` or `WhisperTranscriber`.
+- [ ] `_transcriber.py`: a single shared private classifier `_classify_model(model)
+  -> str | None` implementing the full decision-1 precedence (path separator →
+  whisper i.e. `None`; alias map; `nemo-` passthrough lowercased; unknown
+  parakeet-ish name → the decision-1 `TypeError`; else whisper i.e. `None`), returning
+  the canonical parakeet name or `None` for whisper. `resolve_transcriber(model,
+  compute, language, asr_device)` calls it and constructs `ParakeetTranscriber` or
+  `WhisperTranscriber`; it performs no decision-5 option validation (that lives in
+  `voice_input`, next bullets).
 - [ ] `_input.py`: default `_transcriber_factory` delegates to `resolve_transcriber`;
   `VoiceInput` default `model` becomes `"parakeet-tdt-0.6b-v3"`; `language` default
   becomes `None` (threaded through the factory type and `WhisperTranscriber`'s
@@ -183,7 +187,13 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
   `isinstance(language, str)` check (`__init__.py:46-47`) widens to `str | None`;
   cross-backend `TypeError`s per decision 5 are value-based (non-`None` language,
   non-`"auto"` compute, non-`"cpu"` asr_device with a parakeet model), all raised
-  here, none in `resolve_transcriber`.
+  here, none in `resolve_transcriber`. **`voice_input` gates them on the shared
+  `_classify_model` helper** — never a naive substring check, which would misclassify
+  a whisper CT2 path like `/models/parakeet-ct2` — and calling the helper here also
+  surfaces the decision-1 unknown-parakeet-name `TypeError` at factory time (the CLI
+  resolves `voice_input(**kvs)` long before `start()`), satisfying decision 1's
+  "fail at the factory" promise. When both could apply (unknown parakeet-ish name AND
+  a whisper-only option), the decision-1 name error wins — the classifier runs first.
 - [ ] Tests: alias table (`parakeet`, `parakeet-tdt-0.6b-v3`, `nemo-parakeet-tdt-0.6b-v3`,
   mixed case) → ParakeetTranscriber with the canonical name; unknown parakeet-ish name
   (`parakeet-tdt-1.1b`) → `TypeError` listing supported names; `small`/
@@ -191,8 +201,13 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
   "parakeet", e.g. `/models/parakeet-ct2`) → WhisperTranscriber with today's exact
   arguments; factory defaults (`model`, `language=None`) updated; each cross-backend
   `TypeError` (message asserted) plus the accepted no-ops (`asr_device=cpu`,
-  `compute=auto`, `language=None` with parakeet); whisper `language=None` resolves to
-  `"en"`; explicit whisper language passes through. **Delete the now-inverted
+  `compute=auto`, `language=None` with parakeet); whisper-only option values with a
+  path model whose basename contains "parakeet" (e.g.
+  `voice_input(model="/models/parakeet-ct2", language="fr", asr_device="cuda")`) are
+  **accepted** (the classifier, not a substring, gates the rules); unknown
+  parakeet-ish name + whisper-only option raises the decision-1 name error, not the
+  decision-5 one; whisper `language=None` resolves to `"en"`; explicit whisper
+  language passes through. **Delete the now-inverted
   rejection-matrix row** `({"language": None}, "language must be a string")` at
   tests/test_factory.py:52.
 - [ ] `tests/test_input.py`: the two listening-line literals asserting
