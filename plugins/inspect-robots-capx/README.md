@@ -190,7 +190,7 @@ CLI policy arguments use `-P key=value`.
 | `api_key_env` | `OPENROUTER_API_KEY` with custom URL | Environment variable holding a custom endpoint key. |
 | `wire` | `chat` | `chat` or `responses`. |
 | `temperature` | omitted | Sampling temperature sent when set. |
-| `effort` | `low` | Reasoning effort, or null to omit the field. |
+| `effort` | omitted (provider default) | Reasoning effort level. Omit the flag to inherit the provider default; `-P effort=none` sends the true minimum. |
 | `sam3_url` | `http://127.0.0.1:8114` | SAM3 server base URL. |
 | `graspnet_url` | `http://127.0.0.1:8115` | Contact-GraspNet server base URL. |
 | `pyroki_url` | `http://127.0.0.1:8116` | Pyroki server base URL. |
@@ -210,6 +210,11 @@ CLI policy arguments use `-P key=value`.
 
 The prior-learnings file is read once when the policy is constructed. Its
 resolved path and content hash are recorded in the eval configuration.
+
+Since 0.3.0, an omitted `effort` inherits the provider default instead of
+injecting `low`. Scripts that relied on the old implicit `low` must now pin
+`-P effort=low`. The recorded `effort` in the eval config is the normalized
+value, so `-P effort=none` reads back as `none`.
 
 Each helper request retries transient transport errors, HTTP 429, and server
 5xx responses with exponential backoff. The total retry loop stays within
@@ -239,5 +244,5 @@ inspect-robots view LOG.json
   grasp poses. Filter for top-down grasps in the task prompt or use a matching
   IK target convention.
 - Direct OpenAI reasoning models may require `-P wire=responses`. Chat-only
-  endpoints should keep `-P wire=chat`; `-P effort=none` can disable reasoning
-  where function or code-generation requests reject it.
+  endpoints should keep `-P wire=chat`; `-P effort=none` sends the true minimum
+  and can disable reasoning where function or code-generation requests reject it.
