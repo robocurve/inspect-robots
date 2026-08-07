@@ -3611,6 +3611,33 @@ def test_hookless_voice_input_still_runs(
     assert capsys.readouterr().out.count("operator console:") == 1
 
 
+def test_voice_start_announces_model_before_startup_hook() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+
+    class ModelVoiceInput:
+        model = "parakeet-tdt-0.6b-v3"
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> str:
+            return "listening on test microphone"
+
+    voice = ModelVoiceInput()
+    policy = type("VoicePolicy", (), {"accepts_operator_messages": True})()
+
+    cli._start_voice_input(voice, session, policy)
+
+    assert output == [
+        "voice: loading speech-to-text model parakeet-tdt-0.6b-v3 (a first run downloads it)\n",
+        "listening on test microphone\n",
+    ]
+
+
 def test_non_string_voice_start_result_is_not_printed() -> None:
     output: list[str] = []
     session = OperatorSession(write=output.append)
