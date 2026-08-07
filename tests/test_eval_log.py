@@ -109,6 +109,15 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.eval.max_steps == 1200
 
 
+def test_operator_messages_without_source_remain_readable(tmp_path: Path) -> None:
+    path = tmp_path / "old-operator-message.json"
+    path.write_text(json.dumps(_golden_log().to_dict()), encoding="utf-8")
+
+    restored = read_eval_log(str(path))
+
+    assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
+
+
 def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     # Older schema-v1 logs missing additive fields must remain readable.
     data = _golden_log().to_dict()

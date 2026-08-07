@@ -20,7 +20,7 @@ _SECTIONS = (
     ),
     ("User configuration", ("inspect_robots.defaults",)),
     ("Tasks & scenes", ("inspect_robots.scene", "inspect_robots.task")),
-    ("Scoring", ("inspect_robots.scorer",)),
+    ("Scoring", ("inspect_robots.scorer", "inspect_robots.grader")),
     (
         "Rollout, controllers & safety",
         (

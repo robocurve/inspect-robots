@@ -9,6 +9,29 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.24.0):** `-P effort=` now also takes a number in
+  `[0.0, 1.0)` for servers that read reasoning effort as a fraction rather than
+  a named level, and sends it unquantized so an effort sweep keeps the
+  resolution the server offers. Named levels and the 0.23.0 passthrough rules
+  are unchanged: an omitted flag still omits the field, and `none` still sends
+  the true minimum. Tinker's OpenAI-compatible endpoint accepts `0.0` through
+  `0.99`; wires that take levels only reject a fraction with a guided 4xx naming
+  the wire that accepts one. `-P effort=false` stays an error rather than
+  becoming zero effort (#314).
+
+- **Core (0.44.0):** operator messages now preserve console or attached-input
+  provenance through transcripts, policy observations, and evaluation logs.
+  `OperatorSession.attach_input()` merges feedback-only sources without risking
+  the typed console, the registry exposes an `operator_input` plugin kind, and
+  attended `run` and `eval-set` commands accept `--voice` with repeatable `-V`
+  configuration ([plan 0050](plans/0050-voice-operator-input.md), #313).
+
+- **Voice plugin (0.1.0):** new `inspect-robots-voice` package provides local
+  microphone capture, adaptive energy segmentation, faster-whisper
+  transcription filtering, trial-safe threaded delivery, and the `voice`
+  operator-input entry point ([plan 0050](plans/0050-voice-operator-input.md),
+  #313).
+
 - **Agent plugin (0.22.0):** `done` and `give_up` now ask for a required
   `hindsight` argument: what the agent wishes it had known at the start of
   the episode, as concrete transferable rig and task facts. The system
@@ -24,6 +47,12 @@ All notable changes to this project are documented here. The format is based on
   can accept it through the optional `connect_operator_session(session)` hook
   and stand down their own terminal I/O for that run
   ([plan 0048](plans/0048-operator-session.md), #308).
+
+- Attended runs with a real POSIX TTY now render operator feedback in a fixed
+  two-row footer, with an in-place status line above a session-owned input line.
+  Sent feedback moves into scrollback, while off-TTY and Windows rendering stays
+  unchanged ([plan 0048](plans/0048-operator-session.md),
+  [plan 0051](plans/0051-operator-footer.md), #308).
 
 - CLI `run` and `eval-set` now take per-user advisory claims for declared
   device slots before hardware construction, reject concurrent evals aimed at
@@ -120,6 +149,13 @@ All notable changes to this project are documented here. The format is based on
   included (#194).
 
 ### Changed
+
+- **Agent plugin (0.23.0):** an unset `effort` now omits the field and inherits
+  the provider default (breaking; add `-P effort=low` to pin the previous
+  behavior). `effort=none` sends the true minimum on every HTTP wire, including
+  `thinking: {"type": "disabled"}` on Messages; programmatic `None` normalizes
+  to `"none"`, and Gemini Live now rejects explicit `effort=none` instead of
+  silently accepting it ([plan 0049](plans/0049-effort-passthrough.md), #317).
 
 - Verdict and grader-notes prompts moved from CLI internals to
   `OperatorSession`; their behavior and transcript events are unchanged

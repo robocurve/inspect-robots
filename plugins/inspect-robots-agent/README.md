@@ -308,17 +308,30 @@ integer token counters returned by the wire. The Messages wire
 includes input, output, cache-creation, and cache-read tokens; other wires
 currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
-Reasoning effort defaults to `low` on the HTTP wires: robot control is
-latency-sensitive (the arm stands still while the model thinks), safety
-guardrails sit below the model either way, and frontier models at low effort
-remain strong at this task shape. Raise it for hard manipulation problems
-(`-P effort=high`) or pass `-P effort=none` to omit the parameter for
-endpoints that reject it (the CLI reads a bare `none` as null). To send the
-literal wire value `none` and disable reasoning, quote it:
-`-P effort="'none'"`. GPT-5.x on chat completions requires the literal `none`
-when function tools are in play (any other value, or omitting the field, is a
-400). In Python, `effort=None` omits the field and `effort="none"` sends the
-wire value. Gemini Live has no effort field, so leave it unset on that wire.
+Like `temperature`, reasoning effort is omitted when `-P effort=` is unset, so
+the provider's own default applies. Explicit named levels (`minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`) pass through unchanged. A bare
+`-P effort=none` now requests the true minimum on every HTTP wire:
+
+| Wire | Request field |
+| --- | --- |
+| `chat` | `reasoning_effort: "none"` |
+| `responses` | `reasoning: {"effort": "none"}` |
+| `messages` | `thinking: {"type": "disabled"}` (no `output_config`) |
+
+The older quoted spelling, `-P effort="'none'"`, remains valid but is no longer
+needed. In Python, both `effort=None` and `effort="none"` request the `none`
+level; omit the argument to inherit the provider default. Gemini Live has no
+effort field and rejects any explicit effort, so leave it unset on that wire.
+To pin the behavior from before version 0.23, add `-P effort=low`.
+
+Effort also takes a number in `[0.0, 1.0)` for servers that read it as a
+fraction instead of a named level (`-P effort=0.7`). The number is sent
+unquantized, so an effort sweep keeps whatever resolution the server offers.
+Named levels stay the portable choice: every wire and provider accepts some of
+them, while fractional effort is accepted today only by Tinker's
+OpenAI-compatible endpoint (see below). A server that takes levels only rejects
+a fraction with a guided 4xx naming the wire that does accept one.
 
 ## Depth rendering
 
@@ -371,10 +384,23 @@ inspect-robots "pick up the cube" --policy agent \
     --embodiment cubepick
 ```
 
-The plugin defaults to `effort=low` for latency-sensitive robot control.
-Tinker's thinking-effort cookbook documents Inkling's own default as high, so
-pass `-P effort=` deliberately when comparing results. The endpoint accepts
-`low`, `medium`, `high`, `xhigh`, and `max`; it rejects `none` and `minimal`.
+With effort unset, Inkling inherits Tinker's own default, documented as high in
+the thinking-effort cookbook. That can increase control latency because the arm
+stands still while the model thinks; pass `-P effort=low` for latency-sensitive
+runs or to pin the plugin's pre-0.23 behavior. The endpoint accepts `low`,
+`medium`, `high`, `xhigh`, and `max`; `minimal` is unsupported. `effort=none`
+is sent as disabled thinking, which Tinker's endpoint has not been observed to
+accept — expect a wire rejection until confirmed otherwise.
+
+Fractional effort is a Tinker feature, but only on its OpenAI-compatible
+endpoint, which reads `reasoning_effort` as a number from `0.0` to `0.99`
+(`0.995` and above are a 422). The Messages endpoint that serves Inkling here
+takes named levels only, so `-P effort=0.7` needs
+`-P wire=chat -P base_url=` pointed at `.../tinker-prod/oai/api/v1`. That
+endpoint silently ignores `tools`, so it cannot currently drive a robot episode:
+the policy sees no tool call and fails after three turns. Treat fractional
+effort on Tinker as usable for prompt-level experiments, and named levels as the
+setting for real rollouts until the Messages endpoint accepts a number.
 
 Tinker currently reports `input_tokens: 0` because input usage appears in its
 cache-creation and cache-read counters. EvalLog input-token statistics and the
@@ -417,8 +443,10 @@ while standard quota sits idle. It is available on Claude Opus 5 and Opus 4.8,
 on the Claude API only: not Bedrock, Vertex, Foundry, or Claude Platform on
 AWS. A rejection that names fast mode is turned into an error naming the fix.
 
-This wire always requests adaptive thinking, which pre-4.6 models such as
-Sonnet 4.5 and Haiku 4.5 do not support. Use `-P wire=chat` for those.
+With effort unset or set to a named level, this wire requests adaptive
+thinking. Pre-4.6 models such as Sonnet 4.5 and Haiku 4.5 do not support
+adaptive thinking; pass `-P effort=none` to disable thinking and use them on
+`wire=messages`, or use `-P wire=chat`.
 
 The Messages API requires an output cap, so `-P max_output_tokens=` defaults to
 `16000` here. Thinking bills against that same cap, and a response truncated at
@@ -459,3 +487,7 @@ inspect-robots "pick up the cube" --policy agent \
     -P model=openai/gpt-5.6-sol -P wire=responses -P effort=medium \
     --embodiment cubepick
 ```
+
+To stay on Chat Completions and disable reasoning instead, pass
+`-P effort=none`. It sends the literal `reasoning_effort: "none"`; no nested
+quoting is required.

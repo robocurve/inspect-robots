@@ -14,6 +14,7 @@ const sidebars: SidebarsConfig = {
         'guide/scoring',
         'guide/logging-and-rerun',
         'guide/plugins',
+        'guide/voice-mode',
         'guide/adapters',
         'guide/cli',
       ],

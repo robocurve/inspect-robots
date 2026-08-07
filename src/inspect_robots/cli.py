@@ -2,8 +2,8 @@
 
 Subcommands:
 
-- ``inspect-robots list [tasks|policies|embodiments|scorers|sinks]`` — show registered
-  components (builtins + installed plugins).
+- ``inspect-robots list [tasks|policies|embodiments|scorers|sinks|operator_inputs]`` — show
+  registered components (builtins + installed plugins).
 - ``inspect-robots run --task T --policy P --embodiment E`` — run an eval, resolving
   components from the registry. Pass constructor args with ``-T/-P/-E k=v``;
   ``--epochs``, ``--fail-on-error``, and ``--store-frames`` tune the run. The
@@ -89,7 +89,9 @@ from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.approver import Approver
+    from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
+    from inspect_robots.grader import Grader
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box
@@ -130,7 +132,9 @@ _KIND_BY_PLURAL = {
     "policies": "policy",
     "embodiments": "embodiment",
     "scorers": "scorer",
+    "graders": "grader",
     "sinks": "sink",
+    "operator_inputs": "operator_input",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -176,12 +180,31 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-prompt",
         action="store_true",
-        help="never ask the terminal operator for a success verdict or grader notes",
+        help="suppress the operator grader: never ask the terminal operator "
+        "for a success verdict or grader notes",
+    )
+    parser.add_argument(
+        "--grader",
+        help="registered grader that captures the post-trial judgement, or "
+        "'none' to disable grading (default: config, then operator when the "
+        "run is attended)",
     )
     parser.add_argument("--policy", help="registered policy name (default: user config)")
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
     parser.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="enable attended-only microphone feedback (requires inspect-robots-voice)",
+    )
+    parser.add_argument(
+        "-V",
+        dest="voice_args",
+        action="append",
+        metavar="k=v",
+        help="pass an argument to the inspect-robots-voice input (requires --voice)",
+    )
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=None, help="override each task's epoch count")
@@ -614,13 +637,23 @@ def _resolve_or_exit(
     try:
         return resolve(kind, name, **kwargs)
     except KeyError as exc:
-        raise SystemExit(str(exc.args[0])) from exc
+        message = str(exc.args[0])
+        # Only the registry's own unknown-name error earns the install hint; a
+        # KeyError escaping a factory must not masquerade as a missing plugin.
+        if kind == "operator_input" and message.startswith("no operator_input named"):
+            message = f"{message}; fix: pip install inspect-robots-voice"
+        raise SystemExit(message) from exc
     except ConfigError as exc:
         raise SystemExit(str(exc)) from exc
     except TypeError as exc:
         if args_section is None:
             args_section = f"{kind}.args"
-        flag = {"task": "-T", "policy": "-P", "embodiment": "-E"}.get(kind, "the CLI args flag")
+        flag = {
+            "task": "-T",
+            "policy": "-P",
+            "embodiment": "-E",
+            "operator_input": "-V",
+        }.get(kind, "the CLI args flag")
         raise SystemExit(
             f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
         ) from exc
@@ -721,6 +754,7 @@ def _build_operator_session(
             return session, None
         connect_hook(session)
         usage = USAGE if accepts_messages else USAGE_END_ONLY
+        session.enable_footer(label="sent" if accepts_messages else "noted")
         label = "operator console:"
         session.write_line(f"{_styled(label, _CYAN)} {usage.removeprefix(label + ' ')}")
         return session, session
@@ -751,8 +785,100 @@ def _build_operator_session(
         return session, None
 
     label = "operator console:"
+    session.enable_footer(label="sent")
     session.write_line(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
     return session, session
+
+
+def _build_voice_input(
+    args: argparse.Namespace, operator_input: OperatorSession | None
+) -> OperatorInput | None:
+    """Validate voice flags and construct the registered input when requested."""
+    if args.voice_args and not args.voice:
+        raise SystemExit("-V requires --voice")
+    if not args.voice:
+        return None
+    if not _attended(args):
+        raise SystemExit("--voice requires attended mode (a TTY without --no-prompt)")
+    if operator_input is None:
+        raise SystemExit("--voice requires a live operator input channel")
+    return cast(
+        "OperatorInput",
+        _resolve_or_exit("operator_input", "voice", **_parse_kvs(args.voice_args)),
+    )
+
+
+def _start_voice_input(
+    voice_input: OperatorInput, session: OperatorSession, policy: object
+) -> None:
+    """Start and attach a voice input, honoring its optional startup hook."""
+    start_hook = getattr(voice_input, "start", None)
+    if callable(start_hook):
+        try:
+            listening_line = start_hook()
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
+        if isinstance(listening_line, str):
+            session.write_line(listening_line)
+    session.attach_input(voice_input, label="voice")
+    if not bool(getattr(policy, "accepts_operator_messages", False)):
+        session.write_line("voice notes go to the log only; the policy does not receive them")
+
+
+def _close_voice_input(voice_input: OperatorInput | None) -> None:
+    """Close a constructed voice input through its optional shutdown hook."""
+    if voice_input is None:
+        return
+    close_hook = getattr(voice_input, "close", None)
+    if callable(close_hook):
+        close_hook()
+
+
+def _select_grader_name(args: argparse.Namespace, defaults: Defaults) -> str | None:
+    """Resolve the grader name: flag > config > attended default (plan 0049).
+
+    An explicit ``--grader`` is honored verbatim (``none`` disables grading;
+    the contradictory pair with ``--no-prompt`` is rejected in
+    ``_check_shared_run_conflicts``). A config-sourced ``operator`` needs a
+    run that can actually be attended: under ``--no-prompt`` or without a TTY
+    it downgrades to no grader with a stderr note, so a one-time config edit
+    can never block a later cron/CI run at a prompt.
+    """
+    if args.grader is not None:
+        return None if args.grader == "none" else args.grader
+    name: str | None = defaults.grader
+    if name is None:
+        return "operator" if _attended(args) else None
+    if name == "none":
+        return None
+    if name == "operator" and not _attended(args):
+        print(
+            "note: config grader 'operator' needs an attended terminal; "
+            "grading is off for this run",
+            file=sys.stderr,
+        )
+        return None
+    return name
+
+
+def _build_grader(
+    args: argparse.Namespace, defaults: Defaults, session: OperatorSession | None
+) -> Grader | None:
+    """Construct the run's grader, sharing the operator session when one exists.
+
+    Attendedness only picks the *default* name; an explicitly selected grader
+    is built even without a session (its own fallback behavior then applies,
+    e.g. the operator grader constructs a lazy session that degrades on dead
+    stdin).
+    """
+    name = _select_grader_name(args, defaults)
+    if name is None:
+        return None
+    grader = cast("Grader", _resolve_or_exit("grader", name))
+    connect = getattr(grader, "connect_session", None)
+    if session is not None and callable(connect):
+        connect(session)
+    return grader
 
 
 def _step_limit_count(log: EvalLog) -> int:
@@ -1150,6 +1276,10 @@ def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--max-action-delta tunes the guardrails that --disable-guardrails turns off — drop one"
         )
+    if args.no_prompt and args.grader == "operator":
+        raise SystemExit(
+            "--no-prompt suppresses the operator grader that --grader operator asks for — drop one"
+        )
     if args.max_action_delta is not None and not (
         math.isfinite(args.max_action_delta) and args.max_action_delta > 0
     ):
@@ -1308,6 +1438,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
+    voice_input: OperatorInput | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1322,19 +1453,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
             args, embodiment.info.action_space, resolved.embodiment
         )
 
-        before_scoring = None
         operator_input = None
+        operator_session = None
         if _attended(args):
             operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
-            if is_adhoc and any(s.name == "operator" for s in task.scorers):
-                # Ad-hoc operator-scored runs: every non-definitive trial is
-                # prompted, exactly as before.
-                before_scoring = operator_session.prompt_verdict
-            else:
-                # Any task, registered included: a trial the operator ended by
-                # keypress owes a verdict; everything else stays non-blocking
-                # and unattended-safe (R6).
-                before_scoring = operator_session.prompt_verdict_on_operator_end
+        voice_input = _build_voice_input(args, operator_input)
+        if voice_input is not None:
+            _start_voice_input(
+                voice_input,
+                cast(OperatorSession, operator_input),
+                resolved.policy,
+            )
+        # Attendedness picks the default grader, never gates grader wiring
+        # (plan 0049): an explicit --grader is built session-less and relies
+        # on its own fallback.
+        grader = _build_grader(args, defaults, operator_session)
 
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
@@ -1373,7 +1506,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 operator_input=operator_input,
-                before_scoring=before_scoring,
+                grader=grader,
             )
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
@@ -1389,9 +1522,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
         try:
-            embodiment.close()
+            _close_voice_input(voice_input)
         finally:
-            resolved.claim.release()
+            try:
+                embodiment.close()
+            finally:
+                resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1463,20 +1599,28 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
+    voice_input: OperatorInput | None = None
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
-        before_scoring = None
         operator_input = None
+        operator_session = None
         if _attended(args):
             operator_session, operator_input = _build_operator_session(resolved.policy, embodiment)
-            # Registered tasks only here: prompt for exactly the trials a human
-            # ended by keypress (OPERATOR_END); everything else stays
-            # non-blocking and unattended-safe (R6).
-            before_scoring = operator_session.prompt_verdict_on_operator_end
+        voice_input = _build_voice_input(args, operator_input)
+        if voice_input is not None:
+            _start_voice_input(
+                voice_input,
+                cast(OperatorSession, operator_input),
+                resolved.policy,
+            )
+        # Attendedness picks the default grader, never gates grader wiring
+        # (plan 0049): an explicit --grader is built session-less and relies
+        # on its own fallback.
+        grader = _build_grader(args, defaults, operator_session)
         try:
             success, logs = eval_set(
                 tasks,
@@ -1491,7 +1635,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 ),
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
-                before_scoring=before_scoring,
+                grader=grader,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log
@@ -1518,9 +1662,12 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
         try:
-            embodiment.close()
+            _close_voice_input(voice_input)
         finally:
-            resolved.claim.release()
+            try:
+                embodiment.close()
+            finally:
+                resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 

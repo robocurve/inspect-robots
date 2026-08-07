@@ -10,7 +10,7 @@ import pytest
 from inspect_robots.approver import AutoApprover
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorInput
 from inspect_robots.controller import DefaultController
-from inspect_robots.errors import _CancelledTrial
+from inspect_robots.errors import EmbodimentFault, _CancelledTrial
 from inspect_robots.logging.sink import LogSink, NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.policy import PolicyConfig, PolicyInfo
@@ -77,6 +77,26 @@ class FakeOperatorInput:
             raise self.begin_error
 
 
+class _EndingOperatorInput(FakeOperatorInput):
+    """Add a duck-typed trial-finalization hook to the scripted operator input."""
+
+    def __init__(
+        self,
+        polls: list[ConsolePoll | BaseException],
+        *,
+        end_error: Exception | None = None,
+    ) -> None:
+        super().__init__(polls)
+        self.end_error = end_error
+        self.end_calls = 0
+
+    def end_trial(self) -> None:
+        """Record trial finalization and raise the configured failure, if any."""
+        self.end_calls += 1
+        if self.end_error is not None:
+            raise self.end_error
+
+
 class _TrackingEmbodiment(CubePickEmbodiment):
     """Track reset ordering and how many actions reached the embodiment."""
 
@@ -96,6 +116,15 @@ class _TrackingEmbodiment(CubePickEmbodiment):
         """Count each action before delegating to the mock world."""
         self.step_calls += 1
         return super().step(action)
+
+
+class _FailingStepEmbodiment(CubePickEmbodiment):
+    """Raise a trial-ending embodiment failure from the first action."""
+
+    def step(self, action: Action) -> StepResult:
+        """Fail every attempted action so rollout exercises its exception path."""
+        del action
+        raise RuntimeError("motion failed")
 
 
 class _ObservationSink(NullSink):
@@ -204,7 +233,7 @@ def test_operator_message_reaches_only_the_next_chunked_inference() -> None:
     _run(policy, CubePickEmbodiment(), max_steps=4, operator_input=operator_input)
 
     assert [observation.extra["operator_messages"] for observation in policy.observations] == [
-        [{"t": 0, "text": "keep the wrist level"}],
+        [{"t": 0, "text": "keep the wrist level", "source": "console"}],
         [],
     ]
 
@@ -222,8 +251,8 @@ def test_operator_messages_across_steps_keep_their_drain_step() -> None:
     _run(policy, CubePickEmbodiment(), max_steps=3, operator_input=operator_input)
 
     assert [observation.extra["operator_messages"] for observation in policy.observations] == [
-        [{"t": 0, "text": "first"}],
-        [{"t": 1, "text": "second"}],
+        [{"t": 0, "text": "first", "source": "console"}],
+        [{"t": 1, "text": "second", "source": "console"}],
     ]
 
 
@@ -272,7 +301,13 @@ def test_messages_in_an_ending_poll_are_recorded_as_transcript_events() -> None:
     policy = _ProbePolicy()
     embodiment = _TrackingEmbodiment()
     operator_input = FakeOperatorInput(
-        [ConsolePoll(messages=("gripper slipped",), end=EndRequest())]
+        [
+            ConsolePoll(
+                messages=("gripper slipped",),
+                end=EndRequest(),
+                sources=("voice",),
+            )
+        ]
     )
 
     record = _run(policy, embodiment, max_steps=3, operator_input=operator_input)
@@ -280,9 +315,29 @@ def test_messages_in_an_ending_poll_are_recorded_as_transcript_events() -> None:
     message_events = [event for event in record.events if event.kind == "operator_message"]
     assert len(message_events) == 1
     assert message_events[0].t == 0
-    assert message_events[0].data == {"text": "gripper slipped"}
+    assert message_events[0].data == {"text": "gripper slipped", "source": "voice"}
     assert embodiment.step_calls == 0
     assert policy.observations == []
+
+
+def test_message_sources_are_parallel_with_console_fallback() -> None:
+    policy = _ProbePolicy()
+    operator_input = FakeOperatorInput(
+        [ConsolePoll(messages=("spoken", "typed"), sources=("voice",))]
+    )
+
+    record = _run(policy, CubePickEmbodiment(), max_steps=1, operator_input=operator_input)
+
+    assert policy.observations[0].extra["operator_messages"] == [
+        {"t": 0, "text": "spoken", "source": "voice"},
+        {"t": 0, "text": "typed", "source": "console"},
+    ]
+    assert [
+        event.data["source"] for event in record.events if event.kind == "operator_message"
+    ] == [
+        "voice",
+        "console",
+    ]
 
 
 def test_begin_trial_runs_once_after_embodiment_reset() -> None:
@@ -298,6 +353,87 @@ def test_begin_trial_runs_once_after_embodiment_reset() -> None:
 
     assert operator_input.begin_calls == 1
     assert order == ["reset", "begin"]
+
+
+def test_end_trial_runs_on_success_path() -> None:
+    operator_input = _EndingOperatorInput([])
+
+    record = _run(
+        _ProbePolicy(),
+        CubePickEmbodiment(),
+        max_steps=1,
+        operator_input=operator_input,
+    )
+
+    assert record.status == "success"
+    assert operator_input.end_calls == 1
+
+
+def test_end_trial_runs_on_trial_ending_exception_path() -> None:
+    operator_input = _EndingOperatorInput([])
+
+    with pytest.raises(EmbodimentFault, match="motion failed"):
+        _run(
+            _ProbePolicy(),
+            _FailingStepEmbodiment(),
+            max_steps=1,
+            operator_input=operator_input,
+        )
+
+    assert operator_input.end_calls == 1
+
+
+def test_operator_input_without_end_trial_hook_is_skipped_without_error() -> None:
+    operator_input = FakeOperatorInput([])
+
+    record = _run(
+        _ProbePolicy(),
+        CubePickEmbodiment(),
+        max_steps=1,
+        operator_input=operator_input,
+    )
+
+    assert record.status == "success"
+
+
+def test_raising_end_trial_warns_without_masking_successful_outcome() -> None:
+    operator_input = _EndingOperatorInput([], end_error=RuntimeError("restore failed"))
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Operator console disabled for this trial after RuntimeError: restore failed",
+    ) as warning_records:
+        record = _run(
+            _ProbePolicy(),
+            CubePickEmbodiment(),
+            max_steps=1,
+            operator_input=operator_input,
+        )
+
+    assert len(warning_records) == 1
+    assert record.status == "success"
+    assert operator_input.end_calls == 1
+
+
+def test_raising_end_trial_warns_without_masking_trial_exception() -> None:
+    operator_input = _EndingOperatorInput([], end_error=RuntimeError("restore failed"))
+
+    with (
+        pytest.warns(
+            RuntimeWarning,
+            match="Operator console disabled for this trial after RuntimeError: restore failed",
+        ) as warning_records,
+        pytest.raises(EmbodimentFault, match="motion failed"),
+    ):
+        _run(
+            _ProbePolicy(),
+            _FailingStepEmbodiment(),
+            max_steps=1,
+            operator_input=operator_input,
+        )
+
+    assert len(warning_records) == 1
+    assert operator_input.end_calls == 1
 
 
 def test_no_operator_input_keeps_reserved_key_out_of_policy_observations() -> None:
@@ -331,6 +467,26 @@ def test_raising_poll_warns_once_disables_channel_and_preserves_record() -> None
     assert record.status == "success"
     assert record.truncated is True
     assert record.termination_reason == "max_steps"
+
+
+def test_end_trial_still_runs_after_raising_poll_disables_channel() -> None:
+    operator_input = _EndingOperatorInput([RuntimeError("poll failed")])
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Operator console disabled for this trial after RuntimeError: poll failed",
+    ) as warning_records:
+        record = _run(
+            _ProbePolicy(),
+            CubePickEmbodiment(),
+            max_steps=2,
+            operator_input=operator_input,
+        )
+
+    assert len(warning_records) == 1
+    assert record.status == "success"
+    assert operator_input.poll_calls == 1
+    assert operator_input.end_calls == 1
 
 
 def test_raising_begin_trial_warns_once_and_disables_channel() -> None:
@@ -372,3 +528,20 @@ def test_keyboard_interrupt_from_poll_uses_cancelled_trial_path() -> None:
     assert record.error == "cancelled by user (KeyboardInterrupt)"
     assert record.steps == []
     assert excinfo.value.__cause__ is original
+
+
+def test_end_trial_runs_on_keyboard_interrupt_cancelled_trial_path() -> None:
+    original = KeyboardInterrupt("operator interrupt")
+    operator_input = _EndingOperatorInput([original])
+
+    with pytest.raises(_CancelledTrial) as excinfo:
+        _run(
+            _ProbePolicy(),
+            _TrackingEmbodiment(),
+            max_steps=3,
+            operator_input=operator_input,
+        )
+
+    assert excinfo.value.__cause__ is original
+    assert excinfo.value.record.status == "cancelled"
+    assert operator_input.end_calls == 1

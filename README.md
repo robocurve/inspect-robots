@@ -363,8 +363,8 @@ the compatibility check before anything moves, not mid-rollout.
 
 ## First-party plugins
 
-Both halves of an eval (the "body" and the "brain") have a ready-made
-adapter shipped from this repo as separate packages:
+Policies, embodiments, and attended operator input have ready-made plugins
+shipped from this repo as separate packages:
 
 - **[inspect-robots-ros](plugins/inspect-robots-ros/)**: run evals on ROS 1 or
   ROS 2 arms through rosbridge, with no ROS installation on the eval machine
@@ -386,6 +386,10 @@ adapter shipped from this repo as separate packages:
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
   then queues approver-checked joint targets behind `--policy capx`.
+- **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
+  microphone speech into operator feedback during attended runs with
+  `--voice`. Spoken input is feedback-only, so trial end and verdicts stay on
+  the keyboard.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:

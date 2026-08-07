@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import builtins
 import io
+import os
+import shutil
 import sys
 from collections.abc import Callable
 
 import pytest
 
-from inspect_robots.console import USAGE, ConsolePoll, OperatorConsole, OperatorInput
+from inspect_robots.console import USAGE, ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
@@ -40,6 +42,31 @@ class _RecordingLinesSession(OperatorSession):
         self.lines.append(text)
 
 
+class _ScriptedAttachedInput:
+    def __init__(
+        self,
+        polls: list[ConsolePoll | Exception],
+        *,
+        begin_error: Exception | None = None,
+    ) -> None:
+        self.polls = list(polls)
+        self.begin_error = begin_error
+        self.poll_calls = 0
+        self.begin_calls = 0
+
+    def poll(self) -> ConsolePoll:
+        self.poll_calls += 1
+        item = self.polls.pop(0) if self.polls else ConsolePoll()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def begin_trial(self) -> None:
+        self.begin_calls += 1
+        if self.begin_error is not None:
+            raise self.begin_error
+
+
 def _scripted_prompt_session(
     answers: list[str],
 ) -> tuple[OperatorSession, list[str], list[str]]:
@@ -58,12 +85,93 @@ def test_console_protocol_methods_delegate_to_composed_console() -> None:
     console = _RecordingConsole()
     session = OperatorSession(console=console)
 
-    assert session.poll() == ConsolePoll(messages=("recorded",))
+    poll = session.poll()
+    assert poll == ConsolePoll(messages=("recorded",))
+    assert poll.sources == ()
     session.begin_trial()
 
     assert console.poll_calls == 1
     assert console.begin_trial_calls == 1
     assert isinstance(session, OperatorInput)
+
+
+def test_attached_inputs_merge_after_console_with_session_stamped_sources() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+    voice = _ScriptedAttachedInput(
+        [
+            ConsolePoll(
+                messages=("first", "second"),
+                end=EndRequest(verdict="y"),
+                sources=("untrusted", "untrusted"),
+            )
+        ]
+    )
+    phone = _ScriptedAttachedInput([ConsolePoll(messages=("third",))])
+    session.attach_input(voice, label="voice")
+    session.attach_input(phone, label="phone")
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(
+        messages=("recorded", "first", "second", "third"),
+        end=None,
+        sources=("console", "voice", "voice", "phone"),
+    )
+    assert output == ["voice: first\n", "voice: second\n", "phone: third\n"]
+
+
+def test_poll_failure_permanently_detaches_only_that_source() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+    broken = _ScriptedAttachedInput(
+        [RuntimeError("microphone failed"), ConsolePoll(messages=("must not return",))]
+    )
+    healthy = _ScriptedAttachedInput(
+        [ConsolePoll(messages=("one",)), ConsolePoll(messages=("two",))]
+    )
+    session.attach_input(broken, label="voice")
+    session.attach_input(healthy, label="phone")
+
+    first = session.poll()
+    second = session.poll()
+
+    assert first.sources == ("console", "phone")
+    assert second.sources == ("console", "phone")
+    assert broken.poll_calls == 1
+    assert healthy.poll_calls == 2
+    assert output == [
+        "voice input disabled after RuntimeError: microphone failed\n",
+        "phone: one\n",
+        "phone: two\n",
+    ]
+
+
+def test_begin_trial_failure_permanently_detaches_only_that_source() -> None:
+    output: list[str] = []
+    console = _RecordingConsole()
+    session = OperatorSession(console=console, write=output.append)
+    broken = _ScriptedAttachedInput(
+        [ConsolePoll(messages=("must not return",))],
+        begin_error=ValueError("reset failed"),
+    )
+    healthy = _ScriptedAttachedInput([ConsolePoll(messages=("fresh",))])
+    session.attach_input(broken, label="voice")
+    session.attach_input(healthy, label="phone")
+
+    session.begin_trial()
+    poll = session.poll()
+
+    assert console.begin_trial_calls == 1
+    assert broken.begin_calls == 1
+    assert broken.poll_calls == 0
+    assert healthy.begin_calls == 1
+    assert poll.messages == ("recorded", "fresh")
+    assert poll.sources == ("console", "phone")
+    assert output == [
+        "voice input disabled after ValueError: reset failed\n",
+        "phone: fresh\n",
+    ]
 
 
 def test_default_console_routes_usage_through_write_seam() -> None:
@@ -452,7 +560,7 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof() -> None:
     assert event.data == {"verdict": "n", "source": "prompt", "note": None}
 
 
-def test_prompt_on_operator_end_prompts_and_records_note() -> None:
+def test_prompt_verdict_prompts_for_operator_ended_trial() -> None:
     session, _prompts, _output = _scripted_prompt_session(["partial", "left gripper slipped"])
     record = TrialRecord(
         scene_id="s0",
@@ -462,43 +570,871 @@ def test_prompt_on_operator_end_prompts_and_records_note() -> None:
         termination_reason="operator_end",
     )
 
-    session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
     assert record.operator_judgement == "partial"
     assert record.operator_note == "left gripper slipped"
 
 
-def test_prompt_on_operator_end_adopts_pre_set_console_verdict() -> None:
-    session = _RecordingLinesSession(lambda _prompt: pytest.fail("pre-set verdict must not prompt"))
+def test_prompt_verdict_notes_early_end_reason_before_asking() -> None:
+    session, prompts, output = _scripted_prompt_session(["y", ""])
     record = TrialRecord(
         scene_id="s0",
         epoch=0,
         seed=0,
-        terminated=True,
-        termination_reason="operator_end",
-        operator_judgement="partial",
-        operator_note="left gripper slipped",
+        truncated=True,
+        termination_reason="give_up",
     )
 
-    session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
-    assert record.operator_judgement == "partial"
-    assert record.operator_note == "left gripper slipped"
-    assert session.lines == ["operator verdict adopted from console: partial"]
+    assert "note: this trial ended early ('give_up')\n" in output
+    assert prompts == [_PROMPT, _NOTES_PROMPT]
+    assert record.operator_judgement == "y"
 
 
-def test_prompt_on_operator_end_ignores_other_reasons() -> None:
+# --- Footer mode: line editor + pump + two-state renderer (plan 0051, task 1) -------------
+
+
+class _ScriptedFd:
+    """Feed pre-scripted raw byte chunks to the footer pump's fd seams.
+
+    ``chunks`` is public and mutable so a test can queue more bytes between two
+    ``poll()`` calls (exercising state that must persist across polls).
+    """
+
+    def __init__(self, chunks: list[bytes] | None = None) -> None:
+        self.chunks: list[bytes] = list(chunks) if chunks is not None else []
+
+    def readable(self) -> bool:
+        return bool(self.chunks)
+
+    def read(self) -> bytes:
+        return self.chunks.pop(0)
+
+
+def _footer_session(
+    output: list[str],
+    fd: _ScriptedFd | None = None,
+    width: int = 200,
+    label: str = "sent",
+) -> tuple[OperatorSession, _ScriptedFd]:
+    """Build a footer-enabled session, run ``begin_trial()``, then drop its input-row draw."""
+    fd = fd if fd is not None else _ScriptedFd()
     session = OperatorSession(
-        input_fn=lambda _prompt: pytest.fail("must not prompt: not operator_end")
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: width,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
-    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
-        record = TrialRecord(
-            scene_id="s0",
-            epoch=0,
-            seed=0,
-            terminated=True,
-            truncated=truncated,
-            termination_reason=reason,
-        )
-        session.prompt_verdict_on_operator_end(record, Scene(id="s0", instruction="reach"))
-        assert record.operator_judgement is None
+    session.enable_footer(label=label)
+    session.begin_trial()
+    output.clear()
+    return session, fd
+
+
+def test_enable_footer_is_noop_on_caller_injected_console() -> None:
+    output: list[str] = []
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        console=_RecordingConsole(),
+        write=output.append,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+
+    session.enable_footer(label="sent")
+    session.begin_trial()
+
+    assert output == []
+    assert raw_calls == 0
+
+
+def test_default_console_dispatch_closures_delegate_to_fd_seams_when_footer_inactive() -> None:
+    output: list[str] = []
+    chunks = [b"/oops\n"]
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: bool(chunks),
+        fd_read=lambda: chunks.pop(0),
+    )
+
+    assert session.poll() == ConsolePoll()
+    assert output == [f"{USAGE}\n"]
+
+
+def test_footer_begin_trial_draws_empty_input_row() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_begin_trial_closes_plain_open_status_then_one_row_branch() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.status("t = 3s")
+    output.clear()
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+
+    assert output == ["\n\r\x1b[K> "]
+    output.clear()
+
+    session.status("t = 4s")
+
+    assert output == ["\r\x1b[Kt = 4s\n\r\x1b[K> "]
+    assert "\x1b[A" not in output[0]
+
+
+def test_footer_begin_trial_drain_stops_on_real_eof() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd([b""])
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+    poll = session.poll()
+    assert poll == ConsolePoll()
+
+
+def test_footer_status_none_on_already_closed_status_is_noop() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status(None)
+
+    assert output == []
+
+
+def test_footer_default_width_fn_reads_terminal_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((10, 24)))
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+    output.clear()
+    fd.chunks = [b"abcdefgh"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> cdefgh"]
+
+
+def test_footer_begin_trial_discards_stale_bytes_with_no_echo_and_clears_state() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd([b"stale", b"\n"])
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+
+    assert output == ["\r\x1b[K> "]
+    assert fd.chunks == []
+    assert session.poll().messages == ()
+
+
+def test_footer_one_row_write_line_has_no_cursor_up() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.write_line("hello")
+
+    assert output == ["\r\x1b[Khello\n\r\x1b[K> "]
+    assert "\x1b[A" not in output[0]
+
+
+def test_footer_first_status_creates_status_row_from_one_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("t = 3s")
+
+    assert output == ["\r\x1b[Kt = 3s\n\r\x1b[K> "]
+
+
+def test_footer_two_row_status_update() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 3s")
+    output.clear()
+
+    session.status("t = 4s")
+
+    assert output == ["\x1b[A\r\x1b[Kt = 4s\x1b[B\r\x1b[K> "]
+
+
+def test_footer_two_row_write_line_clears_input_row_first() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+
+    session.write_line("operator message")
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[Koperator message\nt = 4s\n\r\x1b[K> "]
+
+
+def test_footer_status_none_collapses_two_row_to_one_row_retaining_input() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+    fd.chunks = [b"h", b"i"]
+    session.poll()
+    output.clear()
+
+    session.status(None)
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[K> hi"]
+
+    # The one-row branch is active again: no cursor-up in a follow-up status(line).
+    output.clear()
+    session.status("t = 5s")
+    assert output == ["\r\x1b[Kt = 5s\n\r\x1b[K> hi"]
+
+    # Typing after status(None) still echoes correctly, on the retained input row.
+    output.clear()
+    session.status(None)
+    output.clear()
+    fd.chunks = [b"!"]
+    session.poll()
+    assert output == ["\r\x1b[K> hi!"]
+    assert "\x1b[A" not in output[0]
+
+
+def test_footer_input_echo_one_row_state() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"h"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> h"]
+
+
+def test_footer_input_echo_two_row_state() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+    fd.chunks = [b"h"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> h"]
+
+
+def test_footer_end_trial_teardown_one_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.end_trial()
+
+    assert output == ["\r\x1b[K"]
+
+
+def test_footer_end_trial_teardown_two_row_state() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+
+    session.end_trial()
+
+    assert output == ["\r\x1b[K\x1b[A\r\x1b[K"]
+
+
+def test_footer_end_trial_teardown_is_idempotent() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.end_trial()
+    output.clear()
+    session.end_trial()
+
+    assert output == []
+
+
+def test_footer_requires_explicit_enable_even_when_all_runtime_gates_pass() -> None:
+    output: list[str] = []
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+
+    session.begin_trial()
+
+    assert output == []
+    assert raw_calls == 0
+
+
+def test_footer_non_tty_gate_falls_back_to_plain_mode_without_raw_entry() -> None:
+    output: list[str] = []
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: False,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+    session.end_trial()
+
+    assert output == []
+    assert raw_calls == 0
+
+
+def test_footer_missing_termios_gate_falls_back_to_plain_mode_silently() -> None:
+    output: list[str] = []
+
+    def missing_termios() -> object:
+        raise ModuleNotFoundError("termios")
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=missing_termios,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+    session.end_trial()
+
+    assert output == []
+
+
+def test_footer_failed_raw_entry_falls_back_then_retries_next_trial() -> None:
+    output: list[str] = []
+    state = object()
+    attempts = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("tcsetattr failed")
+        return state
+
+    restored: list[object] = []
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=restored.append,
+    )
+    session.enable_footer(label="sent")
+
+    session.begin_trial()
+    session.end_trial()
+    assert output == []
+    assert restored == []
+
+    session.begin_trial()
+    assert output == ["\r\x1b[K> "]
+    session.end_trial()
+
+    assert attempts == 2
+    assert restored == [state]
+
+
+def test_footer_restore_runs_once_and_atexit_cannot_replay_cleared_state() -> None:
+    output: list[str] = []
+    state = object()
+    restored: list[object] = []
+    callbacks: list[Callable[[], None]] = []
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+        atexit_register=lambda callback: callbacks.append(callback),
+    )
+
+    session.enable_footer(label="sent")
+    session.enable_footer(label="sent")
+    session.begin_trial()
+    session.end_trial()
+    session.end_trial()
+    callbacks[0]()
+
+    assert len(callbacks) == 1
+    assert restored == [state]
+
+
+def test_footer_begin_trial_reentry_is_guarded_and_preserves_saved_snapshot() -> None:
+    output: list[str] = []
+    state = object()
+    raw_calls = 0
+    restored: list[object] = []
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return state
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=restored.append,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+
+    session.begin_trial()
+
+    assert raw_calls == 1
+    session.end_trial()
+    assert restored == [state]
+
+
+def test_footer_end_trial_restores_raw_mode_when_renderer_teardown_raises() -> None:
+    output: list[str] = []
+    state = object()
+    restored: list[object] = []
+    fail_writes = False
+
+    def write(text: str) -> None:
+        if fail_writes:
+            raise RuntimeError("terminal write failed")
+        output.append(text)
+
+    session = OperatorSession(
+        write=write,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+    fail_writes = True
+
+    with pytest.raises(RuntimeError, match="terminal write failed"):
+        session.end_trial()
+
+    assert restored == [state]
+    fail_writes = False
+    session.end_trial()
+    assert restored == [state]
+
+
+def test_footer_begin_trial_restores_raw_mode_when_renderer_entry_raises() -> None:
+    state = object()
+    restored: list[object] = []
+
+    def write(_text: str) -> None:
+        raise RuntimeError("terminal write failed")
+
+    session = OperatorSession(
+        write=write,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+    )
+    session.enable_footer(label="sent")
+
+    with pytest.raises(RuntimeError, match="terminal write failed"):
+        session.begin_trial()
+
+    assert restored == [state]
+    session.end_trial()
+    assert restored == [state]
+
+
+def test_footer_end_trial_noop_when_footer_never_entered_leaves_plain_status_untouched() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+    session.status("t = 3s")
+    output.clear()
+
+    session.end_trial()
+
+    assert output == []
+    # The plain-open status line survives: end_trial() must not touch it when footer
+    # mode was never entered (the plain-mode byte-identity backstop).
+    session.status(None)
+    assert output == ["\n"]
+
+
+def test_footer_input_row_tail_clips_at_width_minus_4() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, width=10)
+    fd.chunks = [b"abcdefgh"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> cdefgh"]
+
+
+def test_footer_status_row_clips_at_width_minus_1() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output, width=6)
+
+    session.status("0123456789")
+
+    assert output == ["\r\x1b[K56789\n\r\x1b[K> "]
+
+
+def test_footer_reclips_after_width_fn_change() -> None:
+    output: list[str] = []
+    width = {"cols": 200}
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: width["cols"],
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+    output.clear()
+    fd.chunks = [b"abcdef"]
+    session.poll()
+    assert output == ["\r\x1b[K> abcdef"]
+    output.clear()
+
+    width["cols"] = 8
+    fd.chunks = [b"g"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> defg"]
+
+
+def test_footer_pump_backspace_deletes_one_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"b"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x7f"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> a"]
+
+
+def test_footer_pump_backspace_on_empty_buffer_is_noop() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x7f"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_backspace_after_multibyte_char_removes_whole_character() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"caf", "é".encode()]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x7f"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> caf"]
+
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("caf",)
+
+
+def test_footer_pump_ctrl_u_kills_line() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"abc"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"\x15"]
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_ignores_other_control_bytes() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"\x01", b"\n"]
+
+    poll = session.poll()
+
+    assert poll.messages == ("a",)
+
+
+@pytest.mark.parametrize("terminator", [b"\n", b"\r"])
+def test_footer_pump_enter_completes_line_reaching_console_same_poll(terminator: bytes) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"hello", terminator]
+
+    poll = session.poll()
+
+    assert poll.messages == ("hello",)
+    assert output[-1] == "\r\x1b[K[sent] hello\n\r\x1b[K> "
+
+
+@pytest.mark.parametrize("label", ["sent", "noted"])
+def test_footer_poll_confirms_each_console_feedback_message_with_selected_label(
+    label: str,
+) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, label=label)
+    fd.chunks = [b"first\nsecond\n"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(messages=("first", "second"))
+    assert poll.sources == ()
+    assert output == [
+        "\r\x1b[K> ",
+        f"\r\x1b[K[{label}] first\n\r\x1b[K> ",
+        f"\r\x1b[K[{label}] second\n\r\x1b[K> ",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "expected_end"),
+    [
+        (b"\n", EndRequest()),
+        (b"/p careful placement\n", EndRequest(verdict="partial", note="careful placement")),
+    ],
+)
+def test_footer_poll_does_not_confirm_end_requests_or_verdicts(
+    raw_input: bytes, expected_end: EndRequest
+) -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [raw_input]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(end=expected_end)
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_poll_confirms_console_source_but_only_echoes_voice_source() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"typed\n"]
+    voice = _ScriptedAttachedInput([ConsolePoll(messages=("spoken",), sources=("untrusted",))])
+    session.attach_input(voice, label="voice")
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(messages=("typed", "spoken"), sources=("console", "voice"))
+    assert output == [
+        "\r\x1b[K> ",
+        "\r\x1b[Kvoice: spoken\n\r\x1b[K> ",
+        "\r\x1b[K[sent] typed\n\r\x1b[K> ",
+    ]
+
+
+def test_footer_pump_bytes_without_newline_echo_but_deliver_nothing() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"h", b"i"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll()
+    assert output == ["\r\x1b[K> h", "\r\x1b[K> hi"]
+
+
+def test_footer_pump_split_utf8_across_chunks_decodes_cleanly_at_completion() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    lead, cont = "é".encode()[0:1], "é".encode()[1:2]
+    fd.chunks = [lead, cont, b"\n"]
+
+    poll = session.poll()
+
+    assert poll.messages == ("é",)
+
+
+def test_footer_pump_handles_64kib_paste_chunk() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, width=50)
+    pasted = b"a" * 65536
+    fd.chunks = [pasted]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> " + "a" * 46]
+    output.clear()
+
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+
+    assert poll.messages == (pasted.decode(),)
+
+
+def test_footer_pump_swallows_arrow_key_csi_sequence() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"a", b"\x1b[A", b"b"]
+
+    poll = session.poll()
+
+    assert output == ["\r\x1b[K> a", "\r\x1b[K> a", "\r\x1b[K> ab"]
+    fd.chunks = [b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("ab",)
+
+
+def test_footer_pump_swallows_csi_sequence_with_intermediate_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b[3~"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_swallows_ss3_sequence() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1bOP"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> "]
+
+
+def test_footer_pump_swallows_bare_esc_plus_byte() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1bq", b"z"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> ", "\r\x1b[K> z"]
+
+
+def test_footer_pump_escape_sequence_split_across_two_fd_read_chunks() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b", b"[", b"A", b"z"]
+
+    session.poll()
+
+    assert output == ["\r\x1b[K> ", "\r\x1b[K> ", "\r\x1b[K> ", "\r\x1b[K> z"]
+
+
+def test_footer_pump_escape_sequence_split_across_two_poll_calls() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\x1b"]
+    session.poll()
+    output.clear()
+
+    fd.chunks = [b"[A"]
+    poll = session.poll()
+
+    assert output == ["\r\x1b[K> "]
+    assert poll == ConsolePoll()
+
+    output.clear()
+    fd.chunks = [b"z", b"\n"]
+    poll = session.poll()
+    assert poll.messages == ("z",)
+
+
+def test_footer_dispatch_eof_contract_returns_empty_string_only_on_real_eof() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b""]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll()

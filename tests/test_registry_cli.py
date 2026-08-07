@@ -19,7 +19,7 @@ import inspect_robots.registry as reg
 from inspect_robots._claims import claim_devices
 from inspect_robots.cli import main
 from inspect_robots.conformance import DeviceSlot
-from inspect_robots.console import USAGE, USAGE_END_ONLY
+from inspect_robots.console import USAGE, USAGE_END_ONLY, ConsolePoll
 from inspect_robots.defaults import (
     _ENV_EMBODIMENT as ENV_EMBODIMENT,
 )
@@ -33,6 +33,7 @@ from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneR
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
 from inspect_robots.session import OperatorSession
+from inspect_robots.types import ActionChunk, Observation
 
 
 class _ConsolePolicy(ScriptedPolicy):
@@ -99,6 +100,25 @@ def test_cli_list_runs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "policies"]) == 0
     out = capsys.readouterr().out
     assert "scripted" in out
+
+
+def test_cli_list_operator_inputs_renders_registered_factories(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "operator-input-for-list-test"
+
+    @reg.operator_input(name)
+    def factory() -> object:
+        return object()
+
+    try:
+        assert main(["list", "operator_inputs"]) == 0
+    finally:
+        reg._FACTORIES["operator_input"].pop(name)
+
+    out = capsys.readouterr().out
+    assert "operator_inputs:" in out
+    assert name in out
 
 
 def test_cli_list_all(capsys: pytest.CaptureFixture[str]) -> None:
@@ -196,7 +216,6 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondScene(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -992,7 +1011,6 @@ def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondTask(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -3339,6 +3357,357 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
 
+def _voice_cli_argv(
+    command: str,
+    tmp_path: Path,
+    *,
+    policy: str,
+    voice: bool = True,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    if command == "run":
+        argv = ["run", "--task", "cubepick-reach"]
+    else:
+        argv = ["eval-set", "cubepick-reach"]
+    argv.extend(
+        [
+            "--policy",
+            policy,
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    if voice:
+        argv.append("--voice")
+    argv.extend(extra)
+    return argv
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_voice_args_require_voice_flag(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv = _voice_cli_argv(
+        command,
+        tmp_path,
+        policy="scripted",
+        voice=False,
+        extra=("-V", "model=small"),
+    )
+
+    with pytest.raises(SystemExit, match=r"^-V requires --voice$"):
+        main(argv)
+
+
+@pytest.mark.parametrize("attendance", ["no-tty", "no-prompt"])
+def test_voice_requires_attended_mode(
+    attendance: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-attendance-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    if attendance == "no-tty":
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        extra: tuple[str, ...] = ()
+    else:
+        _tty_stdin(monkeypatch)
+        extra = ("--no-prompt",)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name, extra=extra))
+
+    assert str(excinfo.value) == "--voice requires attended mode (a TTY without --no-prompt)"
+    assert "\n" not in str(excinfo.value)
+
+
+def test_voice_requires_live_operator_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tty_stdin(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy="scripted"))
+
+    assert str(excinfo.value) == "--voice requires a live operator input channel"
+    assert "\n" not in str(excinfo.value)
+
+
+def test_missing_voice_plugin_exits_with_install_hint_only_on_key_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-missing-plugin-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    # Force entry-point loading NOW: resolve() lazily loads entry points, and in a
+    # workspace dev env that would re-register the real voice plugin after the
+    # delitem below, opening an actual microphone instead of exiting.
+    reg.registered("operator_input")
+    monkeypatch.delitem(reg._FACTORIES["operator_input"], "voice", raising=False)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name))
+
+    message = str(excinfo.value)
+    assert "no operator_input named 'voice'" in message
+    assert "pip install inspect-robots-voice" in message
+    assert "\n" not in message
+
+
+def test_bad_voice_argument_is_reported_against_v_not_as_missing_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-bad-arg-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: object())
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            _voice_cli_argv(
+                "run",
+                tmp_path,
+                policy=policy_name,
+                extra=("-V", "typoed_key=1"),
+            )
+        )
+
+    message = str(excinfo.value)
+    assert "invalid arguments for operator_input 'voice'" in message
+    assert "-V k=v" in message
+    assert "pip install inspect-robots-voice" not in message
+    assert "\n" not in message
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_voice_lifecycle_and_coerced_args_for_both_eval_commands(
+    command: str,
+    eval_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = f"voice-lifecycle-policy-{command}-{eval_fails}"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    instances: list[VoiceInput] = []
+
+    class VoiceInput:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            self.kwargs = kwargs
+            self.start_calls = 0
+            self.close_calls = 0
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> str:
+            self.start_calls += 1
+            return "listening on test microphone"
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    def voice_factory(**kwargs: Any) -> VoiceInput:
+        instance = VoiceInput(kwargs)
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", voice_factory)
+
+    def assert_attached(kwargs: dict[str, object]) -> None:
+        session = kwargs["operator_input"]
+        assert isinstance(session, OperatorSession)
+        assert session._attached_inputs == [(instances[0], "voice")]
+        if eval_fails:
+            raise RuntimeError("evaluation failed")
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        assert_attached(kwargs)
+        return [_step_limit_log(reasons=("success",))]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        assert_attached(kwargs)
+        return True, [_step_limit_log(task="cubepick-reach", reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+    argv = _voice_cli_argv(
+        command,
+        tmp_path,
+        policy=policy_name,
+        extra=(
+            "-V",
+            "device=4",
+            "-V",
+            "enabled=true",
+            "-V",
+            "optional=none",
+            "-V",
+            "ratio=1.5",
+            "-V",
+            "model=small",
+        ),
+    )
+
+    if eval_fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            main(argv)
+    else:
+        assert main(argv) == 0
+
+    assert len(instances) == 1
+    assert instances[0].kwargs == {
+        "device": 4,
+        "enabled": True,
+        "optional": None,
+        "ratio": 1.5,
+        "model": "small",
+    }
+    assert instances[0].start_calls == 1
+    assert instances[0].close_calls == 1
+    assert "listening on test microphone" in capsys.readouterr().out
+
+
+def test_hookless_voice_input_still_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = "hookless-voice-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+
+    class HooklessVoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+    voice = HooklessVoiceInput()
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: voice)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    assert main(_voice_cli_argv("run", tmp_path, policy=policy_name)) == 0
+    assert capsys.readouterr().out.count("operator console:") == 1
+
+
+def test_non_string_voice_start_result_is_not_printed() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+
+    class SilentVoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+    voice = SilentVoiceInput()
+    policy = type("VoicePolicy", (), {"accepts_operator_messages": True})()
+
+    cli._start_voice_input(voice, session, policy)
+
+    assert output == []
+    assert session._attached_inputs == [(voice, "voice")]
+
+
+def test_voice_startup_error_exits_with_original_message_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "failing-start-voice-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+
+    class FailingVoiceInput:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("microphone unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    voice = FailingVoiceInput()
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: voice)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name))
+
+    assert str(excinfo.value) == "microphone unavailable"
+    assert voice.close_calls == 1
+
+
+def test_end_only_voice_mode_prints_log_only_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class EndOnlyEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            self.session = session
+
+    class VoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+    embodiment_name = "end-only-voice-embodiment"
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], embodiment_name, EndOnlyEmbodiment)
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", VoiceInput)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+    argv = _voice_cli_argv("run", tmp_path, policy="scripted")
+    embodiment_index = argv.index("cubepick")
+    argv[embodiment_index] = embodiment_name
+
+    assert main(argv) == 0
+
+    out = capsys.readouterr().out
+    assert USAGE_END_ONLY in out
+    assert "voice notes go to the log only; the policy does not receive them" in out
+
+
 @pytest.mark.parametrize(
     (
         "embodiment_kind",
@@ -3348,10 +3717,11 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
         "expected_output",
         "expected_connect_calls",
         "expected_defer_calls",
+        "expected_footer_label",
     ),
     [
-        ("new", True, "linux", True, f"{USAGE}\n", 1, 0),
-        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0),
+        ("new", True, "linux", True, f"{USAGE}\n", 1, 0, "sent"),
+        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0, "noted"),
         (
             "new",
             True,
@@ -3361,6 +3731,7 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
             "feedback typing stays off\n",
             0,
             0,
+            None,
         ),
         (
             "new",
@@ -3371,11 +3742,12 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
             "feedback typing stays off\n",
             0,
             0,
+            None,
         ),
-        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1),
-        ("defer", False, "win32", False, "", 0, 0),
-        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0),
-        ("simulated", False, "linux", False, "", 0, 0),
+        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1, "sent"),
+        ("defer", False, "win32", False, "", 0, 0, None),
+        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0, "sent"),
+        ("simulated", False, "linux", False, "", 0, 0, None),
         (
             "bare",
             True,
@@ -3385,8 +3757,9 @@ def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
             "and still owns the end-of-episode keypress; feedback typing stays off\n",
             0,
             0,
+            None,
         ),
-        ("bare", False, "win32", False, "", 0, 0),
+        ("bare", False, "win32", False, "", 0, 0, None),
     ],
 )
 def test_build_operator_session_enablement_matrix(
@@ -3397,6 +3770,7 @@ def test_build_operator_session_enablement_matrix(
     expected_output: str,
     expected_connect_calls: int,
     expected_defer_calls: int,
+    expected_footer_label: str | None,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -3437,6 +3811,14 @@ def test_build_operator_session_enablement_matrix(
     else:
         embodiment = BareEmbodiment()
     monkeypatch.setattr(sys, "platform", platform)
+    footer_labels: list[str] = []
+    original_enable_footer = OperatorSession.enable_footer
+
+    def record_enable_footer(self: OperatorSession, *, label: str) -> None:
+        footer_labels.append(label)
+        original_enable_footer(self, label=label)
+
+    monkeypatch.setattr(OperatorSession, "enable_footer", record_enable_footer)
 
     session, operator_input = cli._build_operator_session(policy, embodiment)
 
@@ -3446,6 +3828,7 @@ def test_build_operator_session_enablement_matrix(
     assert getattr(embodiment, "defer_calls", 0) == expected_defer_calls
     if expected_connect_calls:
         assert getattr(embodiment, "connected_session", None) is session
+    assert footer_labels == ([] if expected_footer_label is None else [expected_footer_label])
     assert capsys.readouterr().out == expected_output
 
 
@@ -3472,9 +3855,10 @@ def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
         del args
         order.append("eval")
         operator_input = kwargs.get("operator_input")
-        before_scoring = kwargs.get("before_scoring")
+        grader = kwargs.get("grader")
         assert operator_input is connected[0]
-        assert getattr(before_scoring, "__self__", None) is operator_input
+        assert getattr(grader, "name", None) == "operator"
+        assert getattr(grader, "_session", None) is operator_input
         return [_step_limit_log(reasons=("success",))]
 
     monkeypatch.setattr(inspect_robots, "eval", fake_eval)
@@ -3890,7 +4274,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_stays_silent_unless_operator_ends_episode(
+def test_registered_task_attended_adopts_definitive_verdict_without_prompting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -3910,7 +4294,7 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
         "builtins.input",
-        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
+        lambda _prompt: pytest.fail("a definitive embodiment verdict must be adopted, not asked"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -3931,8 +4315,10 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
         # Don't leak the ad-hoc registration into later tests' registry views.
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
-    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
-    capsys.readouterr()
+    # Plan 0049: attended registered tasks are graded by default; the scripted
+    # policy self-confirms success, so the verdict is adopted, never prompted.
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+    assert "operator verdict adopted from embodiment: success" in capsys.readouterr().out
 
 
 def test_registered_task_prompts_when_operator_ends_episode(
@@ -4730,7 +5116,7 @@ def test_embodiment_base_default_matches_an_absent_hook() -> None:
     from inspect_robots.embodiment import EmbodimentBase
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Action, Observation, StepResult
+    from inspect_robots.types import Action, StepResult
 
     class _BaseEmbodiment(EmbodimentBase):
         def __init__(self) -> None:
@@ -5377,3 +5763,305 @@ def test_doctor_closes_the_embodiment_it_constructs() -> None:
     embodiment_decorator("closable-doctor-cubepick")(_ClosableCubePick)
     assert main(["doctor", "--embodiment", "closable-doctor-cubepick"]) == 0
     assert closed == ["closed"]
+
+
+# Plan 0049 / issue #320: a trial the policy ends via done()/give_up() must be
+# graded on every attended path, whatever the scorer.
+
+
+class _DoneStopperPolicy(ScriptedPolicy):
+    """Request a policy stop ('done') on the first inference, like agent done()."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        """Stamp the agent-style stop request onto the scripted action."""
+        chunk = super().act(observation)
+        return ActionChunk(
+            actions=[
+                dataclasses.replace(a, meta={**a.meta, "request_stop": True, "stop_reason": "done"})
+                for a in chunk.actions
+            ]
+        )
+
+
+def _register_stopper(name: str) -> None:
+    reg.policy(name)(_DoneStopperPolicy)
+
+
+def _single_scene_task_factory() -> Any:
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import episode_length
+    from inspect_robots.task import Task
+
+    return Task(
+        name="stopper-task-for-test",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=episode_length(),
+        max_steps=40,
+    )
+
+
+def test_agent_stop_prompts_on_adhoc_run_with_non_operator_scorer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-adhoc"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", "stopped itself cleanly"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "note: this trial ended early ('done')" in capsys.readouterr().out
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.samples[0].operator_notes == ("stopped itself cleanly",)
+
+
+def test_agent_stop_prompts_on_registered_task_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-task"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["n", "gave up on contact"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("n",)
+    assert log.samples[0].operator_notes == ("gave up on contact",)
+    capsys.readouterr()
+
+
+def test_agent_stop_prompts_on_eval_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-eval-set"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["partial", "half the reach"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("partial",)
+    assert log.samples[0].operator_notes == ("half the reach",)
+    capsys.readouterr()
+
+
+def test_grader_none_suppresses_prompt_on_attended_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("--grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--grader",
+                "none",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_prompt_flag", "no_tty"])
+def test_config_operator_grader_downgrades_when_run_cannot_be_attended(
+    suppress: str,
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = operator\n")
+    policy_name = f"done-stopper-downgrade-{suppress}"
+    _register_stopper(policy_name)
+    extra: list[str] = []
+    if suppress == "no_prompt_flag":
+        _tty_stdin(monkeypatch)
+        extra = ["--no-prompt"]
+    else:
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("downgraded grader must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+                *extra,
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "grading is off for this run" in capsys.readouterr().err
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_config_grader_none_disables_grading(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = none\n")
+    policy_name = "done-stopper-config-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("config grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_no_prompt_with_explicit_operator_grader_is_a_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--no-prompt",
+                "--grader",
+                "operator",
+            ]
+        )
+
+
+def test_explicit_custom_config_grader_is_honored_unattended(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    graded: list[str] = []
+
+    class _MarkerGrader:
+        name = "marker"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            graded.append(record.scene_id)
+            record.operator_judgement = "y"
+
+    reg.grader("marker-for-test")(_MarkerGrader)
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = marker-for-test\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--max-steps",
+                "3",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["grader"].pop("marker-for-test", None)
+    assert rc == 0
+    assert graded == ["scene-0"]
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+
+
+def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list", "graders"]) == 0
+    assert "operator" in capsys.readouterr().out
