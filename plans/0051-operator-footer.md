@@ -51,29 +51,44 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 - Worktree: `.claude/worktrees/operator-footer`. Reference #308 in commits; end with
   the `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` trailer. **No git
   operations from Codex.**
-- Before merge: re-check `git ls-tree origin/main plans/` for a 0049 collision and
+- Before merge: re-check `git ls-tree origin/main plans/` for a 0051 collision and
   renumber if a concurrent session took it.
 
-## Reference: current wiring (main @ 6c022ead)
+## Reference: current wiring (main @ 4e5cc772, post-voice #316)
 
-- `src/inspect_robots/session.py` — the whole module (172 lines): `_flush_stdin_fd`,
+- `src/inspect_robots/session.py` — the whole module (209 lines): `_flush_stdin_fd`,
   `OperatorSession.__init__` seams (`console`, `input_fn`, `write`, `flush_fn`),
-  `_write`/`_input` late-binding, `poll`/`begin_trial` delegation, `status`/`write_line`
-  state machine (`_status_open`, `_status_line`), `gate`, verdict prompts.
-- `src/inspect_robots/console.py` — `OperatorConsole(readable, read, output_fn)`;
-  `poll()` assembles lines from chunks (`:94-117`); `begin_trial()` drains (`:119-129`).
-  `_stdin_readable` is at `:55-56`; the console's default `read` is the str-typed
-  fd-level `_stdin_read` (`:59-60`); the session currently builds its default
-  console with only `output_fn=self.write_line`.
-- `src/inspect_robots/rollout.py:276-285` — `operator_input.begin_trial()` inside a
-  try/except that disables the channel on failure; `:291-301` — the per-iteration poll
-  with the same degrade discipline; `:458-463` — KeyboardInterrupt conversion
-  re-raised through the per-trial `finally` at `:463`, which is where `end_trial()`
-  goes. The degrade tests to mirror live in `tests/test_rollout_observation_step.py`
-  (NOT test_rollout_hardening.py, which has no console tests).
-- `src/inspect_robots/cli.py` — `_build_operator_session` (decision-9 ladder): the
-  footer activates only on rows where the console turns on; the helper tells the
-  session (see decision 3).
+  `_write`/`_input` late-binding, `status`/`write_line` state machine
+  (`_status_open`, `_status_line`; the `status(None)` close branch is `:116-119`),
+  `gate`, verdict prompts. Since voice (#316), `poll()` (`:70-91`) is NOT a pure
+  delegate: it polls the console first, then merges every healthy attached input
+  (`attach_input(source, label=...)`, `:106-112`), echoing each attached message as
+  `f"{label}: {text}"` via `write_line` and returning
+  `ConsolePoll(messages, end, sources)` with `sources` parallel to `messages`
+  (`"console"` vs the attach label; empty tuple = all-console). `begin_trial()`
+  (`:93-104`) fans out to the console and every attached input with
+  detach-on-raise.
+- `src/inspect_robots/console.py` — `OperatorConsole(readable, read, output_fn)`
+  (`read: Callable[[], str] | None`, `:90`); `poll()` assembles lines from chunks
+  (`:99-122`; reads only `while self._readable()`, `:106`; EOF latch `:108-111`);
+  `begin_trial()` drains (`:124-134`). `_stdin_readable` is at `:60-61`; the
+  console's default `read` is the str-typed fd-level `_stdin_read` (`:64-65`);
+  `ConsolePoll.sources` defaults to `()` (`:38-44`). The session builds its
+  default console with only `output_fn=self.write_line`.
+- `src/inspect_robots/rollout.py:277-285` — `operator_input.begin_trial()` inside a
+  try/except that disables the channel on failure (`console_ok`, init `:256`);
+  `:291-301` — the per-iteration poll with the same degrade discipline; `:302-308`
+  — the per-message loop now records `poll.sources[i]` provenance; `:461-465` —
+  KeyboardInterrupt conversion re-raised through the per-trial `finally` at
+  `:466`, which is where `end_trial()` goes. The degrade tests to mirror live in
+  `tests/test_rollout_observation_step.py` (NOT test_rollout_hardening.py, which
+  has no console tests).
+- `src/inspect_robots/cli.py` — `_build_operator_session` (`:729-781`, decision-9
+  ladder; `USAGE_END_ONLY` chosen at `:747`): the footer activates only on rows
+  where the console turns on; the helper tells the session (see decision 3).
+  Voice wiring (`_build_voice_input`/`_start_voice_input`/`_close_voice_input`,
+  `:782-817`) attaches a `label="voice"` input around the session — the footer
+  must compose with it (decisions 6/7).
 - Tests: `tests/test_session.py` (exact-byte rendering tests to extend),
   `tests/test_rollout_observation_step.py` (the poll/begin_trial channel-degrade
   tests to mirror for `end_trial`; the new rollout `end_trial` tests can live
@@ -101,7 +116,7 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    attrs so the atexit fallback can never replay a stale saved state over a later
    trial's raw window. `KeyboardInterrupt` is converted by `rollout()` to its
    cancelled-trial path and re-raised **through** the same `finally`
-   (rollout.py:458-463), so Ctrl-C restores too. Guard scope: `end_trial()` runs
+   (rollout.py:461-466), so Ctrl-C restores too. Guard scope: `end_trial()` runs
    whenever `operator_input is not None` and the hook exists — it does NOT check
    `console_ok`. Only the catch-warn part mirrors poll's discipline, not its guard: a
    footer-mode `poll()` that raises (the pump is the likeliest raiser) flips
@@ -147,7 +162,7 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    practice, but the editor must tolerate split sequences: buffer bytes, decode
    with `errors="replace"` at display time for the echo, and decode each completed
    line **once** with `errors="replace"` at queue handoff — the console's `read`
-   seam is str-typed (`read: Callable[[], str]`, console.py:85), so bytes cannot
+   seam is str-typed (`read: Callable[[], str]`, console.py:90), so bytes cannot
    pass through it, and a strict decode there would turn malformed paste bytes into
    a raising `poll()` that kills the channel; decoding only complete lines
    preserves content exactly where today's per-64KiB-chunk decode could not. Paste
@@ -159,7 +174,7 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    optional.** The input row is drawn (empty `> `) at footer `begin_trial()` and
    exists for the whole footer window. Before drawing it, footer `begin_trial()`
    closes any plain-open status line using the existing plain semantics (write
-   `"\n"`, reset `_status_open` — session.py:79-83): a prior plain trial's ticker
+   `"\n"`, reset `_status_open` — session.py:116-119): a prior plain trial's ticker
    line survives the zero-byte plain `end_trial()` (and a plugin can call
    `status()` during `embodiment.reset()`, which runs before `begin_trial()`), and
    drawing the footer onto it would append `> ` to the stale line AND start the
@@ -193,13 +208,19 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    status row too if open) idempotently as the backstop (decision 1), leaving a
    clean terminal for the verdict prompt; plain mode keeps its existing
    close-with-newline semantics.
-6. **Confirmations come from `poll()`, not from the editor.** The editor
-   cannot know whether a completed line is feedback, an end request, a verdict, or a
-   usage typo — the console's parser decides. Footer-mode `poll()` delegates, then
-   for each message in the returned `ConsolePoll.messages` writes
+6. **Confirmations come from `poll()`, not from the editor — and only for
+   console-sourced messages.** The editor cannot know whether a completed line is
+   feedback, an end request, a verdict, or a usage typo — the console's parser
+   decides. Footer-mode `poll()` delegates, then for each message in the returned
+   `ConsolePoll` **whose source is the console** writes
    `write_line(f"[{label}] {text}")` where `label` is the CLI-chosen decision-3(b)
    value (`sent` on feedback rows, `noted` on end-only rows — do not hardcode
-   `sent`). End requests and verdict lines print nothing (the
+   `sent`). Source filtering follows the `ConsolePoll.sources` contract: empty
+   `sources` means every message is console-sourced; otherwise confirm exactly the
+   indices where `sources[i] == "console"`. Voice-sourced messages (#316) are
+   already echoed by the merge loop as `voice: <text>` — a blanket iteration over
+   `messages` would print a second, `[sent]`-stamped line for input the footer
+   never delivered-confirmed. End requests and verdict lines print nothing (the
    episode visibly ends); usage hints already arrive via the console's `output_fn`,
    which is `write_line`. The confirmation therefore appears at the next rollout
    poll, at most one control period after Enter — imperceptible.
@@ -208,7 +229,10 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    only calls `read()` while `readable()` is true, so a queue-checking `readable`
    plus an fd-draining `read` would never drain the fd at all — no echo, no
    completed line, deadlock. Instead, footer-mode `session.poll()` runs an explicit
-   pump **before** delegating: while the fd is readable, `os.read` chunks, feed the
+   pump **before** the console-delegate portion of the merged poll
+   (session.py:70-91) — pump → `console.poll()` → attached-input merge, with the
+   merge loop (voice echo, detach-on-raise, `sources` stamping) untouched after
+   it: while the fd is readable, `os.read` chunks, feed the
    editor (echoing per decision 5), and append each completed raw line to a queue;
    then call `console.poll()`, whose session-provided seams are dispatching
    closures — `readable` returns "queue non-empty or real EOF seen", `read` pops
@@ -231,9 +255,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
    the fd-desync rationale of plan 0042 decision 9 targets the buffered
    TextIOWrapper, which this pump is not. Footer-mode `session.begin_trial()`:
    drain the fd raw with **no echo** (stale pre-trial bytes must not paint into a
-   not-yet-drawn footer), clear the editor buffer and the queue, then call
-   `console.begin_trial()` (its own drain loop sees an empty queue and is a no-op,
-   and it clears its internal buffer as today).
+   not-yet-drawn footer), clear the editor buffer and the queue, then run the
+   existing `begin_trial()` fan-out (session.py:93-104) — `console.begin_trial()`'s
+   own drain loop sees an empty queue and is a no-op, it clears its internal
+   buffer as today, and the attached-input fan-out with detach-on-raise runs
+   unchanged after.
    Echo cadence note (document in docs, it is a property, not a bug): the pump runs
    at the rollout poll cadence, once per control step, so on a self-paced robot
    executing a chunk, keystroke echo can lag up to one `embodiment.step()`. Threads
@@ -303,9 +329,9 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   the next trial retries; `end_trial()` closes the footer rows and restores exactly
   once (idempotent; saved termios attrs cleared on restore so atexit cannot replay
   stale state); restore-on-exception. Rollout: `end_trial` called in the per-trial
-  `finally` (rollout.py:463) on success, on trial-ending exceptions, and on the
+  `finally` (rollout.py:466) on success, on trial-ending exceptions, and on the
   KeyboardInterrupt cancelled-trial path; skipped without error when the hook is
-  absent (plain `OperatorConsole`); a raising `end_trial` warns and never masks the
+  absent (a bare `OperatorInput`); a raising `end_trial` warns and never masks the
   trial's own outcome (mirror the `poll()` degrade tests in
   `tests/test_rollout_observation_step.py`); `end_trial` still called after a
   raising `poll()` flipped `console_ok` False mid-trial (decision 1 guard scope);
@@ -322,8 +348,11 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
   rows where the console turns on (both new-hook and legacy ladders), never
   otherwise; the CLI passes the confirmation label per row — `[sent]` on feedback
   rows, `[noted]` on end-only rows (decision 3, contract point b); footer `poll()` emits one labeled
-  confirmation per feedback message, nothing for ends/verdicts; matrix outputs
-  otherwise unchanged.
+  confirmation per CONSOLE-sourced feedback message, nothing for ends/verdicts;
+  a poll carrying a voice-sourced message (attached input, #316) emits no
+  confirmation beyond the merge loop's existing `voice: <text>` echo — both with
+  non-empty `sources` and in the empty-`sources` all-console case (decision 6);
+  matrix outputs otherwise unchanged.
 - [ ] **Step 2-4: fail → implement → green.**
 
 ### Task 4: docs, module map, changelog, gates
@@ -331,5 +360,5 @@ inside the helpers so core imports stay clean on Windows); pytest; no new deps.
 **Files:** `src/inspect_robots/CLAUDE.md`, `CHANGELOG.md`, `docs/guide/cli.md`
 
 - [ ] Rows, entry (Added: footer; the arc's user-visible payoff — reference plans
-  0048/0049 and #308), docs paragraph with the footer example block.
+  0048/0051 and #308), docs paragraph with the footer example block.
 - [ ] **Full gates** at 100%.
