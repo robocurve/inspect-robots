@@ -63,9 +63,10 @@ unchanged.
     on a long agent run) must not inject serialization + disk latency into
     the control period. The step count rides along on the next turn's write.
   - `log_policy_messages(t, messages)` (duck-typed extension, same contract as
-    `RerunSink`) — append a shallow snapshot (`[dict(m) for m in messages]`,
-    defensive against non-dict rows) of the delta to the in-progress trial's
-    transcript; throttled write. This is the turn-by-turn channel: for
+    `RerunSink`) — append a shallow snapshot (`[dict(m) if isinstance(m,
+    dict) else m for m in messages]` — R3: `dict()` on a non-dict row raises;
+    sink.py warns core does not enforce the shape on this live path) of the
+    delta to the in-progress trial's transcript; throttled write. This is the turn-by-turn channel: for
     `policy=agent`, deltas carry the assistant turns, notes, and the
     `operator feedback (step N): ...` user lines that voice/console input
     becomes (`plugins/inspect-robots-agent/.../policy.py:_operator_lines`).
@@ -109,20 +110,30 @@ unchanged.
   state — new filename, cleared trials — so one instance serves a whole
   eval-set. This invariant is stated in the class docstring and tested.
 - **Log assembly invariants:** all `SceneResult` parallel tuples stay strictly
-  parallel. The in-progress trial contributes one entry to every parallel
-  field (`epochs` gets `{}`, `operator_judgements`/`termination_reasons` get
-  `None`, `policy_transcripts` gets the accumulated transcript).
-  `trial_metadata` for the in-progress trial carries
-  `{"live": {"step": t, "updated_at": <iso>}}` so the page can show progress.
-  `EvalResults`/`EvalStats` are filled with the counts so far
-  (`completed_at=""` → set to the last-write time, `duration_s` so far).
+  parallel. Samples are keyed by `scene_id` in first-seen order (R3): a
+  repeat `scene_id` on `on_trial_start` (multi-epoch) appends one
+  in-progress slot to that scene's existing parallel tuples — never a
+  duplicate `SceneResult` — and `on_trial_end` replaces the last slot. The
+  in-progress slot contributes one entry to every parallel field (`epochs`
+  gets `{}`, `operator_judgements`/`termination_reasons` get `None`,
+  `policy_transcripts` gets the accumulated transcript). The in-progress
+  scene's `status` is `"success"`-so-far, switching to `"error"` if an
+  earlier epoch errored (R3: stays within log.py's documented sample-status
+  vocabulary). `trial_metadata` for the in-progress trial carries
+  `{"live": {"step": t, "updated_at": <iso>}}` so the page can show
+  progress. `EvalResults`/`EvalStats` are filled with the counts so far:
+  `total_trials` = trials completed so far (matching the final log's
+  completed-not-planned semantics), `completed_at` = the last-write time,
+  `duration_s` so far (R3: one reading, not two).
 - **Write path:** identical discipline to `JsonLogSink` — reuse its
   `_sanitize` (import it; it is module-level) and temp-file + `os.replace`.
   Each write is atomic so the renderer can never read a torn file. No fsync on
   the throttled path (a lost live update is worthless; final log durability is
   `JsonLogSink`'s job).
-- **Failure isolation:** the sink must never kill a run. Wrap the disk write
-  in try/except; on failure warn once to stderr and disable further writes.
+- **Failure isolation:** the sink must never kill a run. Every hook body —
+  not just the disk write (R3: a malformed delta row would otherwise raise
+  in the hook and kill the run) — is wrapped; on failure warn once to
+  stderr and disable the sink.
 - **Crash staleness:** a hard-killed run leaves a `*.live.json` behind. The
   index row still renders (valid log, status `running`), and the page shows
   its `updated_at`. Documented; no reaper in this plan.
@@ -154,15 +165,19 @@ unchanged.
   `_SERVE_RERENDER_SECONDS = 60`.
 - **Stateless cadence rule** (R1, restated per R2 so the two off-by-one-tick
   behaviors cannot be implemented inconsistently): every render pass
-  computes `live = bool(log_dir.glob("*.live.json"))` itself; the index (and
-  running pages) get `refresh_seconds = _SERVE_LIVE_RERENDER_SECONDS if live
+  computes `live_set = {p.name for p in log_dir.glob("*.live.json")}` once
+  (R3: `bool(<generator>)` is always truthy — the set, not the generator, is
+  the predicate) and uses it for both decisions; the index (and running
+  pages) get `refresh_seconds = _SERVE_LIVE_RERENDER_SECONDS if live_set
   else _SERVE_RERENDER_SECONDS`. The **initial** render before serving uses
   the same rule (today it hardcodes 60s — a run already live at serve
-  startup must not hand `--open` a 60s-refresh index). The tick loop decides
-  only *whether* to run a pass: the live set differs from the previous
-  pass's (baseline: empty set, so an already-live run renders fast on the
-  first tick), the live set is non-empty, or 60s have accumulated.
-  `_serve_sleep` stays the injection point for tests.
+  startup must not hand `--open` a 60s-refresh index). The loop sleeps
+  `_serve_sleep(_SERVE_LIVE_RERENDER_SECONDS)` every iteration and
+  *accumulates* toward the 60s baseline (R3); each tick decides only
+  *whether* to run a pass: the live set differs from the previous pass's
+  (baseline: empty set, so an already-live run renders fast on the first
+  tick), the live set is non-empty, or 60s have accumulated. `_serve_sleep`
+  stays the injection point for tests.
 - `_render_log_page` / `_render_view_directory` pass
   `refresh_seconds=_SERVE_LIVE_RERENDER_SECONDS` down to `render_html` only
   for logs with `status == "started"` **and** only in serve mode (a static
@@ -175,19 +190,25 @@ unchanged.
   "running" page frozen forever (deleting would 404 the refreshing tab,
   which is worse). Filesystem-derived, not tracked in loop memory: a serve
   *restart* after a crash must still stub the orphans it never saw vanish.
-  Idempotent — skip files that already are stubs.
-- **Exact mtime gating** (R1, precision fixed R2): `stat` the log once
-  before reading; after rendering, `os.utime(page, ns=(st.st_atime_ns,
-  st.st_mtime_ns))` — nanosecond pinning, since float-seconds pinning
-  reintroduces the coarse-granularity hole. A write landing within the
-  filesystem's timestamp granularity of the pre-read stamp can still compare
-  equal, so logs with `status == "started"` use `<=` instead of `<`
-  (self-healing writes cover the rest; the forced trial-end write followed
-  by a long inference pause is the case `<=` closes).
-- **Torn-read hardening** (R2): live pages and redirect stubs are written
-  via temp file + `os.replace` (matching the sink's discipline) — a 2s
-  writer racing a 2s browser poll makes half-written reads plausible,
-  and Windows readers can make in-place overwrites misbehave.
+  Idempotence mechanism pinned (R3): the stub's first line is the fixed
+  sentinel comment `<!-- inspect-robots live redirect stub -->`; the orphan
+  pass reads only the first line and skips files that already carry it.
+- **Started logs re-render every pass by design** (R3, simplifying R2's
+  `<=` gate, which combined with pinning was equivalent anyway):
+  `render_page = force or log.status == "started" or <existing mtime
+  gate>`. The mtime gate — with ns pinning, `os.utime(page,
+  ns=(st.st_atime_ns, st.st_mtime_ns))` from a single pre-read `stat`
+  (float-seconds pinning reintroduces the coarse-granularity hole) —
+  applies to *completed* logs only, closing the write-during-render race
+  for them. The accepted-cost paragraph below covers the started-log churn
+  honestly: typically one live log, and temp+replace makes the rewrite
+  browser-safe.
+- **Torn-read hardening** (R2; widened R3): live pages, redirect stubs,
+  **and `index.html`** — the page every tab meta-refreshes and the one
+  rewritten every pass — are written via temp file + `os.replace` (matching
+  the sink's discipline); a 2s writer racing a 2s browser poll makes
+  half-written reads plausible, and Windows readers can make in-place
+  overwrites misbehave.
 - **Vanishing live logs are not errors** (R2): `on_eval_end` unlinks the
   live file between the directory glob and `read_eval_log`/`stat`; a
   `FileNotFoundError` on a `*.live.json` is skipped silently (that file's
@@ -201,6 +222,14 @@ unchanged.
   the operator copy-pastes it before the first live write lands (session +
   voice/ASR startup can take 10+ s). Under `--serve`, render a "no logs
   yet" index and keep ticking; the fast tick picks the live file up.
+  Precisely (R3): a nonexistent LOG_DIR under `--serve` is treated as a
+  logs directory and created (`_cmd_view`'s is_dir dispatch at
+  cli.py:2111-2114 currently routes it to the single-file branch — that
+  dispatch changes for `--serve`; a typo'd path serves an empty "no logs
+  yet" index, same as an empty dir). `_render_view_directory` conditions
+  its no-logs `SystemExit` on serve mode and still returns a
+  `_DirectoryRenderResult` — the HTTP handler needs `out_dir`, which is
+  computable with zero logs.
 - Accepted cost: while a live log exists, the directory pass re-parses every
   log JSON every 2s. Mtime gating keeps re-rendering (the expensive part)
   incremental; typical log dirs make the parse pass cheap. Called out in the
@@ -237,7 +266,9 @@ unchanged.
 
   First line: new `_BOLD_BRIGHT_MAGENTA = "1;95"` (one code string, matching
   the single-code `_styled` helper shape), so it is unmissable on a dark or
-  light terminal. Second line dim. `logs` is the actual `args.log_dir` value.
+  light terminal. Second line dim. `logs` is the actual `args.log_dir`
+  value, `shlex.quote`d (R3: the tip sells copy-paste-ability; a log dir
+  with a space must not break the advertised command).
   The existing `_styled` NO_COLOR/tty handling applies unchanged. Suppressed
   when `--no-live-log` was passed (never advertise a view that will not
   update). Printed with the other pre-session announcements, so it cannot
@@ -261,8 +292,10 @@ unchanged.
 ## Testing (100% coverage, no hardware)
 
 - **Sink unit tests:** lifecycle round-trip via `read_eval_log` after every
-  hook; throttle honored/bypassed (fake clock); parallel-tuple invariants;
-  transcript delta accumulation and `on_trial_end` replacement; errored-trial
+  hook; throttle honored/bypassed (fake clock); parallel-tuple invariants
+  including the multi-epoch same-`scene_id` append path (R3);
+  transcript delta accumulation and `on_trial_end` replacement; non-dict
+  delta rows survive; errored-trial
   propagation; unlink on end (and `missing_ok` when already gone); write
   failure disables sink without raising; sanitize reuse (non-finite floats).
 - **Integration:** `CubePick` with a `LiveLogSink` — mechanism specified
