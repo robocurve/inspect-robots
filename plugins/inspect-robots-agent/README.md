@@ -325,6 +325,14 @@ level; omit the argument to inherit the provider default. Gemini Live has no
 effort field and rejects any explicit effort, so leave it unset on that wire.
 To pin the behavior from before version 0.23, add `-P effort=low`.
 
+Effort also takes a number in `[0.0, 1.0)` for servers that read it as a
+fraction instead of a named level (`-P effort=0.7`). The number is sent
+unquantized, so an effort sweep keeps whatever resolution the server offers.
+Named levels stay the portable choice: every wire and provider accepts some of
+them, while fractional effort is accepted today only by Tinker's
+OpenAI-compatible endpoint (see below). A server that takes levels only rejects
+a fraction with a guided 4xx naming the wire that does accept one.
+
 ## Depth rendering
 
 For each camera, the policy looks for metric depth in
@@ -383,6 +391,16 @@ runs or to pin the plugin's pre-0.23 behavior. The endpoint accepts `low`,
 `medium`, `high`, `xhigh`, and `max`; `minimal` is unsupported. `effort=none`
 is sent as disabled thinking, which Tinker's endpoint has not been observed to
 accept — expect a wire rejection until confirmed otherwise.
+
+Fractional effort is a Tinker feature, but only on its OpenAI-compatible
+endpoint, which reads `reasoning_effort` as a number from `0.0` to `0.99`
+(`0.995` and above are a 422). The Messages endpoint that serves Inkling here
+takes named levels only, so `-P effort=0.7` needs
+`-P wire=chat -P base_url=` pointed at `.../tinker-prod/oai/api/v1`. That
+endpoint silently ignores `tools`, so it cannot currently drive a robot episode:
+the policy sees no tool call and fails after three turns. Treat fractional
+effort on Tinker as usable for prompt-level experiments, and named levels as the
+setting for real rollouts until the Messages endpoint accepts a number.
 
 Tinker currently reports `input_tokens: 0` because input usage appears in its
 cache-creation and cache-read counters. EvalLog input-token statistics and the

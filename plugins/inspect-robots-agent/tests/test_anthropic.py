@@ -780,6 +780,20 @@ def test_effort_4xx_names_the_accepted_values() -> None:
     assert "none and minimal" not in str(excinfo.value)
 
 
+def test_fractional_effort_is_sent_verbatim_and_its_4xx_names_the_wire_that_takes_it() -> None:
+    seen, ok_handler = _capture(_anthropic_response(_text("hi"), stop_reason="end_turn"))
+    _client(ok_handler).complete([_USER], [], reasoning_effort=0.7)
+    # Passed through unquantized: the level set is not this wire's only vocabulary
+    # to a gateway that forwards a fraction on.
+    assert json.loads(seen[0].content)["output_config"] == {"effort": 0.7}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, text="output_config.effort: Input should be 'low', 'medium'")
+
+    with pytest.raises(RuntimeError, match=r"a fractional effort needs -P wire=chat"):
+        _client(handler).complete([_USER], [], reasoning_effort=0.7)
+
+
 def test_temperature_guidance_only_when_temperature_was_sent() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="temperature is not supported")

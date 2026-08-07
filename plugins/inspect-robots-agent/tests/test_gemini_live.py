@@ -841,7 +841,8 @@ def test_existing_invalid_effort_and_horizon_messages_are_preserved() -> None:
         LLMAgentPolicy(**common, effort="default")
     assert str(effort_error.value) == (
         "effort must be one of ['high', 'low', 'max', 'medium', 'minimal', 'none', "
-        "'xhigh'], got 'default'.\nfix: omit -P effort= to use the provider default"
+        "'xhigh'], or a number in [0.0, 1.0) on servers that take a fractional "
+        "effort, got 'default'.\nfix: omit -P effort= to use the provider default"
     )
     with pytest.raises(ConfigError) as horizon_error:
         LLMAgentPolicy(**common, image_horizon=0)

@@ -9,6 +9,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.24.0):** `-P effort=` now also takes a number in
+  `[0.0, 1.0)` for servers that read reasoning effort as a fraction rather than
+  a named level, and sends it unquantized so an effort sweep keeps the
+  resolution the server offers. Named levels and the 0.23.0 passthrough rules
+  are unchanged: an omitted flag still omits the field, and `none` still sends
+  the true minimum. Tinker's OpenAI-compatible endpoint accepts `0.0` through
+  `0.99`; wires that take levels only reject a fraction with a guided 4xx naming
+  the wire that accepts one. `-P effort=false` stays an error rather than
+  becoming zero effort (#314).
+
 - **Core (0.44.0):** operator messages now preserve console or attached-input
   provenance through transcripts, policy observations, and evaluation logs.
   `OperatorSession.attach_input()` merges feedback-only sources without risking

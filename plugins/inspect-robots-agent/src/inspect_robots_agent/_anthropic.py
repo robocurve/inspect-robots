@@ -101,7 +101,7 @@ class AnthropicClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         """Return one assistant turn for the translated chat-format history."""
         # Prune before storing: the reverse order would evict every fresh
@@ -190,7 +190,7 @@ class AnthropicClient:
                 if response.status_code not in _RETRYABLE_STATUSES and response.status_code < 500:
                     raise RuntimeError(
                         f"LLM request rejected — {last_error}"
-                        f"{self._rejection_guidance(response.text, temperature)}"
+                        f"{self._rejection_guidance(response.text, temperature, reasoning_effort)}"
                     )
             if attempt + 1 < self._max_retries:
                 time.sleep(self._backoff_s * 2**attempt)
@@ -211,7 +211,12 @@ class AnthropicClient:
         """Release the underlying HTTP connection pool."""
         self._http.close()
 
-    def _rejection_guidance(self, body: str, temperature: float | None) -> str:
+    def _rejection_guidance(
+        self,
+        body: str,
+        temperature: float | None,
+        reasoning_effort: str | float | None = None,
+    ) -> str:
         """Name the fix for the 4xx bodies this wire provokes, else say nothing."""
         lowered = body.lower()
         if self._speed == "fast" and "speed" in lowered:
@@ -226,6 +231,13 @@ class AnthropicClient:
                 "Fable 5 all do; Opus 4.6 and Sonnet 4.6 accept it); drop -P temperature="
             )
         if "effort" in lowered:
+            if isinstance(reasoning_effort, float):
+                return (
+                    "\nfix: the Messages API takes named effort levels only "
+                    "(low, medium, high, xhigh, max); a fractional effort needs "
+                    "-P wire=chat against a server that reads one, such as Tinker's "
+                    "OpenAI-compatible endpoint"
+                )
             return (
                 "\nfix: the Messages API accepts -P effort=none (thinking disabled) or "
                 "low, medium, high, xhigh, and max; minimal is an OpenAI-only value"
