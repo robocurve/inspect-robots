@@ -271,11 +271,11 @@ decision 4 for the `<3.14` marker).
 
 ### Task 2: plugin `_speaker.py` — `SpeakerSink`
 
-- [ ] `extract_speech(messages: Sequence[Any]) -> list[str]` (module-level, pure):
+- [x] `extract_speech(messages: Sequence[Any]) -> list[str]` (module-level, pure):
   defensive walk per design decisions 8-9 — per assistant tool call, speak `note`
   (move/capture), or `summary` when `name == "done"`, or `reason` when
   `name == "give_up"`; returns stripped non-empty strings in order.
-- [ ] `SpeakerSink(NullSink)`: constructor takes validated options plus two injectable
+- [x] `SpeakerSink(NullSink)`: constructor takes validated options plus two injectable
   factories for tests — `engine_factory` (defaults to building `KokoroEngine` via
   `resolve_model_files`) and `playback_factory` (defaults to a thin
   `sounddevice.OutputStream` wrapper, lazy import inside it). `start()` builds engine +
@@ -288,7 +288,7 @@ decision 4 for the `<3.14` marker).
   `log.status == "success"`, hard-abort-closes for any other status; `close()` alone is
   a hard abort — idempotent, sets stop event, joins worker (timeout ~5s), closes
   playback.
-- [ ] Tests (`tests/test_speaker.py`), all with fake engine/playback, no real audio:
+- [x] Tests (`tests/test_speaker.py`), all with fake engine/playback, no real audio:
   extraction table (move note; multiple tool_calls in one message; `done` summary spoken
   and hindsight NOT spoken; `give_up` reason; dict already parsed vs JSON string
   arguments; malformed JSON; missing/blank fields; non-assistant role; non-dict
