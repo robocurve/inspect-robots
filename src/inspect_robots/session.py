@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import select
 import shutil
 import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from inspect_robots.console import ConsolePoll, OperatorConsole, OperatorInput, _stdin_readable
 from inspect_robots.errors import EmbodimentFault
@@ -23,6 +24,7 @@ _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 _NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
+_NO_TERMIOS_STATE = object()
 
 
 def _flush_stdin_fd() -> None:
@@ -37,6 +39,29 @@ def _flush_stdin_fd() -> None:
 def _stdin_read_bytes() -> bytes:
     """Read up to 64KiB of raw stdin without decoding (the footer pump's default fd seam)."""
     return os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
+
+
+def _enter_cbreak() -> object:
+    """Enter stdin cbreak mode without echo and return the exact attributes to restore."""
+    import termios  # pragma: no cover
+
+    fd = sys.stdin.fileno()  # pragma: no cover
+    saved = termios.tcgetattr(fd)  # pragma: no cover
+    current = saved.copy()  # pragma: no cover
+    current[6] = saved[6].copy()  # pragma: no cover
+    current[3] &= ~(termios.ECHO | termios.ICANON)  # pragma: no cover
+    current[6][termios.VMIN] = 1  # pragma: no cover
+    current[6][termios.VTIME] = 0  # pragma: no cover
+    termios.tcsetattr(fd, termios.TCSANOW, current)  # pragma: no cover
+    return (fd, saved)  # pragma: no cover
+
+
+def _restore(state: object) -> None:
+    """Restore one exact termios snapshot returned by ``_enter_cbreak``."""
+    import termios  # pragma: no cover
+
+    fd, attrs = cast(tuple[int, list[Any]], state)  # pragma: no cover
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)  # pragma: no cover
 
 
 def _default_width() -> int:
@@ -121,6 +146,10 @@ class OperatorSession:
         fd_readable: Callable[[], bool] | None = None,
         fd_read: Callable[[], bytes] | None = None,
         width_fn: Callable[[], int] | None = None,
+        isatty_fn: Callable[[], bool] | None = None,
+        raw_mode_fn: Callable[[], object] | None = None,
+        restore_fn: Callable[[object], None] | None = None,
+        atexit_register: Callable[[Callable[[], None]], object] | None = None,
     ) -> None:
         self._input_fn = input_fn
         self._write_fn = write
@@ -130,6 +159,20 @@ class OperatorSession:
         self._owns_console = console is None
         self._footer_requested = False
         self._footer_active = False
+        self._isatty_fn: Callable[[], bool] = (
+            isatty_fn if isatty_fn is not None else sys.stdin.isatty
+        )
+        self._raw_mode_fn: Callable[[], object] = (
+            raw_mode_fn if raw_mode_fn is not None else _enter_cbreak
+        )
+        self._restore_fn: Callable[[object], None] = (
+            restore_fn if restore_fn is not None else _restore
+        )
+        self._atexit_register: Callable[[Callable[[], None]], object] = (
+            atexit_register if atexit_register is not None else atexit.register
+        )
+        self._atexit_registered = False
+        self._saved_termios_state: object = _NO_TERMIOS_STATE
         self._fd_readable: Callable[[], bool] = (
             fd_readable if fd_readable is not None else _stdin_readable
         )
@@ -217,6 +260,41 @@ class OperatorSession:
             self._status_open = False
         self._write(f"{prefix}\r\x1b[K> {self._clipped_input_text()}")
 
+    def _try_enter_footer(self) -> None:
+        """Re-evaluate the per-trial gate ladder and silently retain plain mode on failure."""
+        if not self._footer_requested or not self._owns_console:
+            return
+        try:
+            if not self._isatty_fn():
+                return
+            saved_state = self._raw_mode_fn()
+        except Exception:
+            return
+
+        self._saved_termios_state = saved_state
+        try:
+            self._enter_footer()
+        except BaseException:
+            self._reset_footer_state()
+            self._restore_terminal()
+            raise
+
+    def _reset_footer_state(self) -> None:
+        """Discard all renderer and editor state after a footer window closes or aborts."""
+        self._footer_active = False
+        self._status_open = False
+        self._editor.reset()
+        self._line_queue = []
+        self._pump_eof = False
+
+    def _restore_terminal(self) -> None:
+        """Idempotently restore and forget the active termios snapshot."""
+        if self._saved_termios_state is _NO_TERMIOS_STATE:
+            return
+        saved_state = self._saved_termios_state
+        self._saved_termios_state = _NO_TERMIOS_STATE
+        self._restore_fn(saved_state)
+
     def _footer_status(self, line: str | None) -> None:
         if line is None:
             if self._status_open:
@@ -255,23 +333,27 @@ class OperatorSession:
         """
         if self._owns_console:
             self._footer_requested = True
+            if not self._atexit_registered:
+                self._atexit_register(self._restore_terminal)
+                self._atexit_registered = True
 
     def end_trial(self) -> None:
-        """Idempotently tear down the footer's rows; a no-op unless footer mode was entered.
+        """Idempotently clear footer rows and restore the trial's exact terminal attributes.
 
         Duck-typed hook (decision 1): ``rollout()`` calls this best-effort in the
-        per-trial ``finally``. Task 2 layers termios restore around this same call;
-        here it is pure rendering teardown, clearing whatever rows exist and leaving
-        a clean terminal for the verdict prompt.
+        per-trial ``finally``. A session that did not enter footer mode writes no
+        bytes and leaves plain-renderer state untouched.
         """
         if not self._footer_active:
             return
-        if self._status_open:
-            self._write("\r\x1b[K\x1b[A\r\x1b[K")
-            self._status_open = False
-        else:
-            self._write("\r\x1b[K")
-        self._footer_active = False
+        try:
+            if self._status_open:
+                self._write("\r\x1b[K\x1b[A\r\x1b[K")
+            else:
+                self._write("\r\x1b[K")
+        finally:
+            self._reset_footer_state()
+            self._restore_terminal()
 
     def poll(self) -> ConsolePoll:
         """Poll the console first, then merge every healthy attached input in order."""
@@ -299,9 +381,8 @@ class OperatorSession:
         return ConsolePoll(messages=tuple(messages), end=console_poll.end, sources=tuple(sources))
 
     def begin_trial(self) -> None:
-        """Ask every healthy input to discard feedback predating the next trial."""
-        if self._footer_requested:
-            self._enter_footer()
+        """Re-decide footer eligibility, then discard feedback predating the next trial."""
+        self._try_enter_footer()
         self._console.begin_trial()
         healthy_inputs: list[tuple[OperatorInput, str]] = []
         for source, label in self._attached_inputs:

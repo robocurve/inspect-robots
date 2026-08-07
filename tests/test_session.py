@@ -623,6 +623,9 @@ def _footer_session(
         fd_readable=fd.readable,
         fd_read=fd.read,
         width_fn=lambda: width,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.enable_footer()
     session.begin_trial()
@@ -632,12 +635,26 @@ def _footer_session(
 
 def test_enable_footer_is_noop_on_caller_injected_console() -> None:
     output: list[str] = []
-    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        console=_RecordingConsole(),
+        write=output.append,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
 
     session.enable_footer()
     session.begin_trial()
 
     assert output == []
+    assert raw_calls == 0
 
 
 def test_default_console_dispatch_closures_delegate_to_fd_seams_when_footer_inactive() -> None:
@@ -657,7 +674,13 @@ def test_footer_begin_trial_draws_empty_input_row() -> None:
     output: list[str] = []
     fd = _ScriptedFd()
     session = OperatorSession(
-        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.enable_footer()
 
@@ -670,7 +693,13 @@ def test_footer_begin_trial_closes_plain_open_status_then_one_row_branch() -> No
     output: list[str] = []
     fd = _ScriptedFd()
     session = OperatorSession(
-        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.status("t = 3s")
     output.clear()
@@ -691,7 +720,13 @@ def test_footer_begin_trial_drain_stops_on_real_eof() -> None:
     output: list[str] = []
     fd = _ScriptedFd([b""])
     session = OperatorSession(
-        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.enable_footer()
 
@@ -715,7 +750,14 @@ def test_footer_default_width_fn_reads_terminal_size(monkeypatch: pytest.MonkeyP
     output: list[str] = []
     fd = _ScriptedFd()
     monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((10, 24)))
-    session = OperatorSession(write=output.append, fd_readable=fd.readable, fd_read=fd.read)
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
     session.enable_footer()
     session.begin_trial()
     output.clear()
@@ -730,7 +772,13 @@ def test_footer_begin_trial_discards_stale_bytes_with_no_echo_and_clears_state()
     output: list[str] = []
     fd = _ScriptedFd([b"stale", b"\n"])
     session = OperatorSession(
-        write=output.append, fd_readable=fd.readable, fd_read=fd.read, width_fn=lambda: 200
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.enable_footer()
 
@@ -863,6 +911,190 @@ def test_footer_end_trial_teardown_is_idempotent() -> None:
     assert output == []
 
 
+def test_footer_requires_explicit_enable_even_when_all_runtime_gates_pass() -> None:
+    output: list[str] = []
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+
+    session.begin_trial()
+
+    assert output == []
+    assert raw_calls == 0
+
+
+def test_footer_non_tty_gate_falls_back_to_plain_mode_without_raw_entry() -> None:
+    output: list[str] = []
+    raw_calls = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal raw_calls
+        raw_calls += 1
+        return object()
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: False,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+    session.end_trial()
+
+    assert output == []
+    assert raw_calls == 0
+
+
+def test_footer_missing_termios_gate_falls_back_to_plain_mode_silently() -> None:
+    output: list[str] = []
+
+    def missing_termios() -> object:
+        raise ModuleNotFoundError("termios")
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=missing_termios,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+    session.end_trial()
+
+    assert output == []
+
+
+def test_footer_failed_raw_entry_falls_back_then_retries_next_trial() -> None:
+    output: list[str] = []
+    state = object()
+    attempts = 0
+
+    def enter_raw_mode() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("tcsetattr failed")
+        return state
+
+    restored: list[object] = []
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=enter_raw_mode,
+        restore_fn=restored.append,
+    )
+    session.enable_footer()
+
+    session.begin_trial()
+    session.end_trial()
+    assert output == []
+    assert restored == []
+
+    session.begin_trial()
+    assert output == ["\r\x1b[K> "]
+    session.end_trial()
+
+    assert attempts == 2
+    assert restored == [state]
+
+
+def test_footer_restore_runs_once_and_atexit_cannot_replay_cleared_state() -> None:
+    output: list[str] = []
+    state = object()
+    restored: list[object] = []
+    callbacks: list[Callable[[], None]] = []
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+        atexit_register=lambda callback: callbacks.append(callback),
+    )
+
+    session.enable_footer()
+    session.enable_footer()
+    session.begin_trial()
+    session.end_trial()
+    session.end_trial()
+    callbacks[0]()
+
+    assert len(callbacks) == 1
+    assert restored == [state]
+
+
+def test_footer_end_trial_restores_raw_mode_when_renderer_teardown_raises() -> None:
+    output: list[str] = []
+    state = object()
+    restored: list[object] = []
+    fail_writes = False
+
+    def write(text: str) -> None:
+        if fail_writes:
+            raise RuntimeError("terminal write failed")
+        output.append(text)
+
+    session = OperatorSession(
+        write=write,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+    )
+    session.enable_footer()
+    session.begin_trial()
+    fail_writes = True
+
+    with pytest.raises(RuntimeError, match="terminal write failed"):
+        session.end_trial()
+
+    assert restored == [state]
+    fail_writes = False
+    session.end_trial()
+    assert restored == [state]
+
+
+def test_footer_begin_trial_restores_raw_mode_when_renderer_entry_raises() -> None:
+    state = object()
+    restored: list[object] = []
+
+    def write(_text: str) -> None:
+        raise RuntimeError("terminal write failed")
+
+    session = OperatorSession(
+        write=write,
+        fd_readable=lambda: False,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: state,
+        restore_fn=restored.append,
+    )
+    session.enable_footer()
+
+    with pytest.raises(RuntimeError, match="terminal write failed"):
+        session.begin_trial()
+
+    assert restored == [state]
+    session.end_trial()
+    assert restored == [state]
+
+
 def test_footer_end_trial_noop_when_footer_never_entered_leaves_plain_status_untouched() -> None:
     output: list[str] = []
     session = OperatorSession(write=output.append)
@@ -906,6 +1138,9 @@ def test_footer_reclips_after_width_fn_change() -> None:
         fd_readable=fd.readable,
         fd_read=fd.read,
         width_fn=lambda: width["cols"],
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
     )
     session.enable_footer()
     session.begin_trial()
