@@ -106,15 +106,25 @@ persistent default for real runs, not a per-invocation intent. The mapping is
 explicit configuration: the framework never guesses which sim matches your
 robot.
 
-### Operator scoring
+### Operator grading
 
-An arbitrary instruction has no success oracle, so ad-hoc runs default to the
-`operator` scorer. When run on an interactive terminal, the CLI asks after each
-trial unless the embodiment already terminated the episode with a definitive
-`success` or `failure` verdict. In that case, the CLI records the embodiment's
-verdict as the operator judgement instead of asking the operator a second time,
-and prints `operator verdict adopted from embodiment: success` (or `failure`) so
-the operator can catch a mistaken adoption live.
+Judgement capture is a grader component, selected per run: `--grader NAME`
+overrides the `grader` config key, and with neither set an attended run
+(interactive terminal, no `--no-prompt`) uses the builtin `operator` grader
+while an unattended run grades nothing. `--grader none` disables grading
+outright. The grader runs after every scored trial, whatever the task or
+scorer, so a trial the policy ended with its `done()` or `give_up()` tool is
+graded like any other.
+
+An arbitrary instruction has no success oracle, so ad-hoc runs also default to
+the `operator` scorer, which reads the captured judgement. The operator grader
+asks after each trial unless the embodiment already terminated the episode
+with a definitive `success` or `failure` verdict. In that case, it records the
+embodiment's verdict as the operator judgement instead of asking the operator
+a second time, and prints `operator verdict adopted from embodiment: success`
+(or `failure`) so the operator can catch a mistaken adoption live. A trial
+that ended early for any other reason is announced first, for example
+`note: this trial ended early ('done')`.
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure) n
@@ -127,11 +137,13 @@ adopted embodiment verdict is not followed by a notes prompt, so a self-scoring
 embodiment still costs no keypresses per trial.
 `skip` records no judgement, but a grader note entered for that trial is still
 recorded. Notes never affect the score. Piped/CI stdin or `--no-prompt` never
-prompt. A registered `--task` or `eval-set` run prompts only for trials that end
-with `termination_reason="operator_end"` — a human pressed the end-episode key — and
-never adopts an embodiment verdict or prompts for any other ending, so
-unattended runs stay non-blocking. An unjudged trial honestly scores as
-failure with "no operator judgement recorded".
+prompt: without a TTY no grader is selected by default, and `--no-prompt`
+suppresses the operator grader specifically (combining it with an explicit
+`--grader operator` is an error, and a config-set `grader = operator` is
+downgraded with a stderr note whenever the run cannot actually be attended).
+A custom grader named in config or `--grader` runs regardless of TTY-ness,
+which is what a future VLM autograder needs. An unjudged trial honestly
+scores as failure with "no operator judgement recorded".
 
 ### Live operator feedback
 

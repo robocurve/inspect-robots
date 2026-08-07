@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from inspect_robots.console import ConsolePoll, OperatorConsole, OperatorInput
 from inspect_robots.errors import EmbodimentFault
-from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
@@ -173,6 +172,11 @@ class OperatorSession:
             return
         if record.truncated and record.termination_reason == "max_steps":
             self.write_line("note: this trial hit the step limit before terminating")
+        elif record.truncated and record.termination_reason is not None:
+            # Neutral on purpose: the record cannot distinguish a
+            # policy-requested stop from an embodiment truncation, so the
+            # reason string carries the specifics.
+            self.write_line(f"note: this trial ended early ({record.termination_reason!r})")
         while True:
             try:
                 answer = self._input(_PROMPT).strip().lower()
@@ -195,15 +199,3 @@ class OperatorSession:
         # operator_event documents "skip" as "no judgement" for its consumers.
         if answer != "skip" or note is not None:
             record.events.append(operator_event(t=len(record.steps), verdict=answer, note=note))
-
-    def prompt_verdict_on_operator_end(self, record: TrialRecord, scene: Scene) -> None:
-        """Prompt or announce only for a trial the operator demonstrably ended (R6-safe).
-
-        ``OPERATOR_END`` means a human pressed the end-episode key, so prompting
-        here can never block an unattended run; every other reason (``max_steps``
-        included) keeps R6's non-blocking behavior for registered tasks.
-        """
-        if record.termination_reason == OPERATOR_END and record.operator_judgement is None:
-            self.prompt_verdict(record, scene)
-        elif record.termination_reason == OPERATOR_END:
-            self.write_line(f"operator verdict adopted from console: {record.operator_judgement}")

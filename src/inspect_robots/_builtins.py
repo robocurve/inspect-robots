@@ -6,9 +6,10 @@ lookup, so importing ``inspect_robots`` stays cheap and free of import cycles.
 
 from __future__ import annotations
 
+from inspect_robots.grader import operator_grader
 from inspect_robots.logging import JsonLogSink, RerunSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
-from inspect_robots.registry import embodiment, policy, scorer, sink, task
+from inspect_robots.registry import embodiment, grader, policy, scorer, sink, task
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import (
     episode_length,
@@ -33,6 +34,9 @@ scorer("episode_length")(episode_length)
 scorer("min_distance_to_goal")(min_distance_to_goal)
 scorer("reached_goal_state")(reached_goal_state)
 scorer("operator")(operator_scorer)
+
+# Graders
+grader("operator")(operator_grader)
 
 # Sinks
 sink("json")(JsonLogSink)

@@ -8,7 +8,8 @@ being imported first.
 
 Entry-point groups:
 ``inspect_robots.tasks``, ``inspect_robots.policies``, ``inspect_robots.embodiments``,
-``inspect_robots.scorers``, ``inspect_robots.sinks``, ``inspect_robots.operator_inputs``.
+``inspect_robots.scorers``, ``inspect_robots.graders``, ``inspect_robots.sinks``,
+``inspect_robots.operator_inputs``.
 """
 
 from __future__ import annotations
@@ -18,12 +19,13 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
-Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink" | "operator_input"
+Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
 KINDS: tuple[Kind, ...] = (
     "task",
     "policy",
     "embodiment",
     "scorer",
+    "grader",
     "sink",
     "operator_input",
 )
@@ -33,6 +35,7 @@ _GROUPS: dict[Kind, str] = {
     "policy": "inspect_robots.policies",
     "embodiment": "inspect_robots.embodiments",
     "scorer": "inspect_robots.scorers",
+    "grader": "inspect_robots.graders",
     "sink": "inspect_robots.sinks",
     "operator_input": "inspect_robots.operator_inputs",
 }
@@ -77,6 +80,11 @@ def embodiment(name: str | None = None) -> Callable[[F], F]:
 def scorer(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a scorer factory under ``name``."""
     return register("scorer", name)
+
+
+def grader(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register a grader factory under ``name``."""
+    return register("grader", name)
 
 
 def sink(name: str | None = None) -> Callable[[F], F]:
