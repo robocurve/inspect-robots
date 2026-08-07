@@ -24,7 +24,7 @@ public core API for no current need. (Issue #327.)
    the sinks list the eval loop already fans `log_policy_messages` to; `close()` on the
    way out. Missing-plugin errors hint `pip install inspect-robots-voice`. No new public
    API symbols, no rollout/eval changes.
-2. **Voice plugin (`inspect-robots-voice` 0.3.0):** new `SpeakerSink` — extracts spoken
+2. **Voice plugin (`inspect-robots-voice` 0.4.0):** new `SpeakerSink` — extracts spoken
    text from assistant `tool_calls` in the live transcript delta, bounded drop-oldest
    queue, one daemon worker thread, local Kokoro TTS behind a small engine seam,
    playback through the already-depended-on `sounddevice`.
@@ -42,7 +42,7 @@ decision 4 for the `<3.14` marker).
 - D1 docstrings on public defs; state the contract, not the name. Line length 100.
 - Core must never import `kokoro_onnx`/`sounddevice` (the `core-only-import` job guards
   this); the plugin must not import them at module top either, so its test suite runs on
-  CI runners without PortAudio or onnxruntime loaded (`kokoro-onnx` still installs in the
+  CI runners without PortAudio system libraries (`kokoro-onnx` still installs in the
   locked env; importing it stays confined to `start()`-time code paths that tests replace
   with fakes).
 - Public API is fenced by `inspect_robots.__all__` **and** `tests/test_api_snapshot.py` —
@@ -51,12 +51,13 @@ decision 4 for the `<3.14` marker).
 - No behavior change without `--speak`: every existing run takes today's exact paths;
   existing tests pass untouched.
 - `uv lock` after touching any pyproject; CI installs `--locked`. Note: all `plugin-*`
-  CI jobs sync `--all-packages`, so `kokoro-onnx` + `onnxruntime` install in every
-  plugin job; the uv cache absorbs this — accepted cost, no CI changes.
+  CI jobs sync `--all-packages`; `onnxruntime` is already in every plugin job via the
+  voice plugin's `onnx-asr[cpu,hub]` dep, so `kokoro-onnx` adds only itself and its
+  small phonemization deps — accepted cost, no CI changes.
 - Writing-style rules for public-facing text (README, docs): no em dashes in prose, no
   decorative emoji, headers use colons.
 
-## Reference: current wiring (main @ 0ce79eb1)
+## Reference: current wiring (main @ 1731997c)
 
 - `logging/sink.py`: `LogSink` protocol (`on_eval_start` / `on_trial_start` / `log_step` /
   `on_trial_end` / `on_eval_end`) + `NullSink` base. Duck-typed extension
@@ -65,10 +66,12 @@ decision 4 for the `<3.14` marker).
   `TrialRecord.policy_transcript` entries; **core does not enforce the shape on this live
   path, so sinks must render defensively and must not mutate** (see the module docstring).
 - `eval.py` `_Broadcast` (~line 112): fans `log_policy_messages` to every sink that
-  defines it — a second consumer costs nothing. `on_eval_end` fires on halted, errored,
-  and even Ctrl-C-mid-rollout paths too (`eval.py` reaches `bus.on_eval_end` at ~line 607
-  before re-raising a cancellation); only Ctrl-C *outside* the rollout window can skip
-  it — so an end-of-run drain must gate on `log.status`, not on the hook firing.
+  defines it — a second consumer costs nothing. `on_eval_end` fires on errored,
+  fail-on-error-halted, and even Ctrl-C-mid-rollout paths too (`eval.py` reaches
+  `bus.on_eval_end` at ~line 607 before re-raising a cancellation); only Ctrl-C
+  *outside* the rollout window can skip it — so an end-of-run drain must gate on
+  `log.status` (terminal literals: `"success"`, `"error"`, `"cancelled"`), not on the
+  hook firing.
   `on_trial_end` is the bounded-loss flush point (see the Rerun sink's docstring). The
   rollout delivers the final delta (the `done`/`give_up` message) and
   then breaks out of the trial; `bus.on_trial_end` follows within moments in unattended
@@ -125,7 +128,7 @@ decision 4 for the `<3.14` marker).
    body. API: `Kokoro(model_path, voices_path)`;
    `create(text, voice=..., speed=..., lang=...)` returns `(float32 samples,
    sample_rate)`. The seam is a private protocol — `_tts.py::TtsEngine` with
-   `synthesize(text) -> tuple[np.ndarray, int]` — so a future engine swap or
+   `synthesize(text) -> tuple[npt.NDArray[np.float32], int]` — so a future engine swap or
    `-S engine=` never touches the sink. Not exposed as an option now (YAGNI: one
    engine).
 4. **Dependency carries an environment marker: `kokoro-onnx>=0.4; python_version <
@@ -180,9 +183,11 @@ decision 4 for the `<3.14` marker).
    operator footer follows the Rerun sink's existing precedent; unattended runs — the
    primary use case — have no footer at all.)
 8. **The control loop is never blocked, and terminal speech gets flush semantics, not
-   abort semantics.** `log_policy_messages` only walks the delta, `json.loads`es
-   tool-call arguments defensively (malformed or non-dict arguments, missing/empty
-   text, non-assistant roles are all skipped silently), and appends to a bounded queue
+   abort semantics.** `log_policy_messages` only walks the delta, parses
+   tool-call arguments defensively (accepted as a dict, or as a JSON string parsing to
+   a dict — today's sanitized transcript always sends the string form, so the dict
+   branch is defensive-only; anything else, malformed JSON, missing/empty text, and
+   non-assistant roles are all skipped silently), and appends to a bounded queue
    (`maxlen=4`, drop-oldest). Synthesis and playback happen on one daemon worker
    thread. Stale narration is worse than skipped narration, hence drop-oldest; drops
    are counted at enqueue. Lifecycle, hook by hook:
@@ -198,8 +203,9 @@ decision 4 for the `<3.14` marker).
      for the queue to empty and the in-flight utterance to finish, then `close()`. The
      flagship unattended single-trial run must end with the summary spoken, not
      clipped. The drain bound keeps torque-holding time finite; scoring/grading already
-     spends comparable time between rollout and exit. For any other status (cancelled,
-     error, halted — `on_eval_end` fires on those paths too, see the Reference), it
+     spends comparable time between rollout and exit. For any other status
+     (`"cancelled"` or `"error"` — the only other terminal `EvalLog.status` literals,
+     and `on_eval_end` fires on those paths too, see the Reference), it
      hard-abort-closes immediately: a Ctrl-C or SafetyAbort must not be followed by 15s
      of narration while the robot holds torque.
    - `close()` without a prior drain (the CLI `finally` on error/interrupt paths, which
@@ -240,9 +246,11 @@ decision 4 for the `<3.14` marker).
 ### Task 1: plugin engine seam `_tts.py`
 
 - [ ] `plugins/inspect-robots-voice/src/inspect_robots_voice/_tts.py`: private module.
-  `TtsEngine` Protocol: `synthesize(text: str) -> tuple[np.ndarray, int]` (float32 mono
-  samples, sample rate; NumPy is already a typed plugin dep, so the array type is fine
-  under strict mypy). `KokoroEngine` implements it: constructor takes resolved `model` and
+  `TtsEngine` Protocol: `synthesize(text: str) -> tuple[npt.NDArray[np.float32], int]`
+  (float32 mono samples, sample rate — bare `np.ndarray` fails the plugin's strict
+  mypy `disallow_any_generics`; every existing plugin module uses `npt.NDArray`).
+  Add `kokoro_onnx.*` to the plugin's `[[tool.mypy.overrides]]` ignore list alongside
+  `sounddevice.*`/`faster_whisper.*`/`onnx_asr.*`. `KokoroEngine` implements it: constructor takes resolved `model` and
   `voices` paths plus `voice`, `speed`, `lang`; **imports `kokoro_onnx` inside
   `__init__`** behind a guarded try (ImportError message covers both "not installed" and
   the `python_version >= 3.14` marker case, per design decision 4), holds the `Kokoro`
@@ -287,7 +295,7 @@ decision 4 for the `<3.14` marker).
   NOT at trial end (a summary enqueued just before `on_trial_end` survives and gets
   spoken); `on_eval_end` with a success log drains — a queued utterance finishes before
   close (and the drain respects its time bound when the fake worker stalls);
-  `on_eval_end` with a cancelled/error/halted log aborts instead of draining; worker
+  `on_eval_end` with a `"cancelled"` or `"error"` log aborts instead of draining; worker
   exception → one
   warning + inert (later `log_policy_messages` calls do nothing, eval hooks still no-op
   safely); bare `close()` idempotent + aborts mid-utterance (stop event cuts chunked
@@ -300,8 +308,8 @@ decision 4 for the `<3.14` marker).
   `device`, `lang`, `model`, `voices`); numeric coercions accept int-or-float where
   sensible; `volume` outside `[0, 1]` and non-positive `speed` are `TypeError`s (the
   registry surfaces `TypeError` cleanly; `ValueError` would escape as a traceback).
-  Export `SpeakerSink` in `__all__`; bump `__version__` to `0.3.0`.
-- [ ] `pyproject.toml`: version 0.3.0; add `kokoro-onnx>=0.4; python_version < '3.14'`
+  Export `SpeakerSink` in `__all__`; bump `__version__` to `0.4.0`.
+- [ ] `pyproject.toml`: version 0.4.0; add `kokoro-onnx>=0.4; python_version < '3.14'`
   to deps (comment: marker keeps the workspace lock's python range; kokoro floors
   numpy 2 where installed); new entry point
   `[project.entry-points."inspect_robots.sinks"] speaker = "inspect_robots_voice:speaker_sink"`.
@@ -346,7 +354,7 @@ decision 4 for the `<3.14` marker).
   Layout bullet likewise; `src/inspect_robots/CLAUDE.md` cli row; plugin `CLAUDE.md`
   gains the speaker module map rows.
 - [ ] `CHANGELOG.md`: core Unreleased "Added" entry (`--speak`/`-S`, hint-map, lifecycle)
-  and voice plugin 0.3.0 entry (SpeakerSink, Kokoro engine, model cache), both linking
-  issue #327 and this plan (0053).
+  and voice plugin 0.4.0 entry (SpeakerSink, Kokoro engine, model cache), both linking
+  issue #327 and this plan (0054).
 - [ ] File the follow-up issue for `--speak`+`--voice` playback-aware muting; link it
   from the PR body.
