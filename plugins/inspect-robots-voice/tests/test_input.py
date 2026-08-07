@@ -290,7 +290,7 @@ def test_worker_drains_capture_and_close_is_idempotent_and_joins() -> None:
     output = _CheckingDeque(voice._lock, accepted)
     voice._output = cast(deque[str], output)
 
-    assert voice.start() == "listening on test microphone (model=small)"
+    assert voice.start() == "listening on test microphone (model=parakeet-tdt-0.6b-v3)"
     thread = voice._thread
     assert thread is not None
     assert accepted.wait(timeout=2)
@@ -322,7 +322,7 @@ def test_second_start_reuses_live_capture() -> None:
     finally:
         voice.close()
 
-    assert first == second == "listening on test microphone (model=small)"
+    assert first == second == "listening on test microphone (model=parakeet-tdt-0.6b-v3)"
     assert len(captures) == 1
 
 

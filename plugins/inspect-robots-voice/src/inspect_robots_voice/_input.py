@@ -15,7 +15,7 @@ import numpy.typing as npt
 from inspect_robots.console import ConsolePoll
 from inspect_robots_voice._capture import Device, MicrophoneCapture
 from inspect_robots_voice._segmenter import EnergyGate
-from inspect_robots_voice._transcriber import WhisperTranscriber
+from inspect_robots_voice._transcriber import resolve_transcriber
 
 AudioArray = npt.NDArray[np.float32]
 
@@ -47,7 +47,7 @@ class _Segmenter(Protocol):
 
 
 CaptureFactory = Callable[[Device, int, queue.Queue[AudioArray]], _Capture]
-TranscriberFactory = Callable[[str, str, str, str], _Transcriber]
+TranscriberFactory = Callable[[str, str, str | None, str], _Transcriber]
 SegmenterFactory = Callable[[], _Segmenter]
 
 
@@ -57,8 +57,10 @@ def _capture_factory(
     return MicrophoneCapture(device, sample_rate, audio_queue, blocksize=_BLOCK_SAMPLES)
 
 
-def _transcriber_factory(model: str, compute: str, language: str, asr_device: str) -> _Transcriber:
-    return WhisperTranscriber(model, compute, language, asr_device)
+def _transcriber_factory(
+    model: str, compute: str, language: str | None, asr_device: str
+) -> _Transcriber:
+    return resolve_transcriber(model, compute, language, asr_device)
 
 
 class VoiceInput:
@@ -67,9 +69,9 @@ class VoiceInput:
     def __init__(
         self,
         *,
-        model: str = "small",
+        model: str = "parakeet-tdt-0.6b-v3",
         device: Device = None,
-        language: str = "en",
+        language: str | None = None,
         compute: str = "auto",
         asr_device: str = "cpu",
         _capture_factory_override: CaptureFactory | None = None,

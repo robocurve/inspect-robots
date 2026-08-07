@@ -25,7 +25,7 @@ sudo dnf install portaudio        # Fedora
 brew install portaudio            # macOS
 ```
 
-Named faster-whisper models may be downloaded when voice input starts for the first time.
+Model weights may be downloaded when voice input starts for the first time.
 
 ## Run
 
@@ -46,13 +46,20 @@ work.
 Repeat `-V key=value` to configure the voice plugin. Values use the same scalar coercion as
 `-P` and `-E`.
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `model` | `small` | faster-whisper model size or local model path |
-| `device` | system default | sounddevice input index or case-insensitive name substring |
-| `language` | `en` | transcription language |
-| `compute` | `auto` | CTranslate2 compute type |
-| `asr_device` | `cpu` | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
+| Key | Default | Backend | Meaning |
+| --- | --- | --- | --- |
+| `model` | `parakeet-tdt-0.6b-v3` | both | Parakeet alias or `nemo-` name, or a faster-whisper model size or local path |
+| `device` | system default | both | sounddevice input index or case-insensitive name substring |
+| `language` | `none` | whisper | explicit transcription language (Whisper uses `en` when unset); Parakeet auto-detects |
+| `compute` | `auto` | whisper | CTranslate2 compute type |
+| `asr_device` | `cpu` | whisper | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
+
+Parakeet TDT 0.6B v3 is the default. Its int8 ONNX weights download once from the Hugging Face
+hub on first use and use about 640 MB. To use Whisper instead, pass `-V model=small` or another
+faster-whisper model name or local path. Explicit `language`, `compute`, and non-CPU `asr_device`
+values require a Whisper model.
+
+Parakeet TDT 0.6B v3 weights are provided by NVIDIA under the CC-BY-4.0 license.
 
 For example:
 
@@ -73,10 +80,14 @@ after at least 100 ms above the learned noise threshold, prepends 300 ms of audi
 after 700 ms below the threshold. An utterance is force-closed at 30 seconds so a stuck-open
 gate cannot grow without bound. The noise estimate adapts only while speech is not open.
 
-Each closed candidate then passes faster-whisper's bundled Silero VAD. The plugin rejects audio
-shorter than 0.4 seconds, blank text, segments with no-speech probability above 0.6, segments
-with average log probability below -1.0, and exact silence hallucinations such as `Thank you.`,
-`you`, and `Thanks for watching!`. Rejected candidates disappear silently.
+Each closed candidate shorter than 0.4 seconds is rejected before transcription. Both backends
+also reject blank text and exact silence hallucinations such as `Thank you.`, `you`, and
+`Thanks for watching!`.
+
+Parakeet relies on the energy gate and its transducer decoder, then applies a coarse garbage
+check that rejects mean token log probability below -2.5 when token probabilities are available.
+Whisper also runs its bundled Silero VAD and rejects segments with no-speech probability above
+0.6 or average log probability below -1.0. Rejected candidates disappear silently.
 
 ## Feedback-only behavior
 
