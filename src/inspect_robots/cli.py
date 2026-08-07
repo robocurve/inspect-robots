@@ -2077,9 +2077,7 @@ def _render_view_directory(
     # Derived from this pass's own glob, not the caller's earlier one: a live
     # log appearing between the two globs must not have its freshly rendered
     # page immediately stubbed as an orphan.
-    backed_live_pages = {
-        page_names[path] for path in log_paths if path.name.endswith(".live.json")
-    }
+    backed_live_pages = {page_names[path] for path in log_paths if path.name.endswith(".live.json")}
     entries: list[IndexEntry] = []
     pages_written = 0
     bytes_written = 0

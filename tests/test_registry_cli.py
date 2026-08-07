@@ -1719,8 +1719,9 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        refresh_seconds: int | None = None,
     ) -> str:
-        del log, title, frames_dir
+        del log, title, frames_dir, refresh_seconds
         assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
@@ -2043,6 +2044,7 @@ def test_view_directory_incremental_mtime_and_force(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        refresh_seconds: int | None = None,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -2051,6 +2053,7 @@ def test_view_directory_incremental_mtime_and_force(
             log_path=log_path,
             frames_dir=frames_dir,
             frames_budget_bytes=frames_budget_bytes,
+            refresh_seconds=refresh_seconds,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)
@@ -4195,8 +4198,9 @@ def test_run_without_speak_keeps_default_sink_list(
         del args
         sinks = kwargs["sinks"]
         assert isinstance(sinks, list)
-        assert len(sinks) == 1
-        assert type(sinks[0]).__name__ == "JsonLogSink"
+        # The default list is the JSON log plus the live snapshot sink — no
+        # speaker without --speak.
+        assert [type(sink).__name__ for sink in sinks] == ["JsonLogSink", "LiveLogSink"]
         return [_step_limit_log(reasons=("success",))]
 
     monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", unexpected_factory)
