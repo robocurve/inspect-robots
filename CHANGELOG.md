@@ -191,6 +191,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Capx plugin (0.3.0):** an unset `effort` now omits the field and inherits
+  the provider default (breaking; add `-P effort=low` to pin the previous
+  behavior). `effort=none` sends the true minimum (`reasoning_effort: "none"` on
+  the chat wire, `reasoning: {"effort": "none"}` on responses); programmatic
+  `None` normalizes to `"none"`. Only the chat and responses wires are affected,
+  the two capx speaks. This brings capx to the same contract the agent plugin
+  gained in 0.23.0 ([#319](https://github.com/robocurve/inspect-robots/issues/319)).
+
 - **Agent plugin (0.23.0):** an unset `effort` now omits the field and inherits
   the provider default (breaking; add `-P effort=low` to pin the previous
   behavior). `effort=none` sends the true minimum on every HTTP wire, including
