@@ -55,9 +55,11 @@ unchanged.
     appears as soon as the run starts).
   - `on_trial_start(scene_id, epoch)` — open an in-progress trial entry;
     forced write.
-  - `log_step(t, ...)` — record the current step index only (an int); a write
-    happens only if the throttle interval elapsed. High-rate control steps
-    must never turn into high-rate disk writes.
+  - `log_step(t, ...)` — record the current step index only (an int). **Never
+    writes to disk** (R1 critique): `log_step` runs synchronously on the
+    control thread, and a full-log JSON rewrite (up to megabytes of transcript
+    on a long agent run) must not inject serialization + disk latency into
+    the control period. The step count rides along on the next turn's write.
   - `log_policy_messages(t, messages)` (duck-typed extension, same contract as
     `RerunSink`) — append a shallow snapshot (`[dict(m) for m in messages]`,
     defensive against non-dict rows) of the delta to the in-progress trial's
@@ -65,14 +67,30 @@ unchanged.
     `policy=agent`, deltas carry the assistant turns, notes, and the
     `operator feedback (step N): ...` user lines that voice/console input
     becomes (`plugins/inspect-robots-agent/.../policy.py:_operator_lines`).
+    A write here is invisible to control: the hook fires right after an
+    inference that just took seconds, so a synchronous throttled write is
+    acceptable and no worker thread is needed (R1: position taken — the
+    RerunSink worker exists for per-step streaming, which this sink does not
+    do).
   - `on_trial_end(record)` — replace the in-progress entry with the record's
     data: `termination_reason`, `operator_judgement`/`operator_note`,
     delivered operator messages, the normalized `record.policy_transcript`
     when present (falling back to the accumulated deltas), and
     `status="error"` propagation for errored trials; forced write.
   - `on_eval_end(log)` — `unlink(missing_ok=True)` the live file. The
-    canonical `JsonLogSink` final log replaces it; the live page disappears
-    from the index and the final page takes over.
+    canonical `JsonLogSink` final log replaces it in the index.
+- **`on_eval_end` is not guaranteed** (R1): `bus.on_eval_end` is not in a
+  `finally` — an uncaught scorer failure, a grader exception, or Ctrl-C at
+  the operator verdict prompt (the *target scenario* for this feature) skips
+  it and would leak a phantom "running" log. Therefore: the sink exposes
+  `path` (like `JsonLogSink.path`), and `_cmd_run`/`_cmd_eval_set` unlink it
+  in their existing `finally` blocks when it still exists. **Sink order is
+  pinned and tested:** `LiveLogSink` is appended *after* `JsonLogSink`, so
+  `_Broadcast.on_eval_end` writes the final log before the live file is
+  removed — there is never a moment with neither file on disk.
+- **Reusable across sequential runs** (R1): `on_eval_start` fully resets
+  state — new filename, cleared trials — so one instance serves a whole
+  eval-set. This invariant is stated in the class docstring and tested.
 - **Log assembly invariants:** all `SceneResult` parallel tuples stay strictly
   parallel. The in-progress trial contributes one entry to every parallel
   field (`epochs` gets `{}`, `operator_judgements`/`termination_reasons` get
@@ -93,14 +111,18 @@ unchanged.
   its `updated_at`. Documented; no reaper in this plan.
 - **Exports:** `inspect_robots.logging.__all__` gains `LiveLogSink`;
   registered as `sink("live-json")` in `_builtins.py` next to the existing
-  `sink("json")`. Update `tests/test_api_snapshot.py` if the snapshot covers
-  it.
+  `sink("json")`. The top-level API snapshot does not cover
+  `inspect_robots.logging` (verified R1), so only `logging/__init__.py`
+  changes. The class docstring notes that a sinks list containing *only* a
+  `LiveLogSink` ends the run with no log on disk (the final write is
+  `JsonLogSink`'s job).
 
 ### 2. Renderer — `_html.py`, `_html_index.py`
 
 - `_STATUS_DISPLAY` gains `"started": "running"`; `_status_class` /
-  `_status_badge` give `running` a distinct bright badge (amber), reused by
-  the index row.
+  `_status_badge` give `running` a distinct bright badge (amber). The badge
+  CSS must land in **both** duplicated stylesheets — `_html.py`'s `_STYLES`
+  and `_html_index.py`'s — or the index badge silently renders unstyled (R1).
 - `render_html(...)` gains `refresh_seconds: int | None = None`. When set, the
   page gets `<meta http-equiv="refresh" content="N">` plus a prominent banner
   under the header: `RUNNING — refreshes every Ns · last update HH:MM:SS`
@@ -113,16 +135,32 @@ unchanged.
 
 - New module constant `_SERVE_LIVE_RERENDER_SECONDS = 2` beside
   `_SERVE_RERENDER_SECONDS = 60`.
-- `_serve_view_directory` ticks every `_SERVE_LIVE_RERENDER_SECONDS`. Each
-  tick: if `log_dir.glob("*.live.json")` is non-empty, run the incremental
-  re-render (mtime-gated, so only pages whose log changed are re-rendered);
-  otherwise only re-render when 60s have accumulated (preserving today's
-  cadence and cost when nothing is live). `_serve_sleep` stays the injection
-  point for tests.
+- `_serve_view_directory` ticks every `_SERVE_LIVE_RERENDER_SECONDS` and
+  tracks the live set (`log_dir.glob("*.live.json")`) across ticks. A full
+  incremental re-render runs when: the live set is non-empty, **the live set
+  changed since the last tick** (appearance *or* disappearance — so the final
+  page and corrected index appear within 2s of run completion, not up to 60s
+  later; R1), or 60s have accumulated (today's cadence when nothing is live).
+  `_serve_sleep` stays the injection point for tests.
+- **Index refresh matches the live cadence** (R1): while the live set is
+  non-empty the index is rendered with
+  `refresh_seconds=_SERVE_LIVE_RERENDER_SECONDS` (it is the page `--open`
+  lands on); the transition tick after completion re-renders it back to the
+  60s refresh.
 - `_render_log_page` / `_render_view_directory` pass
   `refresh_seconds=_SERVE_LIVE_RERENDER_SECONDS` down to `render_html` only
   for logs with `status == "started"` **and** only in serve mode (a static
   `view` of a stale live log must not meta-refresh forever).
+- **Orphaned live pages become redirects** (R1): when a previously-rendered
+  `*.live.json` vanishes, its `.html` page is rewritten as a zero-delay
+  redirect stub to `index.html` — an operator's auto-refreshing tab lands on
+  the index (where the final page now is) instead of a dead "running" page
+  frozen forever (deleting would 404 the refreshing tab, which is worse).
+- **Exact mtime gating** (R1): after rendering a page, `os.utime` the page to
+  the source log's pre-read mtime so the `<` comparison can never
+  permanently miss a write that landed during rendering or within the same
+  coarse-mtime second (self-healing normally papers over this; a forced
+  trial-end write followed by a long inference pause would not).
 - Accepted cost: while a live log exists, the directory pass re-parses every
   log JSON every 2s. Mtime gating keeps re-rendering (the expensive part)
   incremental; typical log dirs make the parse pass cheap. Called out in the
@@ -130,10 +168,18 @@ unchanged.
 
 ### 4. CLI wiring + the bright tip — `cli.py`
 
-- `run` (registered-task, ad-hoc) and `eval-set` append
-  `LiveLogSink(args.log_dir)` to the sink list by default. New `--no-live-log`
-  flag on both commands opts out. The flag exists because a tmpfs-averse or
-  NFS-hostile rig may want zero mid-run writes.
+- `run` (registered-task, ad-hoc) appends `LiveLogSink(args.log_dir)` to its
+  sink list, **after** `JsonLogSink` (ordering invariant above).
+- **`eval_set()` gains `sinks: list[LogSink] | None = None`** threaded to
+  each `eval()` call (R1: today `eval_set` has no sinks parameter at all, so
+  the CLI wiring was unimplementable as written). Public-API signature
+  addition: docstring, docs, CHANGELOG. `_cmd_eval_set` passes
+  `[JsonLogSink, LiveLogSink]`, relying on the sink's documented
+  reusability across the set's sequential runs.
+- New `--no-live-log` flag on both commands opts out (a tmpfs-averse or
+  NFS-hostile rig may want zero mid-run writes).
+- Both commands unlink `sink.path` in their existing `finally` blocks when
+  the file still exists (the leak guard from §1).
 - **The tip:** printed with the other run announcements (next to the `rerun:`
   line), when the resolved policy registry name is `agent`:
 
@@ -142,19 +188,25 @@ unchanged.
         each agent turn, notes, and operator/voice input, updating live
   ```
 
-  First line: new `_BRIGHT_MAGENTA = "95"` + `_BOLD` (via nested `_styled`,
-  matching the existing helper), so it is unmissable on a dark or light
-  terminal. Second line dim. `logs` is the actual `args.log_dir` value. The
-  existing `_styled` NO_COLOR/tty handling applies unchanged. Suppressed when
-  `--no-live-log` was passed (never advertise a view that will not update).
-- Predicate: the *resolved* policy name (`resolved.policy.info.name ==
-  "agent"`), not the CLI string, so config-default agent runs get the tip too.
+  First line: new `_BOLD_BRIGHT_MAGENTA = "1;95"` (one code string, matching
+  the single-code `_styled` helper shape), so it is unmissable on a dark or
+  light terminal. Second line dim. `logs` is the actual `args.log_dir` value.
+  The existing `_styled` NO_COLOR/tty handling applies unchanged. Suppressed
+  when `--no-live-log` was passed (never advertise a view that will not
+  update). Printed with the other pre-session announcements, so it cannot
+  collide with the OperatorSession footer.
+- Predicate: `resolved.policy_name == "agent"` (the resolved registry name on
+  `_ResolvedComponents`, verified to be the literal `"agent"` for the plugin
+  pre- and post-bind), so config-default agent runs get the tip too.
 
 ### 5. Docs, changelog, module map
 
-- New docs page `docs/live-view.md` ("Watching a run live"): the two-terminal
-  flow, what appears live vs. only in the final log (scores), staleness note,
-  Rerun as the high-rate alternative. Follows the public-writing style rule.
+- New docs page `docs/guide/live-view.md` ("Watching a run live"): the
+  two-terminal flow, what appears live vs. only in the final log (scores),
+  staleness note, Rerun as the high-rate alternative. Registered in
+  `website/sidebars.ts` (R1: unregistered pages never appear on the site) and
+  cross-linked from `docs/guide/logging-and-rerun.md`. Follows the
+  public-writing style rule.
 - README: one bullet in the viewing section.
 - `CHANGELOG.md` entry; `src/inspect_robots/CLAUDE.md` module map rows
   (`logging/` and `cli.py`/`_html.py` rows updated).
@@ -172,11 +224,15 @@ unchanged.
 - **Renderer:** refresh meta + banner emitted only when `refresh_seconds`
   set; `running` badge; pending score cells; escaping.
 - **Serve loop:** with `_serve_sleep` stubbed — fast tick re-renders when a
-  live file exists, 60s cadence preserved otherwise; refresh_seconds passed
-  only for started logs in serve mode.
+  live file exists; re-render fires on live-set *disappearance* (final page +
+  index within one tick); 60s cadence preserved otherwise; index refresh
+  follows the live cadence and reverts; orphaned live page rewritten as a
+  redirect stub; `os.utime` mtime pinning (fake clock).
 - **CLI:** tip printed exactly when the resolved policy is `agent` (and
-  suppressed with `--no-live-log`); sink wired by default; flag removes it;
-  eval-set parity.
+  suppressed with `--no-live-log`); sink wired by default *after*
+  `JsonLogSink` (ordering asserted); flag removes it; `finally` unlinks a
+  leaked live file on a simulated grader-prompt Ctrl-C; eval-set parity via
+  the new `eval_set(sinks=...)` parameter (threading + reuse across runs).
 
 ## Implementation order
 
