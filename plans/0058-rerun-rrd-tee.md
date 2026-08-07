@@ -13,7 +13,11 @@
 > early return with an SDK-absent lifecycle test, else SDK-less rigs print a phantom
 > path; the module docstring's threading-contract sentence joins the edit list; the
 > connect branch gets its own tee kwarg assertions; the real-SDK test gains a
-> functional FileSink round-trip) plus 7 nits, folded in below.
+> functional FileSink round-trip) plus 7 nits, folded in below. R3 found 2 (the
+> old-SDK fallback is a third phantom-path source and must also clear
+> `resolved_recording_path`, with a test; §2's leftover causal sentence attributed
+> the SDK-absent guarantee to the except handler, which never runs on that path)
+> plus 6 nits, folded in below.
 
 **Goal:** Close #340. The live Rerun viewer (`inspect-robots run --rerun`) is the popular
 way to watch a rollout, but a live-viewed run persists no `.rrd`: `RerunSink` treats
@@ -87,10 +91,15 @@ pattern in `tests/test_rerun_sink.py`.
        viewer). If any of the three attrs is missing (SDK 0.20–0.23): warn once
        per sink instance ("this rerun-sdk predates set_sinks; the live view
        continues but the .rrd was skipped; upgrade to rerun-sdk>=0.24" — no em
-       dash, repo prose habit) and fall back to live mode only. The CLI status
-       line prints "(+ .rrd)" at construction time and therefore over-promises in
-       this fallback and when rerun-sdk is absent entirely; in both cases the
-       sink's own warning is the correction, accepted as is.
+       dash, repo prose habit), **clear `resolved_recording_path = None`** (this
+       fallback is the third phantom-path source: the SDK is present and nothing
+       raises, so neither the early-return placement nor the except-handler reset
+       covers it — without this clear the CLI would report a `.rrd` that was
+       never attached), and fall back to live mode only. The CLI status line
+       prints "(+ .rrd)" at construction time and therefore over-promises in this
+       fallback and when rerun-sdk is absent entirely; in both cases the sink's
+       own warning is the correction, accepted as is (the post-eval path report,
+       by contrast, never lies: all three phantom sources clear the path).
    - Shutdown path is untouched: `_probe_recording_flush` already flushes the global
      recording, which flushes every teed sink; the final file finalization on process
      exit is the same mechanism the existing `recording_path` mode relies on.
@@ -112,8 +121,10 @@ pattern in `tests/test_rerun_sink.py`.
    - New flag on `p_run`: `--rerun-save` with `argparse.BooleanOptionalAction`,
      `default=None`, help: also save the stream as a `.rrd` next to the eval log
      (default: on whenever the rerun viewer is active; `--no-rerun-save` or a
-     `rerun_save = false` config line disables; `--rerun-save` alone records without
-     opening a viewer).
+     `rerun_save = false` config line disables; without a viewer, `--rerun-save`
+     records to a `.rrd` only — phrased that way because on a rig whose config
+     sets `rerun = true` the flag tees an already-spawning viewer rather than
+     staying viewer-less).
    - Resolution: `save_wanted = args.rerun_save if args.rerun_save is not None else
      defaults.rerun_save` (config default `True`).
    - Sink construction (the `cli.py:1567-1586` block):
@@ -132,9 +143,10 @@ pattern in `tests/test_rerun_sink.py`.
      path when the rerun sink exists and `getattr(sink, "resolved_recording_path",
      None)` is truthy (keep a reference to the constructed `RerunSink` the way
      `live_sink` is kept; `getattr` with a `None` default so monkeypatched fake
-     sinks without the attribute stay legal). No print when the sink degraded to a
-     no-op: the sink's startup except handler cleared the path (see the matrix
-     note), so a rig without rerun-sdk sees no phantom path. The Ctrl-C path
+     sinks without the attribute stay legal). The report never prints a phantom:
+     SDK-less rigs are covered by the top-of-method reset plus derive-after-early-
+     return placement (§1), startup failures by the except-handler reset, and the
+     old-SDK tee fallback by its own explicit clear. The Ctrl-C path
      (`cli.py:1607-1613`) returns before the summary; a partially written `.rrd`
      is intentionally not reported there.
    - Flag validation: `--no-rerun-save` needs no cross-checks (it is a pure opt-out;
@@ -158,8 +170,10 @@ file-only failures is complexity the failure likelihood does not buy.
 
 ### 1. Sink: constructor + naming
 
-- [ ] `RerunSink.__init__`: add `recording_dir` (keyword-only), drop the
-      spawn×recording and connect×recording `ValueError`s, add
+- [ ] `RerunSink.__init__`: add `recording_dir` (keyword-only), initialize
+      `self.resolved_recording_path: Path | None = None` in the constructor (a
+      constructed-but-never-started sink must not raise `AttributeError`), drop
+      the spawn×recording and connect×recording `ValueError`s, add
       `recording_path`×`recording_dir` exclusivity, keep spawn×connect. Update the
       class and `__init__` docstrings (tee semantics, 0.24 gate, `recording_dir`
       naming convention, `resolved_recording_path` contract).
@@ -180,7 +194,8 @@ file-only failures is complexity the failure likelihood does not buy.
       the extended `_StartupRR` has all three, so the fallback test subclasses or
       deletes them; live only + one warning, twice to prove warn-once),
       `resolved_recording_path` None when no recording target, None after the
-      sink degrades on startup failure (the except-handler reset), None when
+      sink degrades on startup failure (the except-handler reset), None after
+      the old-SDK tee fallback (the fallback's explicit clear), None when
       `recording_dir` is set but rerun-sdk is absent (SDK-less lifecycle test
       beside the existing `skipif(_RERUN_INSTALLED)` tests at
       tests/test_rerun_sink.py:168-184 — this is the branch main CI actually
@@ -206,15 +221,20 @@ file-only failures is complexity the failure likelihood does not buy.
 - [ ] `cli.py`: `--rerun-save` flag, resolution, the three sink-construction branches,
       status lines, post-eval `.rrd` path report, `config show` row. **Extend
       `_FakeRerunSink` in `tests/test_registry_cli.py:5596-5608` first**: its
-      `__init__` must accept `recording_dir` and the instance must carry a
-      `resolved_recording_path` attribute, or all ~8 existing `_fake_rerun` tests
-      fail with `TypeError` the moment the CLI passes the new kwarg by default.
+      `__init__` must accept `recording_dir` (13 tests use the `_fake_rerun`
+      fixture and would `TypeError` the moment the CLI passes the new kwarg by
+      default) and should carry a `resolved_recording_path` attribute for the
+      report tests (the CLI's `getattr` default keeps attribute-less fakes legal).
       New CLI tests (same fake pattern), asserting the **constructor kwarg**, not
       just the printed report (the `recording_dir=... if save_wanted else None`
       ternary produces no coverage arc, so only a kwarg assertion catches a
       forgotten branch): spawn default tee passes `recording_dir=log_dir`, spawn
-      + `--no-rerun-save` passes `None`, connect default tee passes
-      `recording_dir=log_dir`, connect + `--no-rerun-save` passes `None`,
+      + `--no-rerun-save` passes `None`, spawn with `--rerun-port` also carries
+      `recording_dir=log_dir` (the port-carrying `RerunSink(spawn=True, ...)`
+      call is a separate call site from the portless one, cli.py:1583/1585, and
+      a forgotten kwarg there would slip past the portless tests), connect
+      default tee passes `recording_dir=log_dir`, connect + `--no-rerun-save`
+      passes `None`,
       explicit `--rerun-save` alone builds the record-only sink, config
       `rerun_save = false` suppresses, config-true does not create viewer-less
       sinks, path report printed/suppressed.
