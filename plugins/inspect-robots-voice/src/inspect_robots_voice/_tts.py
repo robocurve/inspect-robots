@@ -17,8 +17,8 @@ _VOICES_FILENAME = "voices-v1.0.bin"
 _RELEASE_BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 _KOKORO_URL = f"{_RELEASE_BASE}/{_KOKORO_FILENAME}"
 _VOICES_URL = f"{_RELEASE_BASE}/{_VOICES_FILENAME}"
-_KOKORO_SHA256 = "PENDING_PIN"
-_VOICES_SHA256 = "PENDING_PIN"
+_KOKORO_SHA256 = "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5"
+_VOICES_SHA256 = "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d"
 
 
 class TtsEngine(Protocol):

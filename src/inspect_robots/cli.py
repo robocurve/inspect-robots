@@ -1532,8 +1532,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
         sinks: list[LogSink] = [sink]
-        if speaker_sink is not None:
-            sinks.append(speaker_sink)
         if args.rerun_connect is not None:
             from inspect_robots.logging.rerun_sink import RerunSink
 
@@ -1554,6 +1552,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 else:
                     sinks.append(RerunSink(spawn=True, spawn_port=port))
                 print(f"{_styled('rerun:', _CYAN)} live viewer")
+        # Speaker goes last so its bounded end-of-run drain never delays the
+        # JSON log write or the Rerun flush in the on_eval_end fan-out.
+        if speaker_sink is not None:
+            sinks.append(speaker_sink)
         try:
             logs = eval(
                 task,
