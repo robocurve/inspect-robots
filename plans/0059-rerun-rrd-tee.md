@@ -23,7 +23,10 @@
 > release documented, record-only status line named in the over-promise note,
 > blueprint-replay claim softened pending a manual check, help-text quote boundary,
 > `_set_sinks_warned` in the constructor list, connect-fallback arc heads-up) are
-> folded in.
+> folded in. R5 (vs main @ 6008edb1) returned NO SUBSTANTIVE ISSUES; its nits are
+> post-rebase line drift only, with every target named by symbol (sink block now
+> cli.py:1595-1621, spawn call sites 1617/1619, Ctrl-C 1641-1647, config show
+> ~2604, `_FakeRerunSink` at test_registry_cli.py:5880-5897) — navigate by symbol.
 
 **Goal:** Close #340. The live Rerun viewer (`inspect-robots run --rerun`) is the popular
 way to watch a rollout, but a live-viewed run persists no `.rrd`: `RerunSink` treats
