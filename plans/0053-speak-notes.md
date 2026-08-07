@@ -64,9 +64,14 @@ decision 4 for the `<3.14` marker).
   the policy performed an inference; messages are plain-JSON-type dicts shaped like
   `TrialRecord.policy_transcript` entries; **core does not enforce the shape on this live
   path, so sinks must render defensively and must not mutate** (see the module docstring).
-- `eval.py` `_SinkFan` (~line 113): fans `log_policy_messages` to every sink that defines
-  it — a second consumer costs nothing. `eval()` guarantees `on_eval_end` only on clean
-  paths; `on_trial_end` is the bounded-loss flush point (see the Rerun sink's docstring).
+- `eval.py` `_Broadcast` (~line 112): fans `log_policy_messages` to every sink that
+  defines it — a second consumer costs nothing. `eval()` guarantees `on_eval_end` only on
+  clean paths; `on_trial_end` is the bounded-loss flush point (see the Rerun sink's
+  docstring). The rollout delivers the final delta (the `done`/`give_up` message) and
+  then breaks out of the trial; `bus.on_trial_end` follows within moments in unattended
+  runs, and on the last trial the clean path reaches `bus.on_eval_end` shortly after —
+  the speaker's lifecycle must not treat those hooks as "abort now" (see design
+  decision 8).
 - `rollout.py` (~line 253): `stream_ok = callable(policy.transcript_delta) and
   callable(sink.log_policy_messages)`; the agent policy's `transcript_delta` returns
   sanitized OpenAI-style dicts appended since the previous call.
@@ -171,18 +176,35 @@ decision 4 for the `<3.14` marker).
    never kill or stall an eval. (Raw stderr from a sink coexisting with the attended
    operator footer follows the Rerun sink's existing precedent; unattended runs — the
    primary use case — have no footer at all.)
-8. **The control loop is never blocked.** `log_policy_messages` only walks the delta,
-   `json.loads`es tool-call arguments defensively (malformed or non-dict arguments,
-   missing/empty text, non-assistant roles are all skipped silently), and appends to a
-   bounded queue (`maxlen=4`, drop-oldest). Synthesis and playback happen on one daemon
-   worker thread. Stale narration is worse than skipped narration, hence drop-oldest;
-   drops are counted and reported in one line at trial end (`speaker: dropped N stale
-   note(s)`) — visible but not spammy, matching the Rerun sink's drop-report culture.
-   `on_trial_end` also clears the queue (notes must not leak across trials); the
-   utterance already playing finishes (bounded by one note's length). Playback writes
-   frames to a `sounddevice.OutputStream` in small chunks, checking a stop event between
-   chunks, so `close()` aborts within ~100ms; `close()` (also called by `on_eval_end`)
-   stops the worker and joins with a short timeout.
+8. **The control loop is never blocked, and terminal speech gets flush semantics, not
+   abort semantics.** `log_policy_messages` only walks the delta, `json.loads`es
+   tool-call arguments defensively (malformed or non-dict arguments, missing/empty
+   text, non-assistant roles are all skipped silently), and appends to a bounded queue
+   (`maxlen=4`, drop-oldest). Synthesis and playback happen on one daemon worker
+   thread. Stale narration is worse than skipped narration, hence drop-oldest; drops
+   are counted at enqueue. Lifecycle, hook by hook:
+   - `on_trial_start` clears anything left from the previous trial (notes must not leak
+     across trials) and, when the drop counter is nonzero, prints one line
+     (`speaker: dropped N stale note(s)`) and resets it — visible but not spammy,
+     matching the Rerun sink's drop-report culture. Clearing at trial **start** rather
+     than trial end is deliberate: the rollout enqueues the `done`/`give_up` message
+     and returns almost immediately, so an `on_trial_end` clear would routinely delete
+     the just-enqueued summary while the worker finishes the previous note. Between
+     trials (scoring, grading, operator gates) the summary plays out naturally.
+   - `on_eval_end` (clean path only) **drains**: wait up to ~15s for the queue to empty
+     and the in-flight utterance to finish, then `close()`. The flagship unattended
+     single-trial run must end with the summary spoken, not clipped. The drain bound
+     keeps torque-holding time finite; scoring/grading already spends comparable time
+     between rollout and exit.
+   - `close()` without a prior drain (the CLI `finally` on error/interrupt paths, which
+     runs before `embodiment.close()` releases torque) is a hard abort: set the stop
+     event, current playback cuts within ~100ms, join the worker (~5s ceiling), close
+     the stream. Error paths should not narrate. `close()` is idempotent, so the
+     `finally` after a drained `on_eval_end` is a no-op.
+   - The worker checks the stop event between queue pop and synthesis, immediately
+     after synthesis, and between playback chunks (frames written to a
+     `sounddevice.OutputStream` in small chunks), so the ~5s join ceiling is a true
+     worst case even mid-`Kokoro.create()` is only waited out, never mid-playback.
 9. **What is spoken, verbatim: move/capture `note`, `done` `summary`, `give_up`
    `reason`.** `hindsight` is retrospective self-critique addressed to future attempts,
    not operator narration — never spoken. Assistant free text, observations, tool
@@ -242,18 +264,23 @@ decision 4 for the `<3.14` marker).
   `sounddevice.OutputStream` wrapper, lazy import inside it). `start()` builds engine +
   playback (loud failures propagate); `log_policy_messages` enqueues per design
   decision 8 and is a no-op before `start()` or after worker death; worker loop:
-  pop → synthesize → apply `volume` gain → chunked write with stop-event checks; error
-  handling per design decision 7; `on_trial_end` clears queue + prints the drop report
-  when `dropped > 0`, then resets the counter; `on_eval_end` → `close()`; `close()`
-  idempotent, sets stop event, joins worker (timeout ~5s), closes playback.
+  pop → (stop check) → synthesize → (stop check) → apply `volume` gain → chunked write
+  with stop-event checks; error handling per design decision 7; `on_trial_start` clears
+  the queue + prints the drop report when `dropped > 0`, then resets the counter;
+  `on_eval_end` drains (queue empty + in-flight done, ~15s bound) then closes;
+  `close()` alone is a hard abort — idempotent, sets stop event, joins worker
+  (timeout ~5s), closes playback.
 - [ ] Tests (`tests/test_speaker.py`), all with fake engine/playback, no real audio:
   extraction table (move note; multiple tool_calls in one message; `done` summary spoken
   and hindsight NOT spoken; `give_up` reason; dict already parsed vs JSON string
   arguments; malformed JSON; missing/blank fields; non-assistant role; non-dict
-  message); enqueue→spoken order; overflow drops oldest and trial-end report prints once
-  with the right count then resets; queue cleared at trial end; worker exception → one
+  message); enqueue→spoken order; overflow drops oldest and the next `on_trial_start`
+  report prints once with the right count then resets; queue cleared at trial start,
+  NOT at trial end (a summary enqueued just before `on_trial_end` survives and gets
+  spoken); `on_eval_end` drains — a queued utterance finishes before close (and the
+  drain respects its time bound when the fake worker stalls); worker exception → one
   warning + inert (later `log_policy_messages` calls do nothing, eval hooks still no-op
-  safely); `close()` idempotent + aborts mid-utterance (stop event cuts chunked
+  safely); bare `close()` idempotent + aborts mid-utterance (stop event cuts chunked
   playback); `log_policy_messages` before `start()` is a safe no-op.
 
 ### Task 3: plugin factory + entry point + packaging
