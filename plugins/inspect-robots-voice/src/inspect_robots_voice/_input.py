@@ -169,9 +169,12 @@ class VoiceInput:
                 self._worker_error = exc
             # A dead pipeline must not keep the microphone streaming: the callback
             # would fill the bounded queue and warn from PortAudio's thread, tearing
-            # the operator's status line long after voice stopped mattering.
-            capture = self._capture
-            self._capture = None
+            # the operator's status line long after voice stopped mattering. The
+            # ownership swap is atomic under the shared lock because close() can run
+            # concurrently from the CLI thread, and PortAudio cannot survive two
+            # threads closing one stream.
+            with self._lock:
+                capture, self._capture = self._capture, None
             if capture is not None:
                 with suppress(BaseException):
                     capture.close()

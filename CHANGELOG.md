@@ -14,7 +14,7 @@ All notable changes to this project are documented here. The format is based on
   library fails with per-OS install commands instead of a bare loader error; a
   voice pipeline failure now releases the microphone immediately instead of
   spamming queue-full warnings over the status line; docs gained a
-  prerequisites section ([plan 0051](plans/0051-voice-subprocess-capture-fallback.md)
+  prerequisites section ([plan 0052](plans/0052-voice-subprocess-capture-fallback.md)
   sketches a zero-setup capture fallback).
 
 - **Agent plugin (0.24.0):** `-P effort=` now also takes a number in
