@@ -145,7 +145,7 @@ def _png_dimensions_from_document(document: str) -> tuple[int, int]:
         ("success", "completed", "status-completed"),
         ("error", "error", "status-error"),
         ("cancelled", "cancelled", "status-cancelled"),
-        ("started", "started", "status-neutral"),
+        ("started", "running", "status-running"),
         ("unexpected", "unexpected", "status-neutral"),
     ],
 )
@@ -200,6 +200,52 @@ def test_non_finite_metric_written_as_null_renders_as_not_available() -> None:
 
     assert "min_distance_to_goal" in document
     assert '<div class="stat-value">n/a</div>' in document
+
+
+def test_running_refresh_banner_pending_scores_and_escaping() -> None:
+    log = _log(status="started")
+    scene = dataclasses.replace(
+        log.samples[0],
+        trial_metadata=(
+            {},
+            {"live": {"step": 4, "updated_at": "2026-08-06T12:34:56<script>"}},
+        ),
+    )
+
+    document = render_html(
+        dataclasses.replace(log, samples=(scene,)),
+        title="running",
+        refresh_seconds=2,
+    )
+
+    assert '<meta http-equiv="refresh" content="2">' in document
+    assert "RUNNING — refreshes every 2s · last update 12:34:56" in document
+    assert '<span class="badge status-running">running</span>' in document
+    assert '<span class="score-chip">trial 1 pending</span>' in document
+
+    hostile_scene = dataclasses.replace(
+        scene,
+        trial_metadata=({}, {"live": {"step": 4, "updated_at": "<script>"}}),
+    )
+    hostile = render_html(
+        dataclasses.replace(log, samples=(hostile_scene,)),
+        title="running",
+        refresh_seconds=2,
+    )
+    assert "last update &lt;script&gt;" in hostile
+    assert "&amp;lt;script&amp;gt;" not in hostile
+
+
+def test_refresh_and_pending_output_are_opt_in() -> None:
+    completed = render_html(_log(), title="complete")
+    static_started = render_html(_log(status="started"), title="stale")
+
+    assert 'http-equiv="refresh"' not in completed
+    assert "RUNNING —" not in completed
+    assert "pending" not in completed
+    assert 'http-equiv="refresh"' not in static_started
+    assert "RUNNING —" not in static_started
+    assert "trial 1 pending" in static_started
 
 
 def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:

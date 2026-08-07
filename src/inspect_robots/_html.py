@@ -20,7 +20,7 @@ from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve
 from inspect_robots.frames import _safe
 from inspect_robots.log import EvalLog, SceneResult
 
-_STATUS_DISPLAY = {"success": "completed"}
+_STATUS_DISPLAY = {"started": "running", "success": "completed"}
 _JSON_STRING_LIMIT = 2048
 # \d{1,12}, not \d+: a hostile multi-thousand-digit "step" must miss the
 # regex and degrade rather than trip int()'s conversion-length limit.
@@ -135,10 +135,16 @@ h3 { margin: 24px 0 10px; font-size: 13px; text-transform: uppercase; letter-spa
 .meta { color: var(--muted); margin-top: 8px; display: flex; gap: 16px; flex-wrap: wrap; }
 .badge, .chip { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 12px; }
 .status-completed { color: var(--green); background: var(--green-bg); }
+.status-running { color: var(--amber); background: var(--amber-bg); }
 .status-error { color: var(--red); background: var(--red-bg); }
 .status-cancelled { color: var(--grey); background: var(--grey-bg); }
 .status-neutral { color: var(--neutral); background: var(--neutral-bg); }
 .chip { color: var(--muted); background: var(--grey-bg); }
+.running-banner {
+  margin: 18px 0 0; padding: 11px 14px; color: var(--amber);
+  background: var(--amber-bg); border: 1px solid var(--amber-line); border-radius: 7px;
+  font-weight: 650;
+}
 .spec-strip {
   margin: 24px 0; padding: 18px 20px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px;
@@ -287,6 +293,8 @@ def _status_class(status: str) -> str:
     displayed = _display_status(status)
     if displayed == "completed":
         return "status-completed"
+    if displayed == "running":
+        return "status-running"
     if status == "error":
         return "status-error"
     if status == "cancelled":
@@ -763,6 +771,7 @@ def _scene_section(
     budget: _FrameBudget,
     log_path: Path | None,
     frame_ctx: _FrameContext | None = None,
+    scores_pending: bool = False,
 ) -> str:
     """Render one complete scene card and its available trial transcripts."""
     instruction = (
@@ -777,7 +786,12 @@ def _scene_section(
         "" if not reduced else f'<h3>Reduced scores</h3><div class="score-row">{reduced}</div>'
     )
     epoch_chips = "".join(
-        _score_chips(epoch, prefix=f"trial {index} ") for index, epoch in enumerate(scene.epochs)
+        (
+            f'<span class="score-chip">{_escape(f"trial {index} pending")}</span>'
+            if scores_pending and not epoch
+            else _score_chips(epoch, prefix=f"trial {index} ")
+        )
+        for index, epoch in enumerate(scene.epochs)
     )
     epoch_block = (
         ""
@@ -854,6 +868,7 @@ def render_html(
     log_path: Path | None = None,
     frames_dir: Path | None = None,
     frames_budget_bytes: int = 50_000_000,
+    refresh_seconds: int | None = None,
 ) -> str:
     """Return one self-contained HTML document describing the complete evaluation log."""
     git = (
@@ -918,6 +933,7 @@ def render_html(
             budget=budget,
             log_path=log_path,
             frame_ctx=frame_ctx,
+            scores_pending=log.status == "started",
         )
         for scene in log.samples
     )
@@ -934,11 +950,34 @@ def render_html(
         f"<span>inspect-robots {_escape(log.eval.inspect_robots_version)}</span>"
         f"<span>{git}</span>{frames_chip}"
     )
+    refresh = (
+        ""
+        if refresh_seconds is None
+        else f'<meta http-equiv="refresh" content="{_escape(refresh_seconds)}">\n'
+    )
+    last_update: str | None = None
+    for scene in reversed(log.samples):
+        for metadata in reversed(scene.trial_metadata):
+            live = metadata.get("live")
+            if isinstance(live, dict) and isinstance(live.get("updated_at"), str):
+                updated_at = live["updated_at"]
+                time_tail = updated_at.partition("T")[2]
+                last_update = time_tail[:8] if time_tail else updated_at
+                break
+        if last_update is not None:
+            break
+    running_banner = ""
+    if refresh_seconds is not None:
+        update = "" if last_update is None else f" · last update {_escape(last_update)}"
+        running_banner = (
+            '<div class="running-banner">RUNNING — refreshes every '
+            f"{_escape(refresh_seconds)}s{update}</div>"
+        )
     document = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{refresh}<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
 <style>{_STYLES}</style>
 <script>{_FRAME_CLICK_SCRIPT}</script>
@@ -948,6 +987,7 @@ def render_html(
   <div class="header-top"><h1>{_escape(log.eval.task)}</h1>{_status_badge(log.status)}</div>
   <div class="meta"><span>{_escape(log.eval.created)}</span>
   {meta_tail}</div>
+  {running_banner}
 </div></header>
 <main>
   <section class="spec-strip"><dl>{"".join(definitions)}</dl></section>

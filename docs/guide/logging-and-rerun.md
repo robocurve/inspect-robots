@@ -21,6 +21,9 @@ a read-back guarantee: a newer Inspect Robots always reads an older log.
 Pressing Ctrl-C during a rollout writes a log with `status: "cancelled"` and
 everything gathered so far, including the partial trial record and transcript.
 
+To follow completed trials and the current policy conversation in a browser,
+see [Watching a run live](live-view.md).
+
 ## Sinks
 
 A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecycle
@@ -28,6 +31,7 @@ A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecy
 `on_eval_end`). Builtins:
 
 - [`JsonLogSink`](/api/#inspect_robots.logging.json_log.JsonLogSink): the default; the canonical JSON record.
+- [`LiveLogSink`](/api/#inspect_robots.logging.live_log.LiveLogSink): a transient, schema-valid running snapshot.
 - [`RerunSink`](/api/#inspect_robots.logging.rerun_sink.RerunSink): optional, lazily imported.
 
 Passing `sinks=` replaces the default `JsonLogSink`, it does not add to it.
@@ -38,6 +42,9 @@ from inspect_robots.logging import JsonLogSink, RerunSink
 
 eval(task, policy, embodiment, sinks=[JsonLogSink("logs"), RerunSink("run.rrd")])
 ```
+
+`eval_set(..., sinks=...)` reuses the same sink instances across its sequential
+task runs. Caller-supplied sinks must reset their run state in `on_eval_start`.
 
 ## Rerun visualization
 

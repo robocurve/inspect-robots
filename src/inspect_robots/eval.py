@@ -631,6 +631,7 @@ def eval_set(
     embodiment: Embodiment | str,
     *,
     log_dir: str = "logs",
+    sinks: list[LogSink] | None = None,
     seed: int | None = 0,
     fail_on_error: bool | float = False,
     controller: Controller | None = None,
@@ -650,6 +651,10 @@ def eval_set(
     hook, not both) and are resolved once here, so every task shares the same
     grader instance.
 
+    Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
+    sink must reset its per-run state in ``on_eval_start`` and tolerate one
+    complete lifecycle per task.
+
     Resumption of a partially-completed run (skipping already-finished scenes via
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
@@ -664,6 +669,7 @@ def eval_set(
                 policy,
                 embodiment,
                 log_dir=log_dir,
+                sinks=sinks,
                 seed=seed,
                 fail_on_error=fail_on_error,
                 controller=controller,
