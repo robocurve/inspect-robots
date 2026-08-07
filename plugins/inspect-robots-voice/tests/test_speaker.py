@@ -95,9 +95,50 @@ class _BlockingEngine(_FakeEngine):
         return np.ones(3, dtype=np.float32), 10
 
 
-def _sink(engine: _FakeEngine, playback: _FakePlayback, *, volume: float = 1.0) -> SpeakerSink:
+class _TaggedEngine(_FakeEngine):
+    def synthesize(self, text: str) -> tuple[npt.NDArray[np.float32], int]:
+        self.calls.append(text)
+        value = float(self.calls.index(text) + 1)
+        return np.full(3, value, dtype=np.float32), 10
+
+
+class _GatedPlayback(_FakePlayback):
+    def __init__(self, gated_writes: int = 0) -> None:
+        super().__init__()
+        self.entered = [threading.Event() for _ in range(gated_writes)]
+        self.release = [threading.Event() for _ in range(gated_writes)]
+        self._writes_condition = threading.Condition()
+
+    def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None:
+        with self._writes_condition:
+            super().write(samples, sample_rate)
+            index = len(self.writes) - 1
+            self._writes_condition.notify_all()
+        if index < len(self.entered):
+            self.entered[index].set()
+            self.release[index].wait(timeout=2.0)
+
+    def wait_for_writes(self, count: int, timeout: float = 1.0) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._writes_condition:
+            while len(self.writes) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._writes_condition.wait(timeout=remaining)
+        return True
+
+
+def _sink(
+    engine: _FakeEngine,
+    playback: _FakePlayback,
+    *,
+    volume: float = 1.0,
+    mode: str = "interrupt",
+) -> SpeakerSink:
     return SpeakerSink(
         volume=volume,
+        mode=mode,
         engine_factory=lambda: engine,
         playback_factory=lambda: playback,
     )
@@ -119,7 +160,7 @@ def _log(status: str) -> EvalLog:
 def test_enqueue_is_spoken_in_order_with_volume_gain() -> None:
     engine = _FakeEngine()
     playback = _FakePlayback()
-    sink = _sink(engine, playback, volume=0.25)
+    sink = _sink(engine, playback, volume=0.25, mode="queue")
     sink.start()
 
     sink.log_policy_messages(
@@ -147,7 +188,7 @@ def test_overflow_drops_oldest_and_reports_once_at_next_trial(
 ) -> None:
     engine = _BlockingEngine()
     playback = _FakePlayback()
-    sink = _sink(engine, playback)
+    sink = _sink(engine, playback, mode="queue")
     sink.start()
     sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "inflight"}))])
     assert engine.entered.wait(timeout=1.0)
@@ -168,7 +209,7 @@ def test_overflow_drops_oldest_and_reports_once_at_next_trial(
 def test_trial_start_clears_queued_prior_trial_notes() -> None:
     engine = _BlockingEngine()
     playback = _FakePlayback()
-    sink = _sink(engine, playback)
+    sink = _sink(engine, playback, mode="queue")
     sink.start()
     sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "inflight"}))])
     assert engine.entered.wait(timeout=1.0)
@@ -177,7 +218,6 @@ def test_trial_start_clears_queued_prior_trial_notes() -> None:
     sink.on_trial_start("new-scene", 0)
     engine.release.set()
     _wait_until(lambda: len(playback.writes) == 3)
-    time.sleep(0.02)
     sink.close()
 
     assert engine.calls == ["inflight"]
@@ -211,8 +251,7 @@ def test_successful_eval_end_drains_inflight_utterance_before_close() -> None:
 
     end_thread = threading.Thread(target=end_eval)
     end_thread.start()
-    time.sleep(0.02)
-    assert not finished.is_set()
+    assert not finished.wait(timeout=0.02)
     assert playback.close_calls == 0
     engine.release.set()
     end_thread.join(timeout=1.0)
@@ -341,3 +380,217 @@ def test_startup_factory_errors_propagate(which: str) -> None:
 
     with pytest.raises(RuntimeError, match=f"{which} unavailable"):
         sink.start()
+
+
+def test_constructor_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="mode must be one of: blocking, interrupt, queue"):
+        SpeakerSink(mode="unknown")
+
+
+def test_interrupt_cuts_inflight_within_one_chunk_and_plays_new_note() -> None:
+    engine = _TaggedEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback)
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "old"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+
+    sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "new"}))])
+    with sink._condition:
+        assert list(sink._queue) == ["new"]
+        assert sink._dropped == 0
+    playback.release[0].set()
+    assert playback.wait_for_writes(4)
+    sink.close()
+
+    assert engine.calls == ["old", "new"]
+    assert [float(chunk[0]) for chunk, _ in playback.writes] == [1.0, 2.0, 2.0, 2.0]
+    assert sink._thread is None
+
+
+def test_interrupt_discards_stale_synthesis_result_and_worker_survives() -> None:
+    engine = _BlockingEngine()
+    playback = _GatedPlayback()
+    sink = _sink(engine, playback)
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "stale"}))])
+    assert engine.entered.wait(timeout=1.0)
+
+    sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "current"}))])
+    engine.release.set()
+    assert playback.wait_for_writes(3)
+    sink.close()
+
+    assert engine.calls == ["stale", "current"]
+    assert len(playback.writes) == 3
+
+
+def test_interrupt_multi_text_delta_plays_all_texts_in_order() -> None:
+    engine = _FakeEngine()
+    playback = _FakePlayback()
+    sink = _sink(engine, playback)
+    sink.start()
+
+    sink.log_policy_messages(
+        0,
+        [
+            _assistant(
+                _tool_call("move", {"note": "move now"}),
+                _tool_call("done", {"summary": "finished"}),
+            )
+        ],
+    )
+    sink.on_eval_end(_log("success"))
+
+    assert engine.calls == ["move now", "finished"]
+    assert len(playback.writes) == 6
+
+
+def test_interrupt_trial_start_preserves_inflight_until_next_delta() -> None:
+    engine = _TaggedEngine()
+    playback = _GatedPlayback(gated_writes=2)
+    sink = _sink(engine, playback)
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("done", {"summary": "old"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+
+    sink.on_trial_start("next", 1)
+    assert sink._speech_gen == 1
+    playback.release[0].set()
+    assert playback.entered[1].wait(timeout=1.0)
+
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "new"}))])
+    playback.release[1].set()
+    assert playback.wait_for_writes(5)
+    sink.close()
+
+    assert engine.calls == ["old", "new"]
+    assert [float(chunk[0]) for chunk, _ in playback.writes] == [1.0, 1.0, 2.0, 2.0, 2.0]
+
+
+def test_blocking_waits_for_inflight_then_enqueues_and_plays() -> None:
+    engine = _TaggedEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback, mode="blocking")
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "first"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+    returned = threading.Event()
+
+    def enqueue_second() -> None:
+        sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "second"}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=enqueue_second)
+    hook_thread.start()
+    assert not returned.wait(timeout=0.02)
+    playback.release[0].set()
+    assert returned.wait(timeout=1.0)
+    assert playback.wait_for_writes(6)
+    hook_thread.join(timeout=1.0)
+    sink.close()
+
+    assert engine.calls == ["first", "second"]
+    assert [float(chunk[0]) for chunk, _ in playback.writes] == [1.0] * 3 + [2.0] * 3
+
+
+def test_blocking_fails_open_when_worker_dies() -> None:
+    class FailingBlockingEngine(_BlockingEngine):
+        def synthesize(self, text: str) -> tuple[npt.NDArray[np.float32], int]:
+            self.calls.append(text)
+            self.entered.set()
+            self.release.wait(timeout=2.0)
+            raise RuntimeError("failed while hook waited")
+
+    engine = FailingBlockingEngine()
+    playback = _FakePlayback()
+    sink = _sink(engine, playback, mode="blocking")
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "first"}))])
+    assert engine.entered.wait(timeout=1.0)
+    returned = threading.Event()
+
+    def enqueue_second() -> None:
+        sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "second"}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=enqueue_second)
+    hook_thread.start()
+    assert not returned.wait(timeout=0.02)
+    engine.release.set()
+    assert returned.wait(timeout=1.0)
+    hook_thread.join(timeout=1.0)
+    sink.close()
+
+    assert engine.calls == ["first"]
+    assert list(sink._queue) == []
+
+
+def test_blocking_fails_open_when_close_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _BlockingEngine()
+    playback = _FakePlayback()
+    sink = _sink(engine, playback, mode="blocking")
+    monkeypatch.setattr(speaker_module, "_JOIN_TIMEOUT", 1.0)
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "first"}))])
+    assert engine.entered.wait(timeout=1.0)
+    returned = threading.Event()
+
+    def enqueue_second() -> None:
+        sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "second"}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=enqueue_second)
+    close_thread = threading.Thread(target=sink.close)
+    hook_thread.start()
+    assert not returned.wait(timeout=0.02)
+    close_thread.start()
+    assert returned.wait(timeout=1.0)
+    engine.release.set()
+    hook_thread.join(timeout=1.0)
+    close_thread.join(timeout=1.0)
+
+    assert engine.calls == ["first"]
+    assert list(sink._queue) == []
+
+
+def test_blocking_timeout_degrades_once_and_keeps_drop_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    engine = _FakeEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback, mode="blocking")
+    monkeypatch.setattr(speaker_module, "_BLOCK_TIMEOUT", 0.02)
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "inflight"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+
+    sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "timed out"}))])
+    with sink._condition:
+        assert list(sink._queue) == ["timed out"]
+        assert sink._dropped == 0
+    assert capsys.readouterr().err == "speaker: blocking wait timed out; narration may lag\n"
+
+    monkeypatch.setattr(speaker_module, "_BLOCK_TIMEOUT", 10.0)
+    returned = threading.Event()
+
+    def enqueue_degraded() -> None:
+        sink.log_policy_messages(2, [_assistant(_tool_call("move", {"note": "degraded"}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=enqueue_degraded)
+    hook_thread.start()
+    assert returned.wait(timeout=0.2)
+    hook_thread.join(timeout=1.0)
+    for text in ["three", "four", "five"]:
+        sink.log_policy_messages(3, [_assistant(_tool_call("move", {"note": text}))])
+    with sink._condition:
+        assert list(sink._queue) == ["degraded", "three", "four", "five"]
+        assert sink._dropped == 1
+    assert capsys.readouterr().err == ""
+
+    playback.release[0].set()
+    sink.close()

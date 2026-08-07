@@ -311,7 +311,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="speak_args",
         action="append",
         metavar="k=v",
-        help="pass an argument to the inspect-robots-voice speaker (requires --speak)",
+        help="pass an argument to the inspect-robots-voice speaker, e.g. "
+        "-S mode=blocking|interrupt|queue (requires --speak)",
     )
     p_run.add_argument(
         "--max-steps",

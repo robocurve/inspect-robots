@@ -98,6 +98,7 @@ helps catch flags copied onto a non-speaking invocation:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `mode` | `interrupt` | Speech delivery: `blocking`, `interrupt`, or `queue` |
 | `voice` | `af_sarah` | Kokoro voice identifier |
 | `speed` | `1.0` | Positive synthesis speed multiplier |
 | `volume` | `1.0` | Output gain from `0` through `1` |
@@ -111,6 +112,37 @@ For example:
 ```bash
 inspect-robots run --task my-task --policy agent --embodiment my-robot \
     --speak -S voice=af_sarah -S speed=1.1 -S volume=0.8
+```
+
+### Speech modes
+
+Speech delivery defaults to `interrupt`. Each transcript delta cuts off the current utterance,
+discards superseded queued text, and speaks the new delta. Texts from the same delta, such as a
+move note followed by a terminal summary, still play in order.
+
+`blocking` waits for the previous note to finish before it queues the next one. The wait is
+bounded and fail-open. If it times out, the speaker prints one warning, queues the new note
+anyway, and permanently skips the blocking gate for the rest of the run so speech cannot halt
+the robot indefinitely:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S mode=blocking
+```
+
+The blocking gate is skipped on inference turns with no speakable note. Kokoro must synthesize a
+note before playback begins, which typically takes about 1 to 2 seconds, so speech does not start
+at the instant the joints are commanded. Blocking also delays `operator_input.poll()`, increasing
+Esc and `/stop` latency by up to one note duration, plus one 15 second timeout the single time the
+speaker degrades. It inserts multi-second gaps before `embodiment.step()`, so rigs with
+command-cadence watchdogs should prefer `interrupt`.
+
+`queue` restores the previous bounded drop-oldest behavior. Notes play in order but may describe
+older turns when inference runs ahead of narration:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S mode=queue
 ```
 
 The first `--speak` run downloads about 340 MB of pinned Kokoro model files. The cache is
@@ -132,8 +164,9 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
 ```
 
 `--speak` and `-S` apply only to `run`; `eval-set` does not accept them. Speech synthesis and
-playback run off the control loop. If either fails after startup, the speaker prints one warning
-and stays disabled for the rest of the run.
+playback always run on the speaker worker, never on the control thread. Only `blocking` may wait
+on that work, boundedly and fail-open. If synthesis or playback fails after startup, the speaker
+prints one warning and stays disabled for the rest of the run.
 
 Using `--speak` and `--voice` together can feed speaker output back into the microphone. Separate
 the microphone and speaker, or use a headset, until playback-aware microphone muting is
