@@ -47,7 +47,7 @@ class _Segmenter(Protocol):
 
 
 CaptureFactory = Callable[[Device, int, queue.Queue[AudioArray]], _Capture]
-TranscriberFactory = Callable[[str, str, str], _Transcriber]
+TranscriberFactory = Callable[[str, str, str, str], _Transcriber]
 SegmenterFactory = Callable[[], _Segmenter]
 
 
@@ -57,8 +57,8 @@ def _capture_factory(
     return MicrophoneCapture(device, sample_rate, audio_queue, blocksize=_BLOCK_SAMPLES)
 
 
-def _transcriber_factory(model: str, compute: str, language: str) -> _Transcriber:
-    return WhisperTranscriber(model, compute, language)
+def _transcriber_factory(model: str, compute: str, language: str, asr_device: str) -> _Transcriber:
+    return WhisperTranscriber(model, compute, language, asr_device)
 
 
 class VoiceInput:
@@ -71,6 +71,7 @@ class VoiceInput:
         device: Device = None,
         language: str = "en",
         compute: str = "auto",
+        asr_device: str = "cpu",
         _capture_factory_override: CaptureFactory | None = None,
         _transcriber_factory_override: TranscriberFactory | None = None,
         _segmenter_factory_override: SegmenterFactory | None = None,
@@ -79,6 +80,7 @@ class VoiceInput:
         self.device = device
         self.language = language
         self.compute = compute
+        self.asr_device = asr_device
         self._capture_factory = _capture_factory_override or _capture_factory
         self._transcriber_factory = _transcriber_factory_override or _transcriber_factory
         self._segmenter_factory = _segmenter_factory_override or EnergyGate
@@ -101,7 +103,9 @@ class VoiceInput:
             assert self._capture is not None
             return f"listening on {self._capture.device_name} (model={self.model})"
         self._stop.clear()
-        self._transcriber = self._transcriber_factory(self.model, self.compute, self.language)
+        self._transcriber = self._transcriber_factory(
+            self.model, self.compute, self.language, self.asr_device
+        )
         capture = self._capture_factory(self.device, _SAMPLE_RATE, self._audio_queue)
         self._capture = capture
         thread = threading.Thread(target=self._worker, name="inspect-robots-voice", daemon=True)
@@ -163,6 +167,14 @@ class VoiceInput:
             # Exception, and anything wider must not escape into the rollout loop.
             with self._lock:
                 self._worker_error = exc
+            # A dead pipeline must not keep the microphone streaming: the callback
+            # would fill the bounded queue and warn from PortAudio's thread, tearing
+            # the operator's status line long after voice stopped mattering.
+            capture = self._capture
+            self._capture = None
+            if capture is not None:
+                with suppress(BaseException):
+                    capture.close()
 
     def _process_block(self, block: npt.ArrayLike) -> None:
         with self._lock:

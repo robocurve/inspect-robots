@@ -20,10 +20,12 @@ def voice_input(**kwargs: ScalarValue) -> VoiceInput:
     """Build voice input from validated ``-V`` options.
 
     Supported keys are ``model`` (string, default ``"small"``), ``device`` (string or integer,
-    default system input), ``language`` (string, default ``"en"``), and ``compute`` (string,
-    default ``"auto"``). Unknown or incorrectly typed keys raise :class:`TypeError`.
+    default system input), ``language`` (string, default ``"en"``), ``compute`` (string,
+    default ``"auto"``), and ``asr_device`` (string, default ``"cpu"``; pass ``"cuda"`` or
+    ``"auto"`` to run Whisper on a GPU, which needs the CUDA runtime libraries installed).
+    Unknown or incorrectly typed keys raise :class:`TypeError`.
     """
-    allowed = {"model", "device", "language", "compute"}
+    allowed = {"model", "device", "language", "compute", "asr_device"}
     unknown = sorted(set(kwargs) - allowed)
     if unknown:
         raise TypeError(f"unexpected voice argument(s): {', '.join(unknown)}")
@@ -32,6 +34,7 @@ def voice_input(**kwargs: ScalarValue) -> VoiceInput:
     device = kwargs.get("device")
     language = kwargs.get("language", "en")
     compute = kwargs.get("compute", "auto")
+    asr_device = kwargs.get("asr_device", "cpu")
     if not isinstance(model, str):
         raise TypeError("model must be a string")
     if not (
@@ -44,4 +47,8 @@ def voice_input(**kwargs: ScalarValue) -> VoiceInput:
         raise TypeError("language must be a string")
     if not isinstance(compute, str):
         raise TypeError("compute must be a string")
-    return VoiceInput(model=model, device=device, language=language, compute=compute)
+    if not isinstance(asr_device, str):
+        raise TypeError("asr_device must be a string")
+    return VoiceInput(
+        model=model, device=device, language=language, compute=compute, asr_device=asr_device
+    )

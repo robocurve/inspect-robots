@@ -52,6 +52,7 @@ Repeat `-V key=value` to configure the voice plugin. Values use the same scalar 
 | `device` | system default | sounddevice input index or case-insensitive name substring |
 | `language` | `en` | transcription language |
 | `compute` | `auto` | CTranslate2 compute type |
+| `asr_device` | `cpu` | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
 
 For example:
 

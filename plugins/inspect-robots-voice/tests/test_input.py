@@ -88,7 +88,7 @@ def _voice(
 ) -> VoiceInput:
     voice = VoiceInput(
         _segmenter_factory_override=lambda: segmenter,
-        _transcriber_factory_override=lambda _model, _compute, _language: transcriber,
+        _transcriber_factory_override=lambda _model, _compute, _language, _asr: transcriber,
         _capture_factory_override=capture_factory,
     )
     voice._transcriber = transcriber
@@ -374,3 +374,29 @@ def test_start_failure_closes_partial_capture_and_propagates() -> None:
         voice.start()
 
     assert captures[0].close_calls == 1
+
+
+def test_worker_death_stops_capture_stream() -> None:
+    """A dead pipeline must release the microphone: otherwise PortAudio's callback keeps
+    filling the bounded queue and warns from its own thread, tearing the status line."""
+    pushed = threading.Event()
+    segmenter = _ScriptedSegmenter([RuntimeError("libcublas is gone")], pushed=pushed)
+    voice = _voice(segmenter, _Transcriber("unused"))
+    audio_queue = voice._audio_queue
+    capture = _Capture(audio_queue)
+    voice._capture_factory = lambda _device, _rate, _queue: capture
+    voice._transcriber_factory = lambda _m, _c, _l, _a: _Transcriber("unused")
+
+    voice.start()
+    audio_queue.put_nowait(_BLOCK)
+    assert pushed.wait(timeout=5.0)
+    for _ in range(100):
+        if capture.close_calls:
+            break
+        threading.Event().wait(0.01)
+
+    assert capture.close_calls == 1
+    with pytest.raises(RuntimeError, match="libcublas"):
+        voice.poll()
+    voice.close()
+    assert capture.close_calls == 1
