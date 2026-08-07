@@ -65,9 +65,12 @@ decision 4 for the `<3.14` marker).
   `TrialRecord.policy_transcript` entries; **core does not enforce the shape on this live
   path, so sinks must render defensively and must not mutate** (see the module docstring).
 - `eval.py` `_Broadcast` (~line 112): fans `log_policy_messages` to every sink that
-  defines it — a second consumer costs nothing. `eval()` guarantees `on_eval_end` only on
-  clean paths; `on_trial_end` is the bounded-loss flush point (see the Rerun sink's
-  docstring). The rollout delivers the final delta (the `done`/`give_up` message) and
+  defines it — a second consumer costs nothing. `on_eval_end` fires on halted, errored,
+  and even Ctrl-C-mid-rollout paths too (`eval.py` reaches `bus.on_eval_end` at ~line 607
+  before re-raising a cancellation); only Ctrl-C *outside* the rollout window can skip
+  it — so an end-of-run drain must gate on `log.status`, not on the hook firing.
+  `on_trial_end` is the bounded-loss flush point (see the Rerun sink's docstring). The
+  rollout delivers the final delta (the `done`/`give_up` message) and
   then breaks out of the trial; `bus.on_trial_end` follows within moments in unattended
   runs, and on the last trial the clean path reaches `bus.on_eval_end` shortly after —
   the speaker's lifecycle must not treat those hooks as "abort now" (see design
@@ -191,11 +194,14 @@ decision 4 for the `<3.14` marker).
      and returns almost immediately, so an `on_trial_end` clear would routinely delete
      the just-enqueued summary while the worker finishes the previous note. Between
      trials (scoring, grading, operator gates) the summary plays out naturally.
-   - `on_eval_end` (clean path only) **drains**: wait up to ~15s for the queue to empty
-     and the in-flight utterance to finish, then `close()`. The flagship unattended
-     single-trial run must end with the summary spoken, not clipped. The drain bound
-     keeps torque-holding time finite; scoring/grading already spends comparable time
-     between rollout and exit.
+   - `on_eval_end(log)` **drains only when `log.status == "success"`**: wait up to ~15s
+     for the queue to empty and the in-flight utterance to finish, then `close()`. The
+     flagship unattended single-trial run must end with the summary spoken, not
+     clipped. The drain bound keeps torque-holding time finite; scoring/grading already
+     spends comparable time between rollout and exit. For any other status (cancelled,
+     error, halted — `on_eval_end` fires on those paths too, see the Reference), it
+     hard-abort-closes immediately: a Ctrl-C or SafetyAbort must not be followed by 15s
+     of narration while the robot holds torque.
    - `close()` without a prior drain (the CLI `finally` on error/interrupt paths, which
      runs before `embodiment.close()` releases torque) is a hard abort: set the stop
      event, current playback cuts within ~100ms, join the worker (~5s ceiling), close
@@ -234,8 +240,9 @@ decision 4 for the `<3.14` marker).
 ### Task 1: plugin engine seam `_tts.py`
 
 - [ ] `plugins/inspect-robots-voice/src/inspect_robots_voice/_tts.py`: private module.
-  `TtsEngine` Protocol: `synthesize(text: str) -> tuple[Any, int]` (float32 mono samples,
-  sample rate). `KokoroEngine` implements it: constructor takes resolved `model` and
+  `TtsEngine` Protocol: `synthesize(text: str) -> tuple[np.ndarray, int]` (float32 mono
+  samples, sample rate; NumPy is already a typed plugin dep, so the array type is fine
+  under strict mypy). `KokoroEngine` implements it: constructor takes resolved `model` and
   `voices` paths plus `voice`, `speed`, `lang`; **imports `kokoro_onnx` inside
   `__init__`** behind a guarded try (ImportError message covers both "not installed" and
   the `python_version >= 3.14` marker case, per design decision 4), holds the `Kokoro`
@@ -267,9 +274,10 @@ decision 4 for the `<3.14` marker).
   pop → (stop check) → synthesize → (stop check) → apply `volume` gain → chunked write
   with stop-event checks; error handling per design decision 7; `on_trial_start` clears
   the queue + prints the drop report when `dropped > 0`, then resets the counter;
-  `on_eval_end` drains (queue empty + in-flight done, ~15s bound) then closes;
-  `close()` alone is a hard abort — idempotent, sets stop event, joins worker
-  (timeout ~5s), closes playback.
+  `on_eval_end(log)` drains (queue empty + in-flight done, ~15s bound) then closes when
+  `log.status == "success"`, hard-abort-closes for any other status; `close()` alone is
+  a hard abort — idempotent, sets stop event, joins worker (timeout ~5s), closes
+  playback.
 - [ ] Tests (`tests/test_speaker.py`), all with fake engine/playback, no real audio:
   extraction table (move note; multiple tool_calls in one message; `done` summary spoken
   and hindsight NOT spoken; `give_up` reason; dict already parsed vs JSON string
@@ -277,8 +285,10 @@ decision 4 for the `<3.14` marker).
   message); enqueue→spoken order; overflow drops oldest and the next `on_trial_start`
   report prints once with the right count then resets; queue cleared at trial start,
   NOT at trial end (a summary enqueued just before `on_trial_end` survives and gets
-  spoken); `on_eval_end` drains — a queued utterance finishes before close (and the
-  drain respects its time bound when the fake worker stalls); worker exception → one
+  spoken); `on_eval_end` with a success log drains — a queued utterance finishes before
+  close (and the drain respects its time bound when the fake worker stalls);
+  `on_eval_end` with a cancelled/error/halted log aborts instead of draining; worker
+  exception → one
   warning + inert (later `log_policy_messages` calls do nothing, eval hooks still no-op
   safely); bare `close()` idempotent + aborts mid-utterance (stop event cuts chunked
   playback); `log_policy_messages` before `start()` is a safe no-op.
@@ -318,7 +328,11 @@ decision 4 for the `<3.14` marker).
   without `--speak` exits; missing plugin exits with the pip hint; a fake registered
   sink receives coerced `-S` kwargs, gets `start()`ed before eval and `close()`d after
   (including when eval raises); sink lands in the sinks list; no `--speak` → sinks list
-  unchanged; `eval-set` rejects `--speak`. Keep core coverage at 100%.
+  unchanged; `eval-set` rejects `--speak`. Coverage of every new branch, explicitly:
+  `start()` raising → `SystemExit`; a resolved sink with no callable `start`; a sink
+  with no callable `close`; and the false arm of the new hint condition (a `KeyError`
+  escaping a sink factory must NOT get the pip hint — mirror the operator_input
+  precedent test at tests/test_registry_cli.py ~3436). Keep core coverage at 100%.
 
 ### Task 5: docs + changelog + module maps
 
