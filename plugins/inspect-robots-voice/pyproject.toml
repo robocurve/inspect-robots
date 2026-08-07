@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-voice"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local spoken operator feedback for attended Inspect Robots evaluations."
 dynamic = ["readme"]
 requires-python = ">=3.10"
@@ -22,6 +22,9 @@ classifiers = [
 dependencies = [
     "inspect-robots>=0.44",
     "numpy>=1.24",
+    # The marker preserves the workspace lock's unbounded Python range. Where installed,
+    # kokoro-onnx raises the effective NumPy floor to 2.0.2.
+    "kokoro-onnx>=0.4; python_version < '3.14'",
     "onnx-asr[cpu,hub]>=0.12,<1",
     "sounddevice>=0.4.6",
     "faster-whisper>=1.0",
@@ -32,6 +35,9 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
 
 [project.entry-points."inspect_robots.operator_inputs"]
 voice = "inspect_robots_voice:voice_input"
+
+[project.entry-points."inspect_robots.sinks"]
+speaker = "inspect_robots_voice:speaker_sink"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice"
@@ -59,7 +65,7 @@ known-first-party = ["inspect_robots", "inspect_robots_voice"]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*"]
+module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*", "kokoro_onnx.*"]
 ignore_missing_imports = true
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]

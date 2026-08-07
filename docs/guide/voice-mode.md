@@ -73,6 +73,72 @@ whose name contains that value, ignoring case. Missing or ambiguous names fail w
 available input-device table. `-V` without `--voice` is an error, which helps catch flags copied
 onto a non-voice invocation.
 
+## Speaking policy notes: `--speak`
+
+The same plugin can narrate an agent policy through the machine's audio output. Install it on
+the machine connected to the speaker:
+
+```bash
+pip install inspect-robots-voice
+```
+
+Pass `--speak` to `run`. This mode does not require a TTY, so it works in unattended runs and
+with `--no-prompt`:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot --speak
+```
+
+The speaker reads each `note` from move and capture tool calls as the policy streams it. It also
+reads the `summary` from `done` and the `reason` from `give_up`. It never reads `hindsight`,
+assistant free text, observations, tool results, or grader messages.
+
+Repeat `-S key=value` to configure speech. Passing `-S` without `--speak` is an error, which
+helps catch flags copied onto a non-speaking invocation:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `voice` | `af_sarah` | Kokoro voice identifier |
+| `speed` | `1.0` | Positive synthesis speed multiplier |
+| `volume` | `1.0` | Output gain from `0` through `1` |
+| `device` | system default | sounddevice output index or name substring |
+| `lang` | `en-us` | Kokoro language identifier |
+| `model` | cached release file | Path to an offline `kokoro-v1.0.onnx` override |
+| `voices` | cached release file | Path to an offline `voices-v1.0.bin` override |
+
+For example:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S voice=af_sarah -S speed=1.1 -S volume=0.8
+```
+
+The first `--speak` run downloads about 340 MB of pinned Kokoro model files. The cache is
+`$XDG_CACHE_HOME/inspect-robots-voice/`, or `~/.cache/inspect-robots-voice/` when
+`XDG_CACHE_HOME` is unset. To pre-seed a rig, copy both release files into that directory with
+their exact names:
+
+```bash
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/inspect-robots-voice"
+mkdir -p "$cache_dir"
+cp kokoro-v1.0.onnx voices-v1.0.bin "$cache_dir/"
+```
+
+An offline rig can bypass the cache and download path explicitly:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S model=/models/kokoro-v1.0.onnx -S voices=/models/voices-v1.0.bin
+```
+
+`--speak` and `-S` apply only to `run`; `eval-set` does not accept them. Speech synthesis and
+playback run off the control loop. If either fails after startup, the speaker prints one warning
+and stays disabled for the rest of the run.
+
+Using `--speak` and `--voice` together can feed speaker output back into the microphone. Separate
+the microphone and speaker, or use a headset, until playback-aware microphone muting is
+available.
+
 ## Silence filtering
 
 The plugin does not send every audio block to the policy. A local adaptive energy gate opens

@@ -1,20 +1,76 @@
-"""Local voice feedback for attended Inspect Robots evaluations.
+"""Local spoken input and policy narration for Inspect Robots evaluations.
 
 The ``voice`` operator-input entry point captures microphone audio, transcribes accepted
-utterances locally, and returns them through the core operator-message channel. Heavy audio and
-model dependencies are loaded only when voice input starts.
+utterances locally, and returns them through the core operator-message channel. The ``speaker``
+sink entry point narrates agent policy notes through local text-to-speech. Heavy audio and model
+dependencies are loaded only when their component starts.
 """
 
 from __future__ import annotations
 
 from inspect_robots_voice._input import VoiceInput
+from inspect_robots_voice._speaker import SpeakerSink
 from inspect_robots_voice._transcriber import _classify_model
 
-__all__ = ["VoiceInput", "voice_input"]
+__all__ = ["SpeakerSink", "VoiceInput", "speaker_sink", "voice_input"]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 ScalarValue = str | int | float | bool | None
+
+
+def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
+    """Build a speaker sink from validated ``-S`` options.
+
+    Supported keys are ``voice`` (string, default ``"af_sarah"``), ``speed`` (positive
+    number, default ``1.0``), ``volume`` (number from 0 through 1, default ``1.0``),
+    ``device`` (string or integer, default system output), ``lang`` (string, default
+    ``"en-us"``), and optional ``model`` and ``voices`` file paths. Unknown, incompatible,
+    or incorrectly typed values raise :class:`TypeError`.
+    """
+    allowed = {"voice", "speed", "volume", "device", "lang", "model", "voices"}
+    unknown = sorted(set(kwargs) - allowed)
+    if unknown:
+        raise TypeError(f"unexpected speaker argument(s): {', '.join(unknown)}")
+
+    voice = kwargs.get("voice", "af_sarah")
+    speed = kwargs.get("speed", 1.0)
+    volume = kwargs.get("volume", 1.0)
+    device = kwargs.get("device")
+    lang = kwargs.get("lang", "en-us")
+    model = kwargs.get("model")
+    voices = kwargs.get("voices")
+    if not isinstance(voice, str):
+        raise TypeError("voice must be a string")
+    if not isinstance(speed, (int, float)) or isinstance(speed, bool):
+        raise TypeError("speed must be a number")
+    if speed <= 0:
+        raise TypeError("speed must be positive")
+    if not isinstance(volume, (int, float)) or isinstance(volume, bool):
+        raise TypeError("volume must be a number")
+    if not 0 <= volume <= 1:
+        raise TypeError("volume must be between 0 and 1")
+    if not (
+        device is None
+        or isinstance(device, str)
+        or (isinstance(device, int) and not isinstance(device, bool))
+    ):
+        raise TypeError("device must be a string, integer, or none")
+    if not isinstance(lang, str):
+        raise TypeError("lang must be a string")
+    if model is not None and not isinstance(model, str):
+        raise TypeError("model must be a string or none")
+    if voices is not None and not isinstance(voices, str):
+        raise TypeError("voices must be a string or none")
+    return SpeakerSink(
+        voice=voice,
+        speed=float(speed),
+        volume=float(volume),
+        device=device,
+        lang=lang,
+        model=model,
+        voices=voices,
+    )
 
 
 def voice_input(**kwargs: ScalarValue) -> VoiceInput:

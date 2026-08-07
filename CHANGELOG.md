@@ -9,6 +9,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** `inspect-robots run` now accepts `--speak` with repeatable `-S k=v`
+  options. The CLI resolves the registered `speaker` sink, starts it
+  before evaluation, includes it in live policy-message fanout, and closes it
+  on every exit path. A missing speaker plugin gets the same
+  `pip install inspect-robots-voice` guidance as voice input
+  ([plan 0054](plans/0054-speak-notes.md),
+  [#327](https://github.com/robocurve/inspect-robots/issues/327)).
+
+- **Voice plugin (0.4.0):** new `SpeakerSink` narrates streamed move and capture
+  notes plus terminal summaries and reasons through a bounded, non-blocking
+  worker. Its local Kokoro engine lazily loads audio dependencies and downloads
+  pinned, SHA-256-verified model files into the user cache, with explicit paths
+  for offline rigs ([plan 0054](plans/0054-speak-notes.md),
+  [#327](https://github.com/robocurve/inspect-robots/issues/327)).
+
 - **Voice plugin (0.3.0):** Parakeet TDT 0.6B v3 through onnx-asr is now the
   default transcription backend. Its lower published word error rate and faster
   CPU inference replace faster-whisper `small`, while `-V model=small` remains

@@ -406,8 +406,9 @@ shipped from this repo as separate packages:
   then queues approver-checked joint targets behind `--policy capx`.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
   microphone speech into operator feedback during attended runs with
-  `--voice`. Spoken input is feedback-only, so trial end and verdicts stay on
-  the keyboard.
+  `--voice`, or narrate streamed policy notes and terminal summaries with
+  `run --speak`. Spoken input is feedback-only, so trial end and verdicts stay
+  on the keyboard.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
