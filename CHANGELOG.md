@@ -165,7 +165,9 @@ All notable changes to this project are documented here. The format is based on
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
-  inspect-robots-yam's `auto_start` (yam#87).
+  inspect-robots-yam's `auto_start` (yam#87). A slot can dynamically compute
+  its suggested default from existing `[embodiment.args]` by declaring a
+  `suggest: Callable[[Mapping[str, str]], bool]` callback (#303).
 
 - Policy connection failures now include an actionable action-server
   remediation hint in the recorded error message (#219).

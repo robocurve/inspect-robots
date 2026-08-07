@@ -141,6 +141,7 @@ def test_option_slots_valid_tuple_round_trips_in_order() -> None:
 
 def test_option_slots_default_is_false() -> None:
     assert OptionSlot(arg="a", label="A").default is False
+    assert OptionSlot(arg="a", label="A").suggest is None
 
 
 def test_option_slots_accepts_lists_and_ignores_offending_entries() -> None:
