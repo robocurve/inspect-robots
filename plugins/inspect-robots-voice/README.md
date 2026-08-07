@@ -14,7 +14,9 @@ likely Whisper hallucinations produce no message.
 pip install inspect-robots-voice
 ```
 
-PortAudio must be available for `sounddevice` on the machine connected to the microphone.
+PortAudio must be available for `sounddevice` on the machine connected to the microphone:
+`sudo apt install libportaudio2` (Debian and Ubuntu), `sudo dnf install portaudio` (Fedora),
+or `brew install portaudio` (macOS).
 
 ## Run
 

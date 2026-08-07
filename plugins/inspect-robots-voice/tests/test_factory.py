@@ -9,7 +9,7 @@ from inspect_robots_voice import VoiceInput, voice_input
 
 
 def test_package_exports_and_version() -> None:
-    assert inspect_robots_voice.__version__ == "0.1.0"
+    assert inspect_robots_voice.__version__ == "0.2.0"
     assert inspect_robots_voice.__all__ == ["VoiceInput", "voice_input"]
 
 
@@ -20,6 +20,7 @@ def test_factory_accepts_supported_device_forms(device: str | int | None) -> Non
         device=device,
         language="fr",
         compute="int8",
+        asr_device="cuda",
     )
 
     assert isinstance(voice, VoiceInput)
@@ -27,15 +28,17 @@ def test_factory_accepts_supported_device_forms(device: str | int | None) -> Non
     assert voice.device == device
     assert voice.language == "fr"
     assert voice.compute == "int8"
+    assert voice.asr_device == "cuda"
 
 
 def test_factory_defaults() -> None:
     voice = voice_input()
-    assert (voice.model, voice.device, voice.language, voice.compute) == (
+    assert (voice.model, voice.device, voice.language, voice.compute, voice.asr_device) == (
         "small",
         None,
         "en",
         "auto",
+        "cpu",
     )
 
 
@@ -48,6 +51,7 @@ def test_factory_defaults() -> None:
         ({"device": 1.5}, "device must be"),
         ({"language": None}, "language must be a string"),
         ({"compute": False}, "compute must be a string"),
+        ({"asr_device": 1}, "asr_device must be a string"),
     ],
 )
 def test_factory_rejects_unknown_or_mistyped_values(

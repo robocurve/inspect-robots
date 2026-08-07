@@ -16,8 +16,16 @@ Install the first-party voice plugin on the machine connected to the microphone:
 pip install inspect-robots-voice
 ```
 
-The plugin uses `sounddevice`, so PortAudio must also be available on that machine. Named
-faster-whisper models may be downloaded when voice input starts for the first time.
+The plugin uses `sounddevice`, which needs the PortAudio system library. pip installs the
+Python binding but not the library itself on Linux, so install it once per machine:
+
+```bash
+sudo apt install libportaudio2    # Debian, Ubuntu
+sudo dnf install portaudio        # Fedora
+brew install portaudio            # macOS
+```
+
+Named faster-whisper models may be downloaded when voice input starts for the first time.
 
 ## Run
 
@@ -44,6 +52,7 @@ Repeat `-V key=value` to configure the voice plugin. Values use the same scalar 
 | `device` | system default | sounddevice input index or case-insensitive name substring |
 | `language` | `en` | transcription language |
 | `compute` | `auto` | CTranslate2 compute type |
+| `asr_device` | `cpu` | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
 
 For example:
 

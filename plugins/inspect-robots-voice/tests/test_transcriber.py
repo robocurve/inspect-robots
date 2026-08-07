@@ -36,7 +36,7 @@ def _transcriber(segments: list[_Segment]) -> tuple[WhisperTranscriber, _Model]:
         "small",
         "auto",
         "en",
-        _model_factory=lambda _name, _compute: model,
+        _model_factory=lambda _name, _compute, _asr: model,
     )
     return transcriber, model
 
@@ -94,3 +94,18 @@ def test_multiple_segments_join_before_filtering() -> None:
 def test_empty_segment_sequence_is_rejected() -> None:
     transcriber, _model = _transcriber([])
     assert transcriber.transcribe(_audio()) is None
+
+
+def test_model_loads_on_cpu_by_default_and_honors_asr_device() -> None:
+    """CUDA auto-detection must never be the default: a GPU-visible machine without the
+    CUDA runtime libraries would crash at first transcription (observed on the omen rig)."""
+    seen: list[str] = []
+
+    def factory(_name: str, _compute: str, asr_device: str) -> _Model:
+        seen.append(asr_device)
+        return _Model([])
+
+    WhisperTranscriber("small", "auto", "en", _model_factory=factory)
+    WhisperTranscriber("small", "auto", "en", "cuda", _model_factory=factory)
+
+    assert seen == ["cpu", "cuda"]

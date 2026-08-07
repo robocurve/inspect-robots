@@ -28,7 +28,17 @@ class MicrophoneCapture:
         blocksize: int = 1_600,
     ) -> None:
         if _sounddevice is None:
-            import sounddevice
+            try:
+                import sounddevice
+            except OSError as exc:
+                # sounddevice loads the PortAudio shared library at import time;
+                # pip installs the Python binding but not the library on Linux.
+                raise OSError(
+                    f"{exc}. Voice mode needs the PortAudio system library: "
+                    "install it with 'sudo apt install libportaudio2' (Debian/Ubuntu), "
+                    "'sudo dnf install portaudio' (Fedora), or 'brew install portaudio' "
+                    "(macOS), then re-run. See docs/guide/voice-mode for details."
+                ) from exc
 
             _sounddevice = sounddevice
         self._sounddevice = _sounddevice

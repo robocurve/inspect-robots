@@ -45,13 +45,13 @@ class _Model(Protocol):
     ) -> tuple[Iterable[_Segment], object]: ...
 
 
-ModelFactory = Callable[[str, str], _Model]
+ModelFactory = Callable[[str, str, str], _Model]
 
 
-def _load_model(model: str, compute: str) -> _Model:
+def _load_model(model: str, compute: str, asr_device: str) -> _Model:
     from faster_whisper import WhisperModel
 
-    return cast(_Model, WhisperModel(model, compute_type=compute))
+    return cast(_Model, WhisperModel(model, device=asr_device, compute_type=compute))
 
 
 class WhisperTranscriber:
@@ -62,11 +62,12 @@ class WhisperTranscriber:
         model: str,
         compute: str,
         language: str,
+        asr_device: str = "cpu",
         *,
         _model_factory: ModelFactory | None = None,
     ) -> None:
         factory = _load_model if _model_factory is None else _model_factory
-        self._model = factory(model, compute)
+        self._model = factory(model, compute, asr_device)
         self._language = language
 
     def transcribe(self, audio: npt.ArrayLike) -> str | None:

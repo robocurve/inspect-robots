@@ -9,6 +9,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Voice plugin (0.2.0):** Whisper now runs on CPU by default with a new
+  `asr_device` option (`-V asr_device=cuda` opts into GPU); a missing PortAudio
+  library fails with per-OS install commands instead of a bare loader error; a
+  voice pipeline failure now releases the microphone immediately instead of
+  spamming queue-full warnings over the status line; docs gained a
+  prerequisites section ([plan 0052](plans/0052-voice-subprocess-capture-fallback.md)
+  sketches a zero-setup capture fallback).
+
 - **Agent plugin (0.24.0):** `-P effort=` now also takes a number in
   `[0.0, 1.0)` for servers that read reasoning effort as a fraction rather than
   a named level, and sends it unquantized so an effort sweep keeps the
