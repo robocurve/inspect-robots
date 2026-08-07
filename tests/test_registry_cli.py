@@ -3717,10 +3717,11 @@ def test_end_only_voice_mode_prints_log_only_notice(
         "expected_output",
         "expected_connect_calls",
         "expected_defer_calls",
+        "expected_footer_label",
     ),
     [
-        ("new", True, "linux", True, f"{USAGE}\n", 1, 0),
-        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0),
+        ("new", True, "linux", True, f"{USAGE}\n", 1, 0, "sent"),
+        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0, "noted"),
         (
             "new",
             True,
@@ -3730,6 +3731,7 @@ def test_end_only_voice_mode_prints_log_only_notice(
             "feedback typing stays off\n",
             0,
             0,
+            None,
         ),
         (
             "new",
@@ -3740,11 +3742,12 @@ def test_end_only_voice_mode_prints_log_only_notice(
             "feedback typing stays off\n",
             0,
             0,
+            None,
         ),
-        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1),
-        ("defer", False, "win32", False, "", 0, 0),
-        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0),
-        ("simulated", False, "linux", False, "", 0, 0),
+        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1, "sent"),
+        ("defer", False, "win32", False, "", 0, 0, None),
+        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0, "sent"),
+        ("simulated", False, "linux", False, "", 0, 0, None),
         (
             "bare",
             True,
@@ -3754,8 +3757,9 @@ def test_end_only_voice_mode_prints_log_only_notice(
             "and still owns the end-of-episode keypress; feedback typing stays off\n",
             0,
             0,
+            None,
         ),
-        ("bare", False, "win32", False, "", 0, 0),
+        ("bare", False, "win32", False, "", 0, 0, None),
     ],
 )
 def test_build_operator_session_enablement_matrix(
@@ -3766,6 +3770,7 @@ def test_build_operator_session_enablement_matrix(
     expected_output: str,
     expected_connect_calls: int,
     expected_defer_calls: int,
+    expected_footer_label: str | None,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -3806,6 +3811,14 @@ def test_build_operator_session_enablement_matrix(
     else:
         embodiment = BareEmbodiment()
     monkeypatch.setattr(sys, "platform", platform)
+    footer_labels: list[str] = []
+    original_enable_footer = OperatorSession.enable_footer
+
+    def record_enable_footer(self: OperatorSession, *, label: str) -> None:
+        footer_labels.append(label)
+        original_enable_footer(self, label=label)
+
+    monkeypatch.setattr(OperatorSession, "enable_footer", record_enable_footer)
 
     session, operator_input = cli._build_operator_session(policy, embodiment)
 
@@ -3815,6 +3828,7 @@ def test_build_operator_session_enablement_matrix(
     assert getattr(embodiment, "defer_calls", 0) == expected_defer_calls
     if expected_connect_calls:
         assert getattr(embodiment, "connected_session", None) is session
+    assert footer_labels == ([] if expected_footer_label is None else [expected_footer_label])
     assert capsys.readouterr().out == expected_output
 
 

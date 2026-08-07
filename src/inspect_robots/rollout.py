@@ -464,6 +464,17 @@ def rollout(
         record.events.append(error_event(t, "KeyboardInterrupt", "cancelled by user"))
         raise _CancelledTrial(record.error, record) from exc
     finally:
+        if operator_input is not None:
+            try:
+                end_trial = getattr(operator_input, "end_trial", None)
+                if callable(end_trial):
+                    end_trial()
+            except Exception as exc:
+                warnings.warn(
+                    f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         # Preserve measured latencies even when the trial ends in an error.
         record.inference_latencies = [
             lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None
