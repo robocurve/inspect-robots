@@ -3385,6 +3385,271 @@ def _voice_cli_argv(
     return argv
 
 
+def _speak_cli_argv(
+    tmp_path: Path,
+    *,
+    speak: bool = True,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(tmp_path),
+    ]
+    if speak:
+        argv.append("--speak")
+    argv.extend(extra)
+    return argv
+
+
+def test_speaker_args_require_speak_flag(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match=r"^-S requires --speak$"):
+        main(_speak_cli_argv(tmp_path, speak=False, extra=("-S", "voice=af_sarah")))
+
+
+def test_eval_set_rejects_speak_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "--speak"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: --speak" in capsys.readouterr().err
+
+
+def test_missing_speaker_plugin_exits_with_install_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force entry-point loading before deletion so resolve() cannot restore the
+    # real dev-installed plugin while this missing-plugin path is under test.
+    reg.registered("sink")
+    monkeypatch.delitem(reg._FACTORIES["sink"], "speaker", raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert "no sink named 'speaker'" in message
+    assert "pip install inspect-robots-voice" in message
+    assert "\n" not in message
+
+
+def test_speaker_factory_key_error_does_not_get_missing_plugin_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise KeyError("speaker factory exploded")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", broken_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert message == "speaker factory exploded"
+    assert "pip install inspect-robots-voice" not in message
+
+
+def test_bad_speaker_argument_is_reported_against_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def rejecting_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise TypeError("unexpected speaker argument")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", rejecting_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path, extra=("-S", "typoed_key=1")))
+
+    message = str(exc_info.value)
+    assert "invalid arguments for sink 'speaker'" in message
+    assert "-S k=v" in message
+    assert "pip install inspect-robots-voice" not in message
+
+
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_speaker_lifecycle_coerced_args_and_sink_wiring(
+    eval_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+
+    order: list[str] = []
+    instances: list[FakeSpeaker] = []
+
+    class FakeSpeaker:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            self.kwargs = kwargs
+            self.start_calls = 0
+            self.close_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+            order.append("start")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            order.append("close")
+
+    def speaker_factory(**kwargs: Any) -> FakeSpeaker:
+        speaker = FakeSpeaker(kwargs)
+        instances.append(speaker)
+        return speaker
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        order.append("eval")
+        assert order[:2] == ["start", "eval"]
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert instances[0] in sinks
+        if eval_fails:
+            raise RuntimeError("evaluation failed")
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", speaker_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    argv = _speak_cli_argv(
+        tmp_path,
+        extra=(
+            "-S",
+            "device=4",
+            "-S",
+            "enabled=true",
+            "-S",
+            "optional=none",
+            "-S",
+            "ratio=1.5",
+            "-S",
+            "voice=af_sarah",
+        ),
+    )
+
+    if eval_fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            main(argv)
+    else:
+        assert main(argv) == 0
+
+    assert len(instances) == 1
+    assert instances[0].kwargs == {
+        "device": 4,
+        "enabled": True,
+        "optional": None,
+        "ratio": 1.5,
+        "voice": "af_sarah",
+    }
+    assert instances[0].start_calls == 1
+    assert instances[0].close_calls == 1
+    assert order == ["start", "eval", "close"]
+
+
+def test_run_without_speak_keeps_default_sink_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    def unexpected_factory(**kwargs: Any) -> object:
+        del kwargs
+        pytest.fail("speaker factory called without --speak")
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert len(sinks) == 1
+        assert type(sinks[0]).__name__ == "JsonLogSink"
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", unexpected_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path, speak=False)) == 0
+
+
+def test_speaker_startup_error_exits_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def start(self) -> None:
+            raise RuntimeError("audio output unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = FailingSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    assert str(exc_info.value) == "audio output unavailable"
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_start_is_still_wired_and_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class StartlessSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = StartlessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert speaker in sinks
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_close_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class CloselessSpeaker:
+        def __init__(self) -> None:
+            self.start_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    speaker = CloselessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.start_calls == 1
+
+
 @pytest.mark.parametrize("command", ["run", "eval-set"])
 def test_voice_args_require_voice_flag(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

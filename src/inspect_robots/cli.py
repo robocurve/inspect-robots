@@ -293,6 +293,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_shared_eval_args(p_run)
     _add_config_arg(p_run)
     p_run.add_argument(
+        "--speak",
+        action="store_true",
+        help="speak live policy notes through the local audio output "
+        "(requires inspect-robots-voice)",
+    )
+    p_run.add_argument(
+        "-S",
+        dest="speak_args",
+        action="append",
+        metavar="k=v",
+        help="pass an argument to the inspect-robots-voice speaker (requires --speak)",
+    )
+    p_run.add_argument(
         "--max-steps",
         type=int,
         default=None,
@@ -640,7 +653,9 @@ def _resolve_or_exit(
         message = str(exc.args[0])
         # Only the registry's own unknown-name error earns the install hint; a
         # KeyError escaping a factory must not masquerade as a missing plugin.
-        if kind == "operator_input" and message.startswith("no operator_input named"):
+        if (kind == "operator_input" and message.startswith("no operator_input named")) or (
+            kind == "sink" and message.startswith("no sink named 'speaker'")
+        ):
             message = f"{message}; fix: pip install inspect-robots-voice"
         raise SystemExit(message) from exc
     except ConfigError as exc:
@@ -652,6 +667,7 @@ def _resolve_or_exit(
             "task": "-T",
             "policy": "-P",
             "embodiment": "-E",
+            "sink": "-S",
             "operator_input": "-V",
         }.get(kind, "the CLI args flag")
         raise SystemExit(
@@ -839,6 +855,37 @@ def _close_voice_input(voice_input: OperatorInput | None) -> None:
     if voice_input is None:
         return
     close_hook = getattr(voice_input, "close", None)
+    if callable(close_hook):
+        close_hook()
+
+
+def _build_speaker_sink(args: argparse.Namespace) -> LogSink | None:
+    """Validate speaker flags and construct the registered sink when requested."""
+    if args.speak_args and not args.speak:
+        raise SystemExit("-S requires --speak")
+    if not args.speak:
+        return None
+    return cast(
+        "LogSink",
+        _resolve_or_exit("sink", "speaker", **_parse_kvs(args.speak_args)),
+    )
+
+
+def _start_speaker_sink(speaker_sink: LogSink) -> None:
+    """Start a speaker sink through its optional startup hook."""
+    start_hook = getattr(speaker_sink, "start", None)
+    if callable(start_hook):
+        try:
+            start_hook()
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
+
+
+def _close_speaker_sink(speaker_sink: LogSink | None) -> None:
+    """Close a constructed speaker sink through its optional shutdown hook."""
+    if speaker_sink is None:
+        return
+    close_hook = getattr(speaker_sink, "close", None)
     if callable(close_hook):
         close_hook()
 
@@ -1448,6 +1495,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
+    speaker_sink: LogSink | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1473,6 +1521,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 cast(OperatorSession, operator_input),
                 resolved.policy,
             )
+        speaker_sink = _build_speaker_sink(args)
+        if speaker_sink is not None:
+            _start_speaker_sink(speaker_sink)
         # Attendedness picks the default grader, never gates grader wiring
         # (plan 0049): an explicit --grader is built session-less and relies
         # on its own fallback.
@@ -1481,6 +1532,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
         sinks: list[LogSink] = [sink]
+        if speaker_sink is not None:
+            sinks.append(speaker_sink)
         if args.rerun_connect is not None:
             from inspect_robots.logging.rerun_sink import RerunSink
 
@@ -1531,12 +1584,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
         try:
-            _close_voice_input(voice_input)
+            _close_speaker_sink(speaker_sink)
         finally:
             try:
-                embodiment.close()
+                _close_voice_input(voice_input)
             finally:
-                resolved.claim.release()
+                try:
+                    embodiment.close()
+                finally:
+                    resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1

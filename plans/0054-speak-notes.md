@@ -323,7 +323,7 @@ decision 4 for the `<3.14` marker).
 
 ### Task 4: core CLI `--speak` / `-S` (run only)
 
-- [ ] `cli.py`: add `--speak` (store_true) and repeatable `-S` (`dest="speak_args"`,
+- [x] `cli.py`: add `--speak` (store_true) and repeatable `-S` (`dest="speak_args"`,
   `metavar="k=v"`) to the **run parser only** — NOT `_add_shared_eval_args`, so
   `eval-set` rejects them as unknown flags. `_build_speaker_sink(args)`: `-S` without
   `--speak` → `SystemExit("-S requires --speak")`; resolve via
@@ -334,7 +334,7 @@ decision 4 for the `<3.14` marker).
   helpers mirror the voice ones (duck-typed `start`/`close`); start next to
   `_start_voice_input`, close in the same `finally`; append the started sink to the
   sinks list at the single assembly site in `_cmd_run` (~line 1474).
-- [ ] Tests (mirror the `--voice` approach in `tests/test_registry_cli.py`): `-S`
+- [x] Tests (mirror the `--voice` approach in `tests/test_registry_cli.py`): `-S`
   without `--speak` exits; missing plugin exits with the pip hint; a fake registered
   sink receives coerced `-S` kwargs, gets `start()`ed before eval and `close()`d after
   (including when eval raises); sink lands in the sinks list; no `--speak` → sinks list
