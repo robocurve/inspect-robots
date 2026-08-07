@@ -11,7 +11,7 @@ from inspect_robots_voice._input import VoiceInput
 
 __all__ = ["VoiceInput", "voice_input"]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 ScalarValue = str | int | float | bool | None
 
