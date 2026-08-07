@@ -58,18 +58,32 @@ int8 ONNX download is ~640 MB one-time via the HF hub cache.
 
 ## Design decisions (and why)
 
-1. **Backend is inferred from the model name; no new flag.** A model string containing
-   `"parakeet"` (case-insensitive) selects the onnx-asr backend; anything else keeps
-   faster-whisper. Friendly aliases map onto the canonical onnx-asr name:
-   `"parakeet"` and `"parakeet-tdt-0.6b-v3"` → `"nemo-parakeet-tdt-0.6b-v3"`; a string
-   already starting with `"nemo-"` passes through untouched. The default `model`
-   becomes `"parakeet-tdt-0.6b-v3"`. Escape hatch stays one flag:
+1. **Backend is inferred from the model name; no new flag.** Precedence, evaluated on
+   the raw string:
+   - contains a path separator (`/` or `\`) → whisper (filesystem CT2 paths always
+     mean whisper, even a path like `/models/parakeet-ct2`);
+   - case-insensitive exact alias: `"parakeet"` or `"parakeet-tdt-0.6b-v3"` →
+     canonical `"nemo-parakeet-tdt-0.6b-v3"`, parakeet backend;
+   - case-insensitive prefix `"nemo-"` → parakeet backend, name passed through
+     lowercased (onnx-asr's registry is lowercase);
+   - any other string containing `"parakeet"` (e.g. `"parakeet-tdt-1.1b"`) →
+     `TypeError` listing the supported parakeet names, so typos fail at the factory,
+     not minutes later inside `start()`;
+   - everything else → whisper, exactly as today.
+   The default `model` becomes `"parakeet-tdt-0.6b-v3"`. Escape hatch stays one flag:
    `-V model=small` (or any Whisper size/path) restores 0.2.0 behavior exactly.
 2. **Selection lives in `_transcriber.py` as `resolve_transcriber(model, compute,
    language, asr_device) -> _Transcriber`,** and `_input.py`'s default
    `_transcriber_factory` simply calls it. The `TranscriberFactory` seam, `VoiceInput`,
    the worker, and every orchestration invariant are untouched — this PR changes which
-   object comes out of an existing seam, nothing else.
+   object comes out of an existing seam, nothing else. **Import topology (no cycle):**
+   `_parakeet.py` imports the shared private pre-check helpers from `_transcriber.py`
+   at module top (one direction), and `resolve_transcriber` imports
+   `ParakeetTranscriber` with a function-local
+   `from inspect_robots_voice._parakeet import ParakeetTranscriber` — never at
+   `_transcriber.py` module top. `resolve_transcriber` does selection and
+   canonicalization only; all cross-backend option policy lives in `voice_input`
+   (decision 5).
 3. **`ParakeetTranscriber` lives in a new `_parakeet.py`** (module map updated), lazy
    `import onnx_asr` at construction, `load_model(name, quantization="int8",
    providers=["CPUExecutionProvider"])` then `.with_timestamps()`. `transcribe()`
@@ -82,25 +96,36 @@ int8 ONNX download is ~640 MB one-time via the HF hub cache.
    pre-check (shared constant), empty/whitespace-text rejection, and the hallucination
    blocklist (free belt-and-suspenders; harmless on a transducer). Add: mean token
    logprob rejection, `mean(result.logprobs) < -2.5` → `None`, but **only when
-   `logprobs` is non-`None`** — a deliberately loose, uncalibrated threshold (we chose
+   `logprobs` is truthy** (`if logprobs:` — `None` AND the empty list both skip the
+   check; `mean([])` is NaN/raises depending on the implementation, and a missing list
+   deliberately fails open) — a deliberately loose, uncalibrated threshold (we chose
    not to bench; document it as a coarse garbage-catch, not a tuned filter). Drop:
    `no_speech_prob` and `avg_logprob` (Whisper-specific; onnx-asr exposes neither), and
    `vad_filter` (no equivalent; the energy gate plus transducer behavior covers it).
 5. **Cross-backend option semantics are validated loudly at the factory, not silently
-   ignored.** `language` changes type to `str | None`, default `None`:
-   - Whisper: `None` resolves to `"en"` (today's default preserved); explicit strings
-     pass through unchanged.
-   - Parakeet: v3 auto-detects among 25 languages; `None` is correct, and an explicit
-     `-V language=...` with a parakeet model raises
+   ignored — by VALUE, uniformly, in `voice_input` only.** The rule for every
+   whisper-only option is the same: with a parakeet model, a value other than the
+   backend-neutral default raises `TypeError`; the neutral default itself is always
+   accepted, whether typed or omitted. This makes the CLI's `_parse_kvs` coercion a
+   non-issue (`-V language=none` coerces to Python `None`, which IS the neutral value,
+   so a user typing the parakeet-correct thing is accepted, never scolded) and needs no
+   key-presence machinery (which `resolve_transcriber` could not perform anyway, since
+   it receives resolved values).
+   - `language` changes type to `str | None`, default `None`. Whisper: `None` resolves
+     to `"en"` inside `WhisperTranscriber` (today's behavior preserved); explicit
+     strings pass through. Parakeet: v3 auto-detects among 25 languages, so `None` is
+     correct; a non-`None` language with a parakeet model raises
      `TypeError("parakeet models auto-detect language; drop -V language or pick a
      whisper model")`.
-   - `asr_device`: Parakeet runs CPU-only in this plan (CUDA needs `onnxruntime-gpu`,
-     which we do not ship); `-V asr_device=...` other than `"cpu"` with a parakeet
-     model raises `TypeError("the parakeet backend runs on the CPU; use a whisper
-     model for -V asr_device=cuda")`. `compute` similarly applies to Whisper only;
-     explicit non-default `compute` with parakeet raises `TypeError`. Detecting
-     "explicit non-default" is trivial because the factory reads `kwargs` — presence
-     of the key is the signal, never the value.
+   - `asr_device`: parakeet runs CPU-only in this plan (CUDA needs `onnxruntime-gpu`,
+     which we do not ship); a value other than `"cpu"` with a parakeet model raises
+     `TypeError("the parakeet backend runs on the CPU; use a whisper model for
+     -V asr_device=cuda")`.
+   - `compute`: whisper-only (CTranslate2 compute type); a value other than `"auto"`
+     with a parakeet model raises `TypeError("compute applies to whisper models; the
+     parakeet backend is fixed to int8")`.
+   So `-V asr_device=cpu`, `-V compute=auto`, and `-V language=none` are all accepted
+   no-ops with parakeet — consistent by construction.
 6. **Version and licensing:** plugin 0.3.0 (default-model change is behavior-visible;
    0.x minor). README and the voice-mode docs page gain a one-line attribution:
    Parakeet TDT 0.6B v3 weights by NVIDIA, licensed CC-BY-4.0, downloaded from the
@@ -121,7 +146,10 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
 ### Task 1: dependency + scaffolding
 
 - [ ] `plugins/inspect-robots-voice/pyproject.toml`: add `onnx-asr[cpu,hub]>=0.12,<1`
-  to dependencies; bump version to `0.3.0`; `uv lock`.
+  to dependencies; bump version to `0.3.0`; `uv lock`. Expect the lock to move
+  onnxruntime on the py3.10 resolution only (onnx-asr pins `onnxruntime<1.24` there;
+  the advisory py3.10 CI tier covers it) — resolver-checked compatible with
+  faster-whisper 1.2.1's `onnxruntime>=1.14,<2`.
 - [ ] Bump `__version__` in `__init__.py` and the version-pinning test in
   `tests/test_factory.py` (it asserts the literal).
 
@@ -137,8 +165,8 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
 - [ ] Tests (fake model objects only; never import onnx_asr): accept/reject matrix —
   normal sentence accepted; empty text; whitespace; blocklist phrase as entire text;
   short-audio pre-check (no model call at all); mean-logprob below threshold rejected;
-  `logprobs=None` accepted when text is fine; sample_rate=16000 passed through;
-  audio reshaped to mono float32.
+  `logprobs=None` accepted when text is fine; `logprobs=[]` accepted (fail-open, no
+  NaN warning); sample_rate=16000 passed through; audio reshaped to mono float32.
 
 ### Task 3: backend selection + factory validation
 
@@ -151,25 +179,50 @@ the faster-whisper dependency (Whisper stays the multilingual-explicit and GPU o
   becomes `None` (threaded through the factory type and `WhisperTranscriber`'s
   `None -> "en"` resolution).
 - [ ] `__init__.py`: `voice_input` — default `model` `"parakeet-tdt-0.6b-v3"`;
-  `language` accepts `str | None` (default `None`); cross-backend `TypeError`s per
-  decision 5 use key-presence in `kwargs`, so `-V asr_device=cpu` with parakeet is
-  fine but any explicit `language`/`compute`/`asr_device=cuda` with parakeet errors.
+  `language` accepts `str | None` (default `None`): the existing
+  `isinstance(language, str)` check (`__init__.py:46-47`) widens to `str | None`;
+  cross-backend `TypeError`s per decision 5 are value-based (non-`None` language,
+  non-`"auto"` compute, non-`"cpu"` asr_device with a parakeet model), all raised
+  here, none in `resolve_transcriber`.
 - [ ] Tests: alias table (`parakeet`, `parakeet-tdt-0.6b-v3`, `nemo-parakeet-tdt-0.6b-v3`,
-  mixed case) → ParakeetTranscriber with the canonical name; `small`/`distil-small.en`/
-  a filesystem path → WhisperTranscriber with today's exact arguments; factory defaults
-  (`model`, `language=None`) updated; each cross-backend `TypeError` (message asserted);
-  whisper `language=None` resolves to `"en"`; explicit whisper language passes through.
+  mixed case) → ParakeetTranscriber with the canonical name; unknown parakeet-ish name
+  (`parakeet-tdt-1.1b`) → `TypeError` listing supported names; `small`/
+  `distil-small.en`/a filesystem path (including one whose basename contains
+  "parakeet", e.g. `/models/parakeet-ct2`) → WhisperTranscriber with today's exact
+  arguments; factory defaults (`model`, `language=None`) updated; each cross-backend
+  `TypeError` (message asserted) plus the accepted no-ops (`asr_device=cpu`,
+  `compute=auto`, `language=None` with parakeet); whisper `language=None` resolves to
+  `"en"`; explicit whisper language passes through. **Delete the now-inverted
+  rejection-matrix row** `({"language": None}, "language must be a string")` at
+  tests/test_factory.py:52.
+- [ ] `tests/test_input.py`: the two listening-line literals asserting
+  `(model=small)` (lines ~293 and ~325, defaults-built `VoiceInput`) become
+  `(model=parakeet-tdt-0.6b-v3)`; factory-override lambdas pick up the
+  `language: str | None` type.
 
 ### Task 4: docs, attribution, changelog, module maps
 
 - [ ] `docs/guide/voice-mode.md`: default model row and backend column in the `-V`
   table (which keys apply to parakeet vs whisper), download size note, escape hatch
-  (`-V model=small`), CC-BY-4.0 attribution line.
-- [ ] Plugin `README.md`: default-model paragraph + attribution line.
-- [ ] Plugin `CLAUDE.md`: module map row for `_parakeet.py`; invariant list gains
-  `onnx_asr` in the lazy-import rule.
+  (`-V model=small`), CC-BY-4.0 attribution line. **Rewrite the prose that becomes
+  false for the new default:** the "Silence filtering" section (lines ~76-79)
+  currently presents Silero VAD, `no_speech_prob`, and `avg_logprob` as the pipeline —
+  restate it per backend (parakeet: energy gate + duration + blocklist + coarse mean
+  token logprob; whisper: today's text); line ~28's "Named faster-whisper models may
+  be downloaded" becomes backend-neutral.
+- [ ] Plugin `README.md`: default-model paragraph + attribution line, and reword the
+  faster-whisper/VAD framing at lines ~5, ~9, ~46 so the description matches the new
+  default.
+- [ ] Plugin `CLAUDE.md`: module map row for `_parakeet.py`; reword the
+  `_transcriber.py` row (it is now whisper wrapper + backend selection + shared
+  gauntlet pieces); invariant list gains `onnx_asr` in the lazy-import rule.
+- [ ] Root `CLAUDE.md`: the plugins blurb says "microphone capture and faster-whisper
+  transcription" — becomes backend-neutral ("local transcription", parakeet default).
 - [ ] `CHANGELOG.md`: voice 0.3.0 entry (default flip, why, escape hatch, attribution),
-  linking issue #324 and this plan.
+  linking issue #324 and this plan, and **naming the breaking change**: with the new
+  default model, explicit whisper-only options (`-V language=fr`, `-V compute=int8`,
+  `-V asr_device=cuda`) now require also selecting a whisper model, where 0.2.0
+  accepted them bare.
 
 ### Task 5: gates
 
