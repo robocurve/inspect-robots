@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -109,6 +110,7 @@ def _styled(text: str, code: str) -> str:
 
 
 _BOLD = "1"
+_BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
 _CYAN = "36"
 _GREEN = "32"
@@ -156,6 +158,7 @@ _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 _SERVE_RERENDER_SECONDS = 60
+_SERVE_LIVE_RERENDER_SECONDS = 2
 _serve_sleep = time.sleep
 
 
@@ -206,6 +209,11 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         help="pass an argument to the inspect-robots-voice input (requires --voice)",
     )
     parser.add_argument("--log-dir", default="logs")
+    parser.add_argument(
+        "--no-live-log",
+        action="store_true",
+        help="disable the transient JSON snapshots used by view --serve",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=None, help="override each task's epoch count")
     parser.add_argument(
@@ -1435,6 +1443,25 @@ def _build_and_announce_guardrails(
     return approver
 
 
+def _announce_live_view(args: argparse.Namespace, resolved: _ResolvedComponents) -> None:
+    """Print the copyable browser-view command for agent runs with live logging."""
+    if resolved.policy_name != "agent" or args.no_live_log:
+        return
+    log_dir = shlex.quote(args.log_dir)
+    print(
+        _styled(
+            f"live: watch this run in your browser →  inspect-robots view {log_dir} --serve --open",
+            _BOLD_BRIGHT_MAGENTA,
+        )
+    )
+    print(
+        _styled(
+            "      each agent turn, notes, and operator/voice input, updating live",
+            _DIM,
+        )
+    )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
@@ -1449,7 +1476,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from inspect_robots import eval
-    from inspect_robots.logging import JsonLogSink
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
     from inspect_robots.scene import Scene
     from inspect_robots.task import Task
 
@@ -1496,6 +1523,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
     speaker_sink: LogSink | None = None
+    live_sink: LiveLogSink | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1509,6 +1537,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
+        _announce_live_view(args, resolved)
 
         operator_input = None
         operator_session = None
@@ -1532,6 +1561,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
         sinks: list[LogSink] = [sink]
+        if not args.no_live_log:
+            live_sink = LiveLogSink(args.log_dir)
+            sinks.append(live_sink)
         if args.rerun_connect is not None:
             from inspect_robots.logging.rerun_sink import RerunSink
 
@@ -1586,15 +1618,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
         try:
-            _close_speaker_sink(speaker_sink)
+            # A failing unlink (read-only remount, full disk) must not skip the
+            # close chain below or replace the run's real exception.
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                _close_voice_input(voice_input)
+                _close_speaker_sink(speaker_sink)
             finally:
                 try:
-                    embodiment.close()
+                    _close_voice_input(voice_input)
                 finally:
-                    resolved.claim.release()
+                    try:
+                        embodiment.close()
+                    finally:
+                        resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1646,6 +1685,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from inspect_robots import eval_set
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
 
     _check_shared_run_conflicts(args)
     task_names = _match_tasks(args.tasks)
@@ -1667,12 +1707,14 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
+    live_sink: LiveLogSink | None = None
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
+        _announce_live_view(args, resolved)
         operator_input = None
         operator_session = None
         if _attended(args):
@@ -1688,12 +1730,18 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # (plan 0049): an explicit --grader is built session-less and relies
         # on its own fallback.
         grader = _build_grader(args, defaults, operator_session)
+        sink = JsonLogSink(args.log_dir)
+        sinks: list[LogSink] = [sink]
+        if not args.no_live_log:
+            live_sink = LiveLogSink(args.log_dir)
+            sinks.append(live_sink)
         try:
             success, logs = eval_set(
                 tasks,
                 resolved.policy,
                 embodiment,
                 log_dir=args.log_dir,
+                sinks=sinks,
                 seed=args.seed,
                 fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
                 approver=approver,
@@ -1729,12 +1777,18 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
         try:
-            _close_voice_input(voice_input)
+            # A failing unlink must not skip the close chain (see _cmd_run).
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                embodiment.close()
+                _close_voice_input(voice_input)
             finally:
-                resolved.claim.release()
+                try:
+                    embodiment.close()
+                finally:
+                    resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
@@ -1833,6 +1887,17 @@ def _write_html(document: str, out_path: Path | None) -> int:
     return len(encoded)
 
 
+def _write_html_atomic(document: str, out_path: Path) -> int:
+    """Replace one UTF-8 document atomically and return its encoded byte count."""
+    encoded = document.encode("utf-8", errors="replace")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(f"{out_path.suffix}.tmp")
+    with tmp.open("w", encoding="utf-8", errors="replace") as handle:
+        handle.write(document)
+    os.replace(tmp, out_path)
+    return len(encoded)
+
+
 def _render_log_page(
     log: EvalLog,
     log_path: Path,
@@ -1840,6 +1905,8 @@ def _render_log_page(
     *,
     no_frames: bool,
     frames_budget: float,
+    refresh_seconds: int | None = None,
+    atomic: bool = False,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -1853,7 +1920,10 @@ def _render_log_page(
         log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
+        refresh_seconds=refresh_seconds,
     )
+    if atomic and out_path is not None:
+        return _write_html_atomic(document, out_path)
     return _write_html(document, out_path)
 
 
@@ -1961,6 +2031,21 @@ class _DirectoryRenderResult(NamedTuple):
     index_path: Path
 
 
+_LIVE_REDIRECT_SENTINEL = "<!-- inspect-robots live redirect stub -->"
+
+
+def _write_live_redirect_stub(path: Path) -> int:
+    """Atomically replace an orphaned live page with an idempotent index redirect."""
+    document = f"""{_LIVE_REDIRECT_SENTINEL}
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=index.html">
+<title>Run completed</title></head>
+<body><a href="index.html">Continue to the run index</a></body></html>
+"""
+    return _write_html_atomic(document, path)
+
+
 def _render_view_directory(
     args: argparse.Namespace,
     log_dir: Path,
@@ -1976,7 +2061,7 @@ def _render_view_directory(
         raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
 
     log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
-    if not log_paths:
+    if not log_paths and not args.serve:
         raise SystemExit(f"no top-level *.json logs found in {log_dir}")
 
     out_dir = log_dir / "html" if args.out is None else Path(args.out)
@@ -1989,6 +2074,10 @@ def _render_view_directory(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     page_names = _directory_page_names(log_paths)
+    # Derived from this pass's own glob, not the caller's earlier one: a live
+    # log appearing between the two globs must not have its freshly rendered
+    # page immediately stubbed as an orphan.
+    backed_live_pages = {page_names[path] for path in log_paths if path.name.endswith(".live.json")}
     entries: list[IndexEntry] = []
     pages_written = 0
     bytes_written = 0
@@ -1999,30 +2088,62 @@ def _render_view_directory(
     for index, log_path in enumerate(log_paths, start=1):
         page_name = page_names[log_path]
         page_path = out_dir / page_name
+        is_live_path = log_path.name.endswith(".live.json")
         try:
+            source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
             render_page = (
                 force
+                or log.status == "started"
                 or not page_path.exists()
-                or page_path.stat().st_mtime < log_path.stat().st_mtime
+                or page_path.stat().st_mtime_ns < source_stat.st_mtime_ns
             )
             if render_page:
-                print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
+                if not quiet:
+                    print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
                 bytes_written += _render_log_page(
                     log,
                     log_path,
                     page_path,
                     no_frames=args.no_frames,
                     frames_budget=args.frames_budget,
+                    refresh_seconds=(
+                        _SERVE_LIVE_RERENDER_SECONDS
+                        if args.serve and log.status == "started"
+                        else None
+                    ),
+                    atomic=log.status == "started",
                 )
+                if log.status != "started":
+                    os.utime(
+                        page_path,
+                        ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+                    )
                 pages_written += 1
             entries.append(_index_entry(log, log_path, page_name))
+        except FileNotFoundError:
+            if is_live_path:
+                continue
+            exc = FileNotFoundError(log_path)
+            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            entries.append(_unreadable_index_entry(log_path, exc))
         except Exception as exc:
             print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
             entries.append(_unreadable_index_entry(log_path, exc))
 
+    for live_page in out_dir.glob("*.live.html"):
+        if live_page.name in backed_live_pages:
+            continue
+        try:
+            with live_page.open(encoding="utf-8", errors="replace") as handle:
+                if handle.readline().rstrip("\r\n") == _LIVE_REDIRECT_SENTINEL:
+                    continue
+            bytes_written += _write_live_redirect_stub(live_page)
+        except OSError as exc:
+            print(f"warning: could not redirect {live_page.name}: {exc}", file=sys.stderr)
+
     index_path = out_dir / "index.html"
-    bytes_written += _write_html(
+    bytes_written += _write_html_atomic(
         render_index(entries, refresh_seconds=refresh_seconds),
         index_path,
     )
@@ -2106,6 +2227,8 @@ def _serve_view_directory(
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     sigterm_installed = False
     server_thread_started = False
+    previous_live_set: set[str] = set()
+    accumulated_seconds = 0
     try:
         signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
         sigterm_installed = True
@@ -2115,17 +2238,34 @@ def _serve_view_directory(
             open_url = _serve_open_url(bind_host, actual_port)
             _open_browser(open_url, open_url)
         while True:
-            _serve_sleep(_SERVE_RERENDER_SECONDS)
+            _serve_sleep(_SERVE_LIVE_RERENDER_SECONDS)
+            accumulated_seconds += _SERVE_LIVE_RERENDER_SECONDS
+            live_set = {path.name for path in log_dir.glob("*.live.json")}
+            if not (
+                live_set != previous_live_set
+                or live_set
+                or accumulated_seconds >= _SERVE_RERENDER_SECONDS
+            ):
+                continue
             try:
                 _render_view_directory(
                     args,
                     log_dir,
                     force=False,
                     quiet=True,
-                    refresh_seconds=_SERVE_RERENDER_SECONDS,
+                    refresh_seconds=(
+                        _SERVE_LIVE_RERENDER_SECONDS if live_set else _SERVE_RERENDER_SECONDS
+                    ),
                 )
             except (Exception, SystemExit) as exc:
                 print(f"warning: re-render failed: {exc}", file=sys.stderr)
+                # Reset the accumulator on failure too: an idle directory with
+                # a persistent render error must warn once per baseline period,
+                # not once per 2s tick.
+                accumulated_seconds = 0
+            else:
+                previous_live_set = live_set
+                accumulated_seconds = 0
     except KeyboardInterrupt:
         return 0
     finally:
@@ -2147,12 +2287,17 @@ def _serve_view_directory(
 
 def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
     """Render a logs directory and optionally serve it until stopped."""
+    live_set = {path.name for path in log_dir.glob("*.live.json")}
     render_result = _render_view_directory(
         args,
         log_dir,
         force=args.force,
         quiet=False,
-        refresh_seconds=_SERVE_RERENDER_SECONDS if args.serve else None,
+        refresh_seconds=(
+            (_SERVE_LIVE_RERENDER_SECONDS if live_set else _SERVE_RERENDER_SECONDS)
+            if args.serve
+            else None
+        ),
     )
     if args.serve:
         return _serve_view_directory(args, log_dir, render_result)
@@ -2175,6 +2320,8 @@ def _cmd_view(args: argparse.Namespace) -> int:
         raise SystemExit("--frames-budget must be a non-negative finite number")
 
     log_path = Path(args.log)
+    if args.serve and not log_path.exists():
+        log_path.mkdir(parents=True, exist_ok=True)
     if log_path.is_dir():
         return _cmd_view_directory(args, log_path)
     if args.serve:

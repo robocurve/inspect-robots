@@ -12,6 +12,7 @@ const sidebars: SidebarsConfig = {
         'guide/writing-a-benchmark',
         'guide/policies-and-embodiments',
         'guide/scoring',
+        'guide/live-view',
         'guide/logging-and-rerun',
         'guide/plugins',
         'guide/voice-mode',
