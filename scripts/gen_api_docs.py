@@ -42,6 +42,7 @@ _SECTIONS = (
         (
             "inspect_robots.logging.sink",
             "inspect_robots.logging.json_log",
+            "inspect_robots.logging.live_log",
             "inspect_robots.logging.rerun_sink",
         ),
     ),

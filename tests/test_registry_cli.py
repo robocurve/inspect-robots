@@ -158,6 +158,8 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
     assert out.count("hint:") == 3
     assert out.rstrip().endswith(f"hint: browse all logs: inspect-robots view {tmp_path}")
+    # The live-view tip is reserved for agent runs; a scripted policy is silent.
+    assert "live: watch this run" not in out
 
 
 @pytest.mark.parametrize("command", ["run", "eval-set"])
@@ -266,6 +268,73 @@ def test_cli_finally_unlinks_live_snapshot_after_prompt_interrupt(
     assert main(argv) == 130
     assert len(leaked) == 1
     assert not leaked[0].exists()
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_failing_live_unlink_still_closes_embodiment(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only-disk unlink failure must not skip close() or mask the interrupt."""
+    import inspect_robots
+    from inspect_robots.logging import LiveLogSink
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closes: list[str] = []
+
+    class _RecordingEmbodiment(CubePickEmbodiment):
+        """Record close() so the test can prove the release chain still ran."""
+
+        def close(self) -> None:
+            """Mark the close and defer to the real teardown."""
+            closes.append("closed")
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "cubepick", _RecordingEmbodiment)
+
+    leaked: list[Path] = []
+
+    def interrupt(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        live_sink = next(sink for sink in sinks if isinstance(sink, LiveLogSink))
+        live_sink.on_eval_start(_step_limit_log().eval)
+        assert live_sink.path is not None and live_sink.path.exists()
+        leaked.append(live_sink.path)
+        raise KeyboardInterrupt
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".live.json"):
+            raise PermissionError("read-only filesystem")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "scripted", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 130
+    assert closes == ["closed"]
+    assert len(leaked) == 1
+    assert leaked[0].exists()  # the unlink failed; the file stays, nothing raised
 
 
 @pytest.mark.parametrize(
@@ -2168,7 +2237,6 @@ def test_orphan_live_page_redirect_is_filesystem_derived_and_idempotent(
         force=False,
         quiet=True,
         refresh_seconds=60,
-        live_set=set(),
     )
     stub = orphan.read_text(encoding="utf-8")
     assert stub.splitlines()[0] == "<!-- inspect-robots live redirect stub -->"
@@ -2185,7 +2253,6 @@ def test_orphan_live_page_redirect_is_filesystem_derived_and_idempotent(
         force=False,
         quiet=True,
         refresh_seconds=60,
-        live_set=set(),
     )
 
 
@@ -2216,7 +2283,6 @@ def test_vanished_live_log_is_skipped_silently(
         force=False,
         quiet=True,
         refresh_seconds=2,
-        live_set={"gone.live.json"},
     )
 
     assert "could not read or render" not in capsys.readouterr().err
@@ -2254,7 +2320,6 @@ def test_vanished_completed_log_and_orphan_redirect_failure_warn(
         force=False,
         quiet=True,
         refresh_seconds=60,
-        live_set=set(),
     )
 
     err = capsys.readouterr().err
@@ -2292,7 +2357,6 @@ def test_directory_atomic_live_stub_and_index_writes_and_quiet_progress(
         force=False,
         quiet=True,
         refresh_seconds=2,
-        live_set={"run.live.json"},
     )
 
     assert set(replaced) == {
@@ -2357,7 +2421,6 @@ def test_completed_page_pins_source_nanosecond_mtime_and_live_always_renders(
         force=False,
         quiet=True,
         refresh_seconds=2,
-        live_set={"run.live.json"},
     )
     assert rendered == ["run.live.json"]
 
@@ -2557,7 +2620,7 @@ def test_view_serve_fast_live_and_disappearance_passes(
     render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
     args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
     args.host = "127.0.0.1"
-    passes: list[tuple[set[str], int | None]] = []
+    passes: list[int | None] = []
     ticks = 0
     live_path = logs / "turns.live.json"
 
@@ -2579,10 +2642,9 @@ def test_view_serve_fast_live_and_disappearance_passes(
         force: bool,
         quiet: bool,
         refresh_seconds: int | None,
-        live_set: set[str] | None = None,
     ) -> cli._DirectoryRenderResult:
         assert not force and quiet
-        passes.append((set() if live_set is None else live_set, refresh_seconds))
+        passes.append(refresh_seconds)
         return render_result
 
     monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
@@ -2590,7 +2652,7 @@ def test_view_serve_fast_live_and_disappearance_passes(
     monkeypatch.setattr(cli, "_render_view_directory", record_pass)
 
     assert cli._serve_view_directory(args, logs, render_result) == 0
-    assert passes == [({"turns.live.json"}, 2), (set(), 60)]
+    assert passes == [2, 60]
 
 
 def test_view_serve_preserves_sixty_second_idle_cadence(
@@ -2621,9 +2683,8 @@ def test_view_serve_preserves_sixty_second_idle_cadence(
         force: bool,
         quiet: bool,
         refresh_seconds: int | None,
-        live_set: set[str] | None = None,
     ) -> cli._DirectoryRenderResult:
-        del force, quiet, live_set
+        del force, quiet
         passes.append(refresh_seconds)
         return render_result
 
@@ -2674,7 +2735,6 @@ def test_view_serve_rerender_failure_warns_and_continues(
         force: bool,
         quiet: bool,
         refresh_seconds: int | None,
-        live_set: set[str] | None = None,
     ) -> cli._DirectoryRenderResult:
         nonlocal quiet_calls
         pass_force_values.append(force)
@@ -2688,7 +2748,6 @@ def test_view_serve_rerender_failure_warns_and_continues(
             force=force,
             quiet=quiet,
             refresh_seconds=refresh_seconds,
-            live_set=live_set,
         )
 
     def advance_loop(_seconds: float) -> None:
@@ -2735,7 +2794,6 @@ def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
         force: bool,
         quiet: bool,
         refresh_seconds: int | None,
-        live_set: set[str] | None = None,
     ) -> cli._DirectoryRenderResult:
         if quiet:
             raise KeyboardInterrupt
@@ -2745,7 +2803,6 @@ def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
             force=force,
             quiet=quiet,
             refresh_seconds=refresh_seconds,
-            live_set=live_set,
         )
 
     monkeypatch.setattr(cli, "_render_view_directory", interrupted_render)

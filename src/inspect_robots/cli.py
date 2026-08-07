@@ -1617,18 +1617,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # torque in close(); skipping this leaves a robot energized. The span
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
-        if live_sink is not None and live_sink.path is not None:
-            live_sink.path.unlink(missing_ok=True)
         try:
-            _close_speaker_sink(speaker_sink)
+            # A failing unlink (read-only remount, full disk) must not skip the
+            # close chain below or replace the run's real exception.
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                _close_voice_input(voice_input)
+                _close_speaker_sink(speaker_sink)
             finally:
                 try:
-                    embodiment.close()
+                    _close_voice_input(voice_input)
                 finally:
-                    resolved.claim.release()
+                    try:
+                        embodiment.close()
+                    finally:
+                        resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     return 0 if log.status == "success" else 1
@@ -1771,15 +1776,19 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # Same "close what we open" contract as _cmd_run: the CLI resolved the
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
-        if live_sink is not None and live_sink.path is not None:
-            live_sink.path.unlink(missing_ok=True)
         try:
-            _close_voice_input(voice_input)
+            # A failing unlink must not skip the close chain (see _cmd_run).
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                embodiment.close()
+                _close_voice_input(voice_input)
             finally:
-                resolved.claim.release()
+                try:
+                    embodiment.close()
+                finally:
+                    resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
@@ -1905,16 +1914,13 @@ def _render_log_page(
         from inspect_robots._video import resolve_frames_dir
 
         frames_dir = resolve_frames_dir(log.stats.frames_dir, log_path)
-    render_kwargs: dict[str, Any] = {}
-    if refresh_seconds is not None:
-        render_kwargs["refresh_seconds"] = refresh_seconds
     document = render_html(
         log,
         title=f"{log.eval.task} - {log_path.name}",
         log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
-        **render_kwargs,
+        refresh_seconds=refresh_seconds,
     )
     if atomic and out_path is not None:
         return _write_html_atomic(document, out_path)
@@ -2047,7 +2053,6 @@ def _render_view_directory(
     force: bool,
     quiet: bool,
     refresh_seconds: int | None,
-    live_set: set[str] | None = None,
 ) -> _DirectoryRenderResult:
     """Render one incremental logs-directory pass and return its output paths."""
     from inspect_robots import read_eval_log
@@ -2055,8 +2060,6 @@ def _render_view_directory(
     if args.out == "-":
         raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
 
-    if live_set is None:
-        live_set = {path.name for path in log_dir.glob("*.live.json")}
     log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
     if not log_paths and not args.serve:
         raise SystemExit(f"no top-level *.json logs found in {log_dir}")
@@ -2071,7 +2074,12 @@ def _render_view_directory(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     page_names = _directory_page_names(log_paths)
-    backed_live_pages = {page_names[path] for path in log_paths if path.name in live_set}
+    # Derived from this pass's own glob, not the caller's earlier one: a live
+    # log appearing between the two globs must not have its freshly rendered
+    # page immediately stubbed as an orphan.
+    backed_live_pages = {
+        page_names[path] for path in log_paths if path.name.endswith(".live.json")
+    }
     entries: list[IndexEntry] = []
     pages_written = 0
     bytes_written = 0
@@ -2250,10 +2258,13 @@ def _serve_view_directory(
                     refresh_seconds=(
                         _SERVE_LIVE_RERENDER_SECONDS if live_set else _SERVE_RERENDER_SECONDS
                     ),
-                    live_set=live_set,
                 )
             except (Exception, SystemExit) as exc:
                 print(f"warning: re-render failed: {exc}", file=sys.stderr)
+                # Reset the accumulator on failure too: an idle directory with
+                # a persistent render error must warn once per baseline period,
+                # not once per 2s tick.
+                accumulated_seconds = 0
             else:
                 previous_live_set = live_set
                 accumulated_seconds = 0
@@ -2289,7 +2300,6 @@ def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
             if args.serve
             else None
         ),
-        live_set=live_set,
     )
     if args.serve:
         return _serve_view_directory(args, log_dir, render_result)

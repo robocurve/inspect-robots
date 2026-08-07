@@ -235,8 +235,8 @@ inspect-robots view logs/ --serve --host 0.0.0.0
 can view the logs, including embedded camera frames. The served index
 auto-refreshes as new runs arrive.
 
-- Agent runs update their HTML report turn by turn. Scores appear when the
-  canonical final log replaces the running snapshot.
+Agent runs update their HTML report turn by turn while the run is active.
+Scores appear when the canonical final log replaces the running snapshot.
 
 ### More CLI commands
 
