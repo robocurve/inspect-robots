@@ -4,7 +4,9 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Critique status:** pending first round.
+> **Critique status:** R1 (2026-08-07, vs main @ c8ac6f09) found 7 substantive issues;
+> all folded in below (feed-level ESC resolution, time-floored grace, mode-aware deduped
+> usage reminder, corrected test inventory). R2 pending.
 
 **Goal:** Close #333. On attended runs with the operator console (`policy=agent` being the
 motivating case), pressing Enter on an empty input line currently ends the episode. Enter
@@ -24,7 +26,11 @@ run:
   line.
 - **Bare Enter (empty/whitespace-only line) becomes a usage reminder**, not an end
   request: the console prints the (updated) usage line so an operator who expects the old
-  behavior immediately learns the new gesture.
+  behavior immediately learns the new gesture. The reminder is printed **at most once per
+  poll** (Enter autorepeat must not flood the footer with repaints) and is **mode-aware**:
+  the console owns a `usage` string chosen at construction, so end-only sessions remind
+  with `USAGE_END_ONLY`, not the type-a-message text (today's `poll` hardcodes `USAGE`,
+  a pre-existing wart this change would otherwise promote to the mainline path).
 
 **Why not Cmd+Enter:** terminal emulators do not forward the Cmd modifier to stdin; macOS
 Terminal.app and iTerm2 both bind Cmd+Enter at the app layer (fullscreen), and what
@@ -37,26 +43,53 @@ is out of scope. The issue and CHANGELOG note this so the decision is discoverab
 1. `console._parse` (pure function) — owns the new line grammar: empty line -> usage
    reminder; `"\x1b"` line -> `EndRequest()`; `/stop [note]` -> `EndRequest(note=...)`;
    `/y /n /p` unchanged; unknown `/cmd` unchanged.
-2. `session._LineEditor` + `session._pump_input` — owns bare-Esc detection with a
-   **one-poll grace period**. `feed()` keeps today's in-chunk semantics exactly
-   (ESC+`[`/`O` starts a CSI/SS3 discard; ESC+other-byte is an alt-combo discard). What
-   changes is the *cross-poll* resolution of a trailing ESC: when a pump drains and the
-   editor is still in `escape_pending` state, the session arms a flag instead of
-   swallowing the next byte later. On the next pump:
-   - if new bytes arrived, they are fed normally (a split escape sequence still resolves
-     as a sequence — the existing cross-poll split test must keep passing);
-   - if no bytes arrived and the armed flag is still set, the pending escape is consumed
-     as a bare Esc keypress: the session enqueues the `"\x1b"` sentinel line into
-     `_line_queue`, and the composed console's `_parse` turns it into `EndRequest()`.
+2. `session._LineEditor` + `session._pump_input` — owns bare-Esc detection at two
+   levels.
 
-   The grace period costs one poll interval (~one control period) of latency on Esc,
-   imperceptible to an operator, and is what disambiguates "bare Esc keypress" from "an
-   escape sequence whose tail has not arrived yet" without blocking the control loop.
-   EOF while armed does not fire an end request (EOF already latches the console).
+   **Feed-level resolution (new ESC-while-pending rules).** Today ESC+any-non-`[`/`O`
+   byte is an alt-combo discard, which would make the new gesture self-cancelling: Esc
+   pressed twice would eat itself (odd/even mashing), and Esc-then-Enter would silently
+   discard both keys. `feed()` therefore resolves a pending ESC explicitly. With
+   `_escape_pending` set, the next byte `b` is handled as:
+   - `[` / `O` -> CSI/SS3 discard (unchanged);
+   - `0x1b` (a second ESC) -> the pending ESC was a bare keypress: emit the `"\x1b"`
+     sentinel as a completed line, stay pending for the new ESC (mashing Esc fires
+     immediately, once per press);
+   - `\r` / `\n` -> the pending ESC was a bare keypress: emit the sentinel, clear
+     pending, and consume the newline (so Esc-then-Enter works in footer mode too;
+     accepted cost: Alt+Enter, which sends `ESC \r`, also ends the episode);
+   - anything else -> alt-combo discard (unchanged).
 
-No protocol, `__all__`, or `EvalLog` schema changes. `EndRequest` and `ConsolePoll` are
-untouched. Attached feedback-only inputs (voice) still cannot end an episode
-(`OperatorSession.poll` already ignores their `end`).
+   **Pump-level grace with a time floor.** When a pump drains and the editor is still
+   `escape_pending`, the session arms itself and records `now_fn()` (a new injectable
+   seam defaulting to `time.monotonic`). On a later pump that saw no bytes, if still
+   armed and at least `_ESC_GRACE_S = 0.15` seconds have elapsed, the pending escape is
+   consumed as a bare Esc keypress and the sentinel line is enqueued into `_line_queue`.
+   If bytes arrive while armed they are fed normally, so a split escape sequence still
+   resolves as a sequence (the existing cross-poll split test keeps passing) and any
+   feed-level rule above may fire instead. EOF while armed never fires an end request
+   (EOF already latches the console).
+
+   The time floor (vim-style escape timeout) is what makes the grace robust on fast
+   control loops: with 10-50 ms polls, a single-poll grace would turn an SSH-delayed
+   arrow-key tail into a spurious end request. 150 ms is one-to-a-few polls on fast
+   loops and rounds up to the next poll on slow ones. The accepted residual trade-offs,
+   stated in the `_LineEditor`/pump docstrings: a sequence tail delayed beyond the grace
+   still misreads as bare Esc, and on a very slow self-paced loop a lone Esc waits for
+   the next poll. An operator who wants zero latency presses Esc twice.
+
+**Mode-aware usage plumbing.** `OperatorConsole` gains a `usage: str = USAGE`
+constructor arg stored and printed by `poll` (replacing the hardcoded module constant),
+and `OperatorSession` gains a `console_usage: str | None = None` kwarg forwarded when it
+builds its own console (caller-injected consoles keep their own). `cli._build_operator_session`
+constructs the session after computing `accepts_messages` and passes
+`console_usage=USAGE_END_ONLY` for end-only sessions.
+
+No protocol, `__all__`, or `EvalLog` schema changes (`USAGE` is not exported from
+`inspect_robots/__init__`; cli and tests import it directly). `EndRequest` and
+`ConsolePoll` are untouched. Attached feedback-only inputs (voice) still cannot end an
+episode (`OperatorSession.poll` already ignores their `end`), and voice-transcribed text
+bypasses `_parse` entirely, so it can never trigger `/stop`.
 
 **Tech Stack:** Python 3.10+, stdlib only; pytest; no new deps.
 
@@ -90,55 +123,85 @@ untouched. Attached feedback-only inputs (voice) still cannot end an episode
   `_enter_footer` (`:245-262`) and `_reset_footer_state` (`:285-291`) reset editor
   state. `_dispatch_read` (`:214-223`) hands queued lines (newline-joined) to the
   console.
-- Tests — `tests/test_console.py:52` (`test_whitespace_only_line_requests_an_unscored_end`)
-  asserts the old empty-line semantics. `tests/test_session.py:1394,1404,1414` cover
-  ESC+byte swallow, in-pump split sequences, and the cross-poll split sequence; the
-  first and third pin behavior this plan must preserve (alt-combo discard; split
-  sequence still discarded when its tail arrives on the next poll).
+- Tests that break and must be updated:
+  - `tests/test_console.py:52` (`test_whitespace_only_line_requests_an_unscored_end`)
+    asserts empty line -> `EndRequest()`.
+  - `tests/test_console.py:111` (`test_first_end_request_wins_while_later_lines_still_parse`)
+    scripts an empty first line as the winning end and asserts `output == [USAGE]`;
+    post-change the winning end must come from `/stop` or `"\x1b"` and the usage output
+    changes.
+  - `tests/test_session.py:1285` (`test_footer_poll_does_not_confirm_end_requests_or_verdicts`)
+    parametrizes `(b"\n", EndRequest())` and asserts no extra output; the `b"\n"` case
+    must move to `b"/stop\n"` (or `b"\x1b\x1b"`).
+- Tests that pin behavior this plan preserves, all three staying unmodified:
+  `tests/test_session.py:1394` (ESC+byte alt-combo swallow — still true for non-ESC,
+  non-newline bytes), `:1404` (in-pump split CSI), `:1414` (cross-poll split CSI whose
+  tail arrives on the next poll).
 - Docs — `docs/guide/cli.md:152-153,165,195` document Enter-ends-episode (prose, the
-  footer example's status line, and the quoted usage string).
+  footer example's status line, and the quoted usage string). Do NOT touch
+  `docs/guide/cli.md:135` ("Bare Enter or whitespace-only input records no note") — that
+  is the post-trial grader-notes prompt, unrelated — nor historical CHANGELOG entries.
 - Out of repo: the hardware embodiment (inspect-robots-yam) composes the footer status
   text ("... | Enter ends the episode"); file a follow-up issue there after merge. The
   docs example here should switch to "Esc ends the episode" to match the new gesture.
 
 ## Tasks
 
-### 1. Console grammar (`console.py` + `tests/test_console.py`)
+### 1. Console grammar (`console.py`, `cli.py` + `tests/test_console.py`)
 
 - [ ] `_parse`: empty/whitespace-only line returns `(None, None, True)` (usage
       reminder, no end request).
 - [ ] `_parse`: a stripped line equal to `"\x1b"` returns `(None, EndRequest(), False)`.
+      Add a comment (or dedicated test) for the non-obvious fact the sentinel hinges
+      on: `str.strip()` removes `\x1c`-`\x1f` but not `\x1b`.
 - [ ] `_parse`: `/stop` (case-insensitive) returns
       `(None, EndRequest(note=note or None), False)` with the same note handling as the
       verdict commands (stripped; `None` when absent).
-- [ ] Rewrite `USAGE` and `USAGE_END_ONLY`: Esc (or `/stop`) ends the episode; keep the
-      feedback and verdict phrasing. Keep the `"operator console: "` prefix — `cli.py`
-      `removeprefix`s it for styling.
+- [ ] `OperatorConsole(usage: str = USAGE)`: store and print `self._usage` in `poll`,
+      at most once per `poll()` call regardless of how many lines requested it.
+- [ ] `OperatorSession(console_usage: str | None = None)` forwards to its owned
+      console; `cli._build_operator_session` passes `console_usage=USAGE_END_ONLY` when
+      the policy does not accept messages (construct the session after computing
+      `accepts_messages`).
+- [ ] Rewrite `USAGE` and `USAGE_END_ONLY`: "Esc (or /stop) ends the episode" (the
+      "or /stop" hedge matters: in the plain-mode fallback a lone Esc does nothing
+      until Enter); keep the feedback and verdict phrasing and the
+      `"operator console: "` prefix — `cli.py` `removeprefix`s it for styling.
 - [ ] Update module/class docstrings that promise Enter-ends-episode (`console.py:85`
       stays: it describes line completion, which is unchanged).
-- [ ] Tests: update `test_whitespace_only_line_requests_an_unscored_end` to assert
-      usage-reminder-no-end; add `/stop`, `/STOP note`, and `"\x1b\n"` cases; keep
-      first-end-wins and multiline-paste tests passing.
+- [ ] Tests: update `test_whitespace_only_line_requests_an_unscored_end` (usage
+      reminder, no end) and `test_first_end_request_wins_while_later_lines_still_parse`
+      (first end via `/stop` or `"\x1b"`); add `/stop`, `/STOP note`, `"\x1b\n"`,
+      usage-dedup-per-poll, and custom-`usage` cases; keep multiline-paste tests
+      passing.
 
 ### 2. Bare-Esc detection (`session.py` + `tests/test_session.py`)
 
-- [ ] `_LineEditor`: expose the pending-escape state (`escape_pending` property) and a
-      `take_bare_escape()` consumer that clears and reports it; keep `feed()`'s
-      in-chunk semantics byte-identical.
-- [ ] Update the `_LineEditor` docstring: cross-poll discard still holds when the tail
-      arrives on the next poll; a trailing ESC that stays unanswered for a full poll is
-      a bare Esc keypress (decision: one-poll grace).
-- [ ] `_pump_input`: track whether this pump saw bytes; maintain an armed flag
-      (`_esc_armed`); fire at most one `"\x1b"` sentinel line into `_line_queue` when a
-      quiet pump finds the armed pending escape; never fire on EOF; re-arm/disarm from
-      the editor state after every pump.
-- [ ] Reset `_esc_armed` alongside editor resets (`_enter_footer`,
+- [ ] `_LineEditor.feed`: implement the ESC-while-pending resolution rules from the
+      Architecture section (second ESC -> emit sentinel + stay pending; `\r`/`\n` ->
+      emit sentinel + consume newline; `[`/`O` and other bytes unchanged). Emit the
+      sentinel by appending `"\x1b"` to the returned completed-lines list.
+- [ ] `_LineEditor`: expose `escape_pending` (read) and `take_bare_escape()` (consume);
+      update the class docstring with the resolution rules and the accepted Alt+Enter /
+      delayed-tail trade-offs.
+- [ ] `_pump_input`: track whether this pump saw bytes; on a drain that leaves
+      `escape_pending`, arm and stamp `self._now_fn()`; on a later quiet pump, if armed
+      and `now_fn() - stamp >= _ESC_GRACE_S` (0.15 s module constant), consume via
+      `take_bare_escape()` and enqueue one `"\x1b"` sentinel line; never fire on EOF;
+      disarm whenever the editor is no longer pending.
+- [ ] `OperatorSession.__init__` gains the injectable `now_fn: Callable[[], float]`
+      seam (default `time.monotonic`), consistent with the existing seam style.
+- [ ] Reset the armed flag and stamp alongside editor resets (`_enter_footer`,
       `_reset_footer_state`).
-- [ ] Tests: bare ESC fires an end request on the next quiet poll; ESC-tail split
-      sequence across polls still discards (existing test must pass unmodified); ESC as
-      the last byte after typed text preserves the partial line and still fires; EOF
-      while armed fires nothing; ESC+byte same-chunk alt-combo still swallows (existing
-      test unmodified).
+- [ ] Tests (fake clock via `now_fn`): bare ESC fires after a quiet poll past the
+      grace; quiet poll before the grace does not fire; ESC-tail split across polls
+      within the grace still discards (existing `:1414` unmodified); double-ESC in one
+      chunk fires immediately, once per press; ESC-then-`\r` (same chunk and across
+      polls) fires immediately and completes no line; ESC as the last byte after typed
+      text preserves the partial line and still fires; EOF while armed fires nothing;
+      ESC+letter same-chunk alt-combo still swallows (existing `:1394` unmodified);
+      update `test_footer_poll_does_not_confirm_end_requests_or_verdicts` to use
+      `b"/stop\n"` for its end-request case.
 
 ### 3. Docs, changelog, module map
 
