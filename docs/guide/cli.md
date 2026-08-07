@@ -178,6 +178,12 @@ as the model, microphone device, language, and compute type. Voice input is
 feedback-only, so episode end and verdicts remain keyboard actions. See
 [Voice operator input](voice-mode.md) for setup and filtering details.
 
+The plugin also provides `run --speak` for local narration of streamed policy
+notes and terminal summaries. Repeat `-S key=value` to select the output voice,
+speed, volume, device, language, or offline model paths. Speaking works without
+a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes-speak)
+for model setup and the microphone echo caveat.
+
 A session-aware embodiment offers `connect_operator_session(session)`. On
 POSIX, the CLI calls that hook once before evaluation and the session becomes
 the only owner of terminal input and status output. The console stays active
@@ -288,6 +294,8 @@ inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P c
              --embodiment cubepick --log-dir logs --seed 0
 inspect-robots run --task my-task --policy agent --embodiment my-robot \
              --voice -V model=small -V device="USB Microphone"
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+             --speak -S voice=af_sarah -S volume=0.8
 ```
 
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
@@ -302,7 +310,9 @@ the path of the written log is printed.
 `--policy`/`--embodiment` may be omitted when defaults are configured (see
 the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene. `--voice` adds local spoken feedback on attended
-runs; repeat `-V key=value` to configure the installed voice plugin.
+runs; repeat `-V key=value` to configure the installed voice plugin. `--speak`
+narrates streamed policy notes on attended or unattended runs; repeat `-S key=value`
+for speaker settings.
 
 The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
@@ -334,6 +344,8 @@ matches nothing is an error listing every registered task. `--policy` and
 as they do for `run`, to every matched task — there is no per-task `-T` in
 this release. The embodiment is resolved once for the whole set, not once per
 task, so a real robot is not reconnected between tasks.
+
+`--speak` and `-S` are run-only options and are not accepted by `eval-set`.
 
 Rather than one full summary per task, the CLI prints the resolved
 policy/embodiment, one status line for the whole set, a compact `[status]

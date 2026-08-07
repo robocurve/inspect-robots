@@ -347,16 +347,16 @@ decision 4 for the `<3.14` marker).
 
 ### Task 5: docs + changelog + module maps
 
-- [ ] `docs/guide/voice-mode.md`: new "Speaking policy notes: `--speak`" section — what
+- [x] `docs/guide/voice-mode.md`: new "Speaking policy notes: `--speak`" section — what
   is spoken (note/summary/reason, never hindsight), install, `-S` keys with defaults,
   first-run model download (size, cache path, pre-seeding, offline override), unattended
   use, run-only scope, the `--speak`+`--voice` echo caveat. `docs/guide/cli.md`: mention
   `--speak`/`-S` next to `--voice`/`-V`. `docs/guide/plugins.md` (~lines 106-108): the
   voice plugin entry now covers both directions.
-- [ ] Root `README.md`: voice plugin bullet now covers both directions. Root `CLAUDE.md`
+- [x] Root `README.md`: voice plugin bullet now covers both directions. Root `CLAUDE.md`
   Layout bullet likewise; `src/inspect_robots/CLAUDE.md` cli row; plugin `CLAUDE.md`
   gains the speaker module map rows.
-- [ ] `CHANGELOG.md`: core Unreleased "Added" entry (`--speak`/`-S`, hint-map, lifecycle)
+- [x] `CHANGELOG.md`: core Unreleased "Added" entry (`--speak`/`-S`, hint-map, lifecycle)
   and voice plugin 0.4.0 entry (SpeakerSink, Kokoro engine, model cache), both linking
   issue #327 and this plan (0054).
 - [ ] File the follow-up issue for `--speak`+`--voice` playback-aware muting; link it

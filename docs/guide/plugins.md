@@ -105,8 +105,9 @@ embodiments, and attended operator input:
   capx`.
 - [`inspect-robots-voice`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice):
   transcribe local microphone speech into feedback during an attended run with
-  `--voice`. Silence filtering keeps empty or unreliable candidates out of the
-  operator-message stream.
+  `--voice`, or narrate streamed policy notes through local Kokoro speech with
+  `run --speak`. Silence filtering protects the input path, while bounded
+  drop-oldest buffering keeps speech output off the control loop.
 
 ### `inspect-robots-isaacsim`: the body
 
