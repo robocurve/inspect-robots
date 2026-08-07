@@ -11,7 +11,7 @@ from inspect_robots_voice import SpeakerSink, VoiceInput, speaker_sink, voice_in
 
 
 def test_package_exports_and_version() -> None:
-    assert inspect_robots_voice.__version__ == "0.4.0"
+    assert inspect_robots_voice.__version__ == "0.5.0"
     assert inspect_robots_voice.__all__ == [
         "SpeakerSink",
         "VoiceInput",
@@ -32,7 +32,15 @@ def test_speaker_factory_defaults() -> None:
         speaker.lang,
         speaker.model,
         speaker.voices,
-    ) == ("af_sarah", 1.0, 1.0, None, "en-us", None, None)
+        speaker.mode,
+    ) == ("af_sarah", 1.0, 1.0, None, "en-us", None, None, "interrupt")
+
+
+@pytest.mark.parametrize("mode", ["blocking", "interrupt", "queue"])
+def test_speaker_factory_accepts_speech_modes(mode: str) -> None:
+    speaker = speaker_sink(mode=mode)
+
+    assert speaker.mode == mode
 
 
 @pytest.mark.parametrize("device", [None, 4, "USB speaker"])
@@ -70,6 +78,8 @@ def test_speaker_factory_accepts_options_and_device_forms(device: str | int | No
         ({"lang": None}, "lang must be a string"),
         ({"model": 1}, "model must be a string or none"),
         ({"voices": False}, "voices must be a string or none"),
+        ({"mode": 1}, "mode must be a string and one of: blocking, interrupt, queue"),
+        ({"mode": "later"}, "mode must be a string and one of: blocking, interrupt, queue"),
     ],
 )
 def test_speaker_factory_rejects_unknown_or_mistyped_values(

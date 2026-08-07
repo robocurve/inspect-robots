@@ -188,9 +188,9 @@ feedback-only, so episode end and verdicts remain keyboard actions. See
 [Voice operator input](voice-mode.md) for setup and filtering details.
 
 The plugin also provides `run --speak` for local narration of streamed policy
-notes and terminal summaries. Repeat `-S key=value` to select the output voice,
-speed, volume, device, language, or offline model paths. Speaking works without
-a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes---speak)
+notes and terminal summaries. Repeat `-S key=value` to select the speech mode,
+output voice, speed, volume, device, language, or offline model paths. Speaking
+works without a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes---speak)
 for model setup and the microphone echo caveat.
 
 A session-aware embodiment offers `connect_operator_session(session)`. On
@@ -321,7 +321,7 @@ the zero-config section above); `--instruction "..."` replaces `--task` to
 run a single ad-hoc scene. `--voice` adds local spoken feedback on attended
 runs; repeat `-V key=value` to configure the installed voice plugin. `--speak`
 narrates streamed policy notes on attended or unattended runs; repeat `-S key=value`
-for speaker settings.
+to select the speech mode, output voice, speed, volume, device, language, or offline model paths.
 
 The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored

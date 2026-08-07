@@ -106,8 +106,9 @@ embodiments, and attended operator input:
 - [`inspect-robots-voice`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice):
   transcribe local microphone speech into feedback during an attended run with
   `--voice`, or narrate streamed policy notes through local Kokoro speech with
-  `run --speak`. Silence filtering protects the input path, while bounded
-  drop-oldest buffering keeps speech output off the control loop.
+  `run --speak`. Silence filtering protects the input path. Speech synthesis and
+  playback always run on a worker, while blocking speech may wait boundedly on
+  that work from the control thread.
 
 ### `inspect-robots-isaacsim`: the body
 

@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Voice plugin (0.5.0):** the default `--speak` behavior now interrupts
+  superseded narration so speech stays current. `-S mode=queue` restores the old
+  bounded queueing behavior ([plan 0057](plans/0057-speak-speech-modes.md),
+  [#336](https://github.com/robocurve/inspect-robots/issues/336)).
+
 - **Core:** bare Enter no longer ends an attended episode. Esc ends it in the
   footer (with a 150 ms grace so split arrow-key sequences are not misread), and
   `/stop [note]` ends it from any mode, recording the trailing text to the log
@@ -19,6 +24,12 @@ All notable changes to this project are documented here. The format is based on
   [#333](https://github.com/robocurve/inspect-robots/issues/333)).
 
 ### Added
+
+- **Voice plugin (0.5.0):** `--speak` now supports blocking, interrupt, and queue
+  speech delivery through `-S mode=`, including a bounded fail-open blocking
+  wait and generation-based interruption
+  ([plan 0057](plans/0057-speak-speech-modes.md),
+  [#336](https://github.com/robocurve/inspect-robots/issues/336)).
 
 - **Core:** `inspect-robots run` now accepts `--speak` with repeatable `-S k=v`
   options. The CLI resolves the registered `speaker` sink, starts it

@@ -1,4 +1,4 @@
-"""Non-blocking policy-note speech with bounded stale-work loss."""
+"""Off-thread policy-note audio with selectable delivery and bounded waiting."""
 
 from __future__ import annotations
 
@@ -23,9 +23,12 @@ if TYPE_CHECKING:
 PlaybackDevice = str | int | None
 EngineFactory = Callable[[], TtsEngine]
 _QUEUE_SIZE = 4
+_BLOCK_TIMEOUT = 15.0
 _DRAIN_TIMEOUT = 15.0
 _JOIN_TIMEOUT = 5.0
 _CHUNK_SECONDS = 0.1
+_MODES = ("blocking", "interrupt", "queue")
+_DEFAULT_MODE = "interrupt"
 
 
 class _Playback(Protocol):
@@ -101,7 +104,7 @@ def extract_speech(messages: Sequence[Any]) -> list[str]:
 
 
 class SpeakerSink(NullSink):
-    """Speak policy narration asynchronously without delaying the control loop."""
+    """Play narration off-thread; blocking waits are bounded and fail-open."""
 
     def __init__(
         self,
@@ -113,9 +116,12 @@ class SpeakerSink(NullSink):
         lang: str = "en-us",
         model: str | None = None,
         voices: str | None = None,
+        mode: str = _DEFAULT_MODE,
         engine_factory: EngineFactory | None = None,
         playback_factory: PlaybackFactory | None = None,
     ) -> None:
+        if mode not in _MODES:
+            raise ValueError(f"mode must be one of: {', '.join(_MODES)}")
         self.voice = voice
         self.speed = speed
         self.volume = volume
@@ -123,6 +129,7 @@ class SpeakerSink(NullSink):
         self.lang = lang
         self.model = model
         self.voices = voices
+        self.mode = mode
 
         def build_engine() -> TtsEngine:
             model_path, voices_path = resolve_model_files(self.model, self.voices)
@@ -146,6 +153,8 @@ class SpeakerSink(NullSink):
         self._closed = False
         self._warned = False
         self._dropped = 0
+        self._speech_gen = 0
+        self._block_degraded = False
 
     def start(self) -> None:
         """Build audio resources and start exactly one daemon narration worker."""
@@ -177,21 +186,44 @@ class SpeakerSink(NullSink):
             playback.close()
 
     def log_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
-        """Enqueue spoken fields from one transcript delta without blocking on audio."""
+        """Queue one delta without audio work, waiting boundedly only in blocking mode."""
         del t
         texts = extract_speech(messages)
         if not texts:
             return
+        blocking_timed_out = False
         with self._condition:
             thread = self._thread
             if thread is None or not thread.is_alive() or self._disabled or self._stop.is_set():
                 return
+            if self.mode == "interrupt":
+                self._speech_gen += 1
+                self._queue.clear()
+            elif self.mode == "blocking" and not self._block_degraded:
+                deadline = time.monotonic() + _BLOCK_TIMEOUT
+                while self._queue or self._inflight:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._block_degraded = True
+                        blocking_timed_out = True
+                        break
+                    self._condition.wait(timeout=remaining)
+                    thread = self._thread
+                    if (
+                        thread is None
+                        or not thread.is_alive()
+                        or self._disabled
+                        or self._stop.is_set()
+                    ):
+                        return
             for text in texts:
                 if len(self._queue) >= _QUEUE_SIZE:
                     self._queue.popleft()
                     self._dropped += 1
                 self._queue.append(text)
             self._condition.notify()
+        if blocking_timed_out:
+            print("speaker: blocking wait timed out; narration may lag", file=sys.stderr)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
         """Discard queued prior-trial notes and report accumulated overflow once."""
@@ -200,6 +232,7 @@ class SpeakerSink(NullSink):
             self._queue.clear()
             dropped = self._dropped
             self._dropped = 0
+            self._condition.notify_all()
         if dropped:
             suffix = "" if dropped == 1 else "s"
             print(f"speaker: dropped {dropped} stale note{suffix}", file=sys.stderr)
@@ -218,11 +251,11 @@ class SpeakerSink(NullSink):
             self._closed = True
             self._stop.set()
             self._queue.clear()
-            self._condition.notify_all()
             thread = self._thread
             playback = self._playback
             self._thread = None
             self._playback = None
+            self._condition.notify_all()
         if thread is not None:
             with suppress(BaseException):
                 thread.join(timeout=_JOIN_TIMEOUT)
@@ -247,18 +280,26 @@ class SpeakerSink(NullSink):
                 if self._stop.is_set():
                     return
                 text = self._queue.popleft()
+                gen = self._speech_gen
                 self._inflight = True
+                self._condition.notify_all()
             try:
                 if self._stop.is_set():
                     return
+                if self._speech_gen != gen:
+                    continue
                 samples, sample_rate = engine.synthesize(text)
                 if self._stop.is_set():
                     return
+                if self._speech_gen != gen:
+                    continue
                 gained = np.asarray(samples * np.float32(self.volume), dtype=np.float32)
                 chunk_size = max(1, int(sample_rate * _CHUNK_SECONDS))
                 for start in range(0, len(gained), chunk_size):
                     if self._stop.is_set():
                         return
+                    if self._speech_gen != gen:
+                        break
                     playback.write(gained[start : start + chunk_size], sample_rate)
             except Exception as exc:
                 with self._condition:
