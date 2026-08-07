@@ -800,6 +800,15 @@ def test_footer_status_none_collapses_two_row_to_one_row_retaining_input() -> No
     session.status("t = 5s")
     assert output == ["\r\x1b[Kt = 5s\n\r\x1b[K> hi"]
 
+    # Typing after status(None) still echoes correctly, on the retained input row.
+    output.clear()
+    session.status(None)
+    output.clear()
+    fd.chunks = [b"!"]
+    session.poll()
+    assert output == ["\r\x1b[K> hi!"]
+    assert "\x1b[A" not in output[0]
+
 
 def test_footer_input_echo_one_row_state() -> None:
     output: list[str] = []
