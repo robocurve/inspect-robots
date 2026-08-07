@@ -305,20 +305,20 @@ decision 4 for the `<3.14` marker).
 
 ### Task 3: plugin factory + entry point + packaging
 
-- [ ] `__init__.py`: `speaker_sink(**kwargs: ScalarValue) -> SpeakerSink` factory
+- [x] `__init__.py`: `speaker_sink(**kwargs: ScalarValue) -> SpeakerSink` factory
   mirroring `voice_input`'s allowed-set validation (`voice`, `speed`, `volume`,
   `device`, `lang`, `model`, `voices`); numeric coercions accept int-or-float where
   sensible; `volume` outside `[0, 1]` and non-positive `speed` are `TypeError`s (the
   registry surfaces `TypeError` cleanly; `ValueError` would escape as a traceback).
   Export `SpeakerSink` in `__all__`; bump `__version__` to `0.4.0`.
-- [ ] `pyproject.toml`: version 0.4.0; add `kokoro-onnx>=0.4; python_version < '3.14'`
+- [x] `pyproject.toml`: version 0.4.0; add `kokoro-onnx>=0.4; python_version < '3.14'`
   to deps (comment: marker keeps the workspace lock's python range; kokoro floors
   numpy 2 where installed); new entry point
   `[project.entry-points."inspect_robots.sinks"] speaker = "inspect_robots_voice:speaker_sink"`.
   Core floor stays `inspect-robots>=0.44` (the sink seam predates it; the new flag lives
   in core, not here). Run `uv lock`; verify the workspace `requires-python` range is
   unchanged in the lockfile.
-- [ ] Tests (`tests/test_factory.py` additions): unknown key, each mis-typed key, range
+- [x] Tests (`tests/test_factory.py` additions): unknown key, each mis-typed key, range
   violations; defaults; entry point resolves via `importlib.metadata` in the dev install.
 
 ### Task 4: core CLI `--speak` / `-S` (run only)

@@ -2,15 +2,108 @@
 
 from __future__ import annotations
 
+from importlib.metadata import entry_points
+
 import pytest
 
 import inspect_robots_voice
-from inspect_robots_voice import VoiceInput, voice_input
+from inspect_robots_voice import SpeakerSink, VoiceInput, speaker_sink, voice_input
 
 
 def test_package_exports_and_version() -> None:
-    assert inspect_robots_voice.__version__ == "0.3.0"
-    assert inspect_robots_voice.__all__ == ["VoiceInput", "voice_input"]
+    assert inspect_robots_voice.__version__ == "0.4.0"
+    assert inspect_robots_voice.__all__ == [
+        "SpeakerSink",
+        "VoiceInput",
+        "speaker_sink",
+        "voice_input",
+    ]
+
+
+def test_speaker_factory_defaults() -> None:
+    speaker = speaker_sink()
+
+    assert isinstance(speaker, SpeakerSink)
+    assert (
+        speaker.voice,
+        speaker.speed,
+        speaker.volume,
+        speaker.device,
+        speaker.lang,
+        speaker.model,
+        speaker.voices,
+    ) == ("af_sarah", 1.0, 1.0, None, "en-us", None, None)
+
+
+@pytest.mark.parametrize("device", [None, 4, "USB speaker"])
+def test_speaker_factory_accepts_options_and_device_forms(device: str | int | None) -> None:
+    speaker = speaker_sink(
+        voice="bf_emma",
+        speed=2,
+        volume=0,
+        device=device,
+        lang="en-gb",
+        model="/models/kokoro.onnx",
+        voices="/models/voices.bin",
+    )
+
+    assert speaker.voice == "bf_emma"
+    assert speaker.speed == 2.0
+    assert speaker.volume == 0.0
+    assert speaker.device == device
+    assert speaker.lang == "en-gb"
+    assert speaker.model == "/models/kokoro.onnx"
+    assert speaker.voices == "/models/voices.bin"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"unknown": "x"}, "unexpected speaker argument"),
+        ({"voice": 1}, "voice must be a string"),
+        ({"speed": "fast"}, "speed must be a number"),
+        ({"speed": True}, "speed must be a number"),
+        ({"volume": "loud"}, "volume must be a number"),
+        ({"volume": False}, "volume must be a number"),
+        ({"device": True}, "device must be"),
+        ({"device": 1.5}, "device must be"),
+        ({"lang": None}, "lang must be a string"),
+        ({"model": 1}, "model must be a string or none"),
+        ({"voices": False}, "voices must be a string or none"),
+    ],
+)
+def test_speaker_factory_rejects_unknown_or_mistyped_values(
+    kwargs: dict[str, str | int | float | bool | None], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        speaker_sink(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"speed": 0}, "speed must be positive"),
+        ({"speed": -0.1}, "speed must be positive"),
+        ({"volume": -0.1}, "volume must be between 0 and 1"),
+        ({"volume": 1.1}, "volume must be between 0 and 1"),
+    ],
+)
+def test_speaker_factory_rejects_numeric_range_violations(
+    kwargs: dict[str, int | float], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        speaker_sink(**kwargs)
+
+
+def test_speaker_entry_point_resolves_from_dev_install() -> None:
+    matches = [
+        entry
+        for entry in entry_points(group="inspect_robots.sinks")
+        if entry.name == "speaker" and entry.value == "inspect_robots_voice:speaker_sink"
+    ]
+
+    assert len(matches) == 1
+    assert matches[0].load() is speaker_sink
 
 
 @pytest.mark.parametrize("device", [None, 4, "USB microphone"])
