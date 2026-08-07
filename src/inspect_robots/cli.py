@@ -763,8 +763,8 @@ def _build_operator_session(
     policy: object, embodiment: Embodiment
 ) -> tuple[OperatorSession, OperatorSession | None]:
     """Build the prompt owner and enable its live input channel only when safe."""
-    session = OperatorSession()
     accepts_messages = bool(getattr(policy, "accepts_operator_messages", False))
+    session = OperatorSession(console_usage=None if accepts_messages else USAGE_END_ONLY)
     connect_hook = getattr(embodiment, "connect_operator_session", None)
     if callable(connect_hook):
         if sys.platform == "win32":

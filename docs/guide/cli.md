@@ -150,10 +150,15 @@ scores as failure with "no operator judgement recorded".
 On an attended run, an opted-in policy can also receive feedback while the
 episode is running. The CLI prints the operator console usage hint when this
 channel is active. Type a normal line and press Enter to deliver it at the
-policy's next inference. Bare Enter ends the episode, while `/y`, `/n`, or `/p`
-plus an optional note ends it and records the verdict immediately, without a
-second post-trial prompt. Feedback is saved per trial and appears in summaries
-and HTML reports. Piped stdin and `--no-prompt` disable the channel.
+policy's next inference. Esc ends the episode, and so does `/stop`; trailing
+text after `/stop` is recorded to the log before the episode ends. `/y`, `/n`,
+or `/p` plus an optional note ends it and records the verdict immediately,
+without a second post-trial prompt. Bare Enter never ends the run: it prints
+the usage reminder instead, since Enter is also the key you press right after
+typing feedback. Cmd+Enter is not offered because terminal emulators do not
+forward the Cmd modifier to stdin, so it is indistinguishable from plain
+Enter. Feedback is saved per trial and appears in summaries and HTML reports.
+Piped stdin and `--no-prompt` disable the channel.
 
 On an attended run with the console enabled and a real POSIX TTY, the session
 renders a two-row footer. The timer and controls repaint in place above a stable
@@ -162,12 +167,14 @@ typing:
 
 ```text
   [sent] you might wanna move the right arm out of the way
-  t = 61s / 120s | Enter ends the episode
+  t = 61s / 120s | Esc ends the episode
   > is there anything I can hand you█
 ```
 
 After Enter, feedback moves into scrollback as `[sent] ...`. End-only rows use
-`[noted] ...`. Keystroke echo is pumped at the rollout poll cadence, so on a
+`[noted] ...`, and text that ends the episode (such as a `/stop` note) is
+confirmed as `[noted]` even in a sent-labeled session, because the policy never
+receives it. Keystroke echo is pumped at the rollout poll cadence, so on a
 self-paced robot it can lag up to one control step. Third-party prints can
 smudge one frame; the next repaint heals it. Off-TTY, Windows, and piped-stdin
 rendering is unchanged.
@@ -192,7 +199,7 @@ accepts messages gets the full feedback usage line. Other policies get the
 end-only mode:
 
 ```text
-operator console: Enter ends the episode; /y /n /p [note] records a verdict; typed notes are saved to the log
+operator console: Esc (or /stop [note]) ends the episode; /y /n /p [note] records a verdict; typed notes are saved to the log
 ```
 
 Without that hook, the compatibility path preserves the previous gating. A

@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **Core:** bare Enter no longer ends an attended episode. Esc ends it in the
+  footer (with a 150 ms grace so arrow-key sequences are never misread), and
+  `/stop [note]` ends it from any mode, recording the trailing text to the log
+  as an operator message. An empty line now prints the usage reminder, which is
+  mode-aware for end-only sessions. Cmd+Enter is not offered: terminals do not
+  forward the Cmd modifier to stdin
+  ([plan 0056](plans/0056-escape-ends-episode.md),
+  [#333](https://github.com/robocurve/inspect-robots/issues/333)).
+
 ### Added
 
 - **Core:** `inspect-robots run` now accepts `--speak` with repeatable `-S k=v`

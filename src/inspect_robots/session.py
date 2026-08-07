@@ -7,10 +7,18 @@ import os
 import select
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from inspect_robots.console import ConsolePoll, OperatorConsole, OperatorInput, _stdin_readable
+from inspect_robots.console import (
+    END_SENTINEL,
+    USAGE,
+    ConsolePoll,
+    OperatorConsole,
+    OperatorInput,
+    _stdin_readable,
+)
 from inspect_robots.errors import EmbodimentFault
 
 if TYPE_CHECKING:
@@ -25,6 +33,11 @@ _NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
 _NO_TERMIOS_STATE = object()
+# How long a trailing ESC must stay unanswered before a quiet poll reads it as a bare
+# Esc keypress (vim-style escape timeout). A single-poll grace would misread an
+# SSH-delayed arrow-key tail on a fast control loop; a tail delayed past this floor
+# still misreads as bare Esc and then types literally into the buffer.
+_ESC_GRACE_S = 0.15
 
 
 def _flush_stdin_fd() -> None:
@@ -77,11 +90,20 @@ def _clip_tail(text: str, limit: int) -> str:
 class _LineEditor:
     """Assemble raw stdin bytes into one editable line: append, backspace, Ctrl-U, Enter.
 
-    Escape sequences (CSI ``ESC [ ... final``, SS3 ``ESC O final``, and a bare ``ESC``
-    plus one byte) are discarded whole so arrow keys, Delete, and function keys never
-    leak into the buffer or its echo (decision 4). The discard state persists across
-    ``feed()`` calls so a sequence split across reads, or across polls, is still
-    swallowed cleanly.
+    Escape sequences (CSI ``ESC [ ... final``, SS3 ``ESC O final``, and ``ESC`` plus one
+    other byte as an alt-combo) are discarded whole so arrow keys, Delete, and function
+    keys never leak into the buffer or its echo (decision 4). The discard state persists
+    across ``feed()`` calls so a sequence split across reads, or across polls, is still
+    swallowed cleanly when its tail arrives.
+
+    A pending ESC resolved by a second ESC or by Enter is a bare Esc keypress: ``feed()``
+    emits the ``END_SENTINEL`` line (the end-of-episode request) and, for Enter, consumes
+    the newline. The editor buffer is never touched by sentinel emission: a partial line
+    typed before the Esc stays a partial and is abandoned when the trial ends. A trailing
+    pending ESC with no resolving byte is settled by the session's pump grace
+    (``_ESC_GRACE_S``). Accepted costs: Alt+Enter (``ESC \\r``) ends the episode, and a
+    printable key pressed while an Esc is pending still resolves as an alt-combo,
+    cancelling the intended end and eating the keystroke.
     """
 
     def __init__(self) -> None:
@@ -108,9 +130,14 @@ class _LineEditor:
                     self._csi_discard = False
                 continue
             if self._escape_pending:
+                if b == 0x1B:  # a second ESC: the pending one was a bare keypress
+                    completed.append(END_SENTINEL)
+                    continue
                 self._escape_pending = False
                 if b in (0x5B, 0x4F):  # '[' (CSI) or 'O' (SS3)
                     self._csi_discard = True
+                elif b in (0x0A, 0x0D):  # Esc then Enter: bare keypress, newline consumed
+                    completed.append(END_SENTINEL)
                 continue
             if b == 0x1B:  # ESC
                 self._escape_pending = True
@@ -132,6 +159,17 @@ class _LineEditor:
         if self._buffer:
             self._buffer.pop()
 
+    @property
+    def escape_pending(self) -> bool:
+        """True while a lone ESC awaits its resolving byte (sequence, combo, or bare press)."""
+        return self._escape_pending
+
+    def take_bare_escape(self) -> bool:
+        """Consume a pending ESC as a bare Esc keypress, reporting whether one was pending."""
+        was_pending = self._escape_pending
+        self._escape_pending = False
+        return was_pending
+
 
 class OperatorSession:
     """Coordinate all attended-run terminal input and output through injectable seams."""
@@ -150,6 +188,8 @@ class OperatorSession:
         raw_mode_fn: Callable[[], object] | None = None,
         restore_fn: Callable[[object], None] | None = None,
         atexit_register: Callable[[Callable[[], None]], object] | None = None,
+        now_fn: Callable[[], float] | None = None,
+        console_usage: str | None = None,
     ) -> None:
         self._input_fn = input_fn
         self._write_fn = write
@@ -179,9 +219,13 @@ class OperatorSession:
         )
         self._fd_read: Callable[[], bytes] = fd_read if fd_read is not None else _stdin_read_bytes
         self._width_fn: Callable[[], int] = width_fn if width_fn is not None else _default_width
+        self._now_fn: Callable[[], float] = now_fn if now_fn is not None else time.monotonic
         self._editor = _LineEditor()
         self._line_queue: list[str] = []
         self._pump_eof = False
+        # Monotonic stamp of the byte-feeding pump that left an ESC pending; None means
+        # no bare-Esc grace is armed.
+        self._esc_stamp: float | None = None
         self._console = (
             console
             if console is not None
@@ -189,6 +233,7 @@ class OperatorSession:
                 readable=self._dispatch_readable,
                 read=self._dispatch_read,
                 output_fn=self.write_line,
+                usage=console_usage if console_usage is not None else USAGE,
             )
         )
         self._attached_inputs: list[tuple[OperatorInput, str]] = []
@@ -223,14 +268,34 @@ class OperatorSession:
         return "" if raw == b"" else raw.decode("utf-8", errors="replace")
 
     def _pump_input(self) -> None:
-        """Drain readable stdin into the line editor, echoing the input row after each chunk."""
+        """Drain readable stdin into the line editor, echoing the input row after each chunk.
+
+        Also settles a trailing pending ESC. A pump that fed bytes never runs the grace
+        test (feed resolution always wins); if it ends with an ESC pending it arms the
+        grace by stamping ``now_fn()``. Only a quiet pump (zero bytes) tests the grace,
+        and it never re-stamps: once ``_ESC_GRACE_S`` has elapsed the pending ESC is
+        consumed as a bare Esc keypress and the ``END_SENTINEL`` line is queued. EOF
+        never fires the grace (the console latches EOF instead).
+        """
+        fed = False
         while self._fd_readable():
             chunk = self._fd_read()
             if chunk == b"":
                 self._pump_eof = True
                 break
+            fed = True
             self._line_queue.extend(self._editor.feed(chunk))
             self._draw_input_row()
+        if fed:
+            self._esc_stamp = self._now_fn() if self._editor.escape_pending else None
+            return
+        if self._pump_eof or self._esc_stamp is None:
+            return
+        if self._now_fn() - self._esc_stamp < _ESC_GRACE_S:
+            return
+        self._esc_stamp = None
+        self._editor.take_bare_escape()
+        self._line_queue.append(END_SENTINEL)
 
     def _clipped_input_text(self) -> str:
         return _clip_tail(self._editor.text(), self._width_fn() - 4)
@@ -255,6 +320,7 @@ class OperatorSession:
                 break
         self._editor.reset()
         self._line_queue = []
+        self._esc_stamp = None
         prefix = ""
         if self._status_open:
             prefix = "\n"
@@ -289,6 +355,7 @@ class OperatorSession:
         self._editor.reset()
         self._line_queue = []
         self._pump_eof = False
+        self._esc_stamp = None
 
     def _restore_terminal(self) -> None:
         """Idempotently restore and forget the active termios snapshot."""
@@ -393,9 +460,13 @@ class OperatorSession:
         if not self._footer_active:
             return
         assert self._footer_label is not None
+        # A message in a poll that also carries an end request is recorded to the log
+        # but never delivered to the policy (rollout breaks before the next inference),
+        # so "[sent]" would be a false delivery claim; confirm it as noted instead.
+        label = "noted" if poll.end is not None else self._footer_label
         for index, message in enumerate(poll.messages):
             if not poll.sources or poll.sources[index] == "console":
-                self.write_line(f"[{self._footer_label}] {message}")
+                self.write_line(f"[{label}] {message}")
 
     def begin_trial(self) -> None:
         """Re-decide footer eligibility, then discard feedback predating the next trial."""
