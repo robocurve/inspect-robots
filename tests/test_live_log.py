@@ -299,6 +299,7 @@ class _ProbeSink(NullSink):
     def __init__(self, live_sink: LiveLogSink) -> None:
         self.live_sink = live_sink
         self.start_paths: list[Path] = []
+        self.start_logs: list[EvalLog] = []
         self.message_logs: list[EvalLog] = []
         self.trial_logs: list[EvalLog] = []
         self.removed_on_end = False
@@ -307,6 +308,7 @@ class _ProbeSink(NullSink):
         del spec
         assert self.live_sink.path is not None
         self.start_paths.append(self.live_sink.path)
+        self.start_logs.append(self._read())
 
     def _read(self) -> EvalLog:
         assert self.live_sink.path is not None
@@ -326,7 +328,10 @@ class _ProbeSink(NullSink):
         self.removed_on_end = not self.live_sink.path.exists()
 
 
-def test_eval_integration_probe_observes_valid_mid_run_snapshots(tmp_path: Path) -> None:
+@pytest.mark.parametrize("store_frames", [False, True])
+def test_eval_integration_probe_observes_valid_mid_run_snapshots(
+    store_frames: bool, tmp_path: Path
+) -> None:
     live_sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
     probe = _ProbeSink(live_sink)
     task = Task(
@@ -342,11 +347,15 @@ def test_eval_integration_probe_observes_valid_mid_run_snapshots(tmp_path: Path)
         CubePickEmbodiment(),
         sinks=[live_sink, probe],
         log_dir=str(tmp_path),
+        store_frames=store_frames,
     )
 
     assert logs[0].status == "success"
     assert probe.message_logs
     assert all(log.status == "started" for log in probe.message_logs)
+    snapshots = [*probe.start_logs, *probe.message_logs, *probe.trial_logs]
+    expected = logs[0].stats.frames_dir if store_frames else None
+    assert all(log.stats.frames_dir == expected for log in snapshots)
     assert probe.trial_logs[0].results.total_trials == 1
     assert probe.trial_logs[0].samples[0].policy_transcripts[0]
     assert probe.removed_on_end
@@ -354,6 +363,7 @@ def test_eval_integration_probe_observes_valid_mid_run_snapshots(tmp_path: Path)
 
 def test_eval_set_threads_and_reuses_caller_supplied_live_sink(tmp_path: Path) -> None:
     live_sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    live_sink.bind_frames_dir("stale-run-one-frames")
     probe = _ProbeSink(live_sink)
     tasks = [
         Task(
@@ -376,4 +386,15 @@ def test_eval_set_threads_and_reuses_caller_supplied_live_sink(tmp_path: Path) -
     assert success
     assert len(logs) == 2
     assert len(set(probe.start_paths)) == 2
+    assert [log.stats.frames_dir for log in probe.start_logs] == [None, None]
     assert all(not path.exists() for path in probe.start_paths)
+
+
+def test_bound_frames_directory_survives_the_run_state_reset(tmp_path: Path) -> None:
+    sink = LiveLogSink(str(tmp_path))
+    sink.bind_frames_dir("logs/frames/run-stamp")
+
+    sink.on_eval_start(_spec())
+
+    assert sink.path is not None
+    assert read_eval_log(str(sink.path)).stats.frames_dir == "logs/frames/run-stamp"

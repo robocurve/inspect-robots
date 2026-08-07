@@ -138,6 +138,13 @@ class _Broadcast:
             if callable(hook):
                 hook(action_space, observation_space)
 
+    def bind_frames_dir(self, frames_dir: str | None) -> None:
+        """Offer the run's frame directory to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_frames_dir", None)
+            if callable(hook):
+                hook(frames_dir)
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
             s.on_eval_start(spec)
@@ -355,6 +362,7 @@ def _run_eval(
         max_seconds=task.max_seconds,
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
+    bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()

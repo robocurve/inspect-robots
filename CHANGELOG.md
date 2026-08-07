@@ -25,6 +25,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Live HTML reports now include recent stored camera frames under a bounded
+  serving budget, while completed reports retain the full frame budget. The
+  agent live-view tip now gives remote and headless sessions a network-serving
+  command and reachable URL
+  ([plan 0058](plans/0058-live-frames-and-headless-tip.md),
+  [#337](https://github.com/robocurve/inspect-robots/issues/337)).
+
 - **Voice plugin (0.5.0):** `--speak` now supports blocking, interrupt, and queue
   speech delivery through `-S mode=`, including a bounded fail-open blocking
   wait and generation-based interruption

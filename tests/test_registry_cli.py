@@ -175,6 +175,8 @@ def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
     from inspect_robots.logging import JsonLogSink, LiveLogSink
 
     monkeypatch.setitem(reg._FACTORIES["policy"], "agent", ScriptedPolicy)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
     log_dir = tmp_path / "log dir"
     observed: list[list[object]] = []
     live_paths: list[Path] = []
@@ -225,6 +227,70 @@ def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
     else:
         assert f"live: watch this run in your browser →  {command_text}" in out
         assert "each agent turn, notes, and operator/voice input, updating live" in out
+
+
+@pytest.mark.parametrize(
+    ("env", "platform", "expected"),
+    [
+        ({"SSH_CONNECTION": "client 1 server 2"}, "linux", True),
+        ({"DISPLAY": ":0"}, "linux", False),
+        ({"WAYLAND_DISPLAY": "wayland-0"}, "linux", False),
+        ({"SSH_CONNECTION": "client 1 server 2", "DISPLAY": ":0"}, "linux", True),
+        ({}, "linux", True),
+        ({}, "darwin", False),
+        ({}, "win32", False),
+    ],
+)
+def test_headless_session_matrix(env: dict[str, str], platform: str, expected: bool) -> None:
+    assert cli._headless_session(env, platform) is expected
+
+
+def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_dir = tmp_path / "rig logs' current"
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "agent",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+    resolved = cli._ResolvedComponents(
+        None,
+        "agent",
+        "cli",
+        None,
+        "arm",
+        "cli",
+        None,  # type: ignore[arg-type]
+    )
+
+    cli._announce_live_view(args, resolved, {"DISPLAY": ":0"})
+    local = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open" in local
+    assert "; open http://" not in local
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+    )
+    remote = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
+    assert "open http://[2001:db8::10]:8300/" in remote
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
+    assert "open http://robot-host:8300/" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command", ["run", "eval-set"])
@@ -1570,7 +1636,7 @@ def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
         frames_dir / "s0-e0_top_cam_000004.npy",
         np.zeros((3, 4, 3), dtype=np.uint8),
     )
-    recorded = str(tmp_path / "old-machine" / "run-stamp")
+    recorded = "old-machine/logs/frames/run-stamp"
     path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
     return path, frames_dir
 
@@ -1663,16 +1729,89 @@ def test_view_renders_null_metric_from_sanitized_non_finite_score(
 
 
 def test_view_embeds_frames_resolved_from_log_relative_fallback(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path, _frames_dir = _write_view_frame_fixture(tmp_path)
     output = tmp_path / "report.html"
+    elsewhere = tmp_path / "different-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
 
     assert main(["view", str(path), "-o", str(output)]) == 0
 
     document = output.read_text(encoding="utf-8")
     assert 'src="data:image/png;base64,' in document
     assert "[image omitted: streamed camera frame]" not in document
+    capsys.readouterr()
+
+
+def test_view_no_frames_precedes_the_served_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    from inspect_robots import read_eval_log
+
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    live_path = _write_log(live_log, path.parent, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(live_path.parent),
+                "--serve",
+                "--no-frames",
+                "--live-frames-budget",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+    document = (live_path.parent / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_view_started_pages_elide_wire_blobs_in_static_and_served_modes(
+    serve: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import hashlib
+
+    from inspect_robots import read_eval_log
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    png = b"wire image"
+    sha = hashlib.sha256(png).hexdigest()
+    row = {"call": 0, "request": {"messages": [{"content": f"$blob:{sha}"}]}}
+    path, blob_dir = _write_wire_log(logs, ([row],))
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    _write_log(live_log, logs, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(logs)]
+    if serve:
+        argv.append("--serve")
+
+    assert main(argv) == 0
+
+    document = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert "[blob elided: live page]" in document
+    assert "data:image/png;base64" not in document
     capsys.readouterr()
 
 
@@ -1719,9 +1858,18 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
         refresh_seconds: int | None = None,
     ) -> str:
-        del log, title, frames_dir, refresh_seconds
+        del (
+            log,
+            title,
+            frames_dir,
+            live_frames_budget_bytes,
+            wire_media_elided,
+            refresh_seconds,
+        )
         assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
@@ -1730,6 +1878,130 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
 
     assert main(["view", str(path), "--frames-budget", "1.25"]) == 0
     assert received == [1_250_000]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_live_budget", "expected_refresh"),
+    [
+        ("serve-directory", 8_000_000, 2),
+        ("static-directory", None, None),
+        ("single-file", None, None),
+    ],
+)
+def test_view_live_frames_budget_matrix(
+    mode: str,
+    expected_live_budget: int | None,
+    expected_refresh: int | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _directory_view_log(created="2026-08-07T12:00:00Z", status="started")
+    if mode == "single-file":
+        target = _write_log(log, tmp_path, "run.live.json")
+    else:
+        target = tmp_path / "logs"
+        target.mkdir()
+        _write_log(log, target, "run.live.json")
+    received: list[tuple[int | None, bool, int | None]] = []
+
+    def fake_render_html(
+        rendered_log: EvalLog,
+        *,
+        title: str,
+        log_path: Path,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None,
+    ) -> str:
+        del rendered_log, title, log_path, frames_dir, frames_budget_bytes
+        received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(target)]
+    if mode == "serve-directory":
+        argv.append("--serve")
+
+    assert main(argv) == 0
+    assert received == [(expected_live_budget, True, expected_refresh)]
+    capsys.readouterr()
+
+
+def test_view_zero_live_frames_budget_is_forwarded_as_unlimited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[int | None] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        value = kwargs["live_frames_budget_bytes"]
+        assert value is None or isinstance(value, int)
+        received.append(value)
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve", "--live-frames-budget", "0"]) == 0
+    assert received == [0]
+    capsys.readouterr()
+
+
+def test_view_forwards_tighter_full_budget_with_larger_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[tuple[int, int | None]] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        full = kwargs["frames_budget_bytes"]
+        live = kwargs["live_frames_budget_bytes"]
+        assert isinstance(full, int)
+        assert live is None or isinstance(live, int)
+        received.append((full, live))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(logs),
+                "--serve",
+                "--frames-budget",
+                "2",
+                "--live-frames-budget",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert received == [(2_000_000, 8_000_000)]
     capsys.readouterr()
 
 
@@ -1772,6 +2044,19 @@ def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path
 
     with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
         main(["view", str(path), "--frames-budget", budget])
+
+
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_live_frames_budget(
+    budget: str, tmp_path: Path
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(
+        SystemExit,
+        match="--live-frames-budget must be a non-negative finite number",
+    ):
+        main(["view", str(path), "--live-frames-budget", budget])
 
 
 def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
@@ -2044,6 +2329,8 @@ def test_view_directory_incremental_mtime_and_force(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
         refresh_seconds: int | None = None,
     ) -> str:
         calls.append(log.eval.created)
@@ -2053,6 +2340,8 @@ def test_view_directory_incremental_mtime_and_force(
             log_path=log_path,
             frames_dir=frames_dir,
             frames_budget_bytes=frames_budget_bytes,
+            live_frames_budget_bytes=live_frames_budget_bytes,
+            wire_media_elided=wire_media_elided,
             refresh_seconds=refresh_seconds,
         )
 

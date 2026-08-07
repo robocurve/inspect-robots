@@ -75,6 +75,11 @@ class LiveLogSink:
         self._latencies: list[float] = []
         self._started_clock = 0.0
         self._last_write_clock: float | None = None
+        self._frames_dir: str | None = None
+
+    def bind_frames_dir(self, frames_dir: str | None) -> None:
+        """Bind the frame directory that every snapshot for the next run records."""
+        self._frames_dir = frames_dir
 
     def _disable(self, exc: Exception) -> None:
         """Warn once and turn all later hooks into no-ops for this run."""
@@ -270,6 +275,7 @@ class LiveLogSink:
                 duration_s=duration,
                 total_steps=self._completed_steps + self._current_steps,
                 mean_inference_latency_s=(mean(self._latencies) if self._latencies else None),
+                frames_dir=self._frames_dir,
             ),
             samples=self._samples(updated_at),
         )

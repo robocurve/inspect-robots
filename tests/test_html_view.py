@@ -22,7 +22,7 @@ from inspect_robots._html import (
     render_html,
 )
 from inspect_robots._pngenc import png_data_url
-from inspect_robots.frames import _safe
+from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
 
@@ -961,6 +961,118 @@ def test_frame_budget_embeds_first_then_truncates_remaining(tmp_path: Path) -> N
     assert f"embedded media truncated at {budget_mb:g} MB (1 embedded)" in document
 
 
+def test_live_frame_budget_allocates_newest_first_and_reuses_encoded_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+    payload_size = len(png_data_url(frame).partition(",")[2])
+    store = FrameStore(str(tmp_path))
+    store.put("scene-0-e0", 1, "older", frame)
+    store.put("scene-0-e1", 2, "newest", frame)
+    log = _log(
+        transcripts=(
+            _chat({"role": "user", "content": _parts("older", 1)}),
+            _chat(
+                {
+                    "role": "user",
+                    "content": [
+                        *_parts("newest", 2),
+                        *_parts("newest", 2),
+                        *_parts("missing", 3),
+                    ],
+                }
+            ),
+        )
+    )
+    encode_calls: list[npt.NDArray[np.uint8]] = []
+    encode = png_data_url
+
+    def counting_encode(image: npt.NDArray[np.uint8]) -> str:
+        encode_calls.append(image)
+        return encode(image)
+
+    monkeypatch.setattr("inspect_robots._html.png_data_url", counting_encode)
+
+    document = render_html(
+        log,
+        title="live budget",
+        frames_dir=tmp_path,
+        frames_budget_bytes=8 * payload_size,
+        live_frames_budget_bytes=payload_size,
+    )
+
+    assert document.count('<img class="frame"') == 2
+    assert "camera newest step 2" in document
+    assert "camera older step 1" not in document
+    assert document.count("[image omitted: streamed camera frame]") == 2
+    assert len(encode_calls) == 2
+    assert f"embedded media truncated at {payload_size / 1_000_000:g} MB (1 embedded)" in document
+
+
+def test_live_frame_budget_zero_semantics_match_the_full_budget(tmp_path: Path) -> None:
+    frame = np.zeros((2, 2, 3), dtype=np.uint8)
+    payload_size = len(png_data_url(frame).partition(",")[2])
+    parts = [*_parts("first", 1), *_parts("second", 2)]
+    store = FrameStore(str(tmp_path))
+    store.put("scene-0-e0", 1, "first", frame)
+    store.put("scene-0-e0", 2, "second", frame)
+    log = _frame_log(parts)
+
+    full_unlimited = render_html(
+        log,
+        title="both unlimited",
+        frames_dir=tmp_path,
+        frames_budget_bytes=0,
+        live_frames_budget_bytes=0,
+    )
+    full_caps_live = render_html(
+        log,
+        title="full cap",
+        frames_dir=tmp_path,
+        frames_budget_bytes=payload_size,
+        live_frames_budget_bytes=0,
+    )
+    live_caps_full = render_html(
+        log,
+        title="live cap",
+        frames_dir=tmp_path,
+        frames_budget_bytes=0,
+        live_frames_budget_bytes=payload_size,
+    )
+
+    assert full_unlimited.count('<img class="frame"') == 2
+    assert full_caps_live.count('<img class="frame"') == 1
+    assert live_caps_full.count('<img class="frame"') == 1
+
+
+def test_live_effective_budget_uses_tighter_full_limit_and_reports_it(tmp_path: Path) -> None:
+    rng = np.random.default_rng(7)
+    parts: list[object] = []
+    store = FrameStore(str(tmp_path))
+    for step, name in enumerate(("oldest", "middle", "newest"), start=1):
+        parts.extend(_parts(name, step))
+        store.put(
+            "scene-0-e0",
+            step,
+            name,
+            rng.integers(0, 256, size=(448, 448, 3), dtype=np.uint8),
+        )
+
+    document = render_html(
+        _frame_log(parts),
+        title="effective min",
+        frames_dir=tmp_path,
+        frames_budget_bytes=2_000_000,
+        live_frames_budget_bytes=8_000_000,
+    )
+
+    assert document.count('<img class="frame"') == 2
+    assert "camera newest step 3" in document
+    assert "camera middle step 2" in document
+    assert "camera oldest step 1" not in document
+    assert "embedded media truncated at 2 MB (2 embedded)" in document
+
+
 def test_zero_frame_budget_is_unlimited(tmp_path: Path) -> None:
     parts = [*_parts("first", 1), *_parts("second", 2)]
     for step, name in enumerate(("first", "second"), start=1):
@@ -986,7 +1098,12 @@ def test_non_chat_transcript_never_embeds_frames(tmp_path: Path) -> None:
     _save_frame(tmp_path, "top_cam", 4, np.zeros((2, 2, 3), dtype=np.uint8))
     transcript = {"parts": _parts()}
 
-    document = render_html(_log(transcripts=(transcript,)), title="json", frames_dir=tmp_path)
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="json",
+        frames_dir=tmp_path,
+        live_frames_budget_bytes=8_000_000,
+    )
 
     assert '<img class="frame"' not in document
     assert "[image omitted: streamed camera frame]" in document
@@ -1057,6 +1174,23 @@ def test_wire_section_renders_blob_stubs_breakpoints_and_request_summary(
     assert "cache_control" in document and "ephemeral" in document
     assert f'id="{anchor}"' in document
     assert f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}" in document
+
+
+def test_wire_media_can_be_elided_without_loading_started_page_blobs(tmp_path: Path) -> None:
+    sha = "a" * 64
+    row = {"call": 0, "request": {"messages": [{"content": f"$blob:{sha}"}]}}
+    log, log_path, _calls_path = _wire_log(tmp_path, [row])
+
+    document = render_html(
+        dataclasses.replace(log, status="started"),
+        title="live wire",
+        log_path=log_path,
+        wire_media_elided=True,
+    )
+
+    assert "[blob elided: live page]" in document
+    assert "[broken blob reference" not in document
+    assert "data:image/png;base64" not in document
 
 
 @pytest.mark.parametrize(
