@@ -151,7 +151,9 @@ On an attended run, an opted-in policy can also receive feedback while the
 episode is running. The CLI prints the operator console usage hint when this
 channel is active. Type a normal line and press Enter to deliver it at the
 policy's next inference. Esc ends the episode, and so does `/stop`; trailing
-text after `/stop` is recorded to the log before the episode ends. `/y`, `/n`,
+text after `/stop` is recorded to the log before the episode ends. In the
+plain fallback without the footer, stdin is line-buffered, so a lone Esc needs
+an Enter after it; `/stop` works the same everywhere. `/y`, `/n`,
 or `/p` plus an optional note ends it and records the verdict immediately,
 without a second post-trial prompt. Bare Enter never ends the run: it prints
 the usage reminder instead, since Enter is also the key you press right after

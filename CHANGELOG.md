@@ -10,7 +10,7 @@ All notable changes to this project are documented here. The format is based on
 ### Changed
 
 - **Core:** bare Enter no longer ends an attended episode. Esc ends it in the
-  footer (with a 150 ms grace so arrow-key sequences are never misread), and
+  footer (with a 150 ms grace so split arrow-key sequences are not misread), and
   `/stop [note]` ends it from any mode, recording the trailing text to the log
   as an operator message. An empty line now prints the usage reminder, which is
   mode-aware for end-only sessions. Cmd+Enter is not offered: terminals do not
