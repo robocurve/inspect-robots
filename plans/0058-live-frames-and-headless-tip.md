@@ -94,8 +94,9 @@ is unacceptable CPU (~740 steps × 3 cams on a real rig trial). Therefore:
      copy per trial; the budget object is the only state every trial
      shares). Each winning frame is encoded exactly once.
   3. the render pass displays document order, consuming the cache. In live
-     mode `_frame_image` consults the cache **before** the
-     `budget.truncated` short-circuit and does not re-charge for hits (R2:
+     mode `_frame_image` checks the cache at its top, **before** calling
+     `_load_frame` (whose `budget.truncated` short-circuit would otherwise
+     fire), and does not re-charge for hits (R2:
      the pre-pass legitimately ends with `truncated` set — without the
      cache-first check every winner would render as a placeholder and the
      page would show zero frames); a cache miss in live mode returns `None`
@@ -143,7 +144,8 @@ is unacceptable CPU (~740 steps × 3 cams on a real rig trial). Therefore:
 - `_announce_live_view` picks the variant:
   - headless: command line advertises
     `inspect-robots view <logdir> --serve --host 0.0.0.0`, and the dim
-    second line appends the URL to open. Host preference (R1:
+    second line appends the URL to open (view's default port, 8300). Host
+    preference (R1:
     `gethostname()` short names often don't resolve from the operator's
     laptop): the server IP from `SSH_CONNECTION`'s third field when present
     and well-formed (four whitespace-separated fields; bracketed if IPv6) —
@@ -188,7 +190,7 @@ is unacceptable CPU (~740 steps × 3 cams on a real rig trial). Therefore:
   suppression rules from plan 0055 unchanged.
 - Docs: `docs/guide/live-view.md` frames paragraph updated (live pages show
   recent frames, final report the full set), CHANGELOG entry
-  (`[plan 0057](plans/0057-live-frames-and-headless-tip.md)`,
+  (`[plan 0058](plans/0058-live-frames-and-headless-tip.md)`,
   [#337](https://github.com/robocurve/inspect-robots/issues/337)), module-map
   rows (`logging/`, `eval.py`, `cli.py`).
 
