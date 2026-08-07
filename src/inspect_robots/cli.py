@@ -811,9 +811,18 @@ def _build_voice_input(
 def _start_voice_input(
     voice_input: OperatorInput, session: OperatorSession, policy: object
 ) -> None:
-    """Start and attach a voice input, honoring its optional startup hook."""
+    """Start and attach a voice input, honoring its optional startup hook.
+
+    Announces the voice model before the startup hook runs: loading can download
+    model weights on a first run, and the progress bars are otherwise unlabeled.
+    """
     start_hook = getattr(voice_input, "start", None)
     if callable(start_hook):
+        model = getattr(voice_input, "model", None)
+        if isinstance(model, str):
+            session.write_line(
+                f"voice: loading speech-to-text model {model} (a first run downloads it)"
+            )
         try:
             listening_line = start_hook()
         except Exception as exc:
