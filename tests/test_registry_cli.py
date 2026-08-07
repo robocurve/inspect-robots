@@ -3625,6 +3625,7 @@ def test_voice_start_announces_model_before_startup_hook() -> None:
             return None
 
         def start(self) -> str:
+            output.append("start-hook ran")
             return "listening on test microphone"
 
     voice = ModelVoiceInput()
@@ -3634,6 +3635,7 @@ def test_voice_start_announces_model_before_startup_hook() -> None:
 
     assert output == [
         "voice: loading speech-to-text model parakeet-tdt-0.6b-v3 (a first run downloads it)\n",
+        "start-hook ran",
         "listening on test microphone\n",
     ]
 
