@@ -11,7 +11,14 @@ from collections.abc import Callable
 
 import pytest
 
-from inspect_robots.console import USAGE, ConsolePoll, EndRequest, OperatorConsole, OperatorInput
+from inspect_robots.console import (
+    USAGE,
+    USAGE_END_ONLY,
+    ConsolePoll,
+    EndRequest,
+    OperatorConsole,
+    OperatorInput,
+)
 from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
@@ -613,11 +620,22 @@ class _ScriptedFd:
         return self.chunks.pop(0)
 
 
+class _FakeClock:
+    """A hand-advanced monotonic clock for exercising the bare-Esc grace deterministically."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def now(self) -> float:
+        return self.t
+
+
 def _footer_session(
     output: list[str],
     fd: _ScriptedFd | None = None,
     width: int = 200,
     label: str = "sent",
+    now_fn: Callable[[], float] | None = None,
 ) -> tuple[OperatorSession, _ScriptedFd]:
     """Build a footer-enabled session, run ``begin_trial()``, then drop its input-row draw."""
     fd = fd if fd is not None else _ScriptedFd()
@@ -629,6 +647,7 @@ def _footer_session(
         isatty_fn=lambda: True,
         raw_mode_fn=object,
         restore_fn=lambda _state: None,
+        now_fn=now_fn,
     )
     session.enable_footer(label=label)
     session.begin_trial()
@@ -1285,7 +1304,7 @@ def test_footer_poll_confirms_each_console_feedback_message_with_selected_label(
 @pytest.mark.parametrize(
     ("raw_input", "expected_end"),
     [
-        (b"\n", EndRequest()),
+        (b"/stop\n", EndRequest()),
         (b"/p careful placement\n", EndRequest(verdict="partial", note="careful placement")),
     ],
 )
@@ -1428,6 +1447,135 @@ def test_footer_pump_escape_sequence_split_across_two_poll_calls() -> None:
     fd.chunks = [b"z", b"\n"]
     poll = session.poll()
     assert poll.messages == ("z",)
+
+
+def test_footer_bare_esc_fires_end_on_quiet_poll_past_grace() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+
+    assert session.poll() == ConsolePoll()  # quiet poll with no grace armed
+    fd.chunks = [b"\x1b"]
+    assert session.poll() == ConsolePoll()  # byte-feeding poll arms the grace
+    clock.t = 0.2
+    assert session.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_footer_quiet_poll_before_grace_holds_then_later_quiet_poll_fires() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+    fd.chunks = [b"\x1b"]
+    session.poll()
+
+    clock.t = 0.1
+    assert session.poll() == ConsolePoll()
+    # A second consecutive quiet poll past the floor must fire: a quiet poll that
+    # re-stamped the grace would push the deadline out forever on a fast loop.
+    clock.t = 0.2
+    assert session.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_footer_double_esc_fires_first_at_feed_time_second_via_grace() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+    fd.chunks = [b"\x1b\x1b"]
+
+    assert session.poll() == ConsolePoll(end=EndRequest())
+    clock.t = 0.2
+    assert session.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_footer_esc_then_enter_same_chunk_fires_and_preserves_partial() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"hi", b"\x1b\r"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(end=EndRequest())
+    # The partial stays in the editor buffer (never completed, never merged into the
+    # sentinel); the input row repaints it for one frame until end_trial clears it.
+    assert output[-1] == "\r\x1b[K> hi"
+
+
+def test_footer_esc_then_enter_across_polls_resolves_at_feed_time_not_grace() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+    fd.chunks = [b"hi", b"\x1b"]
+    session.poll()
+
+    # Advancing past the grace before the newline arrives pins the ordering: a pump
+    # that feeds bytes must let feed resolution win instead of firing the grace first
+    # (which would emit the sentinel and then complete "hi" as a stray line).
+    clock.t = 0.2
+    fd.chunks = [b"\r"]
+    poll = session.poll()
+
+    assert poll == ConsolePoll(end=EndRequest())
+    assert output[-1] == "\r\x1b[K> hi"
+
+
+def test_footer_esc_after_typed_text_preserves_partial_and_fires_via_grace() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+    fd.chunks = [b"hi\x1b"]
+    session.poll()
+
+    assert output[-1] == "\r\x1b[K> hi"
+    clock.t = 0.2
+    assert session.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_footer_eof_while_grace_armed_fires_nothing() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now)
+    fd.chunks = [b"\x1b"]
+    session.poll()
+
+    clock.t = 0.2
+    fd.chunks = [b""]
+    assert session.poll() == ConsolePoll()
+
+
+def test_footer_bare_enter_prints_usage_reminder_instead_of_ending() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    fd.chunks = [b"\n"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll()
+    assert output[-1] == f"\r\x1b[K{USAGE}\n\r\x1b[K> "
+
+
+def test_footer_stop_with_text_confirms_noted_even_on_sent_labeled_session() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, label="sent")
+    fd.chunks = [b"/stop wrap it up\n"]
+
+    poll = session.poll()
+
+    assert poll == ConsolePoll(messages=("wrap it up",), end=EndRequest())
+    assert output[-1] == "\r\x1b[K[noted] wrap it up\n\r\x1b[K> "
+
+
+def test_session_console_usage_kwarg_reaches_the_owned_console() -> None:
+    output: list[str] = []
+    chunks = [b"\n"]
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=lambda: bool(chunks),
+        fd_read=lambda: chunks.pop(0),
+        console_usage=USAGE_END_ONLY,
+    )
+
+    assert session.poll() == ConsolePoll()
+    assert output == [f"{USAGE_END_ONLY}\n"]
 
 
 def test_footer_dispatch_eof_contract_returns_empty_string_only_on_real_eof() -> None:

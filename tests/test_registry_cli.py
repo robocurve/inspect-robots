@@ -4758,6 +4758,9 @@ def test_build_operator_session_enablement_matrix(
         assert getattr(embodiment, "connected_session", None) is session
     assert footer_labels == ([] if expected_footer_label is None else [expected_footer_label])
     assert capsys.readouterr().out == expected_output
+    # The bare-Enter usage reminder must match the mode: end-only sessions remind
+    # with USAGE_END_ONLY, not the type-a-message text.
+    assert session._console._usage == (USAGE if accepts_messages else USAGE_END_ONLY)
 
 
 def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
