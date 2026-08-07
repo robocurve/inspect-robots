@@ -27,7 +27,8 @@ All notable changes to this project are documented here. The format is based on
 - Live HTML reports now show a running evaluation turn by turn through a
   transient schema-valid JSON sink. `run` and `eval-set` enable it by default,
   `--no-live-log` disables it, and `eval_set()` accepts reusable caller-supplied
-  sinks ([plan 0055](plans/0055-live-html-view.md), #329).
+  sinks ([plan 0055](plans/0055-live-html-view.md),
+  [#329](https://github.com/robocurve/inspect-robots/issues/329)).
 
 - **Voice plugin (0.3.0):** Parakeet TDT 0.6B v3 through onnx-asr is now the
   default transcription backend. Its lower published word error rate and faster
