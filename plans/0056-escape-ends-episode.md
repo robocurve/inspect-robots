@@ -13,7 +13,9 @@
 > gap (`/stop <text>` would confirm as `[sent]` though never delivered; ending polls now
 > confirm as `[noted]`). R4 found 2 (docs edit list missed `:169` and the trailing-text
 > and bare-Enter discoverability; grace-vs-feed ordering made explicit with a
-> discriminating fake-clock test). All folded in. R5 pending.
+> discriminating fake-clock test). R5 (vs main @ c8ac6f09) returned NO SUBSTANTIVE
+> ISSUES; its three nits (end-to-end usage-plumbing test, `:78-85` docstring span,
+> header bookkeeping) are folded in.
 
 **Goal:** Close #333. On attended runs with the operator console (`policy=agent` being the
 motivating case), pressing Enter on an empty input line currently ends the episode. Enter
@@ -155,8 +157,9 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
   `/y /n /p` (`:75-78`); unknown slash command returns `show_usage=True` (`:79-80`).
   `OperatorConsole.poll` prints `USAGE` via `output_fn` when `show_usage` (`:120-121`).
 - `src/inspect_robots/session.py` — `_LineEditor` (`:77-133`): `_escape_pending` /
-  `_csi_discard` discard state persists across `feed()` calls; docstring (`:80-84`)
-  currently promises the cross-poll persistence outright. `_pump_input` (`:225-233`)
+  `_csi_discard` discard state persists across `feed()` calls; the class docstring
+  (`:78-85`, persistence sentence at `:82-84`) currently promises the cross-poll
+  persistence outright. `_pump_input` (`:225-233`)
   drains `_fd_readable`/`_fd_read` into the editor and extends `_line_queue`.
   `_enter_footer` (`:245-262`) and `_reset_footer_state` (`:285-291`) reset editor
   state. `_dispatch_read` (`:214-223`) hands queued lines (newline-joined) to the
@@ -215,8 +218,10 @@ bypasses `_parse` entirely, so it can never trigger `/stop`.
 - [ ] Tests: update `test_whitespace_only_line_requests_an_unscored_end` (usage
       reminder, no end) and `test_first_end_request_wins_while_later_lines_still_parse`
       (first end via `/stop` or `"\x1b"`); add `/stop`, `/STOP note`, `"\x1b\n"`,
-      usage-dedup-per-poll, and custom-`usage` cases; keep multiline-paste tests
-      passing.
+      usage-dedup-per-poll, and custom-`usage` cases, plus one end-to-end plumbing
+      assertion (a session built with `console_usage=USAGE_END_ONLY` prints
+      `USAGE_END_ONLY`, not `USAGE`, on a bare-Enter reminder — guards the two
+      forwarding kwargs against value-dropping); keep multiline-paste tests passing.
 
 ### 2. Bare-Esc detection (`session.py` + `tests/test_session.py`)
 
