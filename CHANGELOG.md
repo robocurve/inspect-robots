@@ -293,6 +293,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`inspect-robots run --instruction ... --max-steps 0` (or negative) no longer
+  crashes with a raw `ConfigError` traceback.** The flag is now range-checked up
+  front and exits with a guided `--max-steps must be >= 1, got 0` message,
+  matching how the other numeric run flags are validated (#248).
+
 - `inspect-robots setup` now treats a by-id camera name as ambiguous whenever
   another physical camera can claim the same udev identity, including
   same-model cameras with missing serials. It lists and stores port-stable
