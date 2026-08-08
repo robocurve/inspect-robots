@@ -13,11 +13,22 @@ Then start the run in another terminal:
 inspect-robots run --task cubepick-reach --policy agent --embodiment cubepick
 ```
 
-The index and the running report refresh every two seconds. The report shows
-completed trials and the current policy transcript, including agent turns,
-notes, and operator or voice feedback. When frame storage is enabled, running
-pages show the most recent camera frames that fit the live frame budget. The
-final report shows the full set under the normal report frame budget.
+The index and the running report refresh every two seconds. The report groups
+the policy transcript into observation turns. Each turn keeps assistant prose,
+agent notes, readable tool argument chips, and operator or voice feedback next
+to the frames that provide their context. Open the collapsed LLM POV section
+to inspect the complete raw exchange, including state dumps and tool results.
+
+When frame storage is enabled, running pages show the most recent camera frames
+that fit the live frame budget. A camera player above each transcript can play
+or scrub those existing frames at about four frames per second. Its camera,
+position, and pause state survive the two-second browser refresh. Live and
+served pages always use this lightweight flipbook and never run ffmpeg.
+
+After a run finishes, a plain `inspect-robots view logs` pass can replace each
+camera's flipbook with an embedded MP4 when ffmpeg is installed. A page first
+created by `--serve` stays eligible for that upgrade. Use `--no-video` to keep
+the flipbook on a plain rendering pass.
 
 Scores appear only in the final log. Scoring happens after the live sink sees a
 trial end, so score cells remain `pending` while the run is active. When the

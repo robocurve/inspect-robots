@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import html
 import json
 import re
 import struct
@@ -18,7 +19,16 @@ import pytest
 
 from inspect_robots._html import (
     _JSON_STRING_LIMIT,
+    _frame_markup,
+    _FrameBudget,
+    _FrameContext,
     _render_chat_transcript,
+    _render_tool_call,
+    _render_transcript,
+    _trial_camera_streams,
+    _VideoBudget,
+    _VideoContext,
+    _warn_video_degrade,
     render_html,
 )
 from inspect_robots._pngenc import png_data_url
@@ -175,7 +185,7 @@ def test_header_status_metrics_and_scene_content(status: str, label: str, badge_
     assert document.count(">n/a</span>") == 2
     assert "prefers-color-scheme: light" in document
     assert "prefers-color-scheme: dark" in document
-    assert document.count("<script") == 1
+    assert document.count("<script") == 2
     # The literal is duplicated here on purpose: an independent copy is what
     # makes this an injection guard rather than a tautology.
     assert (
@@ -438,7 +448,8 @@ def test_non_string_empty_and_whitespace_notes_do_not_render_callouts() -> None:
     document = render_html(_log(transcripts=(transcript,)), title="empty notes")
 
     assert 'class="agent-note"' not in document
-    assert document.count('class="call"') == 4
+    assert document.count('class="pretty-call"') == 3
+    assert document.count('class="call"') == 5
 
 
 def test_chat_defensive_guards_skip_malformed_calls_and_role_only_content() -> None:
@@ -456,14 +467,21 @@ def test_chat_defensive_guards_skip_malformed_calls_and_role_only_content() -> N
 
     document = render_html(_log(transcripts=(transcript,)), title="defensive")
 
-    assert document.count('<div class="message assistant">') == 2
+    assert document.count('<div class="message assistant">') == 4
     assert "not a list" not in document
     assert "not a call" not in document
     assert "not a function" not in document
     assert "move({&quot;dx&quot;: 1})" in document
     assert 'class="content"' not in document
 
-    assert _render_chat_transcript(["not a message"]) == '<div class="conversation"></div>'
+    assert _render_chat_transcript(["not a message"]).count('class="llm-pov"') == 1
+
+
+def test_role_less_message_renders_as_unknown_instead_of_crashing() -> None:
+    """Transcripts are foreign data: a dict without a role must degrade, not raise."""
+    document = _render_chat_transcript([{"content": "orphan"}, {"role": "assistant"}])
+    assert 'class="message unknown"' in document
+    assert "orphan" in document
 
 
 def test_non_dict_message_falls_back_to_preformatted_json() -> None:
@@ -476,7 +494,8 @@ def test_non_dict_message_falls_back_to_preformatted_json() -> None:
     assert '<div class="conversation">' not in document
 
 
-def test_media_parts_collapse_to_image_chip() -> None:
+def test_media_parts_leave_image_markers_in_pov_only() -> None:
+    """Foreign media payloads never embed, but the POV records their presence."""
     transcript = _chat(
         {
             "role": "user",
@@ -562,10 +581,10 @@ def test_stored_frame_embeds_between_escaped_text_runs(tmp_path: Path) -> None:
     assert 'loading="lazy"' in document
     assert 'src="data:image/png;base64,' in document
     assert 'alt="camera cam &lt;wide&gt; step 7"' in document
-    assert "<figcaption>camera &#x27;cam &lt;wide&gt;&#x27; (step 7)</figcaption>" in document
-    assert document.index("caption &lt;before&gt;") < document.index('<img class="frame"')
+    assert "<figcaption>cam &lt;wide&gt;</figcaption>" in document
+    assert '<div class="turn-step">step 7</div>' in document
     assert document.index('<img class="frame"') < document.index("after frame")
-    assert "[image omitted: streamed camera frame]" not in document
+    assert document.count("[image omitted: streamed camera frame]") == 1
     assert document.count('<div class="content"></div>') == 0
     assert "img.frame" in document
 
@@ -655,7 +674,7 @@ def test_truncation_is_sticky_even_for_a_smaller_later_frame(tmp_path: Path) -> 
     )
 
     assert document.count('<img class="frame"') == 1
-    assert document.count("[image omitted: streamed camera frame]") == 2
+    assert document.count("[image omitted: streamed camera frame]") == 3
 
 
 def test_label_without_step_suffix_degrades(tmp_path: Path) -> None:
@@ -784,14 +803,14 @@ def test_three_camera_pairs_embed_in_part_order(tmp_path: Path) -> None:
     assert document.count('<figure class="frame-cell">') == 3
     assert document.count('<img class="frame"') == 3
     assert document.count("<figcaption>") == 3
-    assert "<figcaption>camera &#x27;left&#x27; (step 1)</figcaption>" in document
-    assert "<figcaption>camera &#x27;top&#x27; (step 2)</figcaption>" in document
-    assert "<figcaption>camera &#x27;right&#x27; (step 3)</figcaption>" in document
+    assert "<figcaption>left</figcaption>" in document
+    assert "<figcaption>top</figcaption>" in document
+    assert "<figcaption>right</figcaption>" in document
     assert document.index("camera left step 1") < document.index("camera top step 2")
     assert document.index("camera top step 2") < document.index("camera right step 3")
-    assert "camera &#x27;left&#x27; (step 1):" not in document
-    assert "camera &#x27;top&#x27; (step 2):" not in document
-    assert "camera &#x27;right&#x27; (step 3):" not in document
+    assert "camera &#x27;left&#x27; (step 1):" in document
+    assert "camera &#x27;top&#x27; (step 2):" in document
+    assert "camera &#x27;right&#x27; (step 3):" in document
     assert document.count('<div class="content"></div>') == 0
 
 
@@ -816,9 +835,9 @@ def test_non_empty_text_between_frames_splits_rows(tmp_path: Path) -> None:
 
     document = render_html(_frame_log(parts), title="split rows", frames_dir=tmp_path)
 
-    assert document.count('<div class="frame-row">') == 2
+    assert document.count('<div class="frame-row">') == 1
     assert document.count('<figure class="frame-cell">') == 2
-    assert '</div><div class="content">between</div><div class="frame-row">' in document
+    assert "between" in document
 
 
 def test_empty_text_between_frames_does_not_split_row(tmp_path: Path) -> None:
@@ -853,11 +872,11 @@ def test_text_between_label_and_placeholder_precedes_captioned_frame(tmp_path: P
 
     document = render_html(_frame_log(parts), title="intervening", frames_dir=tmp_path)
 
-    content = '<div class="content">intervening text</div>'
-    caption = "<figcaption>camera &#x27;top_cam&#x27; (step 4)</figcaption>"
-    assert document.index(content) < document.index(caption)
+    caption = "<figcaption>top_cam</figcaption>"
+    assert caption in document
+    assert "intervening text" in document
     assert document.count('<figure class="frame-cell">') == 1
-    assert "camera &#x27;top_cam&#x27; (step 4):" not in document
+    assert "camera &#x27;top_cam&#x27; (step 4):" in document
 
 
 def test_later_label_captions_frame_and_earlier_label_stays_in_text(tmp_path: Path) -> None:
@@ -870,9 +889,9 @@ def test_later_label_captions_frame_and_earlier_label_stays_in_text(tmp_path: Pa
 
     document = render_html(_frame_log(parts), title="later label", frames_dir=tmp_path)
 
-    assert '<div class="content">camera &#x27;first&#x27; (step 1):</div>' in document
-    assert "<figcaption>camera &#x27;second&#x27; (step 2)</figcaption>" in document
-    assert "camera &#x27;second&#x27; (step 2):" not in document
+    assert "camera &#x27;first&#x27; (step 1):" in document
+    assert "<figcaption>second</figcaption>" in document
+    assert "camera &#x27;second&#x27; (step 2):" in document
     assert document.count('<figure class="frame-cell">') == 1
 
 
@@ -910,7 +929,7 @@ def test_camera_name_is_escaped_in_frame_caption_and_alt(tmp_path: Path) -> None
 
     document = render_html(_frame_log(_parts(name)), title="escaped", frames_dir=tmp_path)
 
-    assert "<figcaption>camera &#x27;&lt;b&gt;&#x27; (step 4)</figcaption>" in document
+    assert "<figcaption>&lt;b&gt;</figcaption>" in document
     assert 'alt="camera &lt;b&gt; step 4"' in document
     assert "<b>" not in document
 
@@ -956,7 +975,7 @@ def test_frame_budget_embeds_first_then_truncates_remaining(tmp_path: Path) -> N
     )
 
     assert document.count('<img class="frame"') == 1
-    assert document.count("[image omitted: streamed camera frame]") == 2
+    assert document.count("[image omitted: streamed camera frame]") == 3
     budget_mb = payload_size / 1_000_000
     assert f"embedded media truncated at {budget_mb:g} MB (1 embedded)" in document
 
@@ -1004,7 +1023,7 @@ def test_live_frame_budget_allocates_newest_first_and_reuses_encoded_cache(
     assert document.count('<img class="frame"') == 2
     assert "camera newest step 2" in document
     assert "camera older step 1" not in document
-    assert document.count("[image omitted: streamed camera frame]") == 2
+    assert document.count("[image omitted: streamed camera frame]") == 4
     assert len(encode_calls) == 2
     assert f"embedded media truncated at {payload_size / 1_000_000:g} MB (1 embedded)" in document
 
@@ -1117,6 +1136,468 @@ def test_non_user_chat_messages_never_embed_frames(tmp_path: Path, role: str) ->
 
     assert '<img class="frame"' not in document
     assert "[image omitted: streamed camera frame]" in document
+
+
+def _without_pov(document: str) -> str:
+    return re.sub(r'<details class="llm-pov">.*?</details>', "", document, flags=re.DOTALL)
+
+
+def test_turns_keep_string_users_visible_and_raw_observations_only_in_pov(
+    tmp_path: Path,
+) -> None:
+    state = "state[joint_pos]: <script>bad()</script>"
+    first_parts = [*_parts("top", 3), {"type": "text", "text": state}]
+    capture_parts = [*_parts("wrist", 3), {"type": "text", "text": "feedback: slower"}]
+    transcript = _chat(
+        {"role": "assistant", "content": "leading assistant"},
+        {"role": "user", "content": "Goal: lift the cube"},
+        {"role": "user", "content": first_parts},
+        {
+            "role": "assistant",
+            "content": "I will move carefully.",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "move_joints",
+                        "arguments": json.dumps(
+                            {
+                                "targets": {"j1": 0.123456, "j2": -0.00004},
+                                "speed": 0.5,
+                                "note": "edge <close>",
+                            }
+                        ),
+                    }
+                },
+                {
+                    "function": {
+                        "name": "take_pic",
+                        "arguments": {"cameras": ["top", "wrist"]},
+                    }
+                },
+            ],
+        },
+        {"role": "tool", "content": "moved exactly"},
+        {"role": "user", "content": "Respond with exactly one tool call."},
+        {"role": "user", "content": capture_parts},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "move_by",
+                        "arguments": {
+                            "deltas": {"x": 0.00055},
+                            "hindsight": "next time go slower",
+                        },
+                    }
+                }
+            ],
+        },
+    )
+    _save_frame(tmp_path, "top", 3, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "wrist", 3, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_log(transcripts=(transcript,)), title="turns", frames_dir=tmp_path)
+    human = _without_pov(document)
+
+    assert document.count('class="turn"') == 3
+    assert document.count('class="llm-pov"') == 3
+    assert document.count('<div class="turn-step">step 3</div>') == 2
+    assert "leading assistant" in human and "Goal: lift the cube" in human
+    assert "Respond with exactly one tool call." in human
+    assert "I will move carefully." in human
+    assert "<figcaption>top</figcaption>" in human
+    assert "<figcaption>wrist</figcaption>" in human
+    assert state not in human and "feedback: slower" not in human
+    assert "moved exactly" not in human  # tool results live in the POV only
+    assert "state[joint_pos]: &lt;script&gt;bad()&lt;/script&gt;" in document
+    assert "feedback: slower" in document and "moved exactly" in document
+    assert "j1</span>0.1235" in human and "j2</span>-0.0000" in human
+    assert "x</span>0.0006" in human and "speed</span>0.5" in human
+    assert "cameras</span>top, wrist" in human
+    assert "edge &lt;close&gt;" in human and "next time go slower" in human
+    assert '<span class="call-key">note</span>' not in human
+    assert '<span class="call-key">hindsight</span>' not in human
+    assert "move_joints({&quot;" in document and "moved exactly" in document
+    assert "&amp;lt;script&amp;gt;" not in document
+
+
+def test_pretty_call_malformed_arguments_use_raw_rendering() -> None:
+    arguments = '{"targets": <broken>}'
+    transcript = _chat(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "move_joints", "arguments": arguments}},
+            ],
+        }
+    )
+
+    document = render_html(_log(transcripts=(transcript,)), title="raw")
+
+    assert 'class="pretty-call"' not in document
+    assert document.count("move_joints({&quot;targets&quot;: &lt;broken&gt;})") == 2
+
+
+def test_feedback_matches_latest_same_step_turn_and_residual_is_exact(
+    tmp_path: Path,
+) -> None:
+    transcript = _chat(
+        {"role": "user", "content": _parts("first", 5)},
+        {"role": "assistant", "content": "first response"},
+        {"role": "user", "content": _parts("capture", 5)},
+        {"role": "assistant", "content": "second response"},
+    )
+    _save_frame(tmp_path, "first", 5, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "capture", 5, np.ones((2, 2, 3), dtype=np.uint8))
+    log = _log(transcripts=(transcript,))
+    messages = (
+        {"t": 4, "text": "too early", "source": "console"},
+        {"t": 5, "text": "same step tail", "source": "voice"},
+    )
+    scene = dataclasses.replace(log.samples[0], operator_messages=(messages,))
+
+    document = render_html(
+        dataclasses.replace(log, samples=(scene,)), title="feedback", frames_dir=tmp_path
+    )
+    turns = document.split('<section class="turn">')[1:]
+
+    assert "same step tail" not in turns[0]
+    assert "same step tail" in turns[1]
+    assert '<span class="feedback-source">voice</span>' in turns[1]
+    residual = document[document.index("<h3>Operator feedback</h3>") :]
+    assert "too early" in residual and "same step tail" not in residual
+    assert document.index("Operator feedback") > document.index("Trial 0 transcript")
+
+
+def test_feedback_fully_placed_hides_residual_and_zero_step_chat_keeps_it(
+    tmp_path: Path,
+) -> None:
+    message = {"t": 2, "text": "hold position", "source": "console"}
+    transcript = _chat({"role": "user", "content": _parts("top", 2)})
+    _save_frame(tmp_path, "top", 2, np.zeros((2, 2, 3), dtype=np.uint8))
+    log = _log(transcripts=(transcript,))
+    scene = dataclasses.replace(log.samples[0], operator_messages=((message,),))
+    placed = render_html(
+        dataclasses.replace(log, samples=(scene,)), title="placed", frames_dir=tmp_path
+    )
+
+    assert "hold position" in placed
+    assert "Operator feedback" not in placed
+
+    zero_step = _log(transcripts=(_chat({"role": "user", "content": "Goal: move"}),))
+    zero_scene = dataclasses.replace(zero_step.samples[0], operator_messages=((message,),))
+    residual = render_html(dataclasses.replace(zero_step, samples=(zero_scene,)), title="zero")
+    assert "Operator feedback" in residual and "hold position" in residual
+    assert 'class="feedback-chip"' not in residual
+
+
+def test_non_chat_feedback_is_residual_and_json_fallback_is_unchanged() -> None:
+    transcript = {"policy": ["opaque", {"value": 3}]}
+    message = {"t": 1, "text": "script note", "source": "voice"}
+    log = _log(transcripts=(transcript,))
+    scene = dataclasses.replace(log.samples[0], operator_messages=((message,),))
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="non-chat")
+
+    expected = json.dumps(transcript, indent=2, sort_keys=True, ensure_ascii=False)
+    assert f"<pre>{html.escape(expected, quote=True)}</pre>" in document
+    assert "Operator feedback" in document and "script note" in document
+
+
+def test_started_scene_badge_uses_live_marker_without_changing_other_scenes() -> None:
+    log = _log(status="started")
+    live_scene = dataclasses.replace(
+        log.samples[0], scene_id="live", status="success", trial_metadata=({}, {"live": {}})
+    )
+    done_scene = dataclasses.replace(
+        log.samples[0], scene_id="done", status="success", trial_metadata=({}, {})
+    )
+    started = render_html(dataclasses.replace(log, samples=(live_scene, done_scene)), title="mixed")
+
+    assert 'scene-head"><h2>live</h2><span class="badge status-running">running</span>' in started
+    assert (
+        'scene-head"><h2>done</h2><span class="badge status-completed">completed</span>' in started
+    )
+
+    completed = render_html(
+        dataclasses.replace(log, status="success", samples=(live_scene,)), title="complete"
+    )
+    assert (
+        'scene-head"><h2>live</h2><span class="badge status-completed">completed</span>'
+        in completed
+    )
+
+
+def test_flipbook_reuses_frame_urls_and_requires_two_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: None)
+    transcript = _chat(
+        {"role": "user", "content": _parts("top", 1)},
+        {"role": "user", "content": _parts("top", 2)},
+    )
+    _save_frame(tmp_path, "top", 1, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "top", 2, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_log(transcripts=(transcript,)), title="flip", frames_dir=tmp_path)
+    sources = re.findall(r'src="(data:image/png;base64,[^"]+)"', document)
+
+    assert len(sources) == 2 and all(document.count(source) == 1 for source in sources)
+    assert document.count("document.addEventListener('DOMContentLoaded'") == 1
+    assert 'class="run-media" data-trial="scene-0-e0"' in document
+    assert 'class="flipbook-player"' in document
+    assert (
+        'class="flipbook-player"'
+        not in re.findall(r'<figure class="frame-cell">.*?</figure>', document, flags=re.DOTALL)[0]
+    )
+    assert 'data-camera="top" data-step="1" data-trial="scene-0-e0"' in document
+    assert "no ffmpeg" in document
+
+    single = _chat({"role": "user", "content": _parts("top", 1)})
+    one = render_html(_log(transcripts=(single,)), title="one", frames_dir=tmp_path)
+    assert 'class="run-media"' not in one
+
+
+def test_mp4_tier_includes_unreferenced_camera_and_only_active_autoplays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    encoded: list[list[int]] = []
+
+    def fake_encode(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: str) -> bytes:
+        assert fps == 10.0 and ffmpeg == "/fake/ffmpeg"
+        encoded.append([step for step, _path in frames])
+        return f"video-{len(encoded)}".encode()
+
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", fake_encode)
+    for camera in ("referenced", "unseen_camera"):
+        _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
+        _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
+    transcript = _chat({"role": "user", "content": _parts("referenced", 1)})
+
+    document = render_html(_log(transcripts=(transcript,)), title="mp4", frames_dir=tmp_path)
+
+    assert encoded == [[0, 1], [0, 1]]
+    assert 'data-camera-tab="unseen_camera"' in document
+    assert document.count("data:video/mp4;base64,") == 2
+    assert document.count("<video controls muted loop autoplay") == 1
+    assert document.count('<video controls muted loop preload="metadata"') == 1
+    summary = "<summary>Trial 0 transcript</summary>"
+    assert (
+        document.index(summary)
+        < document.index('class="run-media"')
+        < document.index('class="conversation"')
+    )
+
+
+def test_mp4_budget_and_failures_degrade_to_flipbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    transcript = _chat(
+        {"role": "user", "content": _parts("top", 0)},
+        {"role": "user", "content": _parts("top", 1)},
+    )
+    _save_frame(tmp_path, "top", 0, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"large")
+
+    budget = render_html(
+        _log(transcripts=(transcript,)),
+        title="budget",
+        frames_dir=tmp_path,
+        video_budget_bytes=1,
+    )
+    assert "video budget" in budget and 'class="flipbook-player"' in budget
+    assert "data:video/mp4" not in budget
+
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: None)
+    failed = render_html(_log(transcripts=(transcript,)), title="failed", frames_dir=tmp_path)
+    assert 'class="flipbook-player"' in failed and "data:video/mp4" not in failed
+    assert capsys.readouterr().err.count("warning: report video unavailable") == 1
+
+
+def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encoder_calls: list[object] = []
+
+    def fake_encode(frames: object, *_args: object) -> bytes:
+        encoder_calls.append(frames)
+        return b"one"
+
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", fake_encode)
+    transcript = _chat(
+        {
+            "role": "user",
+            "content": [*_parts("alpha", 0), *_parts("beta", 0), *_parts("gamma", 0)],
+        },
+        {
+            "role": "user",
+            "content": [*_parts("alpha", 1), *_parts("beta", 1), *_parts("gamma", 1)],
+        },
+    )
+    for camera in ("alpha", "beta", "gamma"):
+        _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
+        _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="first wins",
+        frames_dir=tmp_path,
+        video_budget_bytes=len(base64.b64encode(b"one")),
+    )
+
+    assert document.count("data:video/mp4;base64,") == 1
+    assert document.index('data-camera-panel="alpha"') < document.index('data-camera-panel="beta"')
+    beta_panel = document[document.index('data-camera-panel="beta"') :]
+    assert 'class="flipbook-player"' in beta_panel
+    assert document.count("video budget") == 1  # dedup'd chip covers beta and gamma
+    # Sticky truncation skips the encode entirely for cameras after the overflow.
+    assert len(encoder_calls) == 2
+
+
+def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera below the two-frame flipbook floor vanishes quietly when its video is denied."""
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+
+    def one_frame_layout() -> list[dict[str, Any]]:
+        for camera, steps in (("aa", (0, 1)), ("bb", (0, 1)), ("zz", (0,))):
+            for step in steps:
+                _save_frame(tmp_path, camera, step, np.ones((2, 2, 3), dtype=np.uint8))
+        return [
+            {
+                "role": "user",
+                "content": [*_parts("aa", 0), *_parts("bb", 0), *_parts("zz", 0)],
+            },
+            {"role": "user", "content": [*_parts("aa", 1), *_parts("bb", 1)]},
+        ]
+
+    transcript = _chat(*one_frame_layout())
+
+    # Sticky denial: aa fills the budget, bb overflows, zz is denied with a
+    # sub-two-frame flipbook, exercising the panel-less sticky branch.
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"one")
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="sticky no panel",
+        frames_dir=tmp_path,
+        video_budget_bytes=len(base64.b64encode(b"one")),
+    )
+    assert 'data-camera-panel="zz"' not in document
+
+    # Encode failure: the same sub-two-frame camera cannot fall back to a
+    # flipbook either, exercising the panel-less failure branch.
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: None)
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="failure no panel",
+        frames_dir=tmp_path,
+    )
+    assert 'data-camera-panel="zz"' not in document
+    assert 'data-camera-panel="aa"' in document
+
+
+@pytest.mark.parametrize(
+    ("status", "serve_pass", "no_video"),
+    [("started", False, False), ("success", True, False), ("success", False, True)],
+)
+def test_suppressed_video_tiers_never_call_encoder(
+    status: str,
+    serve_pass: bool,
+    no_video: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    monkeypatch.setattr(
+        "inspect_robots._video._encode_camera_mp4",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("encoder called")),
+    )
+    transcript = _chat(
+        {"role": "user", "content": _parts("top", 0)},
+        {"role": "user", "content": _parts("top", 1)},
+    )
+    _save_frame(tmp_path, "top", 0, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _log(status=status, transcripts=(transcript,)),
+        title="suppressed",
+        frames_dir=tmp_path,
+        serve_pass=serve_pass,
+        no_video=no_video,
+    )
+
+    assert 'class="flipbook-player"' in document
+    assert "data:video/mp4" not in document
+
+
+def test_report_private_degrade_edges_remain_tolerant(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    unsupported = {"function": {"name": "move", "arguments": {"nested": {"label": "not numeric"}}}}
+    assert 'class="call"' in _render_tool_call(unsupported)
+    assert 'class="pretty-call"' not in _render_tool_call(unsupported)
+
+    context = _FrameContext(tmp_path, "trial", _FrameBudget(limit=0))
+    markup = _frame_markup("data:image/png;base64,AA==", context, "top", 1)
+    assert 'data-trial="trial"' in markup
+
+    chat = [{"role": "user", "content": "hello"}]
+    assert 'class="llm-pov"' in _render_transcript(chat, trial_prefix="trial")
+
+    np.save(tmp_path / "trial_bad.npy", np.zeros((1,), dtype=np.uint8))
+    assert _trial_camera_streams(tmp_path, "trial") == {}
+
+    video_context = _VideoContext(False, None, 0.0, _VideoBudget())
+    _warn_video_degrade(video_context, "first")
+    _warn_video_degrade(video_context, "second")
+    assert capsys.readouterr().err.count("warning: report video unavailable") == 1
+
+
+def test_malformed_feedback_and_extra_trial_messages_stay_residual(tmp_path: Path) -> None:
+    transcript = _chat({"role": "user", "content": _parts("top", 2)})
+    _save_frame(tmp_path, "top", 2, np.zeros((2, 2, 3), dtype=np.uint8))
+    log = _log(transcripts=(transcript,))
+    scene = dataclasses.replace(
+        log.samples[0],
+        operator_messages=(
+            ({"t": "bad", "text": "malformed time"},),
+            ({"t": 9, "text": "missing transcript"},),
+        ),
+    )
+
+    document = render_html(
+        dataclasses.replace(log, samples=(scene,)), title="residual", frames_dir=tmp_path
+    )
+
+    assert "Operator feedback" in document
+    assert "malformed time" in document and "missing transcript" in document
+
+
+def test_video_budget_without_flipbook_source_omits_camera_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"large")
+    _save_frame(tmp_path, "unseen", 0, np.zeros((2, 2, 3), dtype=np.uint8))
+    transcript = _chat({"role": "user", "content": "no observation frames"})
+
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="no source",
+        frames_dir=tmp_path,
+        video_budget_bytes=1,
+    )
+
+    assert 'class="run-media"' not in document
 
 
 def test_wire_section_renders_blob_stubs_breakpoints_and_request_summary(

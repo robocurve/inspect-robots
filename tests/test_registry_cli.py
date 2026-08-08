@@ -6,7 +6,9 @@ import dataclasses
 import json
 import os
 import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -1743,7 +1745,7 @@ def test_view_embeds_frames_resolved_from_log_relative_fallback(
 
     document = output.read_text(encoding="utf-8")
     assert 'src="data:image/png;base64,' in document
-    assert "[image omitted: streamed camera frame]" not in document
+    assert document.count("[image omitted: streamed camera frame]") == 1
     capsys.readouterr()
 
 
@@ -1861,6 +1863,8 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         live_frames_budget_bytes: int | None,
         wire_media_elided: bool,
         refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
     ) -> str:
         del (
             log,
@@ -1869,6 +1873,8 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
             live_frames_budget_bytes,
             wire_media_elided,
             refresh_seconds,
+            no_video,
+            serve_pass,
         )
         assert log_path == path
         received.append(frames_budget_bytes)
@@ -1916,8 +1922,18 @@ def test_view_live_frames_budget_matrix(
         live_frames_budget_bytes: int | None,
         wire_media_elided: bool,
         refresh_seconds: int | None,
+        no_video: bool,
+        serve_pass: bool,
     ) -> str:
-        del rendered_log, title, log_path, frames_dir, frames_budget_bytes
+        del (
+            rendered_log,
+            title,
+            log_path,
+            frames_dir,
+            frames_budget_bytes,
+            no_video,
+            serve_pass,
+        )
         received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
         return "<html></html>"
 
@@ -2034,7 +2050,7 @@ def test_view_stdout_embeds_resolved_frames(
 
     out = capsys.readouterr().out
     assert 'src="data:image/png;base64,' in out
-    assert "[image omitted: streamed camera frame]" not in out
+    assert out.count("[image omitted: streamed camera frame]") == 1
     assert "wrote " not in out
 
 
@@ -2332,6 +2348,8 @@ def test_view_directory_incremental_mtime_and_force(
         live_frames_budget_bytes: int | None,
         wire_media_elided: bool,
         refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -2343,6 +2361,8 @@ def test_view_directory_incremental_mtime_and_force(
             live_frames_budget_bytes=live_frames_budget_bytes,
             wire_media_elided=wire_media_elided,
             refresh_seconds=refresh_seconds,
+            no_video=no_video,
+            serve_pass=serve_pass,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)
@@ -2714,7 +2734,109 @@ def test_completed_page_pins_source_nanosecond_mtime_and_live_always_renders(
         quiet=True,
         refresh_seconds=2,
     )
+    # Plan 0058: started logs re-render every pass, even when the page looks
+    # newer than the log; the mtime gate is a completed-page contract only.
     assert rendered == ["run.live.json"]
+
+
+def test_view_directory_two_level_video_stamp_skips_then_upgrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-07T12:00:00Z"), logs, "done.json")
+    source_ns = 2_000_000_000
+    os.utime(source, ns=(source_ns, source_ns))
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+    page = logs / "html" / "done.html"
+    # source_ns and the delta are both multiples of 100 ns, so the expected
+    # stamp survives NTFS's 100 ns timestamp tick exactly.
+    suppressed_ns = source_ns - cli._SUPPRESSED_STAMP_DELTA_NS
+    assert page.stat().st_mtime_ns == suppressed_ns
+    capsys.readouterr()
+
+    calls: list[bool] = []
+    render_page = cli._render_log_page
+
+    def record_render(*args: Any, **kwargs: Any) -> int:
+        calls.append(bool(kwargs["serve_pass"]))
+        return render_page(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    serve_args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    cli._render_view_directory(
+        serve_args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+    assert calls == []
+    assert page.stat().st_mtime_ns == suppressed_ns
+
+    assert main(["view", str(logs)]) == 0
+    assert calls == [False]
+    assert page.stat().st_mtime_ns == source_ns
+
+
+def test_view_no_video_is_parsed_and_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[tuple[bool, bool]] = []
+
+    def fake_render(*args: object, **kwargs: object) -> str:
+        del args
+        received.append((bool(kwargs["no_video"]), bool(kwargs["serve_pass"])))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render)
+
+    assert main(["view", str(path), "--no-video"]) == 0
+    assert received == [(True, False)]
+    capsys.readouterr()
+
+
+def test_view_renderer_popen_oserror_degrades_and_exits_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import numpy as np
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for step in (0, 1):
+        np.save(frames / f"s0-e0_top_cam_{step:06d}.npy", np.zeros((2, 2, 3), dtype=np.uint8))
+    log = _view_frame_log(str(frames))
+    transcript = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"camera 'top_cam' (step {step}):"},
+                {"type": "text", "text": "[image omitted: streamed camera frame]"},
+            ],
+        }
+        for step in (0, 1)
+    ]
+    scene = dataclasses.replace(log.samples[0], policy_transcripts=(transcript,))
+    path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "run.json")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/fake/ffmpeg")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bad shebang")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+
+    assert main(["view", str(path)]) == 0
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert 'class="flipbook-player"' in document
+    assert "data:video/mp4" not in document
+    assert "warning: report video unavailable" in capsys.readouterr().err
 
 
 def test_view_directory_open_targets_index(

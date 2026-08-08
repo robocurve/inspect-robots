@@ -212,7 +212,8 @@ def test_operator_feedback_appears_in_digest_and_escaped_html() -> None:
     document = render_html(log, title="operator feedback")
 
     assert "operator feedback: keep left <now>" in digest
-    assert "Operator feedback" in document
+    assert document.index("Operator feedback") > document.index("Trial 0 transcript")
+    assert 'class="feedback-chip"' not in document
     assert "keep left &lt;now&gt;" in document
     assert "keep left <now>" not in document
 
