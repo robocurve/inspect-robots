@@ -339,7 +339,6 @@ class LLMAgentPolicy(PolicyBase):
             ("model", model),
             ("base_url", base_url),
             ("api_key_env", api_key_env),
-            ("effort", effort),
             ("speed", speed),
         ]:
             if isinstance(val, _Unset):

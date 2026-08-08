@@ -2801,8 +2801,6 @@ def test_non_string_params_rejected() -> None:
         ("base_url", False),
         ("api_key_env", True),
         ("api_key_env", False),
-        ("effort", 123),
-        ("effort", False),
         ("speed", False),
     ]:
         kwargs: dict[str, Any] = {
