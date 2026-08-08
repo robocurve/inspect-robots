@@ -172,3 +172,29 @@ def test_missing_portaudio_error_carries_install_instructions(
 
     with pytest.raises(OSError, match="libportaudio2"):
         MicrophoneCapture(None, 16_000, audio_queue)
+
+
+def test_playback_aware_muting_callback() -> None:
+    from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
+    sounddevice = _SoundDevice(_DEVICES)
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=2)
+    capture = MicrophoneCapture(1, 16_000, audio_queue, _sounddevice=sounddevice)
+
+    # When no speakers are active, blocks should be preserved.
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    capture._callback(np.array([[5.0], [6.0]]), 2, object(), object())
+    assert np.array_equal(audio_queue.get_nowait(), np.array([5.0, 6.0], dtype=np.float32))
+
+    # When a speaker is active, blocks should be zero-filled.
+    dummy_speaker = object()
+    with _speakers_lock:
+        _active_speakers.add(dummy_speaker)
+    try:
+        capture._callback(np.array([[5.0], [6.0]]), 2, object(), object())
+        assert np.array_equal(audio_queue.get_nowait(), np.array([0.0, 0.0], dtype=np.float32))
+    finally:
+        with _speakers_lock:
+            _active_speakers.discard(dummy_speaker)

@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Voice plugin (0.5.2):** added playback-aware muting when `--speak` and
+  `--voice` run together, zero-filling captured microphone blocks during active
+  TTS playback ([#332](https://github.com/robocurve/inspect-robots/issues/332)).
+
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),

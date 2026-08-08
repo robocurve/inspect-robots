@@ -309,12 +309,20 @@ class SpeakerSink(NullSink):
                     continue
                 gained = np.asarray(samples * np.float32(self.volume), dtype=np.float32)
                 chunk_size = max(1, int(sample_rate * _CHUNK_SECONDS))
-                for start in range(0, len(gained), chunk_size):
-                    if self._stop.is_set():
-                        return
-                    if self._speech_gen != gen:
-                        break
-                    playback.write(gained[start : start + chunk_size], sample_rate)
+                from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
+                with _speakers_lock:
+                    _active_speakers.add(self)
+                try:
+                    for start in range(0, len(gained), chunk_size):
+                        if self._stop.is_set():
+                            return
+                        if self._speech_gen != gen:
+                            break
+                        playback.write(gained[start : start + chunk_size], sample_rate)
+                finally:
+                    with _speakers_lock:
+                        _active_speakers.discard(self)
             except Exception as exc:
                 with self._condition:
                     self._disabled = True

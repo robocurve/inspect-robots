@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue as queue_module
+import threading
 import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -13,6 +14,10 @@ import numpy.typing as npt
 
 AudioArray = npt.NDArray[np.float32]
 Device = str | int | None
+
+
+_speakers_lock = threading.Lock()
+_active_speakers: set[object] = set()
 
 
 class MicrophoneCapture:
@@ -130,6 +135,10 @@ class MicrophoneCapture:
     ) -> None:
         del frames, time_info, status
         block = np.asarray(indata, dtype=np.float32).reshape(-1).copy()
+        with _speakers_lock:
+            active = bool(_active_speakers)
+        if active:
+            block.fill(0)
         try:
             self._queue.put_nowait(block)
             return
