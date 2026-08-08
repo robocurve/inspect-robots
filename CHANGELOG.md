@@ -33,6 +33,15 @@ All notable changes to this project are documented here. The format is based on
   adds `recording_dir` per-eval naming with the attached file exposed as
   `resolved_recording_path` ([plan 0059](plans/0059-rerun-rrd-tee.md)).
 
+- HTML reports now group chat transcripts into observation turns with concise
+  frame captions, structured feedback, readable tool calls, and a raw LLM POV
+  dropdown. Stored-frame reports add a camera flipbook, while eligible
+  completed pages embed budgeted MP4 streams through ffmpeg. Running scene
+  badges now follow the live trial marker, and `view --no-video` keeps pages on
+  the upgradeable flipbook tier. Closes
+  [#337](https://github.com/robocurve/inspect-robots/issues/337)
+  ([plan 0060](plans/0060-report-turns-and-video.md)).
+
 - Live HTML reports now include recent stored camera frames under a bounded
   serving budget, while completed reports retain the full frame budget. The
   agent live-view tip now gives remote and headless sessions a network-serving

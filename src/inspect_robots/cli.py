@@ -466,6 +466,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="render placeholders instead of embedding stored camera frames",
     )
     p_view.add_argument(
+        "--no-video",
+        action="store_true",
+        help="skip embedded MP4 encoding while keeping the frame flipbook",
+    )
+    p_view.add_argument(
         "--frames-budget",
         type=float,
         default=50,
@@ -491,7 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "re-render existing pages in directory mode; use after changing "
-            "--no-frames, --frames-budget, or --live-frames-budget (ignored for one file)"
+            "--no-frames, --no-video, --frames-budget, or --live-frames-budget "
+            "(ignored for one file)"
         ),
     )
     p_view.add_argument(
@@ -1975,6 +1981,8 @@ def _render_log_page(
     live_frames_budget: float | None = None,
     refresh_seconds: int | None = None,
     atomic: bool = False,
+    no_video: bool = False,
+    serve_pass: bool = False,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -1993,6 +2001,8 @@ def _render_log_page(
         ),
         wire_media_elided=log.status == "started",
         refresh_seconds=refresh_seconds,
+        no_video=no_video,
+        serve_pass=serve_pass,
     )
     if atomic and out_path is not None:
         return _write_html_atomic(document, out_path)
@@ -2164,11 +2174,13 @@ def _render_view_directory(
         try:
             source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
+            suppressed_tier = args.serve or args.no_video
+            stamp_ns = max(0, source_stat.st_mtime_ns - (1 if suppressed_tier else 0))
             render_page = (
                 force
                 or log.status == "started"
                 or not page_path.exists()
-                or page_path.stat().st_mtime_ns < source_stat.st_mtime_ns
+                or page_path.stat().st_mtime_ns < stamp_ns
             )
             if render_page:
                 if not quiet:
@@ -2188,11 +2200,15 @@ def _render_view_directory(
                         else None
                     ),
                     atomic=log.status == "started",
+                    no_video=args.no_video,
+                    serve_pass=args.serve,
                 )
                 if log.status != "started":
+                    # Started pages re-render every pass by design (plan 0058);
+                    # the two-level stamp is a completed-page contract only.
                     os.utime(
                         page_path,
-                        ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+                        ns=(source_stat.st_atime_ns, stamp_ns),
                     )
                 pages_written += 1
             entries.append(_index_entry(log, log_path, page_name))
@@ -2426,6 +2442,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
         out_path,
         no_frames=args.no_frames,
         frames_budget=args.frames_budget,
+        no_video=args.no_video,
     )
     if stdout_mode:
         return 0

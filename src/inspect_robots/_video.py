@@ -38,6 +38,10 @@ class _FrameError(Exception):
     """A single frame file could not be loaded or is not renderable."""
 
 
+class _LaunchError(Exception):
+    """The external encoder process could not be launched."""
+
+
 @dataclass(frozen=True)
 class StreamResult:
     """Outcome of encoding one (trial, camera) stream."""
@@ -209,17 +213,17 @@ def _stderr_tail(fd: int, name: str) -> str:
     return "\n".join(lines[-_STDERR_TAIL_LINES:])
 
 
-def encode_stream(
+def _encode_core(
     frames: Sequence[tuple[int, Path]], out_path: Path, fps: float, ffmpeg: str
 ) -> StreamResult:
-    """Pipe one stream's frames through ffmpeg into ``out_path``.
+    """Pipe frames to one output while distinguishing process launch failures.
 
     Frames are loaded one at a time, so peak memory is a single frame. On any
     failure the partial output is unlinked (``missing_ok`` — ffmpeg may die
     before creating it) after the process is dead, and ``error`` carries
-    either the offending file or ffmpeg's stderr tail. ``Popen`` itself
-    failing is a hard ``SystemExit``: unlike per-stream failures it would
-    repeat identically for every stream.
+    either the offending file or ffmpeg's stderr tail. A ``Popen`` failure is
+    reported separately through ``_LaunchError`` so callers can choose their
+    command or report-rendering posture.
     """
     skipped = 0
     index = 0
@@ -256,7 +260,7 @@ def encode_stream(
     except OSError as exc:
         os.close(stderr_fd)
         os.unlink(stderr_name)
-        raise SystemExit(f"could not launch ffmpeg ({ffmpeg}): {exc}") from exc
+        raise _LaunchError(f"could not launch ffmpeg ({ffmpeg}): {exc}") from exc
 
     piped = 0
     error: str | None = None
@@ -299,3 +303,38 @@ def encode_stream(
     if error is not None:
         out_path.unlink(missing_ok=True)
     return StreamResult(piped=piped, skipped_empty=skipped, error=error)
+
+
+def encode_stream(
+    frames: Sequence[tuple[int, Path]], out_path: Path, fps: float, ffmpeg: str
+) -> StreamResult:
+    """Pipe one stream to ``out_path``, exiting hard when ffmpeg cannot launch.
+
+    The public command contract is unchanged: ordinary stream failures are
+    returned for per-stream isolation, while a launch failure raises
+    ``SystemExit`` because it would repeat for every stream.
+    """
+    try:
+        return _encode_core(frames, out_path, fps, ffmpeg)
+    except _LaunchError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _encode_camera_mp4(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: str) -> bytes | None:
+    """Return an in-memory camera MP4, degrading every encoder failure to ``None``."""
+    try:
+        fd, name = tempfile.mkstemp(suffix=".mp4")
+    except OSError:
+        return None
+    path = Path(name)
+    try:
+        try:
+            os.close(fd)
+            result = _encode_core(frames, path, fps, ffmpeg)
+            if result.error is not None:
+                return None
+            return path.read_bytes()
+        except (Exception, SystemExit):
+            return None
+    finally:
+        path.unlink(missing_ok=True)

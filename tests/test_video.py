@@ -18,6 +18,7 @@ import pytest
 import inspect_robots.cli as cli
 from inspect_robots._video import (
     StreamResult,
+    _encode_camera_mp4,
     count_frames,
     default_fps,
     discover_streams,
@@ -125,6 +126,7 @@ class _FakePopen:
     fail_on_write_after: ClassVar[int | None] = None
     fail_at_close = False
     write_exception: ClassVar[type[BaseException]] = BrokenPipeError
+    output_bytes = b"fake mp4"
 
     def __init__(self, argv: list[str], stdin: Any, stdout: Any, stderr: int) -> None:
         self.argv = argv
@@ -153,7 +155,10 @@ class _FakePopen:
         # Like a real child: stderr text lands in the file the parent passed.
         if _FakePopen.stderr_text_next:
             os.write(self._stderr_fd, _FakePopen.stderr_text_next.encode())
-        return 1 if self.killed else _FakePopen.returncode_next
+        returncode = 1 if self.killed else _FakePopen.returncode_next
+        if returncode == 0:
+            Path(self.argv[-1]).write_bytes(_FakePopen.output_bytes)
+        return returncode
 
 
 @pytest.fixture()
@@ -164,6 +169,7 @@ def fake_popen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> type[_FakePop
     _FakePopen.fail_on_write_after = None
     _FakePopen.fail_at_close = False
     _FakePopen.write_exception = BrokenPipeError
+    _FakePopen.output_bytes = b"fake mp4"
     monkeypatch.setattr(subprocess, "Popen", _FakePopen)
     # Keep ffmpeg's stderr temp files inside tmp_path so leaks are assertable.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -453,6 +459,66 @@ def test_encode_popen_raising_is_a_hard_exit_without_temp_leak(
     with pytest.raises(SystemExit, match="could not launch ffmpeg"):
         encode_stream(frames, tmp_path / "s.mp4", 10.0, "/fake/ffmpeg")
     assert _no_temp_leak(tmp_path)
+
+
+def test_report_encoder_reads_temp_output_and_unlinks_it(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    fake_popen.output_bytes = b"browser mp4"
+
+    assert _encode_camera_mp4(frames, 10.0, "/fake/ffmpeg") == b"browser mp4"
+    assert not list(tmp_path.glob("*.mp4"))
+    assert _no_temp_leak(tmp_path)
+
+
+def test_report_encoder_degrades_launch_and_encode_failures_without_temp_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bad shim")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    assert _encode_camera_mp4(frames, 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+    assert _no_temp_leak(tmp_path)
+
+    bad = _write_frames(tmp_path / "bad", "s", [np.zeros((2,), dtype=np.uint8)])
+    assert _encode_camera_mp4(bad, 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+def test_report_encoder_degrades_temp_output_read_failure(
+    tmp_path: Path,
+    fake_popen: type[_FakePopen],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+
+    def unreadable(_path: Path) -> bytes:
+        raise OSError("read failed")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+
+    assert _encode_camera_mp4(frames, 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+def test_report_encoder_degrades_tempfile_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+
+    def no_tempfile(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise OSError("read-only temp directory")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_tempfile)
+
+    assert _encode_camera_mp4(frames, 10.0, "/fake/ffmpeg") is None
 
 
 # --------------------------------------------------------------------------- #
