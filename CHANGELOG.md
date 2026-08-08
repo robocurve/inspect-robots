@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Core:** footer status lines now append the framework-owned
+  `Esc ends the episode` hint and replace stale trailing gesture clauses. This
+  prevents a repeat of the yam Enter-to-Esc gesture-prose drift incident while
+  leaving plain-mode embodiment statuses unchanged
+  ([plan 0062](plans/0062-session-owned-end-hint.md),
+  [#345](https://github.com/robocurve/inspect-robots/issues/345)).
+
 - **Voice plugin (0.5.0):** the default `--speak` behavior now interrupts
   superseded narration so speech stays current. `-S mode=queue` restores the old
   bounded queueing behavior ([plan 0057](plans/0057-speak-speech-modes.md),

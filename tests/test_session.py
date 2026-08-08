@@ -204,6 +204,15 @@ def test_status_lifecycle_writes_exact_bytes_and_double_close_is_noop() -> None:
     assert output == ["\r  t = 3s   ", "\r  t = 4s   ", "\n"]
 
 
+def test_plain_status_renders_plugin_text_without_end_hint() -> None:
+    output: list[str] = []
+    session = OperatorSession(console=_RecordingConsole(), write=output.append)
+
+    session.status("parking")
+
+    assert output == ["\r  parking   "]
+
+
 def test_write_line_closes_and_repaints_open_status() -> None:
     output: list[str] = []
     session = OperatorSession(console=_RecordingConsole(), write=output.append)
@@ -257,6 +266,21 @@ def test_gate_flushes_strictly_before_one_successful_input() -> None:
 
     assert gate("Stand clear: ") is None
     assert order == ["flush", "input:Stand clear: "]
+
+
+def test_gate_closes_sticky_plain_status_before_prompting() -> None:
+    output: list[str] = []
+
+    def read(prompt: str) -> str:
+        output.append(prompt)
+        return ""
+
+    session = OperatorSession(input_fn=read, write=output.append, flush_fn=lambda: None)
+    session.status("parking")
+
+    session.gate("Stand clear: ")
+
+    assert output == ["\r  parking   ", "\n", "Stand clear: "]
 
 
 def test_gate_resolves_default_input_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,6 +373,50 @@ def test_prompt_operator_adopts_definitive_embodiment_verdict(
         "source": "embodiment",
         "note": None,
     }
+
+
+def test_prompt_verdict_closes_status_and_flushes_before_reading_answer() -> None:
+    output: list[str] = []
+    order: list[str] = []
+    answers = iter(["y", ""])
+
+    def flush() -> None:
+        order.append("flush")
+
+    def read(prompt: str) -> str:
+        order.append(f"input:{prompt}")
+        output.append(prompt)
+        return next(answers)
+
+    session = OperatorSession(input_fn=read, write=output.append, flush_fn=flush)
+    session.status("parking")
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
+
+    assert output == ["\r  parking   ", "\n", _PROMPT, _NOTES_PROMPT]
+    assert order == ["flush", f"input:{_PROMPT}", f"input:{_NOTES_PROMPT}"]
+    assert record.operator_judgement == "y"
+
+
+def test_prompt_verdict_still_prompts_when_stale_input_flush_fails() -> None:
+    prompts: list[str] = []
+    answers = iter(["n", ""])
+
+    def flush() -> None:
+        raise OSError("stdin has no file descriptor")
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    session = OperatorSession(input_fn=read, flush_fn=flush)
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
+
+    assert prompts == [_PROMPT, _NOTES_PROMPT]
+    assert record.operator_judgement == "n"
 
 
 def test_prompt_operator_early_returns_for_pre_set_console_verdict_via_write_line() -> None:
@@ -734,7 +802,7 @@ def test_footer_begin_trial_closes_plain_open_status_then_one_row_branch() -> No
 
     session.status("t = 4s")
 
-    assert output == ["\r\x1b[Kt = 4s\n\r\x1b[K> "]
+    assert output == ["\r\x1b[Kt = 4s | Esc ends the episode\n\r\x1b[K> "]
     assert "\x1b[A" not in output[0]
 
 
@@ -827,7 +895,58 @@ def test_footer_first_status_creates_status_row_from_one_row_state() -> None:
 
     session.status("t = 3s")
 
-    assert output == ["\r\x1b[Kt = 3s\n\r\x1b[K> "]
+    assert output == ["\r\x1b[Kt = 3s | Esc ends the episode\n\r\x1b[K> "]
+
+
+def test_footer_status_appends_owned_end_hint() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("t = 1s")
+
+    assert output == ["\r\x1b[Kt = 1s | Esc ends the episode\n\r\x1b[K> "]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["t = 1s | Enter ends the episode", "t = 1s | Esc ends the episode"],
+)
+def test_footer_status_replaces_or_deduplicates_trailing_end_hint(line: str) -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status(line)
+
+    assert output == ["\r\x1b[Kt = 1s | Esc ends the episode\n\r\x1b[K> "]
+
+
+def test_footer_status_keeps_separatorless_phrase_before_owned_hint() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("budget exhaustion ends the episode")
+
+    assert output == [
+        "\r\x1b[Kbudget exhaustion ends the episode | Esc ends the episode\n\r\x1b[K> "
+    ]
+
+
+def test_footer_status_keeps_multi_pipe_non_gesture_tail_before_owned_hint() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("t = 4s | left arm ok")
+
+    assert output == ["\r\x1b[Kt = 4s | left arm ok | Esc ends the episode\n\r\x1b[K> "]
+
+
+def test_footer_empty_status_renders_bare_owned_hint() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+
+    session.status("")
+
+    assert output == ["\r\x1b[KEsc ends the episode\n\r\x1b[K> "]
 
 
 def test_footer_two_row_status_update() -> None:
@@ -838,7 +957,7 @@ def test_footer_two_row_status_update() -> None:
 
     session.status("t = 4s")
 
-    assert output == ["\x1b[A\r\x1b[Kt = 4s\x1b[B\r\x1b[K> "]
+    assert output == ["\x1b[A\r\x1b[Kt = 4s | Esc ends the episode\x1b[B\r\x1b[K> "]
 
 
 def test_footer_two_row_write_line_clears_input_row_first() -> None:
@@ -849,7 +968,9 @@ def test_footer_two_row_write_line_clears_input_row_first() -> None:
 
     session.write_line("operator message")
 
-    assert output == ["\r\x1b[K\x1b[A\r\x1b[Koperator message\nt = 4s\n\r\x1b[K> "]
+    assert output == [
+        "\r\x1b[K\x1b[A\r\x1b[Koperator message\nt = 4s | Esc ends the episode\n\r\x1b[K> "
+    ]
 
 
 def test_footer_status_none_collapses_two_row_to_one_row_retaining_input() -> None:
@@ -868,7 +989,7 @@ def test_footer_status_none_collapses_two_row_to_one_row_retaining_input() -> No
     # The one-row branch is active again: no cursor-up in a follow-up status(line).
     output.clear()
     session.status("t = 5s")
-    assert output == ["\r\x1b[Kt = 5s\n\r\x1b[K> hi"]
+    assert output == ["\r\x1b[Kt = 5s | Esc ends the episode\n\r\x1b[K> hi"]
 
     # Typing after status(None) still echoes correctly, on the retained input row.
     output.clear()
@@ -931,6 +1052,26 @@ def test_footer_end_trial_teardown_is_idempotent() -> None:
     session.end_trial()
 
     assert output == []
+
+
+def test_footer_end_trial_returns_status_and_scrollback_redraw_to_plain_mode() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output)
+    session.status("t = 4s")
+    output.clear()
+    session.end_trial()
+    output.clear()
+
+    session.status("parking")
+    session.write_line("operator message")
+
+    assert output == [
+        "\r  parking   ",
+        "\n",
+        "operator message\n",
+        "\r  parking   ",
+    ]
+    assert "Esc ends the episode" not in "".join(output)
 
 
 def test_footer_requires_explicit_enable_even_when_all_runtime_gates_pass() -> None:
@@ -1177,6 +1318,25 @@ def test_footer_status_row_clips_at_width_minus_1() -> None:
     session.status("0123456789")
 
     assert output == ["\r\x1b[K56789\n\r\x1b[K> "]
+
+
+@pytest.mark.parametrize(
+    ("width", "line", "expected"),
+    [
+        (8, "t = 4s", "t = 4s"),
+        (8, "t = 4s | Enter ends the episode", "t = 4s"),
+        (5, "t = 4s", "= 4s"),
+    ],
+)
+def test_footer_width_fallback_drops_hint_and_clips_only_stripped_status(
+    width: int, line: str, expected: str
+) -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output, width=width)
+
+    session.status(line)
+
+    assert output == [f"\r\x1b[K{expected}\n\r\x1b[K> "]
 
 
 def test_footer_reclips_after_width_fn_change() -> None:
