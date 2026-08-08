@@ -243,7 +243,7 @@ class ChatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         body: dict[str, Any] = {"model": self._provider.model, "messages": messages}
         if tools:

@@ -38,7 +38,10 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   wire formats or Anthropic's native Messages API — httpx only, no provider
   SDKs; registered as `agent`), and
   `plugins/inspect-robots-capx/` (CaP-X code-as-policy over perception and IK
-  HTTP servers; registered as `capx`).
+  HTTP servers; registered as `capx`), and
+  `plugins/inspect-robots-voice/` (local microphone transcription with Parakeet and
+  local Kokoro policy narration; registered as the `voice` operator input and
+  `speaker` sink).
 
 ## Working here
 

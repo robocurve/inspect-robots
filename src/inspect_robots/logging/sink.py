@@ -19,6 +19,13 @@ is called by ``eval()`` exactly once per run, before ``on_eval_start``, with the
 resolved embodiment ``Box`` and ``ObservationSpace``. A sink that defines a
 callable ``bind_spaces`` MUST accept this two-argument signature; like
 ``log_policy_messages``, the name is claimed by the eval loop.
+
+A third duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
+``eval()`` exactly once per run, after ``bind_spaces`` and before
+``on_eval_start``. The argument is the run's stored-frame directory as a string,
+or ``None`` when frame storage is off. A callable with this claimed name MUST
+accept that one-argument signature. It deliberately remains off ``LogSink`` and
+``NullSink`` like the other optional extensions.
 """
 
 from __future__ import annotations

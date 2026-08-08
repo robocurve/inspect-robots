@@ -49,12 +49,12 @@ def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
     return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
 
 
-def operator_message_event(t: int, text: str) -> Event:
-    """Record live feedback typed at the console during the trial.
+def operator_message_event(t: int, text: str, source: str = "console") -> Event:
+    """Record live feedback typed at the console or spoken in voice mode.
 
     This is distinct from the post-hoc operator verdict event.
     """
-    return Event(kind="operator_message", t=t, data={"text": text})
+    return Event(kind="operator_message", t=t, data={"text": text, "source": source})
 
 
 def operator_event(t: int, verdict: str, source: str = "prompt", note: str | None = None) -> Event:
