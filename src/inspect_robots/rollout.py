@@ -220,10 +220,12 @@ def _end_operator_trial(operator_input: OperatorInput | None) -> None:
             if callable(end_trial):
                 end_trial()
         except Exception as exc:
+            # stacklevel=3 skips this helper so the warning points at rollout's
+            # caller, like the disable-site warnings issued from rollout() itself.
             warnings.warn(
                 f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
                 RuntimeWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
 
 

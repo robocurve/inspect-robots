@@ -166,7 +166,8 @@ On an attended run with the console enabled and a real POSIX TTY, the session
 renders a two-row footer. The timer and controls repaint in place above a stable
 `> ` line that the session owns, so ticker updates never tear the operator's
 typing. The framework appends `Esc ends the episode` to the footer status line
-and replaces any older end-gesture clause supplied by an embodiment. The hint
+and replaces any older trailing end-gesture clause supplied by an embodiment.
+The hint
 is dropped only when the line is width-clipped, so embodiment status text never
 goes stale when the framework gesture changes:
 
