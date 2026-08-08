@@ -49,6 +49,13 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
     let timer = null;
     let active = tabs.find((tab) => tab.classList.contains('active'))?.dataset.cameraTab;
 
+    const syncVideo = () => {
+      const video = block.querySelector('.video-panel video');
+      if (!video) return;
+      if (!transcript || transcript.open) void video.play().catch(() => {});
+      else video.pause();
+    };
+
     const sourceFrames = (camera) => Array.from(document.querySelectorAll(
       `[data-trial="${CSS.escape(trial)}"][data-camera="${CSS.escape(camera)}"]`
     )).filter((element) => element.matches('img.frame'));
@@ -132,8 +139,12 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
         if (camera === active) stopTimer();
       });
     });
-    if (transcript) transcript.addEventListener('toggle', () => activate(active));
+    if (transcript) transcript.addEventListener('toggle', () => {
+      activate(active);
+      syncVideo();
+    });
     if (active) activate(active);
+    syncVideo();
   });
 });"""
 
@@ -185,8 +196,8 @@ class _Turn:
 class _VideoBudget:
     """Track base64 MP4 characters spent by one report in document order.
 
-    ``truncated`` is sticky like the frame budget's: the first camera that
-    overflows denies every later one, and later cameras skip their encode
+    ``truncated`` is sticky like the frame budget's: the first trial composite
+    that overflows denies every later one, and later trials skip their encode
     entirely rather than paying ffmpeg cost for a discarded payload.
     """
 
@@ -332,6 +343,7 @@ details { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 12px
 summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 .conversation { margin-top: 14px; }
 .turn { margin: 18px 0 24px; }
+.turn + .turn { border-top: 1px solid var(--line); padding-top: 18px; }
 .turn-step {
   margin: 0 0 8px; color: var(--muted); font-size: 12px;
   font-weight: 750; letter-spacing: .07em; text-transform: uppercase;
@@ -381,8 +393,8 @@ img.frame {
 .feedback-source {
   font-size: 10px; font-weight: 750; text-transform: uppercase; margin-right: 6px;
 }
-.llm-pov { margin: 12px 0 0; padding-top: 8px; }
-.llm-pov .message { margin: 9px 0; }
+.raw-transcript { border-top: 0; margin: 12px 0 0; padding-top: 0; }
+.raw-transcript .message { margin: 9px 0; }
 .agent-note {
   margin: 10px 0 6px; padding: 9px 11px; color: var(--amber);
   background: var(--amber-bg); border-left: 3px solid var(--amber-line);
@@ -409,6 +421,7 @@ pre {
 .wire-placeholder { color: var(--muted); }
 .run-media { margin: 14px 0 20px; padding: 12px; background: var(--bg); border-radius: 7px; }
 .run-media-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-weight: 650; }
+.camera-order { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
 .camera-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .camera-tab, .flipbook-controls button {
   border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px;
@@ -696,7 +709,7 @@ def _render_chat_transcript(
     trial_prefix: str = "",
     operator_messages: Sequence[dict[str, Any]] = (),
 ) -> str:
-    """Render original chat messages as observation-led turns with one raw POV each."""
+    """Render original chat messages as observation-led turns with one raw transcript each."""
     rendered, _residual = _render_chat_and_residual(
         transcript,
         frame_ctx,
@@ -850,7 +863,7 @@ def _render_visible_message(raw_message: object) -> str:
 def _render_pov(messages: Sequence[object]) -> str:
     """Render one native dropdown containing the turn's verbatim wire-level text."""
     raw = "".join(_render_raw_message(message) for message in messages)
-    return f'<details class="llm-pov"><summary>LLM POV</summary>{raw}</details>'
+    return f'<details class="raw-transcript"><summary>Raw transcript</summary>{raw}</details>'
 
 
 def _render_raw_message(raw_message: object) -> str:
@@ -862,7 +875,7 @@ def _render_raw_message(raw_message: object) -> str:
     content: str | None
     if isinstance(content_value, list):
         # Non-text parts leave a marker so nothing silently vanishes from the
-        # page: the POV is the turn's complete raw exchange.
+        # page: the raw transcript is the turn's complete exchange.
         content = "\n".join(
             str(part.get("text", ""))
             if isinstance(part, dict) and part.get("type") == "text"
@@ -1257,13 +1270,11 @@ def _render_trial_media(
     rendered_frames: Sequence[tuple[str, int]],
     context: _VideoContext,
 ) -> str:
-    """Render per-camera MP4 panels when eligible and flipbook panels otherwise."""
+    """Render one composite MP4 when eligible and flipbook panels otherwise."""
     flipbook: dict[str, list[int]] = {}
     for camera, step in rendered_frames:
         flipbook.setdefault(camera, []).append(step)
     display_names = {_safe(camera): camera for camera in flipbook}
-    panels: list[tuple[str, str, str | None]] = []
-    seen: set[str] = set()
 
     available_streams = (
         _trial_camera_streams(frames_dir, trial_prefix)
@@ -1273,73 +1284,89 @@ def _render_trial_media(
     streams = available_streams if context.ffmpeg is not None else {}
     if context.enabled and context.ffmpeg is None and (available_streams or flipbook):
         _warn_video_degrade(context, "ffmpeg not found")
-    for stored_camera, frames in streams.items():
-        camera = display_names.get(stored_camera, stored_camera)
-        seen.add(camera)
-        if context.budget.truncated:
-            # Sticky, first-wins: once one camera overflowed, later cameras
-            # degrade without paying an encode for a discarded payload.
-            panel = _flipbook_panel(camera, flipbook.get(camera, ()))
-            if panel:
-                panels.append((camera, panel, "video budget"))
-            continue
-        from inspect_robots._video import _encode_camera_mp4
+    rendered_order: dict[str, int] = {}
+    for index, (camera, _step) in enumerate(rendered_frames):
+        rendered_order.setdefault(camera, index)
+    default_order = len(rendered_frames)
+    ordered_streams = sorted(
+        streams.items(),
+        key=lambda item: (
+            rendered_order.get(display_names.get(item[0], item[0]), default_order),
+            item[0],
+        ),
+    )
+    fallback_cameras = tuple(
+        dict.fromkeys(
+            [display_names.get(key, key) for key, _frames in streams.items()] + list(flipbook)
+        )
+    )
+    if ordered_streams and not context.budget.truncated:
+        from inspect_robots._video import _encode_composite_mp4
 
         ffmpeg = cast(str, context.ffmpeg)
-        encoded = _encode_camera_mp4(frames, context.fps, ffmpeg)
+        encoded = _encode_composite_mp4(ordered_streams, context.fps, ffmpeg)
         if encoded is None:
-            _warn_video_degrade(context, f"encode failed for {trial_prefix}/{camera}")
-            panel = _flipbook_panel(camera, flipbook.get(camera, ()))
-            if panel:
-                panels.append((camera, panel, None))
-            continue
-        payload = base64.b64encode(encoded).decode("ascii")
-        if context.budget.limit and context.budget.encoded + len(payload) > context.budget.limit:
+            _warn_video_degrade(context, f"encode failed for {trial_prefix} composite")
+        else:
+            video, survivors = encoded
+            payload = base64.b64encode(video).decode("ascii")
+            if not (
+                context.budget.limit
+                and context.budget.encoded + len(payload) > context.budget.limit
+            ):
+                context.budget.encoded += len(payload)
+                camera_order = " · ".join(display_names.get(key, key) for key in survivors)
+                return (
+                    f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
+                    '<div class="run-media-head">Run video</div>'
+                    f'<div class="camera-order">{_escape(camera_order)}</div>'
+                    '<div class="camera-panel video-panel">'
+                    '<video controls muted loop preload="metadata" '
+                    f'src="data:video/mp4;base64,{payload}"></video></div></div>'
+                )
             context.budget.truncated = True
-            panel = _flipbook_panel(camera, flipbook.get(camera, ()))
-            if panel:
-                panels.append((camera, panel, "video budget"))
-            continue
-        context.budget.encoded += len(payload)
-        panels.append((camera, f"data:video/mp4;base64,{payload}", "mp4"))
 
-    for camera, steps in flipbook.items():
-        if camera in seen:
-            continue
-        panel = _flipbook_panel(camera, steps)
-        if panel:
-            reason = "no ffmpeg" if context.enabled and context.ffmpeg is None else None
-            panels.append((camera, panel, reason))
+    # Sticky, first-wins: once one trial composite overflows, later trials
+    # degrade without paying an encode for a discarded payload.
+    reason = (
+        "video budget"
+        if context.budget.truncated
+        else "no ffmpeg"
+        if context.enabled and context.ffmpeg is None
+        else None
+    )
+    return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
+
+
+def _render_flipbook_media(
+    trial_prefix: str,
+    flipbook: Mapping[str, Sequence[int]],
+    cameras: Sequence[str],
+    reason: str | None,
+) -> str:
+    """Render the existing per-camera tabbed flipbook fallback."""
+    panels = [
+        (camera, panel)
+        for camera in cameras
+        if (panel := _flipbook_panel(camera, flipbook.get(camera, ())))
+    ]
     if not panels:
         return ""
-
     tabs = "".join(
         f'<button type="button" class="camera-tab{" active" if index == 0 else ""}" '
         f'data-camera-tab="{_escape(camera)}">{_escape(camera)}</button>'
-        for index, (camera, _panel, _tier) in enumerate(panels)
+        for index, (camera, _panel) in enumerate(panels)
     )
-    bodies: list[str] = []
-    for index, (camera, payload, tier) in enumerate(panels):
-        hidden = "" if index == 0 else " hidden"
-        if tier == "mp4":
-            playback = " autoplay" if index == 0 else ' preload="metadata"'
-            body = f'<video controls muted loop{playback} src="{payload}"></video>'
-            panel_class = "camera-panel video-panel"
-        else:
-            body = payload
-            panel_class = "camera-panel flipbook-panel"
-        bodies.append(
-            f'<div class="{panel_class}" data-camera-panel="{_escape(camera)}"{hidden}>{body}</div>'
-        )
-    reasons = []
-    for _camera, _panel, tier in panels:
-        if tier not in {None, "mp4"} and tier not in reasons:
-            reasons.append(tier)
-    reason_chips = "".join(f'<span class="chip">{_escape(reason)}</span>' for reason in reasons)
+    bodies = "".join(
+        f'<div class="camera-panel flipbook-panel" data-camera-panel="{_escape(camera)}"'
+        f"{'' if index == 0 else ' hidden'}>{panel}</div>"
+        for index, (camera, panel) in enumerate(panels)
+    )
+    reason_chip = "" if reason is None else f'<span class="chip">{_escape(reason)}</span>'
     return (
         f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
-        f'<div class="run-media-head">Run video{reason_chips}</div>'
-        f'<div class="camera-tabs">{tabs}</div>{"".join(bodies)}</div>'
+        f'<div class="run-media-head">Run video{reason_chip}</div>'
+        f'<div class="camera-tabs">{tabs}</div>{bodies}</div>'
     )
 
 

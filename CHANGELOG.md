@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Core:** completed HTML reports now combine every stored camera stream into
+  one side-by-side run video with a shared playhead. The raw policy exchange is
+  renamed from LLM POV to Raw transcript, and dividers now separate transcript
+  steps instead of the raw dropdown
+  ([plan 0063](plans/0063-composite-run-video.md),
+  [#347](https://github.com/robocurve/inspect-robots/issues/347)).
+
 - **Core:** footer status lines now append the framework-owned
   `Esc ends the episode` hint and replace stale trailing gesture clauses. This
   prevents a repeat of the yam Enter-to-Esc gesture-prose drift incident while

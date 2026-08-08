@@ -487,17 +487,19 @@ The report puts the run status, configuration, metrics, scene results, and
 recorded policy conversations on one page. Chat transcripts are grouped into
 observation turns. A turn's default view shows its step, camera frames,
 structured operator feedback, assistant prose, agent-note headlines, and
-readable tool argument chips. A collapsed LLM POV section preserves the raw
-observation, state dumps, calls, and tool results. Non-chat transcripts remain
-available as bounded JSON.
+readable tool argument chips. A collapsed Raw transcript section preserves the
+raw observation, state dumps, calls, and tool results. Non-chat transcripts
+remain available as bounded JSON.
 
 For runs captured with `--store-frames`, the report embeds the stored camera
-frames at the exact observation turns where the model saw them. A player above
-each trial transcript provides camera tabs, play or pause, and step scrubbing.
-When ffmpeg is available, a completed report rendered outside `--serve` embeds
-an MP4 for each stored camera stream at the recorded control rate. Otherwise
-the player uses the existing frame images as a lightweight flipbook. The file
-contains its stylesheet and media inline, so it has no network dependency.
+frames at the exact observation turns where the model saw them. When ffmpeg is
+available, a completed report rendered outside `--serve` also embeds one
+side-by-side composite MP4 above each trial transcript at the recorded control
+rate. Its caption names the cameras in left-to-right order, and one playhead
+keeps every view aligned. Otherwise the player provides per-camera tabs, play
+or pause, and step scrubbing over the existing frame images as a lightweight
+flipbook. The file contains its stylesheet and media inline, so it has no
+network dependency.
 
 By default, `view` replaces the log path's suffix with `.html` and prints the
 written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
@@ -512,12 +514,13 @@ Use `--no-frames` to keep the transcript placeholders, or
 `--frames-budget 0` removes the limit. Inlined frames make the HTML document
 larger, so use a smaller budget or `--no-frames` when page size matters.
 
-Embedded MP4 data has a separate 30 MB per-page budget. Cameras that exceed it
-fall back to the flipbook. `--no-video` skips MP4 encoding without removing
-frames or the flipbook. Served and running pages also use the flipbook so the
-two-second live render loop never waits for ffmpeg. In directory mode these
-suppressed pages remain upgradeable: the next eligible plain `view` pass
-re-renders them with MP4s. Reports created before this behavior need `--force`
+Embedded MP4 data has a separate 30 MB per-page budget. A trial composite that
+exceeds it falls back to the per-camera flipbook, and later trials skip their
+composite encode. `--no-video` skips MP4 encoding without removing frames or
+the flipbook. Served and running pages also use the flipbook so the two-second
+live render loop never waits for ffmpeg. In directory mode these suppressed
+pages remain upgradeable: the next eligible plain `view` pass re-renders them
+with the composite MP4. Reports created before this behavior need `--force`
 once to gain embedded video.
 
 ## `inspect-robots video`

@@ -1,4 +1,4 @@
-"""Render stored camera frames to per-stream MP4 videos via the ffmpeg binary.
+"""Render stored camera frames to per-stream or composite MP4s via ffmpeg.
 
 `FrameStore` persists raw ``.npy`` arrays; this module reunites them with a
 log and pipes them one frame at a time to an external ``ffmpeg`` process, so
@@ -20,7 +20,7 @@ from typing import IO, TYPE_CHECKING, Any, cast
 import numpy as np
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     import numpy.typing as npt
 
@@ -245,6 +245,40 @@ def _encode_core(
     if first is None:
         return StreamResult(piped=0, skipped_empty=skipped, error="no usable frames")
 
+    skipped_count = [skipped]
+
+    def remaining() -> Iterable[npt.NDArray[np.uint8]]:
+        for _step, path in frames[index:]:
+            frame = _normalize(path)
+            if frame is None:
+                skipped_count[0] += 1
+                continue
+            if frame.shape != first.shape:
+                raise _FrameError(
+                    f"frame shape changed from {first.shape} to {frame.shape} at {path.name}"
+                )
+            yield frame
+
+    return _encode_arrays(
+        first,
+        remaining(),
+        out_path,
+        fps,
+        ffmpeg,
+        skipped_empty=lambda: skipped_count[0],
+    )
+
+
+def _encode_arrays(
+    first: npt.NDArray[np.uint8],
+    remaining: Iterable[npt.NDArray[np.uint8]],
+    out_path: Path,
+    fps: float,
+    ffmpeg: str,
+    *,
+    skipped_empty: Callable[[], int] = lambda: 0,
+) -> StreamResult:
+    """Pipe one already-probed array stream to ffmpeg."""
     height, width = first.shape[0], first.shape[1]
     # stderr goes to a temp file, never a pipe: unread PIPE buffers fill and
     # deadlock ffmpeg against our stdin writes on exactly the long episodes
@@ -270,15 +304,7 @@ def _encode_core(
         try:
             stdin.write(first.tobytes())
             piped += 1
-            for _step, path in frames[index:]:
-                frame = _normalize(path)
-                if frame is None:
-                    skipped += 1
-                    continue
-                if frame.shape != first.shape:
-                    raise _FrameError(
-                        f"frame shape changed from {first.shape} to {frame.shape} at {path.name}"
-                    )
+            for frame in remaining:
                 stdin.write(frame.tobytes())
                 piped += 1
         except _FrameError as exc:
@@ -302,7 +328,7 @@ def _encode_core(
         error = tail or f"ffmpeg exited with code {returncode}"
     if error is not None:
         out_path.unlink(missing_ok=True)
-    return StreamResult(piped=piped, skipped_empty=skipped, error=error)
+    return StreamResult(piped=piped, skipped_empty=skipped_empty(), error=error)
 
 
 def encode_stream(
@@ -320,8 +346,8 @@ def encode_stream(
         raise SystemExit(str(exc)) from exc
 
 
-def _encode_camera_mp4(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: str) -> bytes | None:
-    """Return an in-memory camera MP4, degrading every encoder failure to ``None``."""
+def _temporary_mp4(encode: Callable[[Path], StreamResult]) -> bytes | None:
+    """Run one encoder into a temporary MP4 and return its bytes on success."""
     try:
         fd, name = tempfile.mkstemp(suffix=".mp4")
     except OSError:
@@ -330,7 +356,7 @@ def _encode_camera_mp4(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: s
     try:
         try:
             os.close(fd)
-            result = _encode_core(frames, path, fps, ffmpeg)
+            result = encode(path)
             if result.error is not None:
                 return None
             return path.read_bytes()
@@ -338,3 +364,65 @@ def _encode_camera_mp4(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: s
             return None
     finally:
         path.unlink(missing_ok=True)
+
+
+def _encode_composite_mp4(
+    ordered_streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]],
+    fps: float,
+    ffmpeg: str,
+) -> tuple[bytes, tuple[str, ...]] | None:
+    """Return one side-by-side report MP4 and its surviving stream keys."""
+    probed: list[tuple[str, Sequence[tuple[int, Path]], tuple[int, int, int]]] = []
+    try:
+        for key, frames in ordered_streams:
+            first = next(
+                (frame for _step, path in frames if (frame := _normalize(path)) is not None),
+                None,
+            )
+            if first is not None:
+                probed.append((key, frames, first.shape))
+    except _FrameError:
+        return None
+    if not probed:
+        return None
+
+    max_height = max(shape[0] for _key, _frames, shape in probed)
+    width = sum(shape[1] for _key, _frames, shape in probed)
+    timeline = sorted({step for _key, frames, _shape in probed for step, _path in frames})
+
+    def composite_frames() -> Iterator[npt.NDArray[np.uint8]]:
+        held = [np.zeros(shape, dtype=np.uint8) for _key, _frames, shape in probed]
+        by_step = [dict(frames) for _key, frames, _shape in probed]
+        for step in timeline:
+            contributed = False
+            for index, ((_key, _frames, shape), paths) in enumerate(
+                zip(probed, by_step, strict=True)
+            ):
+                path = paths.get(step)
+                if path is None:
+                    continue
+                frame = _normalize(path)
+                if frame is None:
+                    continue
+                if frame.shape != shape:
+                    raise _FrameError(
+                        f"frame shape changed from {shape} to {frame.shape} at {path.name}"
+                    )
+                held[index] = frame
+                contributed = True
+            if not contributed:
+                continue
+            padded = [
+                np.pad(frame, ((0, max_height - frame.shape[0]), (0, 0), (0, 0))) for frame in held
+            ]
+            yield np.hstack(padded)
+
+    produced = composite_frames()
+    first_composite = next(produced)
+    assert first_composite.shape == (max_height, width, 3)
+    encoded = _temporary_mp4(
+        lambda path: _encode_arrays(first_composite, produced, path, fps, ffmpeg)
+    )
+    if encoded is None:
+        return None
+    return encoded, tuple(key for key, _frames, _shape in probed)
