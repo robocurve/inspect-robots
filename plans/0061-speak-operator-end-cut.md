@@ -130,7 +130,7 @@ carries the reason, and `OPERATOR_END == "operator_end"` is public core API
 - [ ] `plugins/inspect-robots-voice/CLAUDE.md`: extend the `SpeakerSink` invariant
       bullet with the operator-end cut.
 - [ ] `CHANGELOG.md` `## [Unreleased]` → Fixed: voice 0.5.1, operator-ended trials cut
-      `--speak` narration instead of draining it at eval end (plan 0059, #343).
+      `--speak` narration instead of draining it at eval end (plan 0061, #343).
 - [ ] Version 0.5.0 → 0.5.1 in plugin pyproject + `__init__.py` + the
       `test_package_exports_and_version` assertion; `uv lock` if dirtied. (0.5.0 was
       published to PyPI in the v0.47.1 release run on 2026-08-07, so a distinct 0.5.1

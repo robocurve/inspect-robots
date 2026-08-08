@@ -147,8 +147,9 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
 
 Ending a trial from the console cuts narration immediately in every mode; only natural
 completions drain the final summary. Because the cut lands after grading, the tail of one note
-may still be audible through the verdict prompt in the default `interrupt` mode, while the whole
-`mode=queue` backlog (up to 4 notes) keeps playing until the verdict is entered. The operator's
+may still be audible through the verdict prompt in the default `interrupt` mode, while the
+`mode=queue` backlog (up to 4 queued notes plus the one in flight) keeps playing until the
+verdict is entered. The operator's
 own `/stop` note text is never spoken because the speaker reads policy narration only.
 
 The first `--speak` run downloads about 340 MB of pinned Kokoro model files. The cache is
