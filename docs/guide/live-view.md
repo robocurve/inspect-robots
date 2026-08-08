@@ -38,5 +38,5 @@ confirming that the evaluation process has stopped.
 
 The browser view is designed for turn-by-turn policy transcripts. It rewrites a
 JSON snapshot at most once per second and refreshes the browser every two
-seconds. Use [Rerun](logging-and-rerun.md#rerun-visualization) for high-rate
-camera, state, action, and reward streams synchronized to the control timeline.
+seconds. See [Rerun visualization](logging-and-rerun.md#rerun-visualization) for
+high-rate control-timeline streams and their recording options.

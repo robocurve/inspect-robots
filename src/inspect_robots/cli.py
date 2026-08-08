@@ -337,6 +337,14 @@ def build_parser() -> argparse.ArgumentParser:
         "default)",
     )
     p_run.add_argument(
+        "--rerun-save",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="also save the stream as a .rrd next to the eval log (default: on whenever "
+        "the rerun viewer is active; without a viewer, --rerun-save records to a "
+        ".rrd only; --no-rerun-save or a rerun_save config key overrides)",
+    )
+    p_run.add_argument(
         "--rerun-connect",
         nargs="?",
         const=DEFAULT_RERUN_CONNECT_URL,
@@ -1558,6 +1566,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     voice_input: OperatorInput | None = None
     speaker_sink: LogSink | None = None
     live_sink: LiveLogSink | None = None
+    rerun_sink: LogSink | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1598,11 +1607,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if not args.no_live_log:
             live_sink = LiveLogSink(args.log_dir)
             sinks.append(live_sink)
+        save_wanted = args.rerun_save if args.rerun_save is not None else defaults.rerun_save
         if args.rerun_connect is not None:
             from inspect_robots.logging.rerun_sink import RerunSink
 
-            sinks.append(RerunSink(connect_url=args.rerun_connect))
-            print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}")
+            rerun_sink = RerunSink(
+                connect_url=args.rerun_connect,
+                recording_dir=args.log_dir if save_wanted else None,
+            )
+            sinks.append(rerun_sink)
+            suffix = " (+ .rrd)" if save_wanted else ""
+            print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}{suffix}")
         else:
             spawn_wanted = args.rerun_port is not None or (
                 args.rerun if args.rerun is not None else defaults.rerun
@@ -1614,10 +1629,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 # warn-once no-op when rerun-sdk is not installed.
                 port = args.rerun_port if args.rerun_port is not None else defaults.rerun_port
                 if port is None:
-                    sinks.append(RerunSink(spawn=True))
+                    rerun_sink = RerunSink(
+                        spawn=True,
+                        recording_dir=args.log_dir if save_wanted else None,
+                    )
                 else:
-                    sinks.append(RerunSink(spawn=True, spawn_port=port))
-                print(f"{_styled('rerun:', _CYAN)} live viewer")
+                    rerun_sink = RerunSink(
+                        spawn=True,
+                        spawn_port=port,
+                        recording_dir=args.log_dir if save_wanted else None,
+                    )
+                sinks.append(rerun_sink)
+                suffix = " (+ .rrd)" if save_wanted else ""
+                print(f"{_styled('rerun:', _CYAN)} live viewer{suffix}")
+            elif args.rerun_save is True:
+                from inspect_robots.logging.rerun_sink import RerunSink
+
+                rerun_sink = RerunSink(recording_dir=args.log_dir)
+                sinks.append(rerun_sink)
+                print(f"{_styled('rerun:', _CYAN)} recording .rrd")
         # Speaker goes last so its bounded end-of-run drain never delays the
         # JSON log write or the Rerun flush in the on_eval_end fan-out.
         if speaker_sink is not None:
@@ -1670,6 +1700,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                         resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
+    resolved_recording_path = getattr(rerun_sink, "resolved_recording_path", None)
+    if resolved_recording_path:
+        print(f"{_styled('rrd:', _CYAN)} {_styled(str(resolved_recording_path), _DIM)}")
     return 0 if log.status == "success" else 1
 
 
@@ -2604,6 +2637,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
         ("rerun", defaults.rerun, None),
+        ("rerun_save", defaults.rerun_save, None),
         ("rerun_port", defaults.rerun_port, None),
     ]
     for key, value, source in rows:

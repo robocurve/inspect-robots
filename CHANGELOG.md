@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
+  the log directory by default. `--rerun-save`/`--no-rerun-save` and the
+  `rerun_save` config key control tee or record-only operation
+  ([plan 0059](plans/0059-rerun-rrd-tee.md)).
+
 - Live HTML reports now include recent stored camera frames under a bounded
   serving budget, while completed reports retain the full frame budget. The
   agent live-view tip now gives remote and headless sessions a network-serving

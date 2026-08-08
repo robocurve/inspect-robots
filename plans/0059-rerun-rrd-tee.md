@@ -192,7 +192,7 @@ file-only failures is complexity the failure likelihood does not buy.
 
 ### 1. Sink: constructor + naming
 
-- [ ] `RerunSink.__init__`: add `recording_dir` (keyword-only), initialize
+- [x] `RerunSink.__init__`: add `recording_dir` (keyword-only), initialize
       `self.resolved_recording_path: Path | None = None` and the
       `self._set_sinks_warned = False` guard in the constructor (a
       constructed-but-never-started sink must not raise `AttributeError`), drop
@@ -200,12 +200,12 @@ file-only failures is complexity the failure likelihood does not buy.
       `recording_path`×`recording_dir` exclusivity, keep spawn×connect. Update the
       class and `__init__` docstrings (tee semantics, 0.24 gate, `recording_dir`
       naming convention, `resolved_recording_path` contract).
-- [ ] `on_eval_start`: reset + derive `resolved_recording_path` (recording_dir mode
+- [x] `on_eval_start`: reset + derive `resolved_recording_path` (recording_dir mode
       creates the directory, draws a fresh uuid per eval — a reused sink gets a new
       file per eval); implement the startup matrix above with the set_sinks feature
       gate and the warn-once fallback (`self._set_sinks_warned` guard, reset never —
       one warning per sink instance, matching `_warned`).
-- [ ] Tests (`tests/test_rerun_sink.py`): update the two now-deleted exclusivity
+- [x] Tests (`tests/test_rerun_sink.py`): update the two now-deleted exclusivity
       tests; add recording_dir×recording_path exclusivity; extend `_StartupRR` with
       `set_sinks`/`GrpcSink`/`FileSink` capture (record constructor args) and cover:
       spawn tee call order (`init` → `spawn(connect=False, memory_limit, port)` →
@@ -224,7 +224,7 @@ file-only failures is complexity the failure likelihood does not buy.
       tests/test_rerun_sink.py:168-184 — this is the branch main CI actually
       runs, since the dev extra has no rerun-sdk), and `Path(recording_path)` in
       fixed mode.
-- [ ] Real-SDK contract tests, following the existing `_RERUN_INSTALLED`-gated
+- [x] Real-SDK contract tests, following the existing `_RERUN_INSTALLED`-gated
       pattern (`test_real_rerun_spawn_signature_accepts_forwarded_kwargs` and
       friends at tests/test_rerun_sink.py:1550-1584, run by the `test-rerun` CI
       job at .github/workflows/ci.yml:102-119 against the locked SDK, currently
@@ -238,10 +238,10 @@ file-only failures is complexity the failure likelihood does not buy.
 
 ### 2. CLI + config
 
-- [ ] `defaults.py`: `rerun_save` field, parse, known-keys, `config set` bool
+- [x] `defaults.py`: `rerun_save` field, parse, known-keys, `config set` bool
       validation; tests beside the existing `rerun` parsing tests (true/false/invalid,
       `config set rerun_save`).
-- [ ] `cli.py`: `--rerun-save` flag, resolution, the three sink-construction branches,
+- [x] `cli.py`: `--rerun-save` flag, resolution, the three sink-construction branches,
       status lines, post-eval `.rrd` path report, `config show` row. **Extend
       `_FakeRerunSink` in `tests/test_registry_cli.py:5596-5608` first**: its
       `__init__` must accept `recording_dir` (13 tests use the `_fake_rerun`
@@ -264,7 +264,7 @@ file-only failures is complexity the failure likelihood does not buy.
 
 ### 3. Docs + changelog
 
-- [ ] `docs/guide/logging-and-rerun.md` is the home for the tee content: the live
+- [x] `docs/guide/logging-and-rerun.md` is the home for the tee content: the live
       view now leaves a `.rrd` beside the eval log; how to replay (`rerun <file>`);
       the opt-outs; the 0.24 requirement; the drops caveat (viewer-paced shedding
       reaches the file too). **Rewrite the now-false paragraph at lines 94-96**
@@ -283,7 +283,7 @@ file-only failures is complexity the failure likelihood does not buy.
       row text, which already cites "plans 0055 and 0058" for LiveLogSink live
       frames. Follow the public-facing writing style rules (no em dashes, no
       mid-sentence bold).
-- [ ] CHANGELOG `[Unreleased]` → Added: default `.rrd` capture for live-viewed runs,
+- [x] CHANGELOG `[Unreleased]` → Added: default `.rrd` capture for live-viewed runs,
       `--rerun-save/--no-rerun-save`, `rerun_save` config key, link to plan 0059.
 - [ ] Gates: `ruff check .`, `ruff format --check .`, `mypy`, `pytest --cov` at 100%.
 
