@@ -1,6 +1,6 @@
 # Report overhaul: turn-oriented transcript, LLM POV dropdown, and run video
 
-> Status: PLANNED — issue #337 items 2-6 and 8 (rig-1 shakedown, 2026-08-07).
+> Status: PLANNED — issue #337 items 2-6 and 8 (renumbered 0059→0060; 0059 taken by rerun-rrd-tee on main) (rig-1 shakedown, 2026-08-07).
 > Builds on plans 0055/0058. Closes #337 when merged.
 
 ## Problem
@@ -280,7 +280,7 @@ common single-scene rig run this is the top of the report):
   (cadence tests untouched).
 - Docs: `docs/guide/live-view.md` and the viewer section of
   `docs/guide/cli.md` (or nearest existing viewer doc) updated; CHANGELOG
-  entry (`[plan 0059](plans/0059-report-turns-and-video.md)`,
+  entry (`[plan 0060](plans/0060-report-turns-and-video.md)`,
   [#337](https://github.com/robocurve/inspect-robots/issues/337), Closes);
   module map rows (`_html.py`, `_video.py`, `cli.py`).
 
