@@ -494,7 +494,8 @@ def test_non_dict_message_falls_back_to_preformatted_json() -> None:
     assert '<div class="conversation">' not in document
 
 
-def test_media_parts_collapse_to_image_chip() -> None:
+def test_media_parts_leave_image_markers_in_pov_only() -> None:
+    """Foreign media payloads never embed, but the POV records their presence."""
     transcript = _chat(
         {
             "role": "user",
@@ -508,7 +509,7 @@ def test_media_parts_collapse_to_image_chip() -> None:
 
     document = render_html(_log(transcripts=(transcript,)), title="media")
 
-    assert '<div class="content">look here</div>' in document
+    assert "look here\n[image]\n[image]" in document
     assert "large-data" not in document
     assert "unknown media" not in document
 
@@ -1208,6 +1209,7 @@ def test_turns_keep_string_users_visible_and_raw_observations_only_in_pov(
     assert "<figcaption>top</figcaption>" in human
     assert "<figcaption>wrist</figcaption>" in human
     assert state not in human and "feedback: slower" not in human
+    assert "moved exactly" not in human  # tool results live in the POV only
     assert "state[joint_pos]: &lt;script&gt;bad()&lt;/script&gt;" in document
     assert "feedback: slower" in document and "moved exactly" in document
     assert "j1</span>0.1235" in human and "j2</span>-0.0000" in human
@@ -1418,16 +1420,28 @@ def test_mp4_budget_and_failures_degrade_to_flipbook(
     assert capsys.readouterr().err.count("warning: report video unavailable") == 1
 
 
-def test_mp4_budget_is_first_wins_in_camera_document_order(
+def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    encoder_calls: list[object] = []
+
+    def fake_encode(frames: object, *_args: object) -> bytes:
+        encoder_calls.append(frames)
+        return b"one"
+
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"one")
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", fake_encode)
     transcript = _chat(
-        {"role": "user", "content": [*_parts("alpha", 0), *_parts("beta", 0)]},
-        {"role": "user", "content": [*_parts("alpha", 1), *_parts("beta", 1)]},
+        {
+            "role": "user",
+            "content": [*_parts("alpha", 0), *_parts("beta", 0), *_parts("gamma", 0)],
+        },
+        {
+            "role": "user",
+            "content": [*_parts("alpha", 1), *_parts("beta", 1), *_parts("gamma", 1)],
+        },
     )
-    for camera in ("alpha", "beta"):
+    for camera in ("alpha", "beta", "gamma"):
         _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
         _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
 
@@ -1442,7 +1456,9 @@ def test_mp4_budget_is_first_wins_in_camera_document_order(
     assert document.index('data-camera-panel="alpha"') < document.index('data-camera-panel="beta"')
     beta_panel = document[document.index('data-camera-panel="beta"') :]
     assert 'class="flipbook-player"' in beta_panel
-    assert "video budget" in document
+    assert document.count("video budget") == 1  # dedup'd chip covers beta and gamma
+    # Sticky truncation skips the encode entirely for cameras after the overflow.
+    assert len(encoder_calls) == 2
 
 
 @pytest.mark.parametrize(

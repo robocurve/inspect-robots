@@ -54,6 +54,13 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
     )).filter((element) => element.matches('img.frame'));
     const storageKey = (camera) =>
       `inspect-robots:flipbook:${location.pathname}:${trial}:${camera}`;
+    const tabKey = `inspect-robots:flipbook-tab:${location.pathname}:${trial}`;
+    try {
+      const storedTab = sessionStorage.getItem(tabKey);
+      if (storedTab && tabs.some((tab) => tab.dataset.cameraTab === storedTab)) {
+        active = storedTab;
+      }
+    } catch (_error) { /* Storage can be disabled without disabling playback. */ }
     const readState = (camera) => {
       try { return JSON.parse(sessionStorage.getItem(storageKey(camera))) || {}; }
       catch (_error) { return {}; }
@@ -96,6 +103,8 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
     };
     const activate = (camera) => {
       active = camera;
+      try { sessionStorage.setItem(tabKey, camera); }
+      catch (_error) { /* Storage can be disabled without disabling playback. */ }
       stopTimer();
       const expanded = !transcript || transcript.open;
       tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.cameraTab === camera));
@@ -174,11 +183,17 @@ class _Turn:
 
 @dataclass
 class _VideoBudget:
-    """Track base64 MP4 characters spent by one report in document order."""
+    """Track base64 MP4 characters spent by one report in document order.
+
+    ``truncated`` is sticky like the frame budget's: the first camera that
+    overflows denies every later one, and later cameras skip their encode
+    entirely rather than paying ffmpeg cost for a discarded payload.
+    """
 
     limit: int = _VIDEO_BUDGET_BYTES
     encoded: int = 0
     warned: bool = False
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -846,10 +861,13 @@ def _render_raw_message(raw_message: object) -> str:
     content_value = raw_message.get("content")
     content: str | None
     if isinstance(content_value, list):
+        # Non-text parts leave a marker so nothing silently vanishes from the
+        # page: the POV is the turn's complete raw exchange.
         content = "\n".join(
             str(part.get("text", ""))
-            for part in content_value
             if isinstance(part, dict) and part.get("type") == "text"
+            else "[image]"
+            for part in content_value
         )
     else:
         content = _chat_content(content_value)
@@ -1258,6 +1276,13 @@ def _render_trial_media(
     for stored_camera, frames in streams.items():
         camera = display_names.get(stored_camera, stored_camera)
         seen.add(camera)
+        if context.budget.truncated:
+            # Sticky, first-wins: once one camera overflowed, later cameras
+            # degrade without paying an encode for a discarded payload.
+            panel = _flipbook_panel(camera, flipbook.get(camera, ()))
+            if panel:
+                panels.append((camera, panel, "video budget"))
+            continue
         from inspect_robots._video import _encode_camera_mp4
 
         ffmpeg = cast(str, context.ffmpeg)
@@ -1270,6 +1295,7 @@ def _render_trial_media(
             continue
         payload = base64.b64encode(encoded).decode("ascii")
         if context.budget.limit and context.budget.encoded + len(payload) > context.budget.limit:
+            context.budget.truncated = True
             panel = _flipbook_panel(camera, flipbook.get(camera, ()))
             if panel:
                 panels.append((camera, panel, "video budget"))
