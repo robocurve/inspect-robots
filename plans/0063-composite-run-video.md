@@ -1,7 +1,16 @@
 # 0063 — Composite side-by-side run video; "Raw transcript" rename
 
-- **Status:** draft (R0)
+- **Status:** draft (R1 resolved)
 - **Issue:** #347
+- **Critique rounds:** R1: 4 substantive (unscripted `autoplay loop` composite
+  reversed 0060's pinned collapsed-trials-cost-nothing playback design; three
+  missed doc sites still describing per-camera MP4s; coverage-gate gaps —
+  unnamed skip-step test, unspecified probe-time read failure, sticky-budget
+  tests need multi-trial restructuring not re-pinning, and a
+  rendered-camera-without-stream guard would be an uncoverable branch;
+  `.system-message` cited as a generic-border keeper when it already zeroes
+  the border, and the rename touches two selectors, not one) — all resolved
+  below.
 
 ## Problem
 
@@ -31,6 +40,14 @@ rows read identically.
 Camera order: first-appearance order of display cameras in
 `frame_ctx.rendered` (exactly what `_render_turn_frames` produced), then any
 stored streams never rendered in a turn, in their existing sorted-key order.
+Rendered names are display names while stream keys are `_safe` filename
+prefixes; the ordering is implemented as a *sort of the streams dict* by
+`(first-appearance index of the stream's display name, stream key)` with
+never-rendered streams getting an index past the end — an index lookup with a
+default, **not** a "rendered camera missing its stream" guard branch: within
+one `render_html` pass a rendered frame's `.npy` is the very file the stream
+glob matches, so such a guard could never be covered and would fail the 100%
+coverage gate.
 
 ### Encoder: `_encode_composite_mp4` in `_video.py`
 
@@ -56,8 +73,12 @@ Composite frame construction:
   practice; still trivial.
 - **Probe**: like `_encode_core`'s pre-spawn probe, scan each stream forward
   past empty frames to its first usable one to learn its shape. A stream
-  with no usable frames is dropped from the composite. If *no* stream has a
-  usable frame, return `None`.
+  whose frames are all *empty* (expected first-party warm-up data) is dropped
+  from the composite. A `_FrameError` during the probe (truncated/corrupt
+  file, wrong dtype — the same cases `_encode_core` errors on pre-spawn)
+  **fails the whole composite** → `None` → flipbook fallback: corruption is
+  a loud degrade, never a silently missing camera. If no stream has a usable
+  frame, return `None`.
 - **Height alignment**: cameras may differ in resolution; each frame is
   padded with black rows (bottom pad) to the max probed height, then
   `np.hstack`. Width = sum of camera widths; the existing ffmpeg `pad` filter
@@ -71,17 +92,27 @@ Composite frame construction:
 
 ### HTML changes (`_html.py`)
 
-- Success path: one panel, no `camera-tabs`, no per-panel JS dependence:
+- Success path: one panel, no `camera-tabs`:
 
   ```html
   <div class="run-media" data-trial="...">
     <div class="run-media-head">Run video</div>
     <div class="camera-order">left · top · right</div>
-    <div class="camera-panel video-panel"><video controls muted loop autoplay
-         src="data:video/mp4;base64,..."></video></div>
+    <div class="camera-panel video-panel"><video controls muted loop
+         preload="metadata" src="data:video/mp4;base64,..."></video></div>
   </div>
   ```
 
+- **Playback cost stays governed by transcript visibility** (0060's pinned
+  R2: "a collapsed trial costs nothing"). The composite `<video>` carries
+  **no `autoplay`** and `preload="metadata"`; a small script (in the same
+  per-`run-media` block that today wires tabs) plays/pauses it from the
+  enclosing `details.transcript`: once at load and on every `toggle`,
+  expanded → `void video.play().catch(() => {})`, collapsed → `pause()`.
+  Single-transcript pages (which `render_html` opens by default,
+  `open_transcript=transcript_count == 1`) therefore start playing exactly
+  like today's first tab; multi-trial pages decode nothing until a trial is
+  expanded. The tab/flipbook JS is retained unchanged for fallback pages.
 - **Budget** (`_VideoBudget`, 30 MB base64 default, `--no-video` opt-out)
   is unchanged in mechanism: the single composite payload is charged against
   the limit; on overflow the budget goes sticky-truncated and this trial (and
@@ -115,8 +146,11 @@ steps**:
 
 - `.raw-transcript` overrides the inherited rule (`border-top: 0;
   padding-top: 0;` with its existing margin retained), so no line renders
-  above the dropdown. Other `details` uses (e.g. `.system-message`) keep the
-  generic rule.
+  above the dropdown. The `details` elements that actually depend on the
+  generic rule — `details.transcript`, `details.wire`, `details.wire-call` —
+  keep it (`.system-message` already zeroes its border and is unaffected).
+  The rename touches both existing selectors: `.llm-pov` and
+  `.llm-pov .message`.
 - `.turn + .turn { border-top: 1px solid var(--line); padding-top: 18px; }`
   draws one line between consecutive turns — after each turn's raw dropdown,
   before the next `step N` header — and none before the first turn or after
@@ -129,8 +163,12 @@ steps**:
   order (assert piped bytes via the existing fake-ffmpeg capture pattern).
 - Step-union hold-last: stream A has steps {0,1,2}, B has {0,2} → at step 1,
   B's step-0 frame is repeated.
-- Pre-first-frame black fill and no-usable-frames stream dropped; all-streams
-  unusable → `None`.
+- Pre-first-frame black fill and all-empty stream dropped; every stream
+  empty → `None`.
+- Probe-time `_FrameError` (truncated first frame) → `None` (loud degrade,
+  not a silently dropped camera).
+- Skip-step branch: two streams each holding an *empty* frame at the same
+  union step → that step emits no composite frame (no duplicate).
 - Height padding with mixed resolutions; width is the sum.
 - Mid-stream shape change → `None`.
 - Encoder failure / launch failure → `None` (mirrors existing
@@ -138,9 +176,16 @@ steps**:
 
 `tests/test_html_view.py`:
 - Video-eligible page renders exactly one `<video>` and no `camera-tab`
-  buttons; caption row lists cameras in turn order.
-- Budget overflow → sticky truncation → flipbook tabs with `video budget`
-  chip (existing tests re-pinned to composite sizes).
+  buttons; caption row lists cameras in turn order; the video has **no
+  `autoplay`** and `preload="metadata"` (playback is script-driven from the
+  transcript toggle — pins 0060's collapsed-trials-cost-nothing rule).
+- Sticky budget: the existing within-trial sticky tests
+  (`test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes`, the
+  panel-less sticky half of the single-frame-camera test) are **restructured
+  to multi-trial fixtures** — with one encode per trial, stickiness is only
+  observable across trials: trial 1's composite overflows → truncates →
+  trial 2 skips its encode (`encoder_calls` count pins the skip) and renders
+  flipbook tabs with the `video budget` chip.
 - Encode failure → flipbook tabs (re-pin existing test).
 - Stream never rendered in a turn still appears in the composite caption
   order (replaces the `data-camera-tab="unseen_camera"` assertion).
@@ -150,6 +195,15 @@ steps**:
 ## Docs & changelog
 
 - CHANGELOG `[Unreleased]` → Changed: composite run video (one shared
-  playhead), LLM POV renamed to Raw transcript, with plan/issue links.
-- `docs/guide/cli.md` run-video paragraph rewritten for the single composite
-  video; `docs/guide/live-view.md` dropdown sentence renamed.
+  playhead), LLM POV renamed to Raw transcript, step dividers, with
+  plan/issue links.
+- `docs/guide/cli.md`: the run-video paragraph (~494-500) rewritten for the
+  single composite video, **and** the budget paragraph (~515-518) — the unit
+  of charge/degrade becomes the trial composite, not a camera.
+- `docs/guide/live-view.md`: the LLM POV sentence (~19) renamed, **and** the
+  post-run upgrade paragraph (~28-31) that says a view pass "can replace
+  each camera's flipbook with an embedded MP4" rewritten for the composite.
+- `src/inspect_robots/CLAUDE.md`: the `_html.py` row ("budgeted
+  completed-page MP4 embedding", "raw LLM POV dropdowns") and the `cli.py`
+  row ("eligible embedded MP4s") updated to composite-video and
+  Raw-transcript wording.
