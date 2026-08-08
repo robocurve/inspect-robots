@@ -11,7 +11,7 @@ from inspect_robots_voice import SpeakerSink, VoiceInput, speaker_sink, voice_in
 
 
 def test_package_exports_and_version() -> None:
-    assert inspect_robots_voice.__version__ == "0.5.0"
+    assert inspect_robots_voice.__version__ == "0.5.1"
     assert inspect_robots_voice.__all__ == [
         "SpeakerSink",
         "VoiceInput",

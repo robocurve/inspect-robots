@@ -14,7 +14,7 @@ from inspect_robots_voice._transcriber import _classify_model
 
 __all__ = ["SpeakerSink", "VoiceInput", "speaker_sink", "voice_input"]
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 ScalarValue = str | int | float | bool | None
 

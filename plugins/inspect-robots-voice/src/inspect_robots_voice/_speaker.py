@@ -1,4 +1,7 @@
-"""Off-thread policy-note audio with selectable delivery and bounded waiting."""
+"""Off-thread policy-note audio with selectable delivery and bounded waiting.
+
+Operator-ended trials cut narration in every delivery mode.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +18,12 @@ import numpy as np
 import numpy.typing as npt
 
 from inspect_robots.logging.sink import NullSink
+from inspect_robots.types import OPERATOR_END
 from inspect_robots_voice._tts import KokoroEngine, TtsEngine, resolve_model_files
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog
+    from inspect_robots.rollout import TrialRecord
 
 PlaybackDevice = str | int | None
 EngineFactory = Callable[[], TtsEngine]
@@ -236,6 +241,15 @@ class SpeakerSink(NullSink):
         if dropped:
             suffix = "" if dropped == 1 else "s"
             print(f"speaker: dropped {dropped} stale note{suffix}", file=sys.stderr)
+
+    def on_trial_end(self, record: TrialRecord) -> None:
+        """Silence operator-ended narration in every mode while natural endings play out."""
+        if record.termination_reason != OPERATOR_END:
+            return
+        with self._condition:
+            self._speech_gen += 1
+            self._queue.clear()
+            self._condition.notify_all()
 
     def on_eval_end(self, log: EvalLog) -> None:
         """Drain successful narration within a bound, or abort every other terminal status."""

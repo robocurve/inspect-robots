@@ -36,7 +36,8 @@ Robots runs. It registers the `voice` factory in `inspect_robots.operator_inputs
 - `close()` is idempotent and never raises. It stops capture and joins the worker.
 - `SpeakerSink.log_policy_messages()` never synthesizes or plays audio on the control thread. Its
   blocking mode may wait boundedly and fail-open; the default interrupt mode aborts stale speech
-  through a generation counter. Only a successful eval end drains before close.
+  through a generation counter. Operator-ended trials cut narration in every mode; natural
+  completions drain only on a successful eval end before close.
 
 ## Working here
 
