@@ -474,7 +474,7 @@ def test_chat_defensive_guards_skip_malformed_calls_and_role_only_content() -> N
     assert "move({&quot;dx&quot;: 1})" in document
     assert 'class="content"' not in document
 
-    assert _render_chat_transcript(["not a message"]).count('class="llm-pov"') == 1
+    assert _render_chat_transcript(["not a message"]).count('class="raw-transcript"') == 1
 
 
 def test_role_less_message_renders_as_unknown_instead_of_crashing() -> None:
@@ -495,7 +495,7 @@ def test_non_dict_message_falls_back_to_preformatted_json() -> None:
 
 
 def test_media_parts_leave_image_markers_in_pov_only() -> None:
-    """Foreign media payloads never embed, but the POV records their presence."""
+    """Foreign media payloads never embed, but the raw transcript records their presence."""
     transcript = _chat(
         {
             "role": "user",
@@ -1139,7 +1139,7 @@ def test_non_user_chat_messages_never_embed_frames(tmp_path: Path, role: str) ->
 
 
 def _without_pov(document: str) -> str:
-    return re.sub(r'<details class="llm-pov">.*?</details>', "", document, flags=re.DOTALL)
+    return re.sub(r'<details class="raw-transcript">.*?</details>', "", document, flags=re.DOTALL)
 
 
 def test_turns_keep_string_users_visible_and_raw_observations_only_in_pov(
@@ -1201,7 +1201,8 @@ def test_turns_keep_string_users_visible_and_raw_observations_only_in_pov(
     human = _without_pov(document)
 
     assert document.count('class="turn"') == 3
-    assert document.count('class="llm-pov"') == 3
+    assert document.count('class="raw-transcript"') == 3
+    assert document.count("<summary>Raw transcript</summary>") == 3
     assert document.count('<div class="turn-step">step 3</div>') == 2
     assert "leading assistant" in human and "Goal: lift the cube" in human
     assert "Respond with exactly one tool call." in human
@@ -1209,7 +1210,7 @@ def test_turns_keep_string_users_visible_and_raw_observations_only_in_pov(
     assert "<figcaption>top</figcaption>" in human
     assert "<figcaption>wrist</figcaption>" in human
     assert state not in human and "feedback: slower" not in human
-    assert "moved exactly" not in human  # tool results live in the POV only
+    assert "moved exactly" not in human  # tool results live in the raw transcript only
     assert "state[joint_pos]: &lt;script&gt;bad()&lt;/script&gt;" in document
     assert "feedback: slower" in document and "moved exactly" in document
     assert "j1</span>0.1235" in human and "j2</span>-0.0000" in human
@@ -1359,36 +1360,83 @@ def test_flipbook_reuses_frame_urls_and_requires_two_frames(
     assert 'class="run-media"' not in one
 
 
-def test_mp4_tier_includes_unreferenced_camera_and_only_active_autoplays(
+def test_mp4_tier_renders_one_composite_in_turn_order_without_autoplay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
-    encoded: list[list[int]] = []
+    encoded: list[list[tuple[str, list[int]]]] = []
 
-    def fake_encode(frames: Sequence[tuple[int, Path]], fps: float, ffmpeg: str) -> bytes:
+    def fake_encode(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], fps: float, ffmpeg: str
+    ) -> tuple[bytes, tuple[str, ...]]:
         assert fps == 10.0 and ffmpeg == "/fake/ffmpeg"
-        encoded.append([step for step, _path in frames])
-        return f"video-{len(encoded)}".encode()
+        encoded.append([(key, [step for step, _path in frames]) for key, frames in streams])
+        return b"composite", tuple(key for key, _frames in streams)
 
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", fake_encode)
-    for camera in ("referenced", "unseen_camera"):
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
+    for camera in ("alpha", "top camera", "unseen_camera"):
         _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
         _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
-    transcript = _chat({"role": "user", "content": _parts("referenced", 1)})
+    transcript = _chat(
+        {"role": "user", "content": [*_parts("top camera", 0), *_parts("alpha", 0)]},
+        {"role": "user", "content": [*_parts("top camera", 1), *_parts("alpha", 1)]},
+    )
 
     document = render_html(_log(transcripts=(transcript,)), title="mp4", frames_dir=tmp_path)
 
-    assert encoded == [[0, 1], [0, 1]]
-    assert 'data-camera-tab="unseen_camera"' in document
-    assert document.count("data:video/mp4;base64,") == 2
-    assert document.count("<video controls muted loop autoplay") == 1
-    assert document.count('<video controls muted loop preload="metadata"') == 1
+    assert encoded == [
+        [
+            (_safe("top camera"), [0, 1]),
+            ("alpha", [0, 1]),
+            ("unseen_camera", [0, 1]),
+        ]
+    ]
+    assert document.count("data:video/mp4;base64,") == 1
+    assert document.count("<video") == 1
+    assert 'class="camera-tab' not in document
+    assert '<div class="camera-order">top camera · alpha · unseen_camera</div>' in document
+    assert "autoplay" not in document
+    assert '<video controls muted loop preload="metadata"' in document
+    run_media = re.search(
+        r'<div class="run-media".*?<div class="conversation">', document, flags=re.DOTALL
+    )
+    assert run_media is not None
+    assert "data-camera-panel" not in run_media.group()
+    assert " hidden" not in run_media.group()
     summary = "<summary>Trial 0 transcript</summary>"
     assert (
         document.index(summary)
         < document.index('class="run-media"')
         < document.index('class="conversation"')
     )
+
+
+def test_composite_caption_omits_an_all_empty_stored_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+
+    def fake_encode(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
+    ) -> tuple[bytes, tuple[str, ...]]:
+        survivors = tuple(
+            key for key, frames in streams if any(np.load(path).size for _step, path in frames)
+        )
+        return b"composite", survivors
+
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
+    for step in (0, 1):
+        _save_frame(tmp_path, "top", step, np.ones((2, 2, 3), dtype=np.uint8))
+        _save_frame(tmp_path, "empty", step, np.empty((0,), dtype=np.uint8))
+    transcript = _chat(
+        {"role": "user", "content": _parts("top", 0)},
+        {"role": "user", "content": _parts("top", 1)},
+    )
+
+    document = render_html(_log(transcripts=(transcript,)), title="empty", frames_dir=tmp_path)
+
+    assert '<div class="camera-order">top</div>' in document
+    assert '<div class="camera-order">top · empty</div>' not in document
 
 
 def test_mp4_budget_and_failures_degrade_to_flipbook(
@@ -1403,7 +1451,10 @@ def test_mp4_budget_and_failures_degrade_to_flipbook(
     )
     _save_frame(tmp_path, "top", 0, np.zeros((2, 2, 3), dtype=np.uint8))
     _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"large")
+    monkeypatch.setattr(
+        "inspect_robots._video._encode_composite_mp4",
+        lambda streams, *_args: (b"large", tuple(key for key, _frames in streams)),
+    )
 
     budget = render_html(
         _log(transcripts=(transcript,)),
@@ -1414,10 +1465,12 @@ def test_mp4_budget_and_failures_degrade_to_flipbook(
     assert "video budget" in budget and 'class="flipbook-player"' in budget
     assert "data:video/mp4" not in budget
 
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: None)
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", lambda *_args: None)
     failed = render_html(_log(transcripts=(transcript,)), title="failed", frames_dir=tmp_path)
     assert 'class="flipbook-player"' in failed and "data:video/mp4" not in failed
-    assert capsys.readouterr().err.count("warning: report video unavailable") == 1
+    warning = capsys.readouterr().err
+    assert warning.count("warning: report video unavailable") == 1
+    assert "encode failed for scene-0-e0 composite" in warning
 
 
 def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
@@ -1425,40 +1478,37 @@ def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
 ) -> None:
     encoder_calls: list[object] = []
 
-    def fake_encode(frames: object, *_args: object) -> bytes:
-        encoder_calls.append(frames)
-        return b"one"
+    def fake_encode(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
+    ) -> tuple[bytes, tuple[str, ...]]:
+        encoder_calls.append(streams)
+        return b"overflow", tuple(key for key, _frames in streams)
 
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", fake_encode)
-    transcript = _chat(
-        {
-            "role": "user",
-            "content": [*_parts("alpha", 0), *_parts("beta", 0), *_parts("gamma", 0)],
-        },
-        {
-            "role": "user",
-            "content": [*_parts("alpha", 1), *_parts("beta", 1), *_parts("gamma", 1)],
-        },
-    )
-    for camera in ("alpha", "beta", "gamma"):
-        _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
-        _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
+    transcripts = []
+    for epoch, camera in enumerate(("alpha", "beta")):
+        transcripts.append(
+            _chat(
+                {"role": "user", "content": _parts(camera, 0)},
+                {"role": "user", "content": _parts(camera, 1)},
+            )
+        )
+        _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8), epoch=epoch)
+        _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8), epoch=epoch)
 
     document = render_html(
-        _log(transcripts=(transcript,)),
+        _log(transcripts=tuple(transcripts)),
         title="first wins",
         frames_dir=tmp_path,
-        video_budget_bytes=len(base64.b64encode(b"one")),
+        video_budget_bytes=1,
     )
 
-    assert document.count("data:video/mp4;base64,") == 1
-    assert document.index('data-camera-panel="alpha"') < document.index('data-camera-panel="beta"')
-    beta_panel = document[document.index('data-camera-panel="beta"') :]
-    assert 'class="flipbook-player"' in beta_panel
-    assert document.count("video budget") == 1  # dedup'd chip covers beta and gamma
-    # Sticky truncation skips the encode entirely for cameras after the overflow.
-    assert len(encoder_calls) == 2
+    assert "data:video/mp4;base64," not in document
+    assert document.count('class="flipbook-player"') == 2
+    assert document.count("video budget") == 2
+    # Sticky truncation skips the encode entirely for trials after the overflow.
+    assert len(encoder_calls) == 1
 
 
 def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
@@ -1466,35 +1516,44 @@ def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
 ) -> None:
     """A camera below the two-frame flipbook floor vanishes quietly when its video is denied."""
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    encoder_calls: list[object] = []
 
-    def one_frame_layout() -> list[dict[str, Any]]:
-        for camera, steps in (("aa", (0, 1)), ("bb", (0, 1)), ("zz", (0,))):
-            for step in steps:
-                _save_frame(tmp_path, camera, step, np.ones((2, 2, 3), dtype=np.uint8))
-        return [
-            {
-                "role": "user",
-                "content": [*_parts("aa", 0), *_parts("bb", 0), *_parts("zz", 0)],
-            },
-            {"role": "user", "content": [*_parts("aa", 1), *_parts("bb", 1)]},
-        ]
+    def overflow(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
+    ) -> tuple[bytes, tuple[str, ...]]:
+        encoder_calls.append(streams)
+        return b"overflow", tuple(key for key, _frames in streams)
 
-    transcript = _chat(*one_frame_layout())
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", overflow)
+    first = _chat(
+        {"role": "user", "content": _parts("aa", 0)},
+        {"role": "user", "content": _parts("aa", 1)},
+    )
+    second = _chat({"role": "user", "content": _parts("zz", 0)})
+    for step in (0, 1):
+        _save_frame(tmp_path, "aa", step, np.ones((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "zz", 0, np.ones((2, 2, 3), dtype=np.uint8), epoch=1)
 
-    # Sticky denial: aa fills the budget, bb overflows, zz is denied with a
-    # sub-two-frame flipbook, exercising the panel-less sticky branch.
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"one")
+    # Trial 0 overflows; trial 1 skips its encode and has no two-frame fallback.
     document = render_html(
-        _log(transcripts=(transcript,)),
+        _log(transcripts=(first, second)),
         title="sticky no panel",
         frames_dir=tmp_path,
-        video_budget_bytes=len(base64.b64encode(b"one")),
+        video_budget_bytes=1,
     )
     assert 'data-camera-panel="zz"' not in document
+    assert len(encoder_calls) == 1
 
     # Encode failure: the same sub-two-frame camera cannot fall back to a
     # flipbook either, exercising the panel-less failure branch.
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: None)
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", lambda *_args: None)
+    for camera, steps in (("aa", (0, 1)), ("zz", (0,))):
+        for step in steps:
+            _save_frame(tmp_path, camera, step, np.ones((2, 2, 3), dtype=np.uint8))
+    transcript = _chat(
+        {"role": "user", "content": [*_parts("aa", 0), *_parts("zz", 0)]},
+        {"role": "user", "content": _parts("aa", 1)},
+    )
     document = render_html(
         _log(transcripts=(transcript,)),
         title="failure no panel",
@@ -1517,7 +1576,7 @@ def test_suppressed_video_tiers_never_call_encoder(
 ) -> None:
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
     monkeypatch.setattr(
-        "inspect_robots._video._encode_camera_mp4",
+        "inspect_robots._video._encode_composite_mp4",
         lambda *_args: (_ for _ in ()).throw(AssertionError("encoder called")),
     )
     transcript = _chat(
@@ -1551,7 +1610,7 @@ def test_report_private_degrade_edges_remain_tolerant(
     assert 'data-trial="trial"' in markup
 
     chat = [{"role": "user", "content": "hello"}]
-    assert 'class="llm-pov"' in _render_transcript(chat, trial_prefix="trial")
+    assert 'class="raw-transcript"' in _render_transcript(chat, trial_prefix="trial")
 
     np.save(tmp_path / "trial_bad.npy", np.zeros((1,), dtype=np.uint8))
     assert _trial_camera_streams(tmp_path, "trial") == {}
@@ -1586,7 +1645,10 @@ def test_video_budget_without_flipbook_source_omits_camera_panel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
-    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"large")
+    monkeypatch.setattr(
+        "inspect_robots._video._encode_composite_mp4",
+        lambda streams, *_args: (b"large", tuple(key for key, _frames in streams)),
+    )
     _save_frame(tmp_path, "unseen", 0, np.zeros((2, 2, 3), dtype=np.uint8))
     transcript = _chat({"role": "user", "content": "no observation frames"})
 
