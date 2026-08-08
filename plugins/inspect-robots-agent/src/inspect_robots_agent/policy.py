@@ -342,7 +342,7 @@ class LLMAgentPolicy(PolicyBase):
             ("effort", effort),
             ("speed", speed),
         ]:
-            if val is _UNSET:
+            if isinstance(val, _Unset):
                 continue
             if val is not None and not isinstance(val, str):
                 raise ConfigError(
