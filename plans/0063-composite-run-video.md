@@ -1,6 +1,6 @@
 # 0063 — Composite side-by-side run video; "Raw transcript" rename
 
-- **Status:** draft (R3 resolved)
+- **Status:** draft (R4 resolved)
 - **Issue:** #347
 - **Critique rounds:** R1: 4 substantive (unscripted `autoplay loop` composite
   reversed 0060's pinned collapsed-trials-cost-nothing playback design; three
@@ -26,7 +26,17 @@
   monkeypatch family relies on is now pinned; `.camera-order` had no CSS —
   muted small-caption rule named) plus four foldable nits (test-count
   wording, budget-test naming, `_VideoBudget` docstring, cli.md ~490
-  rename sentence) — all resolved below.
+  rename sentence) — all resolved below. R4: verified all R3 resolutions
+  hold; 3 substantive (survivor keys are `_safe` prefixes, not display
+  names — the caption now maps through `display_names.get(key, key)` and a
+  caption test uses a space-bearing name; the load-bearing absence of
+  `data-camera-panel` had no named test — now asserted; the
+  "wrapper(producer)" composition framing contradicted the tuple return —
+  probe is now specified as a pre-wrapper branch and the migrated tests
+  assert the tuple boundary) plus five foldable nits (dedup of migrated
+  failure tests, fake-encoder tuple shape, cli.md line range and tail
+  sentence, ordering-fixture requirement, storage-write exactness) — all
+  resolved below.
 
 ## Problem
 
@@ -81,8 +91,12 @@ core loop is refactored so frame *production* is separated from *piping*:
   carries the MP4 bytes **and the surviving stream keys in composite
   order** — an all-empty (warm-up) stream is dropped by the probe, and the
   caption must not name a camera that contributes nothing to the video, so
-  the caption is built from the survivors, not the input. Any failure
-  degrades to `None` (caller falls back to flipbook tabs).
+  the caption is built from the survivors, not the input. Survivor keys are
+  `_safe` filename prefixes (not identity for real names — `_safe` swaps
+  unsafe chars and appends a crc32 hash): the caller maps each survivor
+  through the same `display_names.get(key, key)` lookup the tabs use today
+  before joining the caption. Any failure degrades to `None` (caller falls
+  back to flipbook tabs).
 - The call-time `from inspect_robots._video import _encode_composite_mp4`
   **inside** `_render_trial_media` is retained (as with `_encode_camera_mp4`
   today): `inspect_robots._video._encode_composite_mp4` stays the patchable
@@ -91,13 +105,17 @@ core loop is refactored so frame *production* is separated from *piping*:
 - **`_encode_camera_mp4` is deleted** — its only caller is the per-camera
   encode path this plan removes, and no fallback encodes per-camera MP4s.
   Its temp-file wrapper (mkstemp → encode → `read_bytes`, degrading every
-  failure to `None` without leaking the temp file) is **extracted and
-  shared**, so `_encode_composite_mp4` = wrapper(composite frame producer)
-  and the wrapper's four failure branches stay covered in one place: the
-  four existing `_encode_camera_mp4` test functions covering five cases
-  (`tests/test_video.py` ~464-521 — success, encode+launch failure in one
-  test, mkstemp `OSError`, `read_bytes` `OSError`) migrate to
-  `_encode_composite_mp4`.
+  failure to `None` without leaking the temp file, `bytes | None` contract)
+  is **extracted and shared**. `_encode_composite_mp4` first probes the
+  streams (survivors + composite frame producer) — a probe `_FrameError` →
+  `None` is its **own pre-wrapper branch**, covered by the named probe
+  test — then calls wrapper(producer) for the bytes and returns
+  `(bytes, survivors)`. The wrapper's four failure branches stay covered in
+  one place: the four existing `_encode_camera_mp4` test functions covering
+  five cases (`tests/test_video.py` ~464-521 — success, encode+launch
+  failure in one test, mkstemp `OSError`, `read_bytes` `OSError`) migrate to
+  `_encode_composite_mp4`, now asserting the tuple/`None` at its boundary
+  (the success assertion becomes `(b"browser mp4", (<survivors>,))`).
 
 Composite frame construction:
 
@@ -159,8 +177,9 @@ Composite frame construction:
   handling — deliberately and load-bearing.** On a composite block the
   script's `tabs`/`panels` queries are empty, `active` is `undefined`, and
   `activate(undefined)` would hide and pause every `[data-camera-panel]`
-  panel it found; with none present it is a guaranteed no-op. The
-  tab/flipbook JS is otherwise retained unchanged for fallback pages.
+  panel it found; with none present it is a no-op aside from a harmless
+  sessionStorage tab-key write (the load-time read is membership-guarded).
+  The tab/flipbook JS is otherwise retained unchanged for fallback pages.
 - **Budget** (`_VideoBudget`, 30 MB base64 default, `--no-video` opt-out)
   is unchanged in mechanism: the single composite payload is charged against
   the limit; on overflow the budget goes sticky-truncated and this trial (and
@@ -221,14 +240,22 @@ steps**:
   union step → that step emits no composite frame (no duplicate).
 - Height padding with mixed resolutions; width is the sum.
 - Mid-stream shape change → `None`.
-- Encoder failure / launch failure → `None` (mirrors existing
-  `_encode_camera_mp4` failure tests).
+- Wrapper failures (encode, launch, mkstemp, `read_bytes`) → `None`: these
+  are the migrated `_encode_camera_mp4` tests, not new ones.
 
 `tests/test_html_view.py`:
 - Video-eligible page renders exactly one `<video>` and no `camera-tab`
-  buttons; caption row lists cameras in turn order; the video has **no
+  buttons; caption row lists cameras in turn order — the fixture's turn
+  order must differ from sorted-key order (e.g. render `top` before
+  `alpha`) so first-appearance ordering is actually pinned; at least one
+  camera name is one `_safe` rewrites (a space — precedent:
+  `test_space_in_camera_name_reconstructs_and_embeds`) so the caption is
+  pinned to display names, not hash-suffixed keys; the video has **no
   `autoplay`** and `preload="metadata"` (playback is script-driven from the
-  transcript toggle — pins 0060's collapsed-trials-cost-nothing rule).
+  transcript toggle — pins 0060's collapsed-trials-cost-nothing rule); and
+  the run-media block contains **no `data-camera-panel` attribute and no
+  `hidden` panel** — pinning the load-bearing absence that keeps
+  `activate(undefined)` away from the composite video.
 - All-empty extra stream on disk → composite succeeds and the caption
   **omits** the dropped camera (survivor-driven caption).
 - Sticky budget: the existing within-trial sticky tests
@@ -249,7 +276,9 @@ steps**:
   (replaced wholesale — its two-payload/one-autoplay assertions are
   composite-order + no-autoplay assertions now),
   `test_suppressed_video_tiers_never_call_encoder`, and
-  `test_video_budget_without_flipbook_source_omits_camera_panel`.
+  `test_video_budget_without_flipbook_source_omits_camera_panel`. Fake
+  encoders now return `(b"...", ("cam", ...))` tuples (the throwing fake in
+  the suppressed-tiers test is unaffected).
 - `Raw transcript` label and `raw-transcript` class assertions replace the
   `llm-pov` ones (including the strip-helper regex at test line ~1142).
 
@@ -259,9 +288,10 @@ steps**:
   playhead), LLM POV renamed to Raw transcript, step dividers, with
   plan/issue links.
 - `docs/guide/cli.md`: the run-video paragraph (~494-500) rewritten for the
-  single composite video, the budget paragraph (~515-518) — the unit of
-  charge/degrade becomes the trial composite, not a camera — **and** the
-  "LLM POV" sentence in the first report paragraph (~490).
+  single composite video, the budget paragraph (~515-521) — the unit of
+  charge/degrade becomes the trial composite, not a camera, and its tail
+  "re-renders them with MP4s" becomes "with the composite MP4" — **and**
+  the "LLM POV" sentence in the first report paragraph (~490).
 - `docs/guide/live-view.md`: the LLM POV sentence (~19) renamed, **and** the
   post-run upgrade paragraph (~28-31) that says a view pass "can replace
   each camera's flipbook with an embedded MP4" rewritten for the composite.
