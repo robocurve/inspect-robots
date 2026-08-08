@@ -13,7 +13,13 @@
   old yam banner, which renders on the plain path; end_trial-at-disable left
   a sticky plain status line colliding with the verdict/gate prompts; test
   list missed the multi-pipe non-gesture tail and the begin_trial-raise
-  disable site) — all four resolved below.
+  disable site) — all four resolved below. R3: 4 substantive (yam follow-up
+  keyed the prose drop on deferred mode, de-hinting defer-without-session;
+  disable-site guards inlined three times cannot pass the branch gate —
+  shared helper mandated; end_trial-before-warn ordering pinned as contract;
+  "existing tests pass unchanged" was false — replaced with an explicit
+  exact-byte assertion sweep) — resolved below; R3 also verified all R2
+  resolutions hold against the code.
 
 ## Problem
 
@@ -119,7 +125,19 @@ trial. Fix in the same PR: at both disable sites (the `begin_trial()` raise
 and the `poll()` raise), rollout also calls the duck-typed best-effort
 `end_trial()` it already uses in the `finally` (idempotent, guarded by
 `_footer_active`), restoring the terminal and dropping subsequent statuses to
-the hint-less plain path. Two consequences handled with it:
+the hint-less plain path. Implementation constraints, both binding:
+
+- **One shared helper.** The finally's guarded call (attr lookup, callable
+  check, call, warn-on-raise) is factored into a module-private helper reused
+  at all three sites. Inlining it three times triples the guard's branch
+  points and cannot realistically pass the 100% branch gate; with the helper,
+  the existing finally tests plus the new disable-site tests cover it.
+- **Close, then warn.** At both disable sites the footer teardown runs
+  *before* `warnings.warn`: the warning prints at the cursor, and tearing the
+  footer down afterwards erases/garbles the just-printed warning rows. Order
+  is contract, not style.
+
+Two consequences handled with it:
 
 - **Prompt hygiene.** After an early `end_trial()`, subsequent plain-path
   ticks leave `_status_open` sticky, and today nothing closes it before the
@@ -127,6 +145,10 @@ the hint-less plain path. Two consequences handled with it:
   appended to the leftover ticker text. `prompt_verdict()` and `gate()` gain
   an idempotent `self.status(None)` first (plain-close is already idempotent),
   pinned by tests. This also hardens the pre-existing plain-fallback mode.
+  While touching this, `prompt_verdict()` also gains the `self._flush_fn()`
+  drain `gate()` already does: after an early footer teardown, stray mid-trial
+  keystrokes sit buffered in cooked stdin and would otherwise be consumed as
+  the verdict answer.
 - **Contract note.** The duck-typed `end_trial` contract widens from "called
   once in the per-trial finally" to "may be called mid-trial and again in the
   finally"; the `end_trial()` docstring states the idempotency requirement.
@@ -150,8 +172,15 @@ the hint-less plain path. Two consequences handled with it:
 
 After this ships in a core release (call it 0.49):
 
-- Deferred-mode ticker becomes `self._status(f"t = {span}")`.
-- Deferred-mode banner becomes `f"Running.{limit}"` ("Running. Max 120s.") —
+- The gesture/banner prose drop is conditioned on **`self._session is not
+  None` (connected)**, not on `_deferred_operator_end`: `defer_operator_end()`
+  alone leaves yam's own stdout `_status` in place, where the core composer
+  never runs — dropping the suffix there would leave a supported mode
+  (Python-API harnesses that pass their own `operator_input` and call the
+  hook directly) with no hint at all. Defer-only keeps yam's current Esc text;
+  the never-drifts guarantee applies to the connected mode.
+- Connected-mode ticker becomes `self._status(f"t = {span}")`.
+- Connected-mode banner becomes `f"Running.{limit}"` ("Running. Max 120s.") —
   rig-owned facts only. The previous draft kept "type a message + Enter to
   send feedback", but message delivery is a *console* affordance that core
   decides per policy (`accepts_operator_messages` → `USAGE` vs
@@ -198,9 +227,17 @@ matching existing footer render tests):
    (extends the existing rollout console-degradation tests).
 10. Prompt hygiene: with a sticky plain status line open, `prompt_verdict()`
     and `gate()` close it before prompting (assert the written bytes end the
-    status line before the prompt text).
-11. Existing `status(None)` close and repeated-status tests keep passing
-    unchanged (render-time composition leaves storage semantics untouched).
+    status line before the prompt text), and `prompt_verdict()` drains stale
+    stdin via the injectable `_flush_fn` seam before reading the answer.
+11. Assertion sweep (not invariance): existing exact-byte footer status tests
+    must be updated to the composed text — at least
+    `test_footer_first_status_creates_status_row_from_one_row_state`,
+    `test_footer_two_row_status_update`,
+    `test_footer_two_row_write_line_clears_input_row_first`,
+    `test_footer_status_none_collapses_two_row_to_one_row_retaining_input`,
+    and the `test_footer_input_echo_two_row_state` setup. The true unchanged
+    set is the `status(None)` write sequences, the plain-path tests, and
+    (coincidentally, by width) `test_footer_status_row_clips_at_width_minus_1`.
 
 Repo gates: ruff, ruff format, mypy strict (src+tests), pytest --cov at 100%
 with branch coverage.
@@ -227,5 +264,8 @@ with branch coverage.
    tick, but the once-per-trial *banner* still shows "Enter ends the episode"
    on the plain path, out of the composer's reach — a residual contradiction
    resolved only by upgrading yam (accepted: core cannot rewrite plain-path
-   text without breaking the footer-window truth condition); new yam + old
+   text without breaking the footer-window truth condition); relatedly, after
+   a mid-trial console disable drops rendering to the plain path, an
+   un-upgraded yam's own ticker suffix advertises a dead gesture for the
+   trial remainder — also resolved only by the yam upgrade; new yam + old
    core → prevented by the floor bump.
