@@ -371,7 +371,14 @@ def _encode_composite_mp4(
     fps: float,
     ffmpeg: str,
 ) -> tuple[bytes, tuple[str, ...]] | None:
-    """Return one side-by-side report MP4 and its surviving stream keys."""
+    """Return one side-by-side report MP4 and its surviving stream keys.
+
+    Each stream's frames must be step-sorted (``discover_streams`` order).
+    That ordering is what lets the unguarded first ``next(produced)`` below
+    stay outside the ``_FrameError`` net: the probe has already normalized
+    every path up to each stream's first usable frame, and the timeline's
+    first contributing step touches only those validated paths.
+    """
     probed: list[tuple[str, Sequence[tuple[int, Path]], tuple[int, int, int]]] = []
     try:
         for key, frames in ordered_streams:
@@ -387,7 +394,6 @@ def _encode_composite_mp4(
         return None
 
     max_height = max(shape[0] for _key, _frames, shape in probed)
-    width = sum(shape[1] for _key, _frames, shape in probed)
     timeline = sorted({step for _key, frames, _shape in probed for step, _path in frames})
 
     def composite_frames() -> Iterator[npt.NDArray[np.uint8]]:
@@ -418,8 +424,10 @@ def _encode_composite_mp4(
             yield np.hstack(padded)
 
     produced = composite_frames()
+    # Non-empty ``probed`` guarantees a contributing step, so the generator
+    # always yields at least once; the yielded shape is (max height, summed
+    # width, 3) by the pad/hstack construction above.
     first_composite = next(produced)
-    assert first_composite.shape == (max_height, width, 3)
     encoded = _temporary_mp4(
         lambda path: _encode_arrays(first_composite, produced, path, fps, ffmpeg)
     )
