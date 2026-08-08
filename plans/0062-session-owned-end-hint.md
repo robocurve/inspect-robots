@@ -19,7 +19,13 @@
   shared helper mandated; end_trial-before-warn ordering pinned as contract;
   "existing tests pass unchanged" was false — replaced with an explicit
   exact-byte assertion sweep) — resolved below; R3 also verified all R2
-  resolutions hold against the code.
+  resolutions hold against the code. R4: 3 substantive, all plan-text
+  accuracy (hardcoded release numbers were stale — core had already moved
+  past them, and the stale floor would readmit hint-less cores; the rollout
+  disable-site change breaks `test_end_trial_still_runs_after_raising_poll_
+  disables_channel`, now recorded with its `end_calls == 2` re-pin; the
+  assertion sweep missed one test and named one that does not change) — the
+  design itself held; resolved below.
 
 ## Problem
 
@@ -71,6 +77,10 @@ def _status_texts(self) -> tuple[str, str]:
 Both halves matter: `composed` is the normal render, and `stripped` (never the
 raw line) is the only thing width-clipping may fall back to, so stale gesture
 prose cannot re-enter through the clip path either.
+
+The hint deliberately omits `/stop` (core's usage lines say "Esc (or /stop
+…)"): the ticker repeats every second in limited width, Esc is the primary
+gesture, and the usage reminder owns the full grammar.
 
 - **Replace, not suppress.** Pre-#121 yam (≤0.27.x) tickers send
   `t = 4s | Enter ends the episode`; the trailing clause is stripped and the
@@ -170,7 +180,10 @@ Two consequences handled with it:
 
 ## yam follow-up (separate PR in robocurve/inspect-robots-yam)
 
-After this ships in a core release (call it 0.49):
+After this ships in a core release (the exact version is whatever minor
+carries this change — 0.51.0 as of writing; do not hardcode earlier numbers,
+the floor must name the release with the composer or skew readmits hint-less
+cores):
 
 - The gesture/banner prose drop is conditioned on **`self._session is not
   None` (connected)**, not on `_deferred_operator_end`: `defer_operator_end()`
@@ -224,7 +237,14 @@ matching existing footer render tests):
 9. Degraded console, both sites: a rollout whose operator input raises on
    `poll()`, and one whose input raises on `begin_trial()`, each call
    `end_trial()` at disable time — footer closed, later statuses hint-less
-   (extends the existing rollout console-degradation tests).
+   (extends the console-degradation tests in
+   `tests/test_rollout_observation_step.py`). Known breakage, re-pinned
+   deliberately: `test_end_trial_still_runs_after_raising_poll_disables_
+   channel` asserts `end_calls == 1` today and becomes `end_calls == 2` —
+   the natural pin for the widened "may fire mid-trial and again in the
+   finally" contract. (`test_raising_poll_warns_once...` and
+   `test_raising_begin_trial_warns_once...` use a fake without `end_trial`,
+   so their warning counts are unaffected.)
 10. Prompt hygiene: with a sticky plain status line open, `prompt_verdict()`
     and `gate()` close it before prompting (assert the written bytes end the
     status line before the prompt text), and `prompt_verdict()` drains stale
@@ -235,18 +255,23 @@ matching existing footer render tests):
     `test_footer_two_row_status_update`,
     `test_footer_two_row_write_line_clears_input_row_first`,
     `test_footer_status_none_collapses_two_row_to_one_row_retaining_input`,
-    and the `test_footer_input_echo_two_row_state` setup. The true unchanged
-    set is the `status(None)` write sequences, the plain-path tests, and
-    (coincidentally, by width) `test_footer_status_row_clips_at_width_minus_1`.
+    and the footer-mode `status` assertion in
+    `test_footer_begin_trial_closes_plain_open_status_then_one_row_branch`.
+    (`test_footer_input_echo_two_row_state` does not change: its asserted
+    bytes are the input-row echo drawn after `output.clear()`.) The true
+    unchanged set is the `status(None)` write sequences, the plain-path
+    tests, and (coincidentally, by width)
+    `test_footer_status_row_clips_at_width_minus_1`.
 
 Repo gates: ruff, ruff format, mypy strict (src+tests), pytest --cov at 100%
 with branch coverage.
 
 ## Docs
 
-- `docs/guide/cli.md`: note the footer status line always carries the
-  framework-appended end-gesture hint, so embodiment status text never goes
-  stale (short prose near the existing Esc gesture section).
+- `docs/guide/cli.md`: note the footer status line carries the
+  framework-appended end-gesture hint (dropped only when width-clipped), so
+  embodiment status text never goes stale (short prose near the existing Esc
+  gesture section).
 - `src/inspect_robots/CLAUDE.md`: extend the `session.py` row (hint
   composition + replacement rule, prompt-hygiene close) and the `rollout.py`
   row (footer closed at console-disable time; `end_trial` may fire twice).
@@ -255,9 +280,10 @@ with branch coverage.
 
 ## Release sequencing
 
-1. Merge core PR, cut core minor (0.49.0): the appended hint is a visible
+1. Merge core PR, cut the next core minor: the appended hint is a visible
    behavior change for every footer-mode plugin status.
-2. yam PR: drop gesture clauses, floor `>=0.49`, lock refresh, cut yam minor.
+2. yam PR: drop gesture clauses in connected mode, floor `>=` that exact
+   core release, lock refresh, cut yam minor.
    Skew matrix: new core + yam 0.28.0 → replace-rule dedups the ticker
    (identical render) and the banner already says Esc; new core + yam ≤0.27.x
    → the stale "Enter" *ticker* clause is corrected from the first footer
