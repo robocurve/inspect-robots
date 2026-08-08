@@ -138,6 +138,13 @@ class _Broadcast:
             if callable(hook):
                 hook(action_space, observation_space)
 
+    def bind_frames_dir(self, frames_dir: str | None) -> None:
+        """Offer the run's frame directory to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_frames_dir", None)
+            if callable(hook):
+                hook(frames_dir)
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
             s.on_eval_start(spec)
@@ -355,6 +362,7 @@ def _run_eval(
         max_seconds=task.max_seconds,
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
+    bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
@@ -631,6 +639,7 @@ def eval_set(
     embodiment: Embodiment | str,
     *,
     log_dir: str = "logs",
+    sinks: list[LogSink] | None = None,
     seed: int | None = 0,
     fail_on_error: bool | float = False,
     controller: Controller | None = None,
@@ -650,6 +659,10 @@ def eval_set(
     hook, not both) and are resolved once here, so every task shares the same
     grader instance.
 
+    Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
+    sink must reset its per-run state in ``on_eval_start`` and tolerate one
+    complete lifecycle per task.
+
     Resumption of a partially-completed run (skipping already-finished scenes via
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
@@ -664,6 +677,7 @@ def eval_set(
                 policy,
                 embodiment,
                 log_dir=log_dir,
+                sinks=sinks,
                 seed=seed,
                 fail_on_error=fail_on_error,
                 controller=controller,

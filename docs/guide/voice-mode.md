@@ -16,8 +16,16 @@ Install the first-party voice plugin on the machine connected to the microphone:
 pip install inspect-robots-voice
 ```
 
-The plugin uses `sounddevice`, so PortAudio must also be available on that machine. Named
-faster-whisper models may be downloaded when voice input starts for the first time.
+The plugin uses `sounddevice`, which needs the PortAudio system library. pip installs the
+Python binding but not the library itself on Linux, so install it once per machine:
+
+```bash
+sudo apt install libportaudio2    # Debian, Ubuntu
+sudo dnf install portaudio        # Fedora
+brew install portaudio            # macOS
+```
+
+Model weights may be downloaded when voice input starts for the first time.
 
 ## Run
 
@@ -38,12 +46,20 @@ work.
 Repeat `-V key=value` to configure the voice plugin. Values use the same scalar coercion as
 `-P` and `-E`.
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `model` | `small` | faster-whisper model size or local model path |
-| `device` | system default | sounddevice input index or case-insensitive name substring |
-| `language` | `en` | transcription language |
-| `compute` | `auto` | CTranslate2 compute type |
+| Key | Default | Backend | Meaning |
+| --- | --- | --- | --- |
+| `model` | `parakeet-tdt-0.6b-v3` | both | Parakeet alias or `nemo-` name, or a faster-whisper model size or local path |
+| `device` | system default | both | sounddevice input index or case-insensitive name substring |
+| `language` | `none` | whisper | explicit transcription language (Whisper uses `en` when unset); Parakeet auto-detects |
+| `compute` | `auto` | whisper | CTranslate2 compute type |
+| `asr_device` | `cpu` | whisper | where Whisper runs: `cpu` (default, no CUDA needed), `cuda`, or `auto` (needs the CUDA runtime libraries) |
+
+Parakeet TDT 0.6B v3 is the default. Its int8 ONNX weights download once from the Hugging Face
+hub on first use and use about 640 MB. To use Whisper instead, pass `-V model=small` or another
+faster-whisper model name or local path. Explicit `language`, `compute`, and non-CPU `asr_device`
+values require a Whisper model.
+
+Parakeet TDT 0.6B v3 weights are provided by NVIDIA under the CC-BY-4.0 license.
 
 For example:
 
@@ -57,6 +73,112 @@ whose name contains that value, ignoring case. Missing or ambiguous names fail w
 available input-device table. `-V` without `--voice` is an error, which helps catch flags copied
 onto a non-voice invocation.
 
+## Speaking policy notes: `--speak`
+
+The same plugin can narrate an agent policy through the machine's audio output. Install it on
+the machine connected to the speaker:
+
+```bash
+pip install inspect-robots-voice
+```
+
+Pass `--speak` to `run`. This mode does not require a TTY, so it works in unattended runs and
+with `--no-prompt`:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot --speak
+```
+
+The speaker reads each `note` from move and capture tool calls as the policy streams it. It also
+reads the `summary` from `done` and the `reason` from `give_up`. It never reads `hindsight`,
+assistant free text, observations, tool results, or grader messages.
+
+Repeat `-S key=value` to configure speech. Passing `-S` without `--speak` is an error, which
+helps catch flags copied onto a non-speaking invocation:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `interrupt` | Speech delivery: `blocking`, `interrupt`, or `queue` |
+| `voice` | `af_sarah` | Kokoro voice identifier |
+| `speed` | `1.0` | Positive synthesis speed multiplier |
+| `volume` | `1.0` | Output gain from `0` through `1` |
+| `device` | system default | sounddevice output index or name substring |
+| `lang` | `en-us` | Kokoro language identifier |
+| `model` | cached release file | Path to an offline `kokoro-v1.0.onnx` override |
+| `voices` | cached release file | Path to an offline `voices-v1.0.bin` override |
+
+For example:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S voice=af_sarah -S speed=1.1 -S volume=0.8
+```
+
+### Speech modes
+
+Speech delivery defaults to `interrupt`. Each transcript delta cuts off the current utterance,
+discards superseded queued text, and speaks the new delta. Texts from the same delta, such as a
+move note followed by a terminal summary, still play in order.
+
+`blocking` waits for the previous note to finish before it queues the next one. The wait is
+bounded and fail-open. If it times out, the speaker prints one warning, queues the new note
+anyway, and permanently skips the blocking gate for the rest of the run so speech cannot halt
+the robot indefinitely:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S mode=blocking
+```
+
+The blocking gate is skipped on inference turns with no speakable note. Kokoro must synthesize a
+note before playback begins, which typically takes about 1 to 2 seconds, so speech does not start
+at the instant the joints are commanded. Blocking also delays `operator_input.poll()`, increasing
+Esc and `/stop` latency by up to one note duration, plus one 15 second timeout the single time the
+speaker degrades. It inserts multi-second gaps before `embodiment.step()`, so rigs with
+command-cadence watchdogs should prefer `interrupt`.
+
+`queue` restores the previous bounded drop-oldest behavior. Notes play in order but may describe
+older turns when inference runs ahead of narration:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S mode=queue
+```
+
+Ending a trial from the console cuts narration immediately in every mode; only natural
+completions drain the final summary. Because the cut lands after grading, the tail of one note
+may still be audible through the verdict prompt in the default `interrupt` mode, while the
+`mode=queue` backlog (up to 4 queued notes plus the one in flight) keeps playing until the
+verdict is entered. The operator's
+own `/stop` note text is never spoken because the speaker reads policy narration only.
+
+The first `--speak` run downloads about 340 MB of pinned Kokoro model files. The cache is
+`$XDG_CACHE_HOME/inspect-robots-voice/`, or `~/.cache/inspect-robots-voice/` when
+`XDG_CACHE_HOME` is unset. To pre-seed a rig, copy both release files into that directory with
+their exact names:
+
+```bash
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/inspect-robots-voice"
+mkdir -p "$cache_dir"
+cp kokoro-v1.0.onnx voices-v1.0.bin "$cache_dir/"
+```
+
+An offline rig can bypass the cache and download path explicitly:
+
+```bash
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+    --speak -S model=/models/kokoro-v1.0.onnx -S voices=/models/voices-v1.0.bin
+```
+
+`--speak` and `-S` apply only to `run`; `eval-set` does not accept them. Speech synthesis and
+playback always run on the speaker worker, never on the control thread. Only `blocking` may wait
+on that work, boundedly and fail-open. If synthesis or playback fails after startup, the speaker
+prints one warning and stays disabled for the rest of the run.
+
+Using `--speak` and `--voice` together can feed speaker output back into the microphone. Separate
+the microphone and speaker, or use a headset, until playback-aware microphone muting is
+available.
+
 ## Silence filtering
 
 The plugin does not send every audio block to the policy. A local adaptive energy gate opens
@@ -64,10 +186,14 @@ after at least 100 ms above the learned noise threshold, prepends 300 ms of audi
 after 700 ms below the threshold. An utterance is force-closed at 30 seconds so a stuck-open
 gate cannot grow without bound. The noise estimate adapts only while speech is not open.
 
-Each closed candidate then passes faster-whisper's bundled Silero VAD. The plugin rejects audio
-shorter than 0.4 seconds, blank text, segments with no-speech probability above 0.6, segments
-with average log probability below -1.0, and exact silence hallucinations such as `Thank you.`,
-`you`, and `Thanks for watching!`. Rejected candidates disappear silently.
+Each closed candidate shorter than 0.4 seconds is rejected before transcription. Both backends
+also reject blank text and exact silence hallucinations such as `Thank you.`, `you`, and
+`Thanks for watching!`.
+
+Parakeet relies on the energy gate and its transducer decoder, then applies a coarse garbage
+check that rejects mean token log probability below -2.5 when token probabilities are available.
+Whisper also runs its bundled Silero VAD and rejects segments with no-speech probability above
+0.6 or average log probability below -1.0. Rejected candidates disappear silently.
 
 ## Feedback-only behavior
 

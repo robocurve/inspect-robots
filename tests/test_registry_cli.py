@@ -5,7 +5,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import urllib.request
@@ -67,6 +70,7 @@ def test_builtins_are_registered() -> None:
     assert "scripted" in registered("policy")
     assert "success_at_end" in registered("scorer")
     assert "cubepick-reach" in registered("task")
+    assert "live-json" in registered("sink")
 
 
 def test_resolve_constructs_with_args() -> None:
@@ -156,6 +160,249 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
     assert out.count("hint:") == 3
     assert out.rstrip().endswith(f"hint: browse all logs: inspect-robots view {tmp_path}")
+    # The live-view tip is reserved for agent runs; a scripted policy is silent.
+    assert "live: watch this run" not in out
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+@pytest.mark.parametrize("no_live", [False, True])
+def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
+    command: str,
+    no_live: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], "agent", ScriptedPolicy)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    log_dir = tmp_path / "log dir"
+    observed: list[list[object]] = []
+    live_paths: list[Path] = []
+    log = _step_limit_log(task="cubepick-reach", reasons=("success",))
+
+    def inspect_sinks(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        observed.append(sinks)
+        assert isinstance(sinks[0], JsonLogSink)
+        sinks[0].on_eval_end(log)
+        if no_live:
+            assert len(sinks) == 1
+        else:
+            assert len(sinks) == 2
+            assert isinstance(sinks[1], LiveLogSink)
+            sinks[1].on_eval_start(log.eval)
+            assert sinks[1].path is not None
+            live_paths.append(sinks[1].path)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        inspect_sinks(kwargs)
+        return [log]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        inspect_sinks(kwargs)
+        return True, [log]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "agent", "--embodiment", "cubepick", "--log-dir", str(log_dir)])
+    if no_live:
+        argv.append("--no-live-log")
+
+    assert main(argv) == 0
+
+    assert len(observed) == 1
+    assert all(not path.exists() for path in live_paths)
+    out = capsys.readouterr().out
+    command_text = f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open"
+    if no_live:
+        assert "live: watch this run" not in out
+    else:
+        assert f"live: watch this run in your browser →  {command_text}" in out
+        assert "each agent turn, notes, and operator/voice input, updating live" in out
+
+
+@pytest.mark.parametrize(
+    ("env", "platform", "expected"),
+    [
+        ({"SSH_CONNECTION": "client 1 server 2"}, "linux", True),
+        ({"DISPLAY": ":0"}, "linux", False),
+        ({"WAYLAND_DISPLAY": "wayland-0"}, "linux", False),
+        ({"SSH_CONNECTION": "client 1 server 2", "DISPLAY": ":0"}, "linux", True),
+        ({}, "linux", True),
+        ({}, "darwin", False),
+        ({}, "win32", False),
+    ],
+)
+def test_headless_session_matrix(env: dict[str, str], platform: str, expected: bool) -> None:
+    assert cli._headless_session(env, platform) is expected
+
+
+def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_dir = tmp_path / "rig logs' current"
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "agent",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+    resolved = cli._ResolvedComponents(
+        None,
+        "agent",
+        "cli",
+        None,
+        "arm",
+        "cli",
+        None,  # type: ignore[arg-type]
+    )
+
+    cli._announce_live_view(args, resolved, {"DISPLAY": ":0"})
+    local = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open" in local
+    assert "; open http://" not in local
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+    )
+    remote = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
+    assert "open http://[2001:db8::10]:8300/" in remote
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
+    assert "open http://robot-host:8300/" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_finally_unlinks_live_snapshot_after_prompt_interrupt(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+    from inspect_robots.logging import LiveLogSink
+
+    leaked: list[Path] = []
+
+    def interrupt(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        live_sink = next(sink for sink in sinks if isinstance(sink, LiveLogSink))
+        live_sink.on_eval_start(_step_limit_log().eval)
+        live_sink.on_trial_start("scene-0", 0)
+        assert live_sink.path is not None and live_sink.path.exists()
+        leaked.append(live_sink.path)
+        raise KeyboardInterrupt
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "scripted", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 130
+    assert len(leaked) == 1
+    assert not leaked[0].exists()
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_failing_live_unlink_still_closes_embodiment(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only-disk unlink failure must not skip close() or mask the interrupt."""
+    import inspect_robots
+    from inspect_robots.logging import LiveLogSink
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closes: list[str] = []
+
+    class _RecordingEmbodiment(CubePickEmbodiment):
+        """Record close() so the test can prove the release chain still ran."""
+
+        def close(self) -> None:
+            """Mark the close and defer to the real teardown."""
+            closes.append("closed")
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "cubepick", _RecordingEmbodiment)
+
+    leaked: list[Path] = []
+
+    def interrupt(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        live_sink = next(sink for sink in sinks if isinstance(sink, LiveLogSink))
+        live_sink.on_eval_start(_step_limit_log().eval)
+        assert live_sink.path is not None and live_sink.path.exists()
+        leaked.append(live_sink.path)
+        raise KeyboardInterrupt
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".live.json"):
+            raise PermissionError("read-only filesystem")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "scripted", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 130
+    assert closes == ["closed"]
+    assert len(leaked) == 1
+    assert leaked[0].exists()  # the unlink failed; the file stays, nothing raised
 
 
 @pytest.mark.parametrize(
@@ -1391,7 +1638,7 @@ def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
         frames_dir / "s0-e0_top_cam_000004.npy",
         np.zeros((3, 4, 3), dtype=np.uint8),
     )
-    recorded = str(tmp_path / "old-machine" / "run-stamp")
+    recorded = "old-machine/logs/frames/run-stamp"
     path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
     return path, frames_dir
 
@@ -1484,16 +1731,89 @@ def test_view_renders_null_metric_from_sanitized_non_finite_score(
 
 
 def test_view_embeds_frames_resolved_from_log_relative_fallback(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path, _frames_dir = _write_view_frame_fixture(tmp_path)
     output = tmp_path / "report.html"
+    elsewhere = tmp_path / "different-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
 
     assert main(["view", str(path), "-o", str(output)]) == 0
 
     document = output.read_text(encoding="utf-8")
     assert 'src="data:image/png;base64,' in document
-    assert "[image omitted: streamed camera frame]" not in document
+    assert document.count("[image omitted: streamed camera frame]") == 1
+    capsys.readouterr()
+
+
+def test_view_no_frames_precedes_the_served_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    from inspect_robots import read_eval_log
+
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    live_path = _write_log(live_log, path.parent, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(live_path.parent),
+                "--serve",
+                "--no-frames",
+                "--live-frames-budget",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+    document = (live_path.parent / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_view_started_pages_elide_wire_blobs_in_static_and_served_modes(
+    serve: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import hashlib
+
+    from inspect_robots import read_eval_log
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    png = b"wire image"
+    sha = hashlib.sha256(png).hexdigest()
+    row = {"call": 0, "request": {"messages": [{"content": f"$blob:{sha}"}]}}
+    path, blob_dir = _write_wire_log(logs, ([row],))
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    _write_log(live_log, logs, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(logs)]
+    if serve:
+        argv.append("--serve")
+
+    assert main(argv) == 0
+
+    document = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert "[blob elided: live page]" in document
+    assert "data:image/png;base64" not in document
     capsys.readouterr()
 
 
@@ -1540,8 +1860,22 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
     ) -> str:
-        del log, title, frames_dir
+        del (
+            log,
+            title,
+            frames_dir,
+            live_frames_budget_bytes,
+            wire_media_elided,
+            refresh_seconds,
+            no_video,
+            serve_pass,
+        )
         assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
@@ -1550,6 +1884,140 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
 
     assert main(["view", str(path), "--frames-budget", "1.25"]) == 0
     assert received == [1_250_000]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_live_budget", "expected_refresh"),
+    [
+        ("serve-directory", 8_000_000, 2),
+        ("static-directory", None, None),
+        ("single-file", None, None),
+    ],
+)
+def test_view_live_frames_budget_matrix(
+    mode: str,
+    expected_live_budget: int | None,
+    expected_refresh: int | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _directory_view_log(created="2026-08-07T12:00:00Z", status="started")
+    if mode == "single-file":
+        target = _write_log(log, tmp_path, "run.live.json")
+    else:
+        target = tmp_path / "logs"
+        target.mkdir()
+        _write_log(log, target, "run.live.json")
+    received: list[tuple[int | None, bool, int | None]] = []
+
+    def fake_render_html(
+        rendered_log: EvalLog,
+        *,
+        title: str,
+        log_path: Path,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None,
+        no_video: bool,
+        serve_pass: bool,
+    ) -> str:
+        del (
+            rendered_log,
+            title,
+            log_path,
+            frames_dir,
+            frames_budget_bytes,
+            no_video,
+            serve_pass,
+        )
+        received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(target)]
+    if mode == "serve-directory":
+        argv.append("--serve")
+
+    assert main(argv) == 0
+    assert received == [(expected_live_budget, True, expected_refresh)]
+    capsys.readouterr()
+
+
+def test_view_zero_live_frames_budget_is_forwarded_as_unlimited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[int | None] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        value = kwargs["live_frames_budget_bytes"]
+        assert value is None or isinstance(value, int)
+        received.append(value)
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve", "--live-frames-budget", "0"]) == 0
+    assert received == [0]
+    capsys.readouterr()
+
+
+def test_view_forwards_tighter_full_budget_with_larger_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[tuple[int, int | None]] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        full = kwargs["frames_budget_bytes"]
+        live = kwargs["live_frames_budget_bytes"]
+        assert isinstance(full, int)
+        assert live is None or isinstance(live, int)
+        received.append((full, live))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(logs),
+                "--serve",
+                "--frames-budget",
+                "2",
+                "--live-frames-budget",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert received == [(2_000_000, 8_000_000)]
     capsys.readouterr()
 
 
@@ -1582,7 +2050,7 @@ def test_view_stdout_embeds_resolved_frames(
 
     out = capsys.readouterr().out
     assert 'src="data:image/png;base64,' in out
-    assert "[image omitted: streamed camera frame]" not in out
+    assert out.count("[image omitted: streamed camera frame]") == 1
     assert "wrote " not in out
 
 
@@ -1592,6 +2060,19 @@ def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path
 
     with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
         main(["view", str(path), "--frames-budget", budget])
+
+
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_live_frames_budget(
+    budget: str, tmp_path: Path
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(
+        SystemExit,
+        match="--live-frames-budget must be a non-negative finite number",
+    ):
+        main(["view", str(path), "--live-frames-budget", budget])
 
 
 def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
@@ -1864,6 +2345,11 @@ def test_view_directory_incremental_mtime_and_force(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -1872,6 +2358,11 @@ def test_view_directory_incremental_mtime_and_force(
             log_path=log_path,
             frames_dir=frames_dir,
             frames_budget_bytes=frames_budget_bytes,
+            live_frames_budget_bytes=live_frames_budget_bytes,
+            wire_media_elided=wire_media_elided,
+            refresh_seconds=refresh_seconds,
+            no_video=no_video,
+            serve_pass=serve_pass,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)
@@ -1997,6 +2488,357 @@ def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
     assert not (logs / "html" / "index.html").exists()
 
 
+def test_view_serve_initial_live_refresh_and_static_live_page_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    live = _directory_view_log(created="2026-08-06T12:00:00Z", status="started")
+    _write_log(live, logs, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    page = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert '<meta http-equiv="refresh" content="2">' in index
+    assert '<meta http-equiv="refresh" content="2">' in page
+    assert "RUNNING — refreshes every 2s" in page
+    assert '<span class="badge status-running">running</span>' in index
+
+    assert main(["view", str(logs), "--force"]) == 0
+    static_page = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert 'http-equiv="refresh"' not in static_page
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_view_serve_empty_or_missing_directory_starts_with_no_logs_index(
+    missing: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    if not missing:
+        logs.mkdir()
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+
+    assert logs.is_dir()
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "no evaluation logs found" in index
+    assert '<meta http-equiv="refresh" content="60">' in index
+
+
+def test_orphan_live_page_redirect_is_filesystem_derived_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    orphan = html_dir / "old.live.html"
+    orphan.write_text("stale running page", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+    stub = orphan.read_text(encoding="utf-8")
+    assert stub.splitlines()[0] == "<!-- inspect-robots live redirect stub -->"
+    assert 'content="0; url=index.html"' in stub
+
+    monkeypatch.setattr(
+        cli,
+        "_write_live_redirect_stub",
+        lambda _path: (_ for _ in ()).throw(AssertionError("stub rewritten")),
+    )
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+
+
+def test_vanished_live_log_is_skipped_silently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-06T12:00:00Z", status="started"),
+        logs,
+        "gone.live.json",
+    )
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    monkeypatch.setattr(
+        inspect_robots,
+        "read_eval_log",
+        lambda _path: (_ for _ in ()).throw(FileNotFoundError("vanished")),
+    )
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+
+    assert "could not read or render" not in capsys.readouterr().err
+    assert "gone.live.json" not in (logs / "html" / "index.html").read_text(encoding="utf-8")
+
+
+def test_vanished_completed_log_and_orphan_redirect_failure_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-08-06T12:00:00Z"), logs, "gone.json")
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    (html_dir / "orphan.live.html").write_text("stale", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    monkeypatch.setattr(
+        inspect_robots,
+        "read_eval_log",
+        lambda _path: (_ for _ in ()).throw(FileNotFoundError("vanished")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_write_live_redirect_stub",
+        lambda _path: (_ for _ in ()).throw(OSError("read-only")),
+    )
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+
+    err = capsys.readouterr().err
+    assert "could not read or render gone.json" in err
+    assert "could not redirect orphan.live.html: read-only" in err
+
+
+def test_directory_atomic_live_stub_and_index_writes_and_quiet_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-06T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    (html_dir / "orphan.live.html").write_text("old", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    replaced: list[Path] = []
+    real_replace = os.replace
+
+    def record_replace(source: str | Path, target: str | Path) -> None:
+        replaced.append(Path(target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", record_replace)
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+
+    assert set(replaced) == {
+        html_dir / "run.live.html",
+        html_dir / "orphan.live.html",
+        html_dir / "index.html",
+    }
+    assert " rendering " not in capsys.readouterr().err
+
+
+def test_completed_page_pins_source_nanosecond_mtime_and_live_always_renders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-06T12:00:00Z"), logs, "done.json")
+    args = cli.build_parser().parse_args(["view", str(logs)])
+    utimes: list[tuple[Path, tuple[int, int]]] = []
+
+    def record_utime(path: str | Path, *, ns: tuple[int, int]) -> None:
+        utimes.append((Path(path), ns))
+
+    source_stat = source.stat()
+    monkeypatch.setattr(os, "utime", record_utime)
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=None,
+    )
+    assert utimes == [
+        (
+            logs / "html" / "done.html",
+            (source_stat.st_atime_ns, source_stat.st_mtime_ns),
+        )
+    ]
+
+    live_source = _write_log(
+        _directory_view_log(created="2026-08-06T12:01:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    page = logs / "html" / "run.live.html"
+    page.write_text("newer", encoding="utf-8")
+    newer = live_source.stat().st_mtime_ns + 10_000_000_000
+    real_utime = os.utime
+    monkeypatch.setattr(os, "utime", real_utime)
+    os.utime(page, ns=(newer, newer))
+    rendered: list[str] = []
+
+    def record_render(log: EvalLog, log_path: Path, out_path: Path, **kwargs: Any) -> int:
+        del log, out_path, kwargs
+        rendered.append(log_path.name)
+        return 0
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    cli._render_view_directory(
+        cli.build_parser().parse_args(["view", str(logs), "--serve"]),
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+    # Plan 0058: started logs re-render every pass, even when the page looks
+    # newer than the log; the mtime gate is a completed-page contract only.
+    assert rendered == ["run.live.json"]
+
+
+def test_view_directory_two_level_video_stamp_skips_then_upgrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-07T12:00:00Z"), logs, "done.json")
+    source_ns = 2_000_000_000
+    os.utime(source, ns=(source_ns, source_ns))
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+    page = logs / "html" / "done.html"
+    # source_ns and the delta are both multiples of 100 ns, so the expected
+    # stamp survives NTFS's 100 ns timestamp tick exactly.
+    suppressed_ns = source_ns - cli._SUPPRESSED_STAMP_DELTA_NS
+    assert page.stat().st_mtime_ns == suppressed_ns
+    capsys.readouterr()
+
+    calls: list[bool] = []
+    render_page = cli._render_log_page
+
+    def record_render(*args: Any, **kwargs: Any) -> int:
+        calls.append(bool(kwargs["serve_pass"]))
+        return render_page(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    serve_args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    cli._render_view_directory(
+        serve_args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+    assert calls == []
+    assert page.stat().st_mtime_ns == suppressed_ns
+
+    assert main(["view", str(logs)]) == 0
+    assert calls == [False]
+    assert page.stat().st_mtime_ns == source_ns
+
+
+def test_view_no_video_is_parsed_and_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[tuple[bool, bool]] = []
+
+    def fake_render(*args: object, **kwargs: object) -> str:
+        del args
+        received.append((bool(kwargs["no_video"]), bool(kwargs["serve_pass"])))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render)
+
+    assert main(["view", str(path), "--no-video"]) == 0
+    assert received == [(True, False)]
+    capsys.readouterr()
+
+
+def test_view_renderer_popen_oserror_degrades_and_exits_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import numpy as np
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for step in (0, 1):
+        np.save(frames / f"s0-e0_top_cam_{step:06d}.npy", np.zeros((2, 2, 3), dtype=np.uint8))
+    log = _view_frame_log(str(frames))
+    transcript = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"camera 'top_cam' (step {step}):"},
+                {"type": "text", "text": "[image omitted: streamed camera frame]"},
+            ],
+        }
+        for step in (0, 1)
+    ]
+    scene = dataclasses.replace(log.samples[0], policy_transcripts=(transcript,))
+    path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "run.json")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/fake/ffmpeg")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bad shebang")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+
+    assert main(["view", str(path)]) == 0
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert 'class="flipbook-player"' in document
+    assert "data:video/mp4" not in document
+    assert "warning: report video unavailable" in capsys.readouterr().err
+
+
 def test_view_directory_open_targets_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2062,7 +2904,7 @@ def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
         return display_urls(bind_host, port)
 
     def probe_server(seconds: float) -> None:
-        assert seconds == cli._SERVE_RERENDER_SECONDS
+        assert seconds == cli._SERVE_LIVE_RERENDER_SECONDS
         url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
         with urllib.request.urlopen(url, timeout=2) as response:
             response_status.append(response.status)
@@ -2083,6 +2925,192 @@ def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
     assert out.out.index("index: ") < out.out.index("serving logs at: ")
 
 
+class _FakeHTTPServer:
+    """Provide the server lifecycle without opening a sandboxed socket."""
+
+    server_address = ("127.0.0.1", 18300)
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        self.shutdown_calls = 0
+        self.close_calls = 0
+
+    def serve_forever(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def server_close(self) -> None:
+        self.close_calls += 1
+
+
+def test_serve_helpers_wildcard_open_and_prethread_interrupt_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = object.__new__(cli._QuietHTTPRequestHandler)
+    handler.log_message("ignored %s", "request")
+    with pytest.raises(KeyboardInterrupt):
+        cli._raise_keyboard_interrupt(15, None)
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(
+        ["view", str(logs), "--serve", "--host", "0.0.0.0", "--port", "0", "--open"]
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(
+        cli, "_serve_sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    monkeypatch.setattr(
+        cli,
+        "_open_browser",
+        lambda uri, _display: opened.append(uri),
+    )
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert opened == ["http://127.0.0.1:18300/"]
+
+    class _InterruptedThread:
+        """Interrupt before serve_forever starts to exercise safe shutdown."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def start(self) -> None:
+            raise KeyboardInterrupt
+
+    args.host = "127.0.0.1"
+    args.open = False
+    monkeypatch.setattr(threading, "Thread", _InterruptedThread)
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+
+
+def test_serve_rerender_warning_path_without_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "run.live.json").write_text("live", encoding="utf-8")
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    ticks = 0
+
+    def tick(_seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(
+        cli,
+        "_render_view_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("changing")),
+    )
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert "warning: re-render failed: changing" in capsys.readouterr().err
+
+
+def test_view_serve_fast_live_and_disappearance_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    passes: list[int | None] = []
+    ticks = 0
+    live_path = logs / "turns.live.json"
+
+    def tick(seconds: float) -> None:
+        nonlocal ticks
+        assert seconds == 2
+        ticks += 1
+        if ticks == 1:
+            live_path.write_text("live", encoding="utf-8")
+        elif ticks == 2:
+            live_path.unlink()
+        else:
+            raise KeyboardInterrupt
+
+    def record_pass(
+        _args: Any,
+        _log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        assert not force and quiet
+        passes.append(refresh_seconds)
+        return render_result
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(cli, "_render_view_directory", record_pass)
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert passes == [2, 60]
+
+
+def test_view_serve_preserves_sixty_second_idle_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    ticks = 0
+    passes: list[int | None] = []
+
+    def tick(seconds: float) -> None:
+        nonlocal ticks
+        assert seconds == 2
+        ticks += 1
+        if ticks == 31:
+            raise KeyboardInterrupt
+
+    def record_pass(
+        _args: Any,
+        _log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        del force, quiet
+        passes.append(refresh_seconds)
+        return render_result
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(cli, "_render_view_directory", record_pass)
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert ticks == 31
+    assert passes == [60]
+
+
 @pytest.mark.parametrize(
     "rerender_error",
     [
@@ -2098,7 +3126,11 @@ def test_view_serve_rerender_failure_warns_and_continues(
 ) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
-    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
     bound_ports: list[int] = []
     sleep_calls = 0
     quiet_calls = 0
@@ -2162,7 +3194,11 @@ def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
 ) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
-    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
     render_directory = cli._render_view_directory
 
     def interrupted_render(
@@ -2509,7 +3545,7 @@ def test_inspect_started_status_uses_raw_fallback(
 
     assert main(["inspect", str(path)]) == 1
 
-    assert "run status:  started" in capsys.readouterr().out
+    assert "run status:  running" in capsys.readouterr().out
 
 
 def test_inspect_outcome_coerces_non_string_hand_edited_reasons(
@@ -3385,6 +4421,280 @@ def _voice_cli_argv(
     return argv
 
 
+def _speak_cli_argv(
+    tmp_path: Path,
+    *,
+    speak: bool = True,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(tmp_path),
+    ]
+    if speak:
+        argv.append("--speak")
+    argv.extend(extra)
+    return argv
+
+
+def test_speaker_args_require_speak_flag(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match=r"^-S requires --speak$"):
+        main(_speak_cli_argv(tmp_path, speak=False, extra=("-S", "voice=af_sarah")))
+
+
+def test_eval_set_rejects_speak_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "--speak"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: --speak" in capsys.readouterr().err
+
+
+def test_eval_set_rejects_speaker_kv_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "-S", "voice=af_sarah"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: -S" in capsys.readouterr().err
+
+
+def test_missing_speaker_plugin_exits_with_install_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force entry-point loading before deletion so resolve() cannot restore the
+    # real dev-installed plugin while this missing-plugin path is under test.
+    reg.registered("sink")
+    monkeypatch.delitem(reg._FACTORIES["sink"], "speaker", raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert "no sink named 'speaker'" in message
+    assert "pip install inspect-robots-voice" in message
+    assert "\n" not in message
+
+
+def test_speaker_factory_key_error_does_not_get_missing_plugin_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise KeyError("speaker factory exploded")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", broken_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert message == "speaker factory exploded"
+    assert "pip install inspect-robots-voice" not in message
+
+
+def test_bad_speaker_argument_is_reported_against_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def rejecting_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise TypeError("unexpected speaker argument")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", rejecting_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path, extra=("-S", "typoed_key=1")))
+
+    message = str(exc_info.value)
+    assert "invalid arguments for sink 'speaker'" in message
+    assert "-S k=v" in message
+    assert "pip install inspect-robots-voice" not in message
+
+
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_speaker_lifecycle_coerced_args_and_sink_wiring(
+    eval_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+
+    order: list[str] = []
+    instances: list[FakeSpeaker] = []
+
+    class FakeSpeaker:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            self.kwargs = kwargs
+            self.start_calls = 0
+            self.close_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+            order.append("start")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            order.append("close")
+
+    def speaker_factory(**kwargs: Any) -> FakeSpeaker:
+        speaker = FakeSpeaker(kwargs)
+        instances.append(speaker)
+        return speaker
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        order.append("eval")
+        assert order[:2] == ["start", "eval"]
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert instances[0] in sinks
+        if eval_fails:
+            raise RuntimeError("evaluation failed")
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", speaker_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    argv = _speak_cli_argv(
+        tmp_path,
+        extra=(
+            "-S",
+            "device=4",
+            "-S",
+            "enabled=true",
+            "-S",
+            "optional=none",
+            "-S",
+            "ratio=1.5",
+            "-S",
+            "voice=af_sarah",
+        ),
+    )
+
+    if eval_fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            main(argv)
+    else:
+        assert main(argv) == 0
+
+    assert len(instances) == 1
+    assert instances[0].kwargs == {
+        "device": 4,
+        "enabled": True,
+        "optional": None,
+        "ratio": 1.5,
+        "voice": "af_sarah",
+    }
+    assert instances[0].start_calls == 1
+    assert instances[0].close_calls == 1
+    assert order == ["start", "eval", "close"]
+
+
+def test_run_without_speak_keeps_default_sink_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    def unexpected_factory(**kwargs: Any) -> object:
+        del kwargs
+        pytest.fail("speaker factory called without --speak")
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        # The default list is the JSON log plus the live snapshot sink — no
+        # speaker without --speak.
+        assert [type(sink).__name__ for sink in sinks] == ["JsonLogSink", "LiveLogSink"]
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", unexpected_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path, speak=False)) == 0
+
+
+def test_speaker_startup_error_exits_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def start(self) -> None:
+            raise RuntimeError("audio output unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = FailingSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    assert str(exc_info.value) == "audio output unavailable"
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_start_is_still_wired_and_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class StartlessSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = StartlessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert speaker in sinks
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_close_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class CloselessSpeaker:
+        def __init__(self) -> None:
+            self.start_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    speaker = CloselessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.start_calls == 1
+
+
 @pytest.mark.parametrize("command", ["run", "eval-set"])
 def test_voice_args_require_voice_flag(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3611,6 +4921,35 @@ def test_hookless_voice_input_still_runs(
     assert capsys.readouterr().out.count("operator console:") == 1
 
 
+def test_voice_start_announces_model_before_startup_hook() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+
+    class ModelVoiceInput:
+        model = "parakeet-tdt-0.6b-v3"
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> str:
+            output.append("start-hook ran")
+            return "listening on test microphone"
+
+    voice = ModelVoiceInput()
+    policy = type("VoicePolicy", (), {"accepts_operator_messages": True})()
+
+    cli._start_voice_input(voice, session, policy)
+
+    assert output == [
+        "voice: loading speech-to-text model parakeet-tdt-0.6b-v3 (a first run downloads it)\n",
+        "start-hook ran",
+        "listening on test microphone\n",
+    ]
+
+
 def test_non_string_voice_start_result_is_not_printed() -> None:
     output: list[str] = []
     session = OperatorSession(write=output.append)
@@ -3830,6 +5169,9 @@ def test_build_operator_session_enablement_matrix(
         assert getattr(embodiment, "connected_session", None) is session
     assert footer_labels == ([] if expected_footer_label is None else [expected_footer_label])
     assert capsys.readouterr().out == expected_output
+    # The bare-Enter usage reminder must match the mode: end-only sessions remind
+    # with USAGE_END_ONLY, not the type-a-message text.
+    assert session._console._usage == (USAGE if accepts_messages else USAGE_END_ONLY)
 
 
 def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
@@ -4661,18 +6003,23 @@ class _FakeRerunSink:
     """Stands in for RerunSink: records construction and step traffic."""
 
     instances: ClassVar[list[_FakeRerunSink]] = []
+    next_resolved_recording_path: ClassVar[Path | None] = None
 
     def __init__(
         self,
         recording_path: str | None = None,
         *,
+        recording_dir: str | None = None,
         spawn: bool = False,
         spawn_port: int = 9876,
         connect_url: str | None = None,
     ) -> None:
+        self.recording_path = recording_path
+        self.recording_dir = recording_dir
         self.spawn = spawn
         self.spawn_port = spawn_port
         self.connect_url = connect_url
+        self.resolved_recording_path = self.next_resolved_recording_path
         self.steps = 0
         _FakeRerunSink.instances.append(self)
 
@@ -4693,6 +6040,7 @@ def _fake_rerun(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRerunSink]:
     import inspect_robots.logging.rerun_sink as rrs
 
     _FakeRerunSink.instances = []
+    _FakeRerunSink.next_resolved_recording_path = None
     monkeypatch.setattr(rrs, "RerunSink", _FakeRerunSink)
     return _FakeRerunSink
 
@@ -4713,6 +6061,7 @@ def test_config_rerun_attaches_live_viewer_sink(
     (sink,) = _fake_rerun.instances  # constructed exactly once
     assert sink.spawn is True  # live viewer, not just a recording
     assert sink.spawn_port == 9876
+    assert sink.recording_dir == str(tmp_path / "logs")
     assert sink.steps > 0  # actually received rollout traffic
 
 
@@ -4732,7 +6081,18 @@ def test_rerun_flag_enables_without_config(
     )
     rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
     assert rc == 0
-    assert len(_fake_rerun.instances) == 1
+    (sink,) = _fake_rerun.instances
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_spawn_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves live spawn without a file target."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun-save") == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
 
 
 def test_bare_rerun_connect_uses_default_url(
@@ -4743,6 +6103,7 @@ def test_bare_rerun_connect_uses_default_url(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+    assert sink.recording_dir == str(tmp_path / "logs")
 
 
 def test_rerun_connect_honors_explicit_url(
@@ -4753,6 +6114,24 @@ def test_rerun_connect_honors_explicit_url(
     assert _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-connect", url) == 0
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == url
+
+
+def test_connect_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves a remote live stream without a file target."""
+    assert (
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-connect",
+            "--no-rerun-save",
+        )
+        == 0
+    )
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
+    assert sink.recording_dir is None
 
 
 def test_rerun_connect_takes_precedence_over_rerun(
@@ -4785,6 +6164,79 @@ def test_rerun_port_flag_spawns_viewer_on_that_port(
     (sink,) = _fake_rerun.instances
     assert sink.spawn is True
     assert sink.spawn_port == 9877
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_explicit_rerun_save_builds_record_only_sink(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An explicit save request without a viewer constructs one viewer-less sink."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    log_dir = tmp_path / "logs"
+    assert main(["reach the cube", "--log-dir", str(log_dir), "--rerun-save"]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is False
+    assert sink.connect_url is None
+    assert sink.recording_dir == str(log_dir)
+    assert "rerun: recording .rrd" in capsys.readouterr().out
+
+
+def test_config_rerun_save_false_suppresses_default_tee(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A false config key keeps the configured live viewer but removes its file target."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_save = false\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
+
+
+def test_config_rerun_save_true_does_not_create_viewerless_sink(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A config default alone never changes a run that has no viewer."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_save = true\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_post_eval_reports_resolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary prints the file path only after the sink resolves one."""
+    target = tmp_path / "logs" / "demo_deadbeef.rrd"
+    _fake_rerun.next_resolved_recording_path = target
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert f"rrd: {target}" in capsys.readouterr().out
+
+
+def test_post_eval_suppresses_unresolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary omits the file line when startup attached no recording."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert "rrd:" not in capsys.readouterr().out
 
 
 def test_config_rerun_port_reaches_spawned_viewer(
@@ -5494,6 +6946,7 @@ def test_cli_config_set_writes_and_show_reads(
     out = capsys.readouterr().out
     assert f"embodiment: cubepick  ({path})" in out
     assert "sim_embodiment: (unset)" in out
+    assert "rerun_save: True" in out
 
 
 def test_cli_config_set_preserves_unknown_sections(_hermetic_defaults: Path) -> None:
@@ -5519,10 +6972,13 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert excinfo.value.code == 2
     with pytest.raises(SystemExit, match="rerun"):
         main(["config", "set", "rerun", "sometimes"])
+    with pytest.raises(SystemExit, match="rerun_save"):
+        main(["config", "set", "rerun_save", "sometimes"])
     # Valid values round-trip.
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
     assert main(["config", "set", "rerun", "true"]) == 0
+    assert main(["config", "set", "rerun_save", "false"]) == 0
 
 
 def test_cli_config_set_rejects_bad_rerun_port(

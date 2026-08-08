@@ -1760,6 +1760,7 @@ def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) ->
     note = (
         "no display detected (SSH?): the rerun viewer cannot open here; "
         "use --rerun-connect to stream to a viewer on another machine; "
+        "use --rerun-save to keep a replayable .rrd without a local viewer; "
         "frames still record with store_frames"
     )
 

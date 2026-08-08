@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -48,7 +49,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from functools import partial
@@ -109,6 +110,7 @@ def _styled(text: str, code: str) -> str:
 
 
 _BOLD = "1"
+_BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
 _CYAN = "36"
 _GREEN = "32"
@@ -156,6 +158,15 @@ _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 _SERVE_RERENDER_SECONDS = 60
+_SERVE_LIVE_RERENDER_SECONDS = 2
+# Two-level directory stamp (plan 0060): a suppressed-tier page (serve pass or
+# --no-video) is stamped this far below the source log's mtime so a later
+# full-tier pass can recognize and upgrade it. The delta spans many filesystem
+# timestamp ticks (NTFS rounds to 100 ns) and the gate compares with slack so
+# tick rounding can never turn a skip into a per-tick re-render.
+_SUPPRESSED_STAMP_DELTA_NS = 2_000
+_STAMP_TICK_SLACK_NS = 1_000
+_LIVE_FRAMES_BUDGET_MB = 8.0
 _serve_sleep = time.sleep
 
 
@@ -206,6 +217,11 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         help="pass an argument to the inspect-robots-voice input (requires --voice)",
     )
     parser.add_argument("--log-dir", default="logs")
+    parser.add_argument(
+        "--no-live-log",
+        action="store_true",
+        help="disable the transient JSON snapshots used by view --serve",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=None, help="override each task's epoch count")
     parser.add_argument(
@@ -293,6 +309,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_shared_eval_args(p_run)
     _add_config_arg(p_run)
     p_run.add_argument(
+        "--speak",
+        action="store_true",
+        help="speak live policy notes through the local audio output "
+        "(requires inspect-robots-voice)",
+    )
+    p_run.add_argument(
+        "-S",
+        dest="speak_args",
+        action="append",
+        metavar="k=v",
+        help="pass an argument to the inspect-robots-voice speaker, e.g. "
+        "-S mode=blocking|interrupt|queue (requires --speak)",
+    )
+    p_run.add_argument(
         "--max-steps",
         type=int,
         default=None,
@@ -312,6 +342,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="stream the rollout (cameras, state, actions) to a live Rerun "
         "viewer window; needs rerun-sdk (--no-rerun overrides a rerun config "
         "default)",
+    )
+    p_run.add_argument(
+        "--rerun-save",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="also save the stream as a .rrd next to the eval log (default: on whenever "
+        "the rerun viewer is active; without a viewer, --rerun-save records to a "
+        ".rrd only; --no-rerun-save or a rerun_save config key overrides)",
     )
     p_run.add_argument(
         "--rerun-connect",
@@ -435,6 +473,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="render placeholders instead of embedding stored camera frames",
     )
     p_view.add_argument(
+        "--no-video",
+        action="store_true",
+        help="skip embedded MP4 encoding while keeping the frame flipbook",
+    )
+    p_view.add_argument(
         "--frames-budget",
         type=float,
         default=50,
@@ -445,11 +488,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_view.add_argument(
+        "--live-frames-budget",
+        type=float,
+        default=_LIVE_FRAMES_BUDGET_MB,
+        metavar="MB",
+        help=(
+            "maximum inline frame payload for each running page while serving "
+            f"(default: {_LIVE_FRAMES_BUDGET_MB:g}; 0 is unlimited and is not "
+            "recommended while serving)"
+        ),
+    )
+    p_view.add_argument(
         "--force",
         action="store_true",
         help=(
             "re-render existing pages in directory mode; use after changing "
-            "--no-frames or --frames-budget (ignored for one file)"
+            "--no-frames, --no-video, --frames-budget, or --live-frames-budget "
+            "(ignored for one file)"
         ),
     )
     p_view.add_argument(
@@ -640,7 +695,9 @@ def _resolve_or_exit(
         message = str(exc.args[0])
         # Only the registry's own unknown-name error earns the install hint; a
         # KeyError escaping a factory must not masquerade as a missing plugin.
-        if kind == "operator_input" and message.startswith("no operator_input named"):
+        if (kind == "operator_input" and message.startswith("no operator_input named")) or (
+            kind == "sink" and message.startswith("no sink named 'speaker'")
+        ):
             message = f"{message}; fix: pip install inspect-robots-voice"
         raise SystemExit(message) from exc
     except ConfigError as exc:
@@ -652,6 +709,7 @@ def _resolve_or_exit(
             "task": "-T",
             "policy": "-P",
             "embodiment": "-E",
+            "sink": "-S",
             "operator_input": "-V",
         }.get(kind, "the CLI args flag")
         raise SystemExit(
@@ -739,8 +797,8 @@ def _build_operator_session(
     policy: object, embodiment: Embodiment
 ) -> tuple[OperatorSession, OperatorSession | None]:
     """Build the prompt owner and enable its live input channel only when safe."""
-    session = OperatorSession()
     accepts_messages = bool(getattr(policy, "accepts_operator_messages", False))
+    session = OperatorSession(console_usage=None if accepts_messages else USAGE_END_ONLY)
     connect_hook = getattr(embodiment, "connect_operator_session", None)
     if callable(connect_hook):
         if sys.platform == "win32":
@@ -811,9 +869,18 @@ def _build_voice_input(
 def _start_voice_input(
     voice_input: OperatorInput, session: OperatorSession, policy: object
 ) -> None:
-    """Start and attach a voice input, honoring its optional startup hook."""
+    """Start and attach a voice input, honoring its optional startup hook.
+
+    Announces the voice model before the startup hook runs: loading can download
+    model weights on a first run, and the progress bars are otherwise unlabeled.
+    """
     start_hook = getattr(voice_input, "start", None)
     if callable(start_hook):
+        model = getattr(voice_input, "model", None)
+        if isinstance(model, str):
+            session.write_line(
+                f"voice: loading speech-to-text model {model} (a first run downloads it)"
+            )
         try:
             listening_line = start_hook()
         except Exception as exc:
@@ -830,6 +897,37 @@ def _close_voice_input(voice_input: OperatorInput | None) -> None:
     if voice_input is None:
         return
     close_hook = getattr(voice_input, "close", None)
+    if callable(close_hook):
+        close_hook()
+
+
+def _build_speaker_sink(args: argparse.Namespace) -> LogSink | None:
+    """Validate speaker flags and construct the registered sink when requested."""
+    if args.speak_args and not args.speak:
+        raise SystemExit("-S requires --speak")
+    if not args.speak:
+        return None
+    return cast(
+        "LogSink",
+        _resolve_or_exit("sink", "speaker", **_parse_kvs(args.speak_args)),
+    )
+
+
+def _start_speaker_sink(speaker_sink: LogSink) -> None:
+    """Start a speaker sink through its optional startup hook."""
+    start_hook = getattr(speaker_sink, "start", None)
+    if callable(start_hook):
+        try:
+            start_hook()
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
+
+
+def _close_speaker_sink(speaker_sink: LogSink | None) -> None:
+    """Close a constructed speaker sink through its optional shutdown hook."""
+    if speaker_sink is None:
+        return
+    close_hook = getattr(speaker_sink, "close", None)
     if callable(close_hook):
         close_hook()
 
@@ -1379,6 +1477,46 @@ def _build_and_announce_guardrails(
     return approver
 
 
+def _headless_session(env: Mapping[str, str], platform: str = sys.platform) -> bool:
+    """Return whether the operator is expected to be remote from this process."""
+    # _setup.py asks if a viewer window can open here; this asks if the human is elsewhere.
+    if env.get("SSH_CONNECTION"):
+        return True
+    return platform.startswith("linux") and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+
+
+def _announce_live_view(
+    args: argparse.Namespace,
+    resolved: _ResolvedComponents,
+    env: Mapping[str, str] = os.environ,
+) -> None:
+    """Print the copyable browser-view command for agent runs with live logging."""
+    if resolved.policy_name != "agent" or args.no_live_log:
+        return
+    log_dir = shlex.quote(args.log_dir)
+    headless = _headless_session(env)
+    command_tail = "--serve --host 0.0.0.0" if headless else "--serve --open"
+    print(
+        _styled(
+            f"live: watch this run in your browser →  inspect-robots view {log_dir} {command_tail}",
+            _BOLD_BRIGHT_MAGENTA,
+        )
+    )
+    url = ""
+    if headless:
+        fields = env.get("SSH_CONNECTION", "").split()
+        host = fields[2] if len(fields) == 4 else socket.gethostname()
+        if ":" in host and not (host.startswith("[") and host.endswith("]")):
+            host = f"[{host}]"
+        url = f"; open http://{host}:8300/"
+    print(
+        _styled(
+            "      each agent turn, notes, and operator/voice input, updating live" + url,
+            _DIM,
+        )
+    )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
@@ -1393,7 +1531,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from inspect_robots import eval
-    from inspect_robots.logging import JsonLogSink
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
     from inspect_robots.scene import Scene
     from inspect_robots.task import Task
 
@@ -1439,6 +1577,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
+    speaker_sink: LogSink | None = None
+    live_sink: LiveLogSink | None = None
+    rerun_sink: LogSink | None = None
     try:
         if args.epochs is not None:
             from inspect_robots.errors import ConfigError
@@ -1452,6 +1593,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
+        _announce_live_view(args, resolved)
 
         operator_input = None
         operator_session = None
@@ -1464,6 +1606,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 cast(OperatorSession, operator_input),
                 resolved.policy,
             )
+        speaker_sink = _build_speaker_sink(args)
+        if speaker_sink is not None:
+            _start_speaker_sink(speaker_sink)
         # Attendedness picks the default grader, never gates grader wiring
         # (plan 0049): an explicit --grader is built session-less and relies
         # on its own fallback.
@@ -1472,11 +1617,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Construct the sink explicitly so we can tell the user where the log went.
         sink = JsonLogSink(args.log_dir)
         sinks: list[LogSink] = [sink]
+        if not args.no_live_log:
+            live_sink = LiveLogSink(args.log_dir)
+            sinks.append(live_sink)
+        save_wanted = args.rerun_save if args.rerun_save is not None else defaults.rerun_save
         if args.rerun_connect is not None:
             from inspect_robots.logging.rerun_sink import RerunSink
 
-            sinks.append(RerunSink(connect_url=args.rerun_connect))
-            print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}")
+            rerun_sink = RerunSink(
+                connect_url=args.rerun_connect,
+                recording_dir=args.log_dir if save_wanted else None,
+            )
+            sinks.append(rerun_sink)
+            suffix = " (+ .rrd)" if save_wanted else ""
+            print(f"{_styled('rerun:', _CYAN)} connect {args.rerun_connect}{suffix}")
         else:
             spawn_wanted = args.rerun_port is not None or (
                 args.rerun if args.rerun is not None else defaults.rerun
@@ -1488,10 +1642,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 # warn-once no-op when rerun-sdk is not installed.
                 port = args.rerun_port if args.rerun_port is not None else defaults.rerun_port
                 if port is None:
-                    sinks.append(RerunSink(spawn=True))
+                    rerun_sink = RerunSink(
+                        spawn=True,
+                        recording_dir=args.log_dir if save_wanted else None,
+                    )
                 else:
-                    sinks.append(RerunSink(spawn=True, spawn_port=port))
-                print(f"{_styled('rerun:', _CYAN)} live viewer")
+                    rerun_sink = RerunSink(
+                        spawn=True,
+                        spawn_port=port,
+                        recording_dir=args.log_dir if save_wanted else None,
+                    )
+                sinks.append(rerun_sink)
+                suffix = " (+ .rrd)" if save_wanted else ""
+                print(f"{_styled('rerun:', _CYAN)} live viewer{suffix}")
+            elif args.rerun_save is True:
+                from inspect_robots.logging.rerun_sink import RerunSink
+
+                rerun_sink = RerunSink(recording_dir=args.log_dir)
+                sinks.append(rerun_sink)
+                print(f"{_styled('rerun:', _CYAN)} recording .rrd")
+        # Speaker goes last so its bounded end-of-run drain never delays the
+        # JSON log write or the Rerun flush in the on_eval_end fan-out.
+        if speaker_sink is not None:
+            sinks.append(speaker_sink)
         try:
             logs = eval(
                 task,
@@ -1522,14 +1695,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # starts right after resolution: --epochs/scorer validation between
         # here and eval() can raise, and that must not leak the embodiment.
         try:
-            _close_voice_input(voice_input)
+            # A failing unlink (read-only remount, full disk) must not skip the
+            # close chain below or replace the run's real exception.
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                embodiment.close()
+                _close_speaker_sink(speaker_sink)
             finally:
-                resolved.claim.release()
+                try:
+                    _close_voice_input(voice_input)
+                finally:
+                    try:
+                        embodiment.close()
+                    finally:
+                        resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
+    resolved_recording_path = getattr(rerun_sink, "resolved_recording_path", None)
+    if resolved_recording_path:
+        print(f"{_styled('rrd:', _CYAN)} {_styled(str(resolved_recording_path), _DIM)}")
     return 0 if log.status == "success" else 1
 
 
@@ -1579,6 +1765,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from inspect_robots import eval_set
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
 
     _check_shared_run_conflicts(args)
     task_names = _match_tasks(args.tasks)
@@ -1600,12 +1787,14 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
+    live_sink: LiveLogSink | None = None
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
         approver = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
+        _announce_live_view(args, resolved)
         operator_input = None
         operator_session = None
         if _attended(args):
@@ -1621,12 +1810,18 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # (plan 0049): an explicit --grader is built session-less and relies
         # on its own fallback.
         grader = _build_grader(args, defaults, operator_session)
+        sink = JsonLogSink(args.log_dir)
+        sinks: list[LogSink] = [sink]
+        if not args.no_live_log:
+            live_sink = LiveLogSink(args.log_dir)
+            sinks.append(live_sink)
         try:
             success, logs = eval_set(
                 tasks,
                 resolved.policy,
                 embodiment,
                 log_dir=args.log_dir,
+                sinks=sinks,
                 seed=args.seed,
                 fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
                 approver=approver,
@@ -1662,12 +1857,18 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # embodiment itself, so it — not eval_set() — is responsible for
         # releasing it, exactly once, after every task has run.
         try:
-            _close_voice_input(voice_input)
+            # A failing unlink must not skip the close chain (see _cmd_run).
+            if live_sink is not None and live_sink.path is not None:
+                with suppress(OSError):
+                    live_sink.path.unlink(missing_ok=True)
         finally:
             try:
-                embodiment.close()
+                _close_voice_input(voice_input)
             finally:
-                resolved.claim.release()
+                try:
+                    embodiment.close()
+                finally:
+                    resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
@@ -1766,6 +1967,17 @@ def _write_html(document: str, out_path: Path | None) -> int:
     return len(encoded)
 
 
+def _write_html_atomic(document: str, out_path: Path) -> int:
+    """Replace one UTF-8 document atomically and return its encoded byte count."""
+    encoded = document.encode("utf-8", errors="replace")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(f"{out_path.suffix}.tmp")
+    with tmp.open("w", encoding="utf-8", errors="replace") as handle:
+        handle.write(document)
+    os.replace(tmp, out_path)
+    return len(encoded)
+
+
 def _render_log_page(
     log: EvalLog,
     log_path: Path,
@@ -1773,6 +1985,11 @@ def _render_log_page(
     *,
     no_frames: bool,
     frames_budget: float,
+    live_frames_budget: float | None = None,
+    refresh_seconds: int | None = None,
+    atomic: bool = False,
+    no_video: bool = False,
+    serve_pass: bool = False,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -1786,7 +2003,16 @@ def _render_log_page(
         log_path=log_path,
         frames_dir=frames_dir,
         frames_budget_bytes=int(frames_budget * 1_000_000),
+        live_frames_budget_bytes=(
+            None if live_frames_budget is None else int(live_frames_budget * 1_000_000)
+        ),
+        wire_media_elided=log.status == "started",
+        refresh_seconds=refresh_seconds,
+        no_video=no_video,
+        serve_pass=serve_pass,
     )
+    if atomic and out_path is not None:
+        return _write_html_atomic(document, out_path)
     return _write_html(document, out_path)
 
 
@@ -1894,6 +2120,21 @@ class _DirectoryRenderResult(NamedTuple):
     index_path: Path
 
 
+_LIVE_REDIRECT_SENTINEL = "<!-- inspect-robots live redirect stub -->"
+
+
+def _write_live_redirect_stub(path: Path) -> int:
+    """Atomically replace an orphaned live page with an idempotent index redirect."""
+    document = f"""{_LIVE_REDIRECT_SENTINEL}
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=index.html">
+<title>Run completed</title></head>
+<body><a href="index.html">Continue to the run index</a></body></html>
+"""
+    return _write_html_atomic(document, path)
+
+
 def _render_view_directory(
     args: argparse.Namespace,
     log_dir: Path,
@@ -1909,7 +2150,7 @@ def _render_view_directory(
         raise SystemExit("-o - cannot be used with a logs directory; pass an output directory")
 
     log_paths = sorted(path for path in log_dir.glob("*.json") if path.is_file())
-    if not log_paths:
+    if not log_paths and not args.serve:
         raise SystemExit(f"no top-level *.json logs found in {log_dir}")
 
     out_dir = log_dir / "html" if args.out is None else Path(args.out)
@@ -1922,6 +2163,10 @@ def _render_view_directory(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     page_names = _directory_page_names(log_paths)
+    # Derived from this pass's own glob, not the caller's earlier one: a live
+    # log appearing between the two globs must not have its freshly rendered
+    # page immediately stubbed as an orphan.
+    backed_live_pages = {page_names[path] for path in log_paths if path.name.endswith(".live.json")}
     entries: list[IndexEntry] = []
     pages_written = 0
     bytes_written = 0
@@ -1932,30 +2177,79 @@ def _render_view_directory(
     for index, log_path in enumerate(log_paths, start=1):
         page_name = page_names[log_path]
         page_path = out_dir / page_name
+        is_live_path = log_path.name.endswith(".live.json")
         try:
+            source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
+            suppressed_tier = args.serve or args.no_video
+            # The suppressed-tier stamp sits a full 2 microseconds below the
+            # source mtime, and the gate allows 1 microsecond of slack:
+            # filesystems round timestamps to their tick (100 ns on NTFS), so
+            # a 1 ns delta would floor below its own target and re-render
+            # suppressed pages on every serve tick on Windows.
+            stamp_ns = max(
+                0,
+                source_stat.st_mtime_ns - (_SUPPRESSED_STAMP_DELTA_NS if suppressed_tier else 0),
+            )
             render_page = (
                 force
+                or log.status == "started"
                 or not page_path.exists()
-                or page_path.stat().st_mtime < log_path.stat().st_mtime
+                or page_path.stat().st_mtime_ns < stamp_ns - _STAMP_TICK_SLACK_NS
             )
             if render_page:
-                print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
+                if not quiet:
+                    print(f"[{index}/{total}] rendering {log_path.name}", file=sys.stderr)
                 bytes_written += _render_log_page(
                     log,
                     log_path,
                     page_path,
                     no_frames=args.no_frames,
                     frames_budget=args.frames_budget,
+                    live_frames_budget=(
+                        args.live_frames_budget if args.serve and log.status == "started" else None
+                    ),
+                    refresh_seconds=(
+                        _SERVE_LIVE_RERENDER_SECONDS
+                        if args.serve and log.status == "started"
+                        else None
+                    ),
+                    atomic=log.status == "started",
+                    no_video=args.no_video,
+                    serve_pass=args.serve,
                 )
+                if log.status != "started":
+                    # Started pages re-render every pass by design (plan 0058);
+                    # the two-level stamp is a completed-page contract only.
+                    os.utime(
+                        page_path,
+                        ns=(source_stat.st_atime_ns, stamp_ns),
+                    )
                 pages_written += 1
             entries.append(_index_entry(log, log_path, page_name))
+        except FileNotFoundError:
+            if is_live_path:
+                continue
+            exc = FileNotFoundError(log_path)
+            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            entries.append(_unreadable_index_entry(log_path, exc))
         except Exception as exc:
             print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
             entries.append(_unreadable_index_entry(log_path, exc))
 
+    for live_page in out_dir.glob("*.live.html"):
+        if live_page.name in backed_live_pages:
+            continue
+        try:
+            with live_page.open(encoding="utf-8", errors="replace") as handle:
+                if handle.readline().rstrip("\r\n") == _LIVE_REDIRECT_SENTINEL:
+                    continue
+            bytes_written += _write_live_redirect_stub(live_page)
+        except OSError as exc:
+            print(f"warning: could not redirect {live_page.name}: {exc}", file=sys.stderr)
+
     index_path = out_dir / "index.html"
-    bytes_written += _write_html(
+    bytes_written += _write_html_atomic(
         render_index(entries, refresh_seconds=refresh_seconds),
         index_path,
     )
@@ -2039,6 +2333,8 @@ def _serve_view_directory(
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     sigterm_installed = False
     server_thread_started = False
+    previous_live_set: set[str] = set()
+    accumulated_seconds = 0
     try:
         signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
         sigterm_installed = True
@@ -2048,17 +2344,34 @@ def _serve_view_directory(
             open_url = _serve_open_url(bind_host, actual_port)
             _open_browser(open_url, open_url)
         while True:
-            _serve_sleep(_SERVE_RERENDER_SECONDS)
+            _serve_sleep(_SERVE_LIVE_RERENDER_SECONDS)
+            accumulated_seconds += _SERVE_LIVE_RERENDER_SECONDS
+            live_set = {path.name for path in log_dir.glob("*.live.json")}
+            if not (
+                live_set != previous_live_set
+                or live_set
+                or accumulated_seconds >= _SERVE_RERENDER_SECONDS
+            ):
+                continue
             try:
                 _render_view_directory(
                     args,
                     log_dir,
                     force=False,
                     quiet=True,
-                    refresh_seconds=_SERVE_RERENDER_SECONDS,
+                    refresh_seconds=(
+                        _SERVE_LIVE_RERENDER_SECONDS if live_set else _SERVE_RERENDER_SECONDS
+                    ),
                 )
             except (Exception, SystemExit) as exc:
                 print(f"warning: re-render failed: {exc}", file=sys.stderr)
+                # Reset the accumulator on failure too: an idle directory with
+                # a persistent render error must warn once per baseline period,
+                # not once per 2s tick.
+                accumulated_seconds = 0
+            else:
+                previous_live_set = live_set
+                accumulated_seconds = 0
     except KeyboardInterrupt:
         return 0
     finally:
@@ -2080,12 +2393,17 @@ def _serve_view_directory(
 
 def _cmd_view_directory(args: argparse.Namespace, log_dir: Path) -> int:
     """Render a logs directory and optionally serve it until stopped."""
+    live_set = {path.name for path in log_dir.glob("*.live.json")}
     render_result = _render_view_directory(
         args,
         log_dir,
         force=args.force,
         quiet=False,
-        refresh_seconds=_SERVE_RERENDER_SECONDS if args.serve else None,
+        refresh_seconds=(
+            (_SERVE_LIVE_RERENDER_SECONDS if live_set else _SERVE_RERENDER_SECONDS)
+            if args.serve
+            else None
+        ),
     )
     if args.serve:
         return _serve_view_directory(args, log_dir, render_result)
@@ -2106,8 +2424,12 @@ def _cmd_view(args: argparse.Namespace) -> int:
 
     if not (math.isfinite(args.frames_budget) and args.frames_budget >= 0):
         raise SystemExit("--frames-budget must be a non-negative finite number")
+    if not (math.isfinite(args.live_frames_budget) and args.live_frames_budget >= 0):
+        raise SystemExit("--live-frames-budget must be a non-negative finite number")
 
     log_path = Path(args.log)
+    if args.serve and not log_path.exists():
+        log_path.mkdir(parents=True, exist_ok=True)
     if log_path.is_dir():
         return _cmd_view_directory(args, log_path)
     if args.serve:
@@ -2135,6 +2457,7 @@ def _cmd_view(args: argparse.Namespace) -> int:
         out_path,
         no_frames=args.no_frames,
         frames_budget=args.frames_budget,
+        no_video=args.no_video,
     )
     if stdout_mode:
         return 0
@@ -2346,6 +2669,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
         ("rerun", defaults.rerun, None),
+        ("rerun_save", defaults.rerun_save, None),
         ("rerun_port", defaults.rerun_port, None),
     ]
     for key, value, source in rows:

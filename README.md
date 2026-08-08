@@ -92,8 +92,9 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+policy sees while the robot moves, and saves that stream as a replayable `.rrd`
+beside the eval log. CLI flags override any default (`--no-rerun-save`,
+`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
 
@@ -143,6 +144,24 @@ inspect-robots run --policy agent --rerun-connect \
     -P effort=high \
     --instruction "place the fork on the plate"
 ```
+
+### Talk to the policy while it runs
+
+With the [voice plugin](plugins/inspect-robots-voice/) installed, `--voice`
+keeps the microphone open for the whole run and delivers each spoken remark to
+the policy at its next inference, transcribed locally (no keys, no network).
+Silence sends nothing, and voice is feedback-only: ending an episode and
+recording verdicts stay on the keyboard.
+
+```bash
+pip install inspect-robots-voice
+inspect-robots run --policy agent -P model=anthropic/claude-opus-5 \
+    --voice \
+    --instruction "place the fork on the plate"
+```
+
+Typed console feedback keeps working alongside; both land in the transcript
+and the eval log with their source recorded.
 
 ### Retry with learning
 
@@ -216,6 +235,9 @@ inspect-robots view logs/ --serve --host 0.0.0.0
 `--host 0.0.0.0` exposes the viewer to anyone who can reach the machine; they
 can view the logs, including embedded camera frames. The served index
 auto-refreshes as new runs arrive.
+
+Agent runs update their HTML report turn by turn while the run is active.
+Scores appear when the canonical final log replaces the running snapshot.
 
 ### More CLI commands
 
@@ -388,8 +410,9 @@ shipped from this repo as separate packages:
   then queues approver-checked joint targets behind `--policy capx`.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
   microphone speech into operator feedback during attended runs with
-  `--voice`. Spoken input is feedback-only, so trial end and verdicts stay on
-  the keyboard.
+  `--voice`, or narrate streamed policy notes and terminal summaries with
+  `run --speak`. Spoken input is feedback-only, so trial end and verdicts stay
+  on the keyboard.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:

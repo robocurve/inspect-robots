@@ -39,8 +39,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   SDKs; registered as `agent`), and
   `plugins/inspect-robots-capx/` (CaP-X code-as-policy over perception and IK
   HTTP servers; registered as `capx`), and
-  `plugins/inspect-robots-voice/` (local microphone capture and faster-whisper
-  transcription; registered as the `voice` operator input).
+  `plugins/inspect-robots-voice/` (local microphone transcription with Parakeet and
+  local Kokoro policy narration; registered as the `voice` operator input and
+  `speaker` sink).
 
 ## Working here
 
