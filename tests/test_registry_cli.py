@@ -5881,18 +5881,23 @@ class _FakeRerunSink:
     """Stands in for RerunSink: records construction and step traffic."""
 
     instances: ClassVar[list[_FakeRerunSink]] = []
+    next_resolved_recording_path: ClassVar[Path | None] = None
 
     def __init__(
         self,
         recording_path: str | None = None,
         *,
+        recording_dir: str | None = None,
         spawn: bool = False,
         spawn_port: int = 9876,
         connect_url: str | None = None,
     ) -> None:
+        self.recording_path = recording_path
+        self.recording_dir = recording_dir
         self.spawn = spawn
         self.spawn_port = spawn_port
         self.connect_url = connect_url
+        self.resolved_recording_path = self.next_resolved_recording_path
         self.steps = 0
         _FakeRerunSink.instances.append(self)
 
@@ -5913,6 +5918,7 @@ def _fake_rerun(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRerunSink]:
     import inspect_robots.logging.rerun_sink as rrs
 
     _FakeRerunSink.instances = []
+    _FakeRerunSink.next_resolved_recording_path = None
     monkeypatch.setattr(rrs, "RerunSink", _FakeRerunSink)
     return _FakeRerunSink
 
@@ -5933,6 +5939,7 @@ def test_config_rerun_attaches_live_viewer_sink(
     (sink,) = _fake_rerun.instances  # constructed exactly once
     assert sink.spawn is True  # live viewer, not just a recording
     assert sink.spawn_port == 9876
+    assert sink.recording_dir == str(tmp_path / "logs")
     assert sink.steps > 0  # actually received rollout traffic
 
 
@@ -5952,7 +5959,18 @@ def test_rerun_flag_enables_without_config(
     )
     rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
     assert rc == 0
-    assert len(_fake_rerun.instances) == 1
+    (sink,) = _fake_rerun.instances
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_spawn_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves live spawn without a file target."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun-save") == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
 
 
 def test_bare_rerun_connect_uses_default_url(
@@ -5963,6 +5981,7 @@ def test_bare_rerun_connect_uses_default_url(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+    assert sink.recording_dir == str(tmp_path / "logs")
 
 
 def test_rerun_connect_honors_explicit_url(
@@ -5973,6 +5992,24 @@ def test_rerun_connect_honors_explicit_url(
     assert _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-connect", url) == 0
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == url
+
+
+def test_connect_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves a remote live stream without a file target."""
+    assert (
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-connect",
+            "--no-rerun-save",
+        )
+        == 0
+    )
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
+    assert sink.recording_dir is None
 
 
 def test_rerun_connect_takes_precedence_over_rerun(
@@ -6005,6 +6042,79 @@ def test_rerun_port_flag_spawns_viewer_on_that_port(
     (sink,) = _fake_rerun.instances
     assert sink.spawn is True
     assert sink.spawn_port == 9877
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_explicit_rerun_save_builds_record_only_sink(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An explicit save request without a viewer constructs one viewer-less sink."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    log_dir = tmp_path / "logs"
+    assert main(["reach the cube", "--log-dir", str(log_dir), "--rerun-save"]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is False
+    assert sink.connect_url is None
+    assert sink.recording_dir == str(log_dir)
+    assert "rerun: recording .rrd" in capsys.readouterr().out
+
+
+def test_config_rerun_save_false_suppresses_default_tee(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A false config key keeps the configured live viewer but removes its file target."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_save = false\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
+
+
+def test_config_rerun_save_true_does_not_create_viewerless_sink(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A config default alone never changes a run that has no viewer."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_save = true\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_post_eval_reports_resolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary prints the file path only after the sink resolves one."""
+    target = tmp_path / "logs" / "demo_deadbeef.rrd"
+    _fake_rerun.next_resolved_recording_path = target
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert f"rrd: {target}" in capsys.readouterr().out
+
+
+def test_post_eval_suppresses_unresolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary omits the file line when startup attached no recording."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert "rrd:" not in capsys.readouterr().out
 
 
 def test_config_rerun_port_reaches_spawned_viewer(
@@ -6714,6 +6824,7 @@ def test_cli_config_set_writes_and_show_reads(
     out = capsys.readouterr().out
     assert f"embodiment: cubepick  ({path})" in out
     assert "sim_embodiment: (unset)" in out
+    assert "rerun_save: True" in out
 
 
 def test_cli_config_set_preserves_unknown_sections(_hermetic_defaults: Path) -> None:
@@ -6739,10 +6850,13 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert excinfo.value.code == 2
     with pytest.raises(SystemExit, match="rerun"):
         main(["config", "set", "rerun", "sometimes"])
+    with pytest.raises(SystemExit, match="rerun_save"):
+        main(["config", "set", "rerun_save", "sometimes"])
     # Valid values round-trip.
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
     assert main(["config", "set", "rerun", "true"]) == 0
+    assert main(["config", "set", "rerun_save", "false"]) == 0
 
 
 def test_cli_config_set_rejects_bad_rerun_port(

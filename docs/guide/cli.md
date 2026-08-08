@@ -270,6 +270,7 @@ embodiment = yam_arms     # same plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
+rerun_save = true         # save the live stream as a replayable .rrd (default true)
 rerun_port = 9877         # viewer port for this rig (default 9876)
 store_frames = true       # save each run's camera frames under logs/frames/
 
@@ -315,6 +316,12 @@ directory; the log's `stats.frames_dir` records the exact path). A
 `store_frames = true` config default enables capture on every run;
 `--no-store-frames` disables it for one invocation. When the run finishes,
 the path of the written log is printed.
+
+`--rerun` and `--rerun-connect` also save the viewed stream as a `.rrd` under
+`<log-dir>` by default. Replay it with `rerun <file>`. Pass `--no-rerun-save`,
+or set `rerun_save = false`, to keep the live stream only. Explicit
+`--rerun-save` without an active viewer records to a `.rrd` only. This flag is
+run-only; `eval-set` does not add Rerun sinks.
 
 `--policy`/`--embodiment` may be omitted when defaults are configured (see
 the zero-config section above); `--instruction "..."` replaces `--task` to

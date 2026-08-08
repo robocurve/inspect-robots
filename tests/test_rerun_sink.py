@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import re
 import socket
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
+from inspect_robots.log import EvalSpec
 from inspect_robots.logging import RerunSink
 from inspect_robots.logging import rerun_sink as rerun_sink_module
 from inspect_robots.logging.rerun_sink import (
@@ -64,16 +66,22 @@ def test_spawn_and_connect_are_mutually_exclusive() -> None:
         RerunSink(spawn=True, connect_url="rerun+http://127.0.0.1:9876/proxy")
 
 
-def test_spawn_and_recording_are_mutually_exclusive() -> None:
-    """A sink cannot spawn a local viewer and record to .rrd at once."""
-    with pytest.raises(ValueError, match="spawn and recording_path are mutually exclusive"):
-        RerunSink("run.rrd", spawn=True)
+def test_recording_path_and_dir_are_mutually_exclusive() -> None:
+    """A fixed recording file and per-eval recording directory cannot both be selected."""
+    with pytest.raises(ValueError, match="recording_path and recording_dir are mutually exclusive"):
+        RerunSink("run.rrd", recording_dir="recordings")
 
 
-def test_recording_and_connect_are_mutually_exclusive() -> None:
-    """A sink cannot record to .rrd and stream to a remote viewer at once."""
-    with pytest.raises(ValueError, match="recording_path and connect_url are mutually exclusive"):
-        RerunSink("run.rrd", connect_url="rerun+http://127.0.0.1:9876/proxy")
+class _GrpcSinkTarget(NamedTuple):
+    """Captured gRPC sink constructor arguments."""
+
+    url: str
+
+
+class _FileSinkTarget(NamedTuple):
+    """Captured file sink constructor arguments."""
+
+    path: Path
 
 
 class _StartupRR:
@@ -93,6 +101,52 @@ class _StartupRR:
     def connect_grpc(self, url: str) -> None:
         """Capture the remote viewer URL."""
         self.calls.append(("connect_grpc", url))
+
+    def save(self, path: Path) -> None:
+        """Capture the viewer-less recording path."""
+        self.calls.append(("save", path))
+
+    def GrpcSink(self, *, url: str) -> _GrpcSinkTarget:
+        """Return a marker carrying the explicit live-view URL."""
+        return _GrpcSinkTarget(url)
+
+    def FileSink(self, path: Path) -> _FileSinkTarget:
+        """Return a marker carrying the recording path."""
+        return _FileSinkTarget(path)
+
+    def set_sinks(self, *sinks: object) -> None:
+        """Capture the ordered tee targets."""
+        self.calls.append(("set_sinks", sinks))
+
+
+class _OldStartupRR:
+    """Capture the pre-0.24 startup surface without tee attributes."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def init(self, application_id: str, **kwargs: object) -> None:
+        """Capture initialization arguments."""
+        self.calls.append(("init", (application_id, kwargs)))
+
+    def spawn(self, **kwargs: object) -> None:
+        """Capture the legacy local-view startup."""
+        self.calls.append(("spawn", kwargs))
+
+    def connect_grpc(self, url: str) -> None:
+        """Capture the legacy remote-view startup."""
+        self.calls.append(("connect_grpc", url))
+
+
+def _eval_spec(task: str = "demo") -> EvalSpec:
+    """Build the minimal eval identity needed by startup path derivation."""
+    return EvalSpec(
+        task=task,
+        policy="p",
+        embodiment="e",
+        created="now",
+        inspect_robots_version="0",
+    )
 
 
 def test_spawn_uses_bounded_memory_limit_after_plain_init() -> None:
@@ -165,6 +219,175 @@ def test_connect_grpc_follows_init_without_spawning() -> None:
     ]
 
 
+def test_spawn_tee_uses_explicit_default_url_and_order(tmp_path: Path) -> None:
+    """A local tee starts a disconnected viewer before attaching its two sinks."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True, recording_dir=str(tmp_path))
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec("Demo Task"))
+
+    path = sink.resolved_recording_path
+    assert path is not None
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876, "connect": False}),
+        (
+            "set_sinks",
+            (
+                _GrpcSinkTarget("rerun+http://127.0.0.1:9876/proxy"),
+                _FileSinkTarget(path),
+            ),
+        ),
+    ]
+
+
+def test_spawn_tee_uses_custom_port_in_explicit_url(tmp_path: Path) -> None:
+    """The tee URL follows a custom spawn port instead of an SDK default."""
+    fake = _StartupRR()
+    sink = RerunSink(spawn=True, spawn_port=9988, recording_dir=str(tmp_path))
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    assert fake.calls[1] == (
+        "spawn",
+        {"memory_limit": "2GiB", "port": 9988, "connect": False},
+    )
+    set_sinks = fake.calls[2]
+    assert set_sinks[0] == "set_sinks"
+    targets = set_sinks[1]
+    assert isinstance(targets, tuple)
+    assert targets[0] == _GrpcSinkTarget("rerun+http://127.0.0.1:9988/proxy")
+
+
+def test_connect_tee_sets_sinks_without_legacy_connect(tmp_path: Path) -> None:
+    """A remote tee attaches the URL and file together without connect_grpc."""
+    url = "rerun+http://viewer.example:9988/proxy"
+    fake = _StartupRR()
+    sink = RerunSink(connect_url=url, recording_dir=str(tmp_path))
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    path = sink.resolved_recording_path
+    assert path is not None
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("set_sinks", (_GrpcSinkTarget(url), _FileSinkTarget(path))),
+    ]
+
+
+def test_fixed_path_tee_attaches_the_configured_file(tmp_path: Path) -> None:
+    """A fixed recording path combines with a local viewer through the same tee."""
+    fake = _StartupRR()
+    target = tmp_path / "run.rrd"
+    sink = RerunSink(str(target), spawn=True)
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path == target
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876, "connect": False}),
+        (
+            "set_sinks",
+            (
+                _GrpcSinkTarget("rerun+http://127.0.0.1:9876/proxy"),
+                _FileSinkTarget(target),
+            ),
+        ),
+    ]
+
+
+def test_recording_dir_saves_derived_fresh_path_per_eval(tmp_path: Path) -> None:
+    """Directory mode creates its parent and draws a task-slugged path for each eval."""
+    recording_dir = tmp_path / "nested" / "recordings"
+    fake = _StartupRR()
+    sink = RerunSink(recording_dir=str(recording_dir))
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec("Demo Task"))
+    first = sink.resolved_recording_path
+    sink.on_eval_start(_eval_spec("Demo Task"))
+    second = sink.resolved_recording_path
+
+    assert recording_dir.is_dir()
+    assert first is not None and second is not None and first != second
+    assert first.parent == recording_dir
+    assert second.parent == recording_dir
+    assert re.fullmatch(r"demo-task_[0-9a-f]{8}\.rrd", first.name)
+    assert re.fullmatch(r"demo-task_[0-9a-f]{8}\.rrd", second.name)
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("save", first),
+        ("init", ("inspect_robots", {})),
+        ("save", second),
+    ]
+
+
+def test_fixed_recording_path_is_exposed_as_path(tmp_path: Path) -> None:
+    """Fixed mode normalizes the configured string into the public Path contract."""
+    fake = _StartupRR()
+    target = tmp_path / "fixed.rrd"
+    sink = RerunSink(str(target))
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path == target
+    assert fake.calls[-1] == ("save", target)
+
+
+def test_no_recording_target_leaves_resolved_path_none() -> None:
+    """Bare initialization never advertises a recording file."""
+    fake = _StartupRR()
+    sink = RerunSink()
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path is None
+
+
+def test_old_sdk_spawn_fallback_warns_once_and_clears_path(tmp_path: Path) -> None:
+    """A pre-0.24 SDK keeps its local viewer but never advertises the skipped file."""
+    fake = _OldStartupRR()
+    sink = RerunSink(spawn=True, recording_dir=str(tmp_path))
+    sink._rr = fake
+
+    with pytest.warns(RuntimeWarning, match="predates set_sinks") as caught:
+        sink.on_eval_start(_eval_spec())
+        sink.on_eval_start(_eval_spec())
+
+    assert len(caught) == 1
+    assert sink.resolved_recording_path is None
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876}),
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876}),
+    ]
+
+
+def test_old_sdk_connect_fallback_keeps_remote_view(tmp_path: Path) -> None:
+    """A pre-0.24 SDK preserves the legacy remote connection while skipping the file."""
+    url = "rerun+http://viewer.example:9876/proxy"
+    fake = _OldStartupRR()
+    sink = RerunSink(connect_url=url, recording_dir=str(tmp_path))
+    sink._rr = fake
+
+    with pytest.warns(RuntimeWarning, match="predates set_sinks"):
+        sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path is None
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("connect_grpc", url),
+    ]
+
+
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
 def test_noop_and_warns_when_absent() -> None:
     sink = RerunSink()
@@ -175,6 +398,19 @@ def test_noop_and_warns_when_absent() -> None:
     # ...but a fresh instance warns again (no hidden module-global state).
     with pytest.warns(RuntimeWarning, match="rerun-sdk is not installed"):
         assert RerunSink().available is False
+
+
+@pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
+def test_recording_dir_stays_unresolved_when_sdk_is_absent(tmp_path: Path) -> None:
+    """The SDK-less early return does not create or advertise a phantom file."""
+    recording_dir = tmp_path / "recordings"
+    sink = RerunSink(recording_dir=str(recording_dir))
+
+    with pytest.warns(RuntimeWarning, match="rerun-sdk is not installed"):
+        sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path is None
+    assert not recording_dir.exists()
 
 
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
@@ -193,15 +429,14 @@ def test_rerun_sink_writes_recording(tmp_path: Path) -> None:
     assert rrd.exists()
 
 
-def test_init_failure_disables_sink_instead_of_crashing() -> None:
+def test_init_failure_disables_sink_instead_of_crashing(tmp_path: Path) -> None:
     """A recording initialization failure must warn instead of killing the eval."""
-    from inspect_robots.log import EvalSpec
 
     class _FakeRR:
         def init(self, *a: object, **k: object) -> None:
             raise RuntimeError("Failed to find Rerun Viewer executable in PATH.")
 
-    sink = RerunSink(spawn=True)
+    sink = RerunSink(spawn=True, recording_dir=str(tmp_path))
     sink._rr = _FakeRR()
     with pytest.warns(RuntimeWarning, match="RerunSink disabled"):
         sink.on_eval_start(
@@ -210,6 +445,7 @@ def test_init_failure_disables_sink_instead_of_crashing() -> None:
             )
         )
     assert sink.available is False  # dormant from here on
+    assert sink.resolved_recording_path is None
     sink.log_step(0, None, None, None)  # type: ignore[arg-type]  # must not raise
 
 
@@ -1556,10 +1792,30 @@ def test_real_rerun_accepts_the_transcript_document_call() -> None:
 
 
 @pytest.mark.skipif(not _RERUN_INSTALLED, reason="requires rerun-sdk")
-def test_real_rerun_spawn_signature_accepts_forwarded_kwargs() -> None:
-    """The real SDK spawn signature accepts every keyword the sink forwards."""
+def test_real_rerun_tee_surface_accepts_forwarded_arguments(tmp_path: Path) -> None:
+    """The locked SDK exposes every tee constructor and keyword the sink forwards."""
     rr = pytest.importorskip("rerun")
-    assert {"port", "memory_limit"} <= set(inspect.signature(rr.spawn).parameters)
+    assert all(hasattr(rr, name) for name in ("set_sinks", "GrpcSink", "FileSink"))
+    assert {"port", "memory_limit", "connect"} <= set(inspect.signature(rr.spawn).parameters)
+    grpc_sink = rr.GrpcSink(url="rerun+http://127.0.0.1:9876/proxy")
+    file_sink = rr.FileSink(tmp_path / "signature.rrd")
+    assert grpc_sink is not None
+    assert file_sink is not None
+
+
+@pytest.mark.skipif(not _RERUN_INSTALLED, reason="requires rerun-sdk")
+def test_real_rerun_file_sink_round_trip(tmp_path: Path) -> None:
+    """A scalar flushed through the real FileSink produces a nonempty recording."""
+    rr = pytest.importorskip("rerun")
+    target = tmp_path / "t.rrd"
+    rr.init("inspect_robots_test_file_sink")
+    rr.set_sinks(rr.FileSink(target))
+    rr.log("scalar", rr.Scalars(1.0))
+    recording = rr.get_global_data_recording()
+    assert recording is not None
+    recording.flush()
+    assert target.exists()
+    assert target.stat().st_size > 0
 
 
 @pytest.mark.skipif(not _RERUN_INSTALLED, reason="rerun-sdk not installed")
