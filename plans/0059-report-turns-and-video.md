@@ -58,7 +58,9 @@ always headerless. Per turn, the default (human) layer renders, in order:
   latest in document order. **A chat transcript with zero frame-step turns
   (capx: its camera labels carry no `(step N)`) routes the trial's
   messages to the residual block instead** — first-turn dumping would
-  destroy all temporal placement (R2). The chip shows the text and its
+  destroy all temporal placement (R2). A message whose `t` precedes every
+  frame-step turn (frames first revealed late via take_pic) likewise goes
+  to the residual (R3). The chip shows the text and its
   source label. The raw delivered lines inside the observation blob stay
   verbatim in the POV dropdown.
 - **assistant text content** — stays visible in the default layer (R1:
@@ -150,36 +152,46 @@ common single-scene rig run this is the top of the report):
   the tick and stall every live page past the 0055 cadence; serve pages
   get the flipbook, always), and the frames side-car directory resolves,
   the renderer stitches **all control steps** per (trial, camera) through
-  the existing `_video.py` pipeline machinery, refactored to expose a
-  reusable `encode_camera_mp4(...) -> bytes | None` used by both the
-  `video` command and the renderer (same stderr-tempfile and per-stream
-  failure-isolation discipline, plan 0016; ffmpeg writes a temp **file**
-  that is read back — `-f mp4` cannot stream to a pipe, and faststart is
-  irrelevant for a fully in-memory `data:` URL; the temp file is unlinked
-  after read-back on success as well as on failure; R1/R2).
-  **`encode_camera_mp4` never raises `SystemExit`** — it returns `None` on
-  any failure including `Popen` launch errors; the `video` command's
-  wrapper reinstates its existing `SystemExit`-on-launch-failure behavior
-  (R2: the directory pass catches only `Exception` per log, so a verbatim
-  reuse of `encode_stream`'s posture would let one broken ffmpeg shim
-  abort the entire `view` render). Streams are
+  the existing `_video.py` pipeline machinery. Layering pinned (R3, so the
+  `video` command's output contract and existing tests stay untouched): a
+  shared **private core** carrying the current pipeline (stderr-tempfile,
+  per-stream failure isolation, plan 0016) whose result distinguishes
+  launch failure from encode failure (private exception or result kind);
+  `encode_stream` keeps its exact current public signature and behavior on
+  top of it (writes `out_path`, raises `SystemExit` on launch failure —
+  existing `video` tests and per-stream CLI output unchanged); new
+  `encode_camera_mp4(...) -> bytes | None` calls the core with a temp
+  output path, reads the bytes back, unlinks the temp file on success and
+  failure alike, and returns `None` on any failure including `Popen`
+  launch errors — it never raises `SystemExit` (R2: the directory pass
+  catches only `Exception` per log, so the command posture would let one
+  broken ffmpeg shim abort the entire `view` render). `-f mp4` cannot
+  stream to a pipe, and faststart is irrelevant for a fully in-memory
+  `data:` URL (R1). Streams are
   enumerated by globbing `f"{trial_prefix}_*.npy"` and parsing
   `camera_step` from the remainder after stripping the known trial prefix
   (R1: `discover_streams`' un-splittable key cannot give per-trial
   association, and transcript-derived cameras would miss unrevealed
-  on-demand cameras). Embeds `<video controls muted loop autoplay>` with a
-  base64 `data:video/mp4` URL, one per camera tab, replacing the flipbook
-  for that trial. Playback is real-time (frame rate = `control_hz` via the
-  existing `default_fps` guards).
+  on-demand cameras). Embeds `<video controls muted loop>` with a base64
+  `data:video/mp4` URL, one per camera tab, replacing the flipbook for
+  that trial; the `autoplay` attribute lives only on the active tab's
+  element (R3, consistent with active-tab-only playback). Playback is
+  real-time (frame rate = `control_hz` via the existing `default_fps`
+  guards).
   Accepted, documented cost: a first `view` of a large directory encodes
   every completed log's videos once; the mtime gate makes it a one-time
-  cost per log. **Suppressed-tier pages stay upgradeable** (R2): when the
-  MP4 tier was suppressed for a completed log (serve pass or
-  `--no-video`), the directory pass skips the `os.utime` mtime stamp for
-  that page, so the next eligible plain `view` re-renders it with video —
-  otherwise the standard rig path (run finishes under `--serve`, tick
-  renders it flipbook-only, stamps it) would permanently block the
-  upgrade.
+  cost per log. **Suppressed-tier pages stay upgradeable via a two-level
+  stamp** (R2, mechanism corrected R3 — merely skipping the stamp cannot
+  work: a fresh page's natural mtime is render wall time, *newer* than the
+  log, so the `<` gate freezes it regardless): a full-tier render stamps
+  the page with the source log's mtime `S`; a suppressed-tier render
+  (serve pass or `--no-video`) stamps `S − 1ns`; and the gate compares the
+  page's mtime against the stamp *this pass would write*. Serve ticks skip
+  pages already at `S − 1ns` (no per-tick churn even with a live log
+  present), while the next eligible plain `view` sees `S − 1ns < S`,
+  re-renders with video, and stamps `S`. Pages rendered by pre-0059
+  versions carry the full-tier stamp and need `--force` to gain video
+  (documented; R3).
 - **Budgeting:** embedded MP4s are charged to a dedicated
   `_VIDEO_BUDGET_BYTES = 30_000_000` per page of **encoded base64
   characters** (R1: matching the frame-budget precedent, which charges
@@ -216,9 +228,9 @@ common single-scene rig run this is the top of the report):
   messages; non-chat fallback untouched (differential assertion against a
   golden snippet); frames on live pages still resolve through the 0058
   cache (identity contract regression test).
-- **Headers/captions:** step from frame label; from the matched structured
-  message `t` when frames absent; no header otherwise; captions are
-  camera-name-only.
+- **Headers/captions:** step from the turn's first frame label; headerless
+  when the turn has no frame references, even when a feedback chip matched
+  (R3: the R2 rule); captions are camera-name-only.
 - **Feedback chips:** sourced from `scene.operator_messages`; `/stop`-style
   undelivered tail message appears inline (matched by `t`); multi-source
   labels; non-chat trial's messages land in the residual block; a
@@ -251,8 +263,9 @@ common single-scene rig run this is the top of the report):
   — its `_FakePopen` gains a writes-the-output-file behavior for the
   temp-file read-back path (R1: today it never writes `out_path`);
   `Popen` raising `OSError` under the renderer → flipbook degrade and
-  `view` exits 0 (R2); suppressed-tier completed pages skip the mtime
-  stamp and upgrade on the next eligible pass (R2); video block nests
+  `view` exits 0 (R2); the two-level stamp — suppressed-tier pages stamp
+  `S − 1ns`, skip on serve ticks, upgrade and restamp `S` on the next
+  eligible plain pass (R3); video block nests
   inside the trial details after its summary; only the active camera tab
   autoplays (inactive paused, `preload="metadata"`).
 - **CLI:** `--no-video` parsing and forwarding; serve tick unaffected
