@@ -27,10 +27,15 @@ readability failures and one status bug:
 The chat transcript is regrouped into **turns**. A turn starts at each
 `user`-role message **whose content is list-shaped** (an observation
 message); string-content user messages (agent nudges like "Respond with
-exactly one tool call.", capx execution reports, take_pic frame deliveries)
-render as ordinary visible messages *inside* the current turn and never
-start one (R1: capx has no tool calls at all — its assistant prose IS the
-content — and nudges would otherwise open junk turns). The **preamble
+exactly one tool call.", capx execution reports) render as ordinary
+visible messages *inside* the current turn and never start one (R1: capx
+has no tool calls at all — its assistant prose IS the content — and
+nudges would otherwise open junk turns). An immediate take_pic frame
+delivery IS list-shaped (label + image parts) and therefore starts its
+own turn with real frame references and that step's header (R4: no
+special-casing — the same-step chip tie-break, "latest in document order
+wins", already covers the resulting same-step turns; pending captures
+arrive inside the next observation message and need no rule). The **preamble
 turn** is everything before the first list-shaped user message — including
 string-content user messages like capx's "Goal: ..." opener (R2) — and is
 always headerless. Per turn, the default (human) layer renders, in order:
@@ -92,7 +97,7 @@ JSON fallback rendering unchanged.
 
 ### 2. Scene badge fix for running logs
 
-For a `status == "started"` log, a scene whose trial metadata's **last slot
+For a `status == "started"` log, a scene **a slot of whose trial metadata
 carries the live marker** (`{"live": {...}}`, written by `LiveLogSink` on
 every in-progress snapshot) renders its card badge as `running` (amber)
 instead of mapping the slot's `"success"`-so-far through to `completed`.
@@ -105,8 +110,10 @@ The prominent `feedback_block` leaves `_scene_section`'s top. Because the
 structured `operator_messages` now drive the inline chips (§1), the block
 survives only as a **residual**: it renders (in its current list form,
 below the transcripts and above the wire details rather than at the top;
-R2) exactly the messages that could not be placed inline — i.e. trials with no chat transcript (non-chat
-policies, transcript capture failures). When every message was placed
+R2) exactly the messages that could not be placed inline — e.g. trials with no chat transcript (non-chat
+policies, transcript capture failures), zero-frame-step transcripts, and
+early-`t` messages (R4: the normative rule is "exactly the unplaced
+messages"; the list is illustrative). When every message was placed
 inline, the block renders nothing (R1: deleting it outright would make
 feedback invisible for xpolicylab/scripted runs, and `/stop [note]`
 end-of-episode notes are precisely the high-value annotations). The log
@@ -223,7 +230,8 @@ common single-scene rig run this is the top of the report):
 
 - **Turn grouping:** user/assistant/tool sequences; string-content user
   messages (nudges, capx reports) stay inside the current turn and render
-  visibly; assistant prose visible in the default layer (capx transcript
+  visibly; an immediate take_pic delivery opens its own same-step turn
+  (R4); assistant prose visible in the default layer (capx transcript
   golden case); leading assistant preamble; missing roles; non-dict
   messages; non-chat fallback untouched (differential assertion against a
   golden snippet); frames on live pages still resolve through the 0058
