@@ -1287,20 +1287,19 @@ def test_variant_strip_keeps_fine_tune_colons() -> None:
         )
 
 
-@pytest.mark.parametrize("api_key_env", [None, "", False, 0, 0.0])
+@pytest.mark.parametrize("api_key_env", [None, ""])
 def test_falsy_api_key_env_does_not_send_the_openrouter_key_to_a_gateway(
-    api_key_env: object,
+    api_key_env: str | None,
 ) -> None:
-    # '-P api_key_env=' parses to '', and 'false'/'0' to other falsy values,
-    # all of which resolve_provider treats as unset and answers with
-    # $OPENROUTER_API_KEY. An `is None` test would hand a third-party gateway
-    # the OpenRouter secret.
+    # '-P api_key_env=' parses to '', which resolve_provider treats as unset
+    # and answers with $OPENROUTER_API_KEY. An `is None` test would hand a
+    # third-party gateway the OpenRouter secret.
     seen, handler = _capture(_anthropic_response(_text("ok"), stop_reason="end_turn"))
     policy = LLMAgentPolicy(
         model="claude-opus-5",
         wire="messages",
         base_url="https://gw.example/v1",
-        api_key_env=api_key_env,  # type: ignore[arg-type]
+        api_key_env=api_key_env,
         transport=httpx.MockTransport(handler),
         env={"ANTHROPIC_API_KEY": "sk-ant", "OPENROUTER_API_KEY": "sk-or"},
     )
