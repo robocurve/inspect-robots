@@ -1,6 +1,6 @@
 # 0062 — Session-owned end-gesture hint on footer status lines
 
-- **Status:** draft
+- **Status:** approved (R5 clean)
 - **Issue:** #345
 - **Critique rounds:** R1: 4 substantive (skew guard preserved stale "Enter
   ends the episode" prose instead of replacing it; yam banner rewrite
@@ -25,7 +25,9 @@
   disable-site change breaks `test_end_trial_still_runs_after_raising_poll_
   disables_channel`, now recorded with its `end_calls == 2` re-pin; the
   assertion sweep missed one test and named one that does not change) — the
-  design itself held; resolved below.
+  design itself held; resolved below. R5: clean — no substantive findings;
+  every byte-level claim verified against the code; three wording nitpicks
+  folded in below without a further round.
 
 ## Problem
 
@@ -93,9 +95,10 @@ gesture, and the usage reminder owns the full grammar.
   last segment is not gesture prose (`t = 4s | left arm ok`) is untouched and
   suffixed. Documented accepted costs (composer docstring): a `" | "` segment
   that contains the phrase without being gesture prose is dropped; a gesture
-  mention placed mid-line or after a non-pipe separator renders a duplicated
-  hint (no first-party plugin does either — a grep of `plugins/*` finds no
-  `session.status` callers; yam is the only known one).
+  mention placed mid-line, after a non-pipe separator, or as a sep-less
+  whole-line status (`status("Enter ends the episode")`) renders a duplicated
+  or contradictory hint (no first-party plugin does any of these — a grep of
+  `plugins/*` finds no `session.status` callers; yam is the only known one).
 - **Empty line:** `status("")` renders the bare hint, no dangling separator.
   A line ending in exactly `" | "` composes with a doubled separator —
   harmless cosmetic, accepted.
@@ -160,8 +163,10 @@ Two consequences handled with it:
   keystrokes sit buffered in cooked stdin and would otherwise be consumed as
   the verdict answer.
 - **Contract note.** The duck-typed `end_trial` contract widens from "called
-  once in the per-trial finally" to "may be called mid-trial and again in the
-  finally"; the `end_trial()` docstring states the idempotency requirement.
+  once in the per-trial finally" to "may be called mid-trial — including on a
+  trial whose `begin_trial()` itself raised — and again in the finally"; the
+  `end_trial()` docstring states the idempotency requirement and that
+  begin-before-end pairing is not guaranteed.
 
 ### Non-goals / out of scope
 
@@ -258,9 +263,9 @@ matching existing footer render tests):
     and the footer-mode `status` assertion in
     `test_footer_begin_trial_closes_plain_open_status_then_one_row_branch`.
     (`test_footer_input_echo_two_row_state` does not change: its asserted
-    bytes are the input-row echo drawn after `output.clear()`.) The true
-    unchanged set is the `status(None)` write sequences, the plain-path
-    tests, and (coincidentally, by width)
+    bytes are the input-row echo drawn after `output.clear()`.) The remaining
+    unchanged footer-status assertions are the `status(None)` write
+    sequences, the plain-path tests, and (coincidentally, by width)
     `test_footer_status_row_clips_at_width_minus_1`.
 
 Repo gates: ruff, ruff format, mypy strict (src+tests), pytest --cov at 100%
