@@ -1,6 +1,6 @@
 # 0063 — Composite side-by-side run video; "Raw transcript" rename
 
-- **Status:** draft (R2 resolved)
+- **Status:** draft (R3 resolved)
 - **Issue:** #347
 - **Critique rounds:** R1: 4 substantive (unscripted `autoplay loop` composite
   reversed 0060's pinned collapsed-trials-cost-nothing playback design; three
@@ -16,7 +16,17 @@
   tests uncovered — now explicitly deleted with the temp-file wrapper
   extracted/shared and tests migrated, plus the full monkeypatch-family
   retarget list; fourth doc site — the CLAUDE.md `_video.py` row's
-  "report-only wrapper" sentence) — all resolved below.
+  "report-only wrapper" sentence) — all resolved below. R3: verified all R2
+  resolutions hold; 4 substantive (an all-empty stream dropped by the probe
+  would still be named in the caption — encoder now returns surviving keys
+  and the caption is survivor-driven; `activate(undefined)` on toggle would
+  hide/pause any panel carrying `data-camera-panel`, so the composite
+  panel's lack of that attribute is now pinned as load-bearing and the
+  play/pause hook's single home specified; the call-time import seam the
+  monkeypatch family relies on is now pinned; `.camera-order` had no CSS —
+  muted small-caption rule named) plus four foldable nits (test-count
+  wording, budget-test naming, `_VideoBudget` docstring, cli.md ~490
+  rename sentence) — all resolved below.
 
 ## Problem
 
@@ -65,18 +75,29 @@ core loop is refactored so frame *production* is separated from *piping*:
 
 - `_encode_core(frames, ...)` keeps its exact public behavior (CLI contract
   unchanged, `StreamResult` unchanged).
-- New `_encode_composite_mp4(ordered_streams, fps, ffmpeg) -> bytes | None`
-  where `ordered_streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]]`.
-  Any failure degrades to `None` (caller falls back to flipbook tabs).
+- New `_encode_composite_mp4(ordered_streams, fps, ffmpeg) ->
+  tuple[bytes, tuple[str, ...]] | None` where `ordered_streams:
+  Sequence[tuple[str, Sequence[tuple[int, Path]]]]`. The returned tuple
+  carries the MP4 bytes **and the surviving stream keys in composite
+  order** — an all-empty (warm-up) stream is dropped by the probe, and the
+  caption must not name a camera that contributes nothing to the video, so
+  the caption is built from the survivors, not the input. Any failure
+  degrades to `None` (caller falls back to flipbook tabs).
+- The call-time `from inspect_robots._video import _encode_composite_mp4`
+  **inside** `_render_trial_media` is retained (as with `_encode_camera_mp4`
+  today): `inspect_robots._video._encode_composite_mp4` stays the patchable
+  seam every retargeted monkeypatch test relies on; a top-of-module import
+  would bind a direct reference in `_html` and defeat them all.
 - **`_encode_camera_mp4` is deleted** — its only caller is the per-camera
   encode path this plan removes, and no fallback encodes per-camera MP4s.
   Its temp-file wrapper (mkstemp → encode → `read_bytes`, degrading every
   failure to `None` without leaking the temp file) is **extracted and
   shared**, so `_encode_composite_mp4` = wrapper(composite frame producer)
   and the wrapper's four failure branches stay covered in one place: the
-  five existing `_encode_camera_mp4` tests (`tests/test_video.py` ~464-521 —
-  success, encode failure, launch failure, mkstemp `OSError`, `read_bytes`
-  `OSError`) migrate to `_encode_composite_mp4`.
+  four existing `_encode_camera_mp4` test functions covering five cases
+  (`tests/test_video.py` ~464-521 — success, encode+launch failure in one
+  test, mkstemp `OSError`, `read_bytes` `OSError`) migrate to
+  `_encode_composite_mp4`.
 
 Composite frame construction:
 
@@ -113,6 +134,10 @@ Composite frame construction:
   <div class="run-media" data-trial="...">
     <div class="run-media-head">Run video</div>
     <div class="camera-order">left · top · right</div>
+    <!-- .camera-order gets a muted small-caption rule in _STYLES, matching
+         the page's other captions:
+         .camera-order { color: var(--muted); font-size: 12px;
+                         margin: 4px 0 8px; } -->
     <div class="camera-panel video-panel"><video controls muted loop
          preload="metadata" src="data:video/mp4;base64,..."></video></div>
   </div>
@@ -120,21 +145,31 @@ Composite frame construction:
 
 - **Playback cost stays governed by transcript visibility** (0060's pinned
   R2: "a collapsed trial costs nothing"). The composite `<video>` carries
-  **no `autoplay`** and `preload="metadata"`; a small script (in the same
-  per-`run-media` block that today wires tabs) plays/pauses it from the
-  enclosing `details.transcript`: once at load and on every `toggle`,
-  expanded → `void video.play().catch(() => {})`, collapsed → `pause()`.
-  Single-transcript pages (which `render_html` opens by default,
-  `open_transcript=transcript_count == 1`) therefore start playing exactly
-  like today's first tab; multi-trial pages decode nothing until a trial is
-  expanded. The tab/flipbook JS is retained unchanged for fallback pages.
+  **no `autoplay`** and `preload="metadata"`. Playback is wired inside the
+  existing per-`run-media` `forEach` as **one** sync function: it queries
+  `block.querySelector('.video-panel video')` and, from the enclosing
+  `details.transcript` state, expanded → `void video.play().catch(() => {})`,
+  collapsed → `pause()`; it is registered on the **same** `toggle`
+  registration point the tab code uses today (one listener home) and called
+  once at load. Single-transcript pages (which `render_html` opens by
+  default, `open_transcript=transcript_count == 1`) therefore start playing
+  exactly like today's first tab; multi-trial pages decode nothing until a
+  trial is expanded.
+- **The composite panel carries no `data-camera-panel` and no `hidden`
+  handling — deliberately and load-bearing.** On a composite block the
+  script's `tabs`/`panels` queries are empty, `active` is `undefined`, and
+  `activate(undefined)` would hide and pause every `[data-camera-panel]`
+  panel it found; with none present it is a guaranteed no-op. The
+  tab/flipbook JS is otherwise retained unchanged for fallback pages.
 - **Budget** (`_VideoBudget`, 30 MB base64 default, `--no-video` opt-out)
   is unchanged in mechanism: the single composite payload is charged against
   the limit; on overflow the budget goes sticky-truncated and this trial (and
   later trials) render the current per-camera flipbook tabs with the
   `video budget` chip. Because there is now one encode per trial instead of
-  one per camera, the sticky "later cameras skip their encode" comment moves
-  up a level: later *trials* skip the composite encode.
+  one per camera, the sticky "later cameras skip their encode" prose moves
+  up a level — later *trials* skip the composite encode — in both the
+  `_render_trial_media` comment and the `_VideoBudget` docstring (which says
+  "camera" twice today).
 - **Fallback** (no ffmpeg, encode failure, budget, live/serve pages): the
   existing per-camera flipbook tabs render exactly as today — the tab/JS
   machinery is retained for these paths.
@@ -194,6 +229,8 @@ steps**:
   buttons; caption row lists cameras in turn order; the video has **no
   `autoplay`** and `preload="metadata"` (playback is script-driven from the
   transcript toggle — pins 0060's collapsed-trials-cost-nothing rule).
+- All-empty extra stream on disk → composite succeeds and the caption
+  **omits** the dropped camera (survivor-driven caption).
 - Sticky budget: the existing within-trial sticky tests
   (`test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes`, the
   panel-less sticky half of the single-frame-camera test) are **restructured
@@ -201,7 +238,9 @@ steps**:
   observable across trials: trial 1's composite overflows → truncates →
   trial 2 skips its encode (`encoder_calls` count pins the skip) and renders
   flipbook tabs with the `video budget` chip.
-- Encode failure → flipbook tabs (re-pin existing test).
+- Encode failure → flipbook tabs (re-pin
+  `test_mp4_budget_and_failures_degrade_to_flipbook`; its budget half stays
+  valid single-trial).
 - Stream never rendered in a turn still appears in the composite caption
   order (replaces the `data-camera-tab="unseen_camera"` assertion). The
   whole `_encode_camera_mp4` monkeypatch family retargets
@@ -220,8 +259,9 @@ steps**:
   playhead), LLM POV renamed to Raw transcript, step dividers, with
   plan/issue links.
 - `docs/guide/cli.md`: the run-video paragraph (~494-500) rewritten for the
-  single composite video, **and** the budget paragraph (~515-518) — the unit
-  of charge/degrade becomes the trial composite, not a camera.
+  single composite video, the budget paragraph (~515-518) — the unit of
+  charge/degrade becomes the trial composite, not a camera — **and** the
+  "LLM POV" sentence in the first report paragraph (~490).
 - `docs/guide/live-view.md`: the LLM POV sentence (~19) renamed, **and** the
   post-run upgrade paragraph (~28-31) that says a view pass "can replace
   each camera's flipbook with an embedded MP4" rewritten for the composite.
