@@ -278,6 +278,29 @@ def test_connect_tee_sets_sinks_without_legacy_connect(tmp_path: Path) -> None:
     ]
 
 
+def test_fixed_path_tee_attaches_the_configured_file(tmp_path: Path) -> None:
+    """A fixed recording path combines with a local viewer through the same tee."""
+    fake = _StartupRR()
+    target = tmp_path / "run.rrd"
+    sink = RerunSink(str(target), spawn=True)
+    sink._rr = fake
+
+    sink.on_eval_start(_eval_spec())
+
+    assert sink.resolved_recording_path == target
+    assert fake.calls == [
+        ("init", ("inspect_robots", {})),
+        ("spawn", {"memory_limit": "2GiB", "port": 9876, "connect": False}),
+        (
+            "set_sinks",
+            (
+                _GrpcSinkTarget("rerun+http://127.0.0.1:9876/proxy"),
+                _FileSinkTarget(target),
+            ),
+        ),
+    ]
+
+
 def test_recording_dir_saves_derived_fresh_path_per_eval(tmp_path: Path) -> None:
     """Directory mode creates its parent and draws a task-slugged path for each eval."""
     recording_dir = tmp_path / "nested" / "recordings"

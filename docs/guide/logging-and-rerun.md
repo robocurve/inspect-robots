@@ -97,8 +97,9 @@ RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # live only, lossless
 
 File recording combines with either live mode through `set_sinks` in rerun-sdk
 0.24 or newer. With rerun-sdk 0.20 through 0.23, the sink warns once, continues
-the live view, and skips the teed file. Only `spawn=True` with `connect_url`, or
-`recording_path` with `recording_dir`, raises `ValueError`.
+the live view, and skips the teed file. Among the mode combinations, only
+`spawn=True` with `connect_url`, or `recording_path` with `recording_dir`,
+raises `ValueError`.
 
 For `inspect-robots run`, a live viewer or `--rerun-connect` saves a `.rrd` in
 the log directory by default. Replay it later with:

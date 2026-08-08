@@ -27,8 +27,11 @@ All notable changes to this project are documented here. The format is based on
 
 - Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
   the log directory by default. `--rerun-save`/`--no-rerun-save` and the
-  `rerun_save` config key control tee or record-only operation
-  ([plan 0059](plans/0059-rerun-rrd-tee.md)).
+  `rerun_save` config key control tee or record-only operation. For library
+  users, `RerunSink` now accepts a recording target combined with `spawn` or
+  `connect_url` (previously a `ValueError`) on rerun-sdk 0.24 or newer, and
+  adds `recording_dir` per-eval naming with the attached file exposed as
+  `resolved_recording_path` ([plan 0059](plans/0059-rerun-rrd-tee.md)).
 
 - Live HTML reports now include recent stored camera frames under a bounded
   serving budget, while completed reports retain the full frame budget. The
