@@ -1,6 +1,6 @@
 # 0063 — Composite side-by-side run video; "Raw transcript" rename
 
-- **Status:** draft (R1 resolved)
+- **Status:** draft (R2 resolved)
 - **Issue:** #347
 - **Critique rounds:** R1: 4 substantive (unscripted `autoplay loop` composite
   reversed 0060's pinned collapsed-trials-cost-nothing playback design; three
@@ -10,7 +10,13 @@
   rendered-camera-without-stream guard would be an uncoverable branch;
   `.system-message` cited as a generic-border keeper when it already zeroes
   the border, and the rename touches two selectors, not one) — all resolved
-  below.
+  below. R2: verified all R1 resolutions hold against the code; 3 substantive
+  (stale `autoplay` in the design intro contradicted the R1 playback
+  resolution; `_encode_camera_mp4` orphaned with its five wrapper-failure
+  tests uncovered — now explicitly deleted with the temp-file wrapper
+  extracted/shared and tests migrated, plus the full monkeypatch-family
+  retarget list; fourth doc site — the CLAUDE.md `_video.py` row's
+  "report-only wrapper" sentence) — all resolved below.
 
 ## Problem
 
@@ -32,10 +38,11 @@ in a report shared outside the team. It should say **"Raw transcript"**.
 video-eligible (completed log, ffmpeg present, budget not yet truncated), it
 encodes a **single MP4 whose frames are the per-step horizontal concatenation
 of every stored camera stream**, in the same left-to-right order as the
-per-turn frame rows. One `<video controls muted loop autoplay>` panel replaces
-the camera tabs; a caption row under the "Run video" head lists the camera
-names in composite order (`left · top · right`) so the video and the frame
-rows read identically.
+per-turn frame rows. One `<video controls muted loop preload="metadata">`
+panel (playback script-driven — see the HTML section) replaces the camera
+tabs; a caption row under the "Run video" head lists the camera names in
+composite order (`left · top · right`) so the video and the frame rows read
+identically.
 
 Camera order: first-appearance order of display cameras in
 `frame_ctx.rendered` (exactly what `_render_turn_frames` produced), then any
@@ -60,8 +67,16 @@ core loop is refactored so frame *production* is separated from *piping*:
   unchanged, `StreamResult` unchanged).
 - New `_encode_composite_mp4(ordered_streams, fps, ffmpeg) -> bytes | None`
   where `ordered_streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]]`.
-  Any failure degrades to `None` (caller falls back to flipbook tabs), same
-  posture as `_encode_camera_mp4`.
+  Any failure degrades to `None` (caller falls back to flipbook tabs).
+- **`_encode_camera_mp4` is deleted** — its only caller is the per-camera
+  encode path this plan removes, and no fallback encodes per-camera MP4s.
+  Its temp-file wrapper (mkstemp → encode → `read_bytes`, degrading every
+  failure to `None` without leaking the temp file) is **extracted and
+  shared**, so `_encode_composite_mp4` = wrapper(composite frame producer)
+  and the wrapper's four failure branches stay covered in one place: the
+  five existing `_encode_camera_mp4` tests (`tests/test_video.py` ~464-521 —
+  success, encode failure, launch failure, mkstemp `OSError`, `read_bytes`
+  `OSError`) migrate to `_encode_composite_mp4`.
 
 Composite frame construction:
 
@@ -188,7 +203,14 @@ steps**:
   flipbook tabs with the `video budget` chip.
 - Encode failure → flipbook tabs (re-pin existing test).
 - Stream never rendered in a turn still appears in the composite caption
-  order (replaces the `data-camera-tab="unseen_camera"` assertion).
+  order (replaces the `data-camera-tab="unseen_camera"` assertion). The
+  whole `_encode_camera_mp4` monkeypatch family retargets
+  `_encode_composite_mp4`:
+  `test_mp4_tier_includes_unreferenced_camera_and_only_active_autoplays`
+  (replaced wholesale — its two-payload/one-autoplay assertions are
+  composite-order + no-autoplay assertions now),
+  `test_suppressed_video_tiers_never_call_encoder`, and
+  `test_video_budget_without_flipbook_source_omits_camera_panel`.
 - `Raw transcript` label and `raw-transcript` class assertions replace the
   `llm-pov` ones (including the strip-helper regex at test line ~1142).
 
@@ -204,6 +226,8 @@ steps**:
   post-run upgrade paragraph (~28-31) that says a view pass "can replace
   each camera's flipbook with an embedded MP4" rewritten for the composite.
 - `src/inspect_robots/CLAUDE.md`: the `_html.py` row ("budgeted
-  completed-page MP4 embedding", "raw LLM POV dropdowns") and the `cli.py`
-  row ("eligible embedded MP4s") updated to composite-video and
-  Raw-transcript wording.
+  completed-page MP4 embedding", "raw LLM POV dropdowns"), the `cli.py`
+  row ("eligible embedded MP4s"), **and the `_video.py` row** (the
+  "report-only wrapper" sentence — the report wrapper is now the composite
+  encoder, and the report path degrades loudly as a whole video, not
+  per-stream) updated to composite-video and Raw-transcript wording.
