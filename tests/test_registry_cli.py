@@ -2753,7 +2753,10 @@ def test_view_directory_two_level_video_stamp_skips_then_upgrades(
 
     assert main(["view", str(logs), "--serve"]) == 0
     page = logs / "html" / "done.html"
-    assert page.stat().st_mtime_ns == source_ns - 1
+    # source_ns and the delta are both multiples of 100 ns, so the expected
+    # stamp survives NTFS's 100 ns timestamp tick exactly.
+    suppressed_ns = source_ns - cli._SUPPRESSED_STAMP_DELTA_NS
+    assert page.stat().st_mtime_ns == suppressed_ns
     capsys.readouterr()
 
     calls: list[bool] = []
@@ -2773,7 +2776,7 @@ def test_view_directory_two_level_video_stamp_skips_then_upgrades(
         refresh_seconds=60,
     )
     assert calls == []
-    assert page.stat().st_mtime_ns == source_ns - 1
+    assert page.stat().st_mtime_ns == suppressed_ns
 
     assert main(["view", str(logs)]) == 0
     assert calls == [False]

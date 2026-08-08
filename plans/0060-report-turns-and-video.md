@@ -192,13 +192,17 @@ common single-scene rig run this is the top of the report):
   work: a fresh page's natural mtime is render wall time, *newer* than the
   log, so the `<` gate freezes it regardless): a full-tier render stamps
   the page with the source log's mtime `S`; a suppressed-tier render
-  (serve pass or `--no-video`) stamps `S − 1ns`; and the gate compares the
-  page's mtime against the stamp *this pass would write*. Serve ticks skip
-  pages already at `S − 1ns` (no per-tick churn even with a live log
-  present), while the next eligible plain `view` sees `S − 1ns < S`,
-  re-renders with video, and stamps `S`. Pages rendered by pre-0059
-  versions carry the full-tier stamp and need `--force` to gain video
-  (documented; R3).
+  (serve pass or `--no-video`) stamps `S − 2µs`; and the gate compares the
+  page's mtime against the stamp *this pass would write*, minus 1µs of
+  slack (tick correction after CI: filesystems round timestamps to their
+  tick — 100ns on NTFS — so a 1ns delta floors below its own target and
+  re-renders suppressed pages on every Windows serve tick; the delta spans
+  many ticks and the slack absorbs the rounding). Serve ticks skip pages
+  already at the suppressed stamp (no per-tick churn even with a live log
+  present), while the next eligible plain `view` sees the suppressed stamp
+  below `S − 1µs`, re-renders with video, and stamps `S`. Pages rendered
+  by pre-0060 versions carry the full-tier stamp and need `--force` to
+  gain video (documented; R3).
 - **Budgeting:** embedded MP4s are charged to a dedicated
   `_VIDEO_BUDGET_BYTES = 30_000_000` per page of **encoded base64
   characters** (R1: matching the frame-budget precedent, which charges
@@ -272,7 +276,8 @@ common single-scene rig run this is the top of the report):
   temp-file read-back path (R1: today it never writes `out_path`);
   `Popen` raising `OSError` under the renderer → flipbook degrade and
   `view` exits 0 (R2); the two-level stamp — suppressed-tier pages stamp
-  `S − 1ns`, skip on serve ticks, upgrade and restamp `S` on the next
+  `S − 2µs` with 1µs gate slack, skip on serve ticks, upgrade and restamp
+  `S` on the next
   eligible plain pass (R3); video block nests
   inside the trial details after its summary; only the active camera tab
   autoplays (inactive paused, `preload="metadata"`).

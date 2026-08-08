@@ -159,6 +159,13 @@ _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
 DEFAULT_RERUN_CONNECT_URL = "rerun+http://127.0.0.1:9876/proxy"
 _SERVE_RERENDER_SECONDS = 60
 _SERVE_LIVE_RERENDER_SECONDS = 2
+# Two-level directory stamp (plan 0060): a suppressed-tier page (serve pass or
+# --no-video) is stamped this far below the source log's mtime so a later
+# full-tier pass can recognize and upgrade it. The delta spans many filesystem
+# timestamp ticks (NTFS rounds to 100 ns) and the gate compares with slack so
+# tick rounding can never turn a skip into a per-tick re-render.
+_SUPPRESSED_STAMP_DELTA_NS = 2_000
+_STAMP_TICK_SLACK_NS = 1_000
 _LIVE_FRAMES_BUDGET_MB = 8.0
 _serve_sleep = time.sleep
 
@@ -2175,12 +2182,20 @@ def _render_view_directory(
             source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
             suppressed_tier = args.serve or args.no_video
-            stamp_ns = max(0, source_stat.st_mtime_ns - (1 if suppressed_tier else 0))
+            # The suppressed-tier stamp sits a full 2 microseconds below the
+            # source mtime, and the gate allows 1 microsecond of slack:
+            # filesystems round timestamps to their tick (100 ns on NTFS), so
+            # a 1 ns delta would floor below its own target and re-render
+            # suppressed pages on every serve tick on Windows.
+            stamp_ns = max(
+                0,
+                source_stat.st_mtime_ns - (_SUPPRESSED_STAMP_DELTA_NS if suppressed_tier else 0),
+            )
             render_page = (
                 force
                 or log.status == "started"
                 or not page_path.exists()
-                or page_path.stat().st_mtime_ns < stamp_ns
+                or page_path.stat().st_mtime_ns < stamp_ns - _STAMP_TICK_SLACK_NS
             )
             if render_page:
                 if not quiet:
