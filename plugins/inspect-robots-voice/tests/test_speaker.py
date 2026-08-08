@@ -748,3 +748,35 @@ def test_blocking_timeout_degrades_once_and_keeps_drop_accounting(
 
     playback.release[0].set()
     sink.close()
+
+
+def test_speaker_active_playback_registration() -> None:
+    from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
+    engine = _FakeEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(
+        0, [_assistant(_tool_call("move", {"note": "test-playback-registration"}))]
+    )
+
+    # Wait for the worker to synthesize and start writing the chunk
+    assert playback.entered[0].wait(timeout=2.0)
+
+    # The speaker should be registered in _active_speakers during playback
+    with _speakers_lock:
+        assert sink in _active_speakers
+
+    # Release the playback write chunk
+    playback.release[0].set()
+    _wait_until(lambda: len(playback.writes) == 3)
+    sink.close()
+
+    # The speaker should be discarded from _active_speakers when done
+    with _speakers_lock:
+        assert sink not in _active_speakers
