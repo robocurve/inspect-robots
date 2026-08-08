@@ -165,7 +165,10 @@ Piped stdin and `--no-prompt` disable the channel.
 On an attended run with the console enabled and a real POSIX TTY, the session
 renders a two-row footer. The timer and controls repaint in place above a stable
 `> ` line that the session owns, so ticker updates never tear the operator's
-typing:
+typing. The framework appends `Esc ends the episode` to the footer status line
+and replaces any older end-gesture clause supplied by an embodiment. The hint
+is dropped only when the line is width-clipped, so embodiment status text never
+goes stale when the framework gesture changes:
 
 ```text
   [sent] you might wanna move the right arm out of the way

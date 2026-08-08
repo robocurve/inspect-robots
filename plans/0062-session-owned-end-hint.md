@@ -158,10 +158,14 @@ Two consequences handled with it:
   appended to the leftover ticker text. `prompt_verdict()` and `gate()` gain
   an idempotent `self.status(None)` first (plain-close is already idempotent),
   pinned by tests. This also hardens the pre-existing plain-fallback mode.
-  While touching this, `prompt_verdict()` also gains the `self._flush_fn()`
-  drain `gate()` already does: after an early footer teardown, stray mid-trial
-  keystrokes sit buffered in cooked stdin and would otherwise be consumed as
-  the verdict answer.
+  While touching this, `prompt_verdict()` also gains a stdin drain: after an
+  early footer teardown, stray mid-trial keystrokes sit buffered in cooked
+  stdin and would otherwise be consumed as the verdict answer. Implementation
+  deviation, deliberate: unlike `gate()` (whose flush faults on `OSError` by
+  design — a dead stdin means the readiness gate cannot work), the verdict
+  flush is best-effort (`suppress(OSError)`): a failed drain must not prevent
+  capturing a verdict, and pytest's pseudofile stdin raises
+  `io.UnsupportedOperation` (an `OSError`) from the default flush.
 - **Contract note.** The duck-typed `end_trial` contract widens from "called
   once in the per-trial finally" to "may be called mid-trial — including on a
   trial whose `begin_trial()` itself raised — and again in the finally"; the

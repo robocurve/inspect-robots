@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
 from inspect_robots.console import (
@@ -33,6 +34,8 @@ _NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
 _NO_TERMIOS_STATE = object()
+_END_HINT = "Esc ends the episode"
+_END_HINT_PHRASE = "ends the episode"
 # How long a trailing ESC must stay unanswered before a quiet poll reads it as a bare
 # Esc keypress (vim-style escape timeout). A single-poll grace would misread an
 # SSH-delayed arrow-key tail on a fast control loop; a tail delayed past this floor
@@ -300,9 +303,27 @@ class OperatorSession:
     def _clipped_input_text(self) -> str:
         return _clip_tail(self._editor.text(), self._width_fn() - 4)
 
-    def _clipped_status_text(self) -> str:
+    def _status_texts(self) -> tuple[str, str]:
+        """Return plugin text without a trailing gesture clause and with the owned hint.
+
+        Accepted costs: a ``" | "`` segment containing the phrase without being
+        gesture prose is dropped; a gesture mention mid-line, after a non-pipe
+        separator, or as a separator-less whole-line status renders a duplicated or
+        contradictory hint.
+        """
         assert self._status_line is not None
-        return _clip_tail(self._status_line, self._width_fn() - 1)
+        line = self._status_line
+        head, sep, tail = line.rpartition(" | ")
+        if sep and _END_HINT_PHRASE in tail:
+            line = head
+        if not line:
+            return "", _END_HINT
+        return line, f"{line} | {_END_HINT}"
+
+    def _clipped_status_text(self) -> str:
+        width = self._width_fn() - 1
+        stripped, composed = self._status_texts()
+        return composed if len(composed) <= width else _clip_tail(stripped, width)
 
     def _draw_input_row(self) -> None:
         self._write(f"\r\x1b[K> {self._clipped_input_text()}")
@@ -413,9 +434,11 @@ class OperatorSession:
     def end_trial(self) -> None:
         """Idempotently clear footer rows and restore the trial's exact terminal attributes.
 
-        Duck-typed hook (decision 1): ``rollout()`` calls this best-effort in the
-        per-trial ``finally``. A session that did not enter footer mode writes no
-        bytes and leaves plain-renderer state untouched.
+        Duck-typed hook (decision 1): ``rollout()`` may call this best-effort
+        mid-trial, including when ``begin_trial()`` itself raised, and again in the
+        per-trial ``finally``. Begin-before-end pairing is not guaranteed, so this
+        hook must remain idempotent. A session that did not enter footer mode writes
+        no bytes and leaves plain-renderer state untouched.
         """
         if not self._footer_active:
             return
@@ -522,7 +545,8 @@ class OperatorSession:
             self._write(f"\r  {self._status_line}   ")
 
     def gate(self, prompt: str, *, hint: str | None = None) -> None:
-        """Block for readiness after flushing stale input, or fault when stdin is dead."""
+        """Close sticky status, flush stale input, and block for readiness."""
+        self.status(None)
         try:
             self._flush_fn()
             self._input(prompt)
@@ -538,12 +562,15 @@ class OperatorSession:
     def prompt_verdict(self, record: TrialRecord, scene: Scene) -> None:
         """Capture or adopt the terminal operator's verdict on the trial record (R6).
 
+        Any sticky status is closed before output or prompting, and stale stdin is
+        drained best-effort before a verdict answer is read.
         A verdict already captured by the console is announced and preserved.
         A terminated episode with a definitive embodiment verdict adopts and announces
         that verdict instead of asking the operator to confirm the same outcome a second
         time. Prompted verdicts are followed by one optional, stripped, case-preserved
         grader note.
         """
+        self.status(None)
         from inspect_robots.transcript import operator_event
 
         del scene
@@ -567,6 +594,8 @@ class OperatorSession:
             # policy-requested stop from an embodiment truncation, so the
             # reason string carries the specifics.
             self.write_line(f"note: this trial ended early ({record.termination_reason!r})")
+        with suppress(OSError):
+            self._flush_fn()
         while True:
             try:
                 answer = self._input(_PROMPT).strip().lower()
