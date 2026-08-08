@@ -1,6 +1,6 @@
 # 0063 — Composite side-by-side run video; "Raw transcript" rename
 
-- **Status:** draft (R4 resolved)
+- **Status:** approved (R5 clean)
 - **Issue:** #347
 - **Critique rounds:** R1: 4 substantive (unscripted `autoplay loop` composite
   reversed 0060's pinned collapsed-trials-cost-nothing playback design; three
@@ -36,7 +36,10 @@
   assert the tuple boundary) plus five foldable nits (dedup of migrated
   failure tests, fake-encoder tuple shape, cli.md line range and tail
   sentence, ordering-fixture requirement, storage-write exactness) — all
-  resolved below.
+  resolved below. R5: clean — no substantive findings; every branch of the
+  encoder and html inventories mapped to a named test, browser/CSS/docs
+  claims verified byte-level; three wording nitpicks folded in without a
+  further round.
 
 ## Problem
 
@@ -152,14 +155,14 @@ Composite frame construction:
   <div class="run-media" data-trial="...">
     <div class="run-media-head">Run video</div>
     <div class="camera-order">left · top · right</div>
-    <!-- .camera-order gets a muted small-caption rule in _STYLES, matching
-         the page's other captions:
-         .camera-order { color: var(--muted); font-size: 12px;
-                         margin: 4px 0 8px; } -->
     <div class="camera-panel video-panel"><video controls muted loop
          preload="metadata" src="data:video/mp4;base64,..."></video></div>
   </div>
   ```
+
+  `.camera-order` gets a muted small-caption rule in `_STYLES`, matching
+  the page's other captions: `.camera-order { color: var(--muted);
+  font-size: 12px; margin: 4px 0 8px; }`.
 
 - **Playback cost stays governed by transcript visibility** (0060's pinned
   R2: "a collapsed trial costs nothing"). The composite `<video>` carries
@@ -192,10 +195,12 @@ Composite frame construction:
 - **Fallback** (no ffmpeg, encode failure, budget, live/serve pages): the
   existing per-camera flipbook tabs render exactly as today — the tab/JS
   machinery is retained for these paths.
-- **Cameras with rendered frames but no stored stream** cannot join the
-  composite; when the composite succeeds they are dropped from the run-media
-  block (their frames still appear in every turn row). When the composite is
-  not produced, today's behavior (flipbook panels for them) is unchanged.
+- **The success path renders only the composite** — no per-camera panels of
+  any kind. Within one render pass every rendered frame's `.npy` is a file
+  the stream glob enumerates, so "rendered camera without a stored stream"
+  cannot arise (do **not** write a filter loop for it — it would be
+  uncoverable); when the composite is not produced, today's flipbook
+  behavior is unchanged.
 - `_warn_video_degrade` reasons gain `encode failed for <trial> composite`.
 
 ### "LLM POV" → "Raw transcript"
@@ -240,8 +245,11 @@ steps**:
   union step → that step emits no composite frame (no duplicate).
 - Height padding with mixed resolutions; width is the sum.
 - Mid-stream shape change → `None`.
-- Wrapper failures (encode, launch, mkstemp, `read_bytes`) → `None`: these
-  are the migrated `_encode_camera_mp4` tests, not new ones.
+- Wrapper failures (launch, mkstemp, `read_bytes`) → `None`: these are the
+  migrated `_encode_camera_mp4` tests, not new ones. The migrated bad-shape
+  "encode failure" case now exercises the pre-wrapper probe branch; the
+  wrapper's own `result.error` branch is covered by the mid-stream
+  shape-change test.
 
 `tests/test_html_view.py`:
 - Video-eligible page renders exactly one `<video>` and no `camera-tab`
