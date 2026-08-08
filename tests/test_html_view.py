@@ -1461,6 +1461,49 @@ def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
     assert len(encoder_calls) == 2
 
 
+def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera below the two-frame flipbook floor vanishes quietly when its video is denied."""
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+
+    def one_frame_layout() -> list[dict[str, Any]]:
+        for camera, steps in (("aa", (0, 1)), ("bb", (0, 1)), ("zz", (0,))):
+            for step in steps:
+                _save_frame(tmp_path, camera, step, np.ones((2, 2, 3), dtype=np.uint8))
+        return [
+            {
+                "role": "user",
+                "content": [*_parts("aa", 0), *_parts("bb", 0), *_parts("zz", 0)],
+            },
+            {"role": "user", "content": [*_parts("aa", 1), *_parts("bb", 1)]},
+        ]
+
+    transcript = _chat(*one_frame_layout())
+
+    # Sticky denial: aa fills the budget, bb overflows, zz is denied with a
+    # sub-two-frame flipbook, exercising the panel-less sticky branch.
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: b"one")
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="sticky no panel",
+        frames_dir=tmp_path,
+        video_budget_bytes=len(base64.b64encode(b"one")),
+    )
+    assert 'data-camera-panel="zz"' not in document
+
+    # Encode failure: the same sub-two-frame camera cannot fall back to a
+    # flipbook either, exercising the panel-less failure branch.
+    monkeypatch.setattr("inspect_robots._video._encode_camera_mp4", lambda *_args: None)
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="failure no panel",
+        frames_dir=tmp_path,
+    )
+    assert 'data-camera-panel="zz"' not in document
+    assert 'data-camera-panel="aa"' in document
+
+
 @pytest.mark.parametrize(
     ("status", "serve_pass", "no_video"),
     [("started", False, False), ("success", True, False), ("success", False, True)],
