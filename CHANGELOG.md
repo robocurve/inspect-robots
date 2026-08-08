@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
+  instead of draining it at eval end
+  ([plan 0059](plans/0059-speak-operator-end-cut.md),
+  [#343](https://github.com/robocurve/inspect-robots/issues/343)).
+
 ### Changed
 
 - **Voice plugin (0.5.0):** the default `--speak` behavior now interrupts

@@ -15,6 +15,7 @@ import pytest
 import inspect_robots_voice._speaker as speaker_module
 from inspect_robots.log import EvalLog
 from inspect_robots.rollout import TrialRecord
+from inspect_robots.types import OPERATOR_END
 from inspect_robots_voice._speaker import SpeakerSink, extract_speech
 
 
@@ -157,6 +158,15 @@ def _log(status: str) -> EvalLog:
     return cast(EvalLog, SimpleNamespace(status=status))
 
 
+def _record(termination_reason: str | None = None) -> TrialRecord:
+    return TrialRecord(
+        scene_id="scene",
+        epoch=0,
+        seed=0,
+        termination_reason=termination_reason,
+    )
+
+
 def test_enqueue_is_spoken_in_order_with_volume_gain() -> None:
     engine = _FakeEngine()
     playback = _FakePlayback()
@@ -230,8 +240,127 @@ def test_trial_end_does_not_clear_just_enqueued_summary() -> None:
     sink.start()
     sink.log_policy_messages(4, [_assistant(_tool_call("done", {"summary": "all done"}))])
 
-    sink.on_trial_end(cast(TrialRecord, object()))
+    sink.on_trial_end(_record())
     _wait_until(lambda: engine.calls == ["all done"] and len(playback.writes) == 3)
+    sink.close()
+
+
+def _assert_operator_end_cuts_narration(mode: str | None = None) -> None:
+    engine = _FakeEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback) if mode is None else _sink(engine, playback, mode=mode)
+    sink.start()
+    sink.log_policy_messages(
+        0,
+        [
+            _assistant(
+                _tool_call("move", {"note": "inflight"}),
+                _tool_call("move", {"note": "queued"}),
+            )
+        ],
+    )
+    assert playback.entered[0].wait(timeout=1.0)
+    with sink._condition:
+        assert list(sink._queue) == ["queued"]
+        generation = sink._speech_gen
+
+    sink.on_trial_end(_record(OPERATOR_END))
+
+    with sink._condition:
+        assert list(sink._queue) == []
+        assert sink._speech_gen == generation + 1
+    playback.release[0].set()
+    finished = threading.Event()
+
+    def end_eval() -> None:
+        sink.on_eval_end(_log("success"))
+        finished.set()
+
+    end_thread = threading.Thread(target=end_eval)
+    end_thread.start()
+    assert finished.wait(timeout=1.0)
+    end_thread.join(timeout=1.0)
+
+    assert engine.calls == ["inflight"]
+    assert len(playback.writes) == 1
+    assert playback.close_calls == 1
+
+
+def test_operator_end_cuts_default_interrupt_narration() -> None:
+    _assert_operator_end_cuts_narration()
+
+
+def test_operator_end_cuts_queue_mode_narration() -> None:
+    _assert_operator_end_cuts_narration("queue")
+
+
+def test_operator_end_releases_blocking_waiter_after_abandonment() -> None:
+    class GateSecondSynthesis(_TaggedEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.second_entered = threading.Event()
+            self.second_release = threading.Event()
+
+        def synthesize(self, text: str) -> tuple[npt.NDArray[np.float32], int]:
+            samples, sample_rate = super().synthesize(text)
+            if len(self.calls) == 2:
+                self.second_entered.set()
+                self.second_release.wait(timeout=2.0)
+            return samples, sample_rate
+
+    engine = GateSecondSynthesis()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback, mode="blocking")
+    sink.start()
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "inflight"}))])
+    assert playback.entered[0].wait(timeout=1.0)
+    returned = threading.Event()
+
+    def enqueue_second() -> None:
+        sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "second"}))])
+        returned.set()
+
+    hook_thread = threading.Thread(target=enqueue_second)
+    hook_thread.start()
+    assert not returned.wait(timeout=0.02)
+    sink.on_trial_end(_record(OPERATOR_END))
+    assert not returned.wait(timeout=0.02)
+
+    playback.release[0].set()
+    assert returned.wait(timeout=1.0)
+    assert engine.second_entered.wait(timeout=1.0)
+    hook_thread.join(timeout=1.0)
+    closed = threading.Event()
+
+    def close_sink() -> None:
+        sink.close()
+        closed.set()
+
+    close_thread = threading.Thread(target=close_sink)
+    close_thread.start()
+    assert sink._stop.wait(timeout=1.0)
+    engine.second_release.set()
+    assert closed.wait(timeout=1.0)
+    close_thread.join(timeout=1.0)
+
+    assert engine.calls == ["inflight", "second"]
+    assert len(playback.writes) == 1
+
+
+@pytest.mark.parametrize("termination_reason", [None, "policy_stop"])
+def test_non_operator_trial_end_leaves_narration_untouched(
+    termination_reason: str | None,
+) -> None:
+    sink = _sink(_FakeEngine(), _FakePlayback(), mode="queue")
+    with sink._condition:
+        sink._queue.extend(["inflight", "summary"])
+        sink._speech_gen = 7
+
+    sink.on_trial_end(_record(termination_reason))
+
+    with sink._condition:
+        assert list(sink._queue) == ["inflight", "summary"]
+        assert sink._speech_gen == 7
     sink.close()
 
 
