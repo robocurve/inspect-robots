@@ -32,9 +32,10 @@ class Observation:
     change for long-horizon tasks). The rollout injects ``extra["env_step"]`` (int),
     ``extra["approvals"]`` (list of ``{"t": int, "detail": str | None}`` records for
     safety interventions since the previous ``act()`` call), and
-    ``extra["operator_messages"]`` (list of ``{"t": int, "text": str}`` records for
-    live feedback since the previous ``act()`` call) into the policy-facing observation
-    and reserves those keys; embodiments should not set them.
+    ``extra["operator_messages"]`` (list of
+    ``{"t": int, "text": str, "source": str}`` records for live feedback since the
+    previous ``act()`` call) into the policy-facing observation and reserves those keys;
+    embodiments should not set them.
     """
 
     images: Mapping[str, ImageArray] = field(default_factory=dict)
