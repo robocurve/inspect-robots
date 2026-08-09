@@ -315,6 +315,25 @@ def test_explicit_max_delta_overrides_declarations() -> None:
     assert approver.review(within_override, store) is within_override
 
 
+def test_explicit_max_delta_broadcasts_to_a_multidimensional_box() -> None:
+    # A bimanual (2, 7) box: an explicit max_delta must reach review() shaped
+    # like the action, exactly as the derived default does (#287).
+    shape = (2, 7)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    approver = DeltaLimitApprover(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.zeros(shape)), store)
+    out = approver.review(Action(data=np.full(shape, 5.0)), store)
+
+    assert np.allclose(out.data, np.full(shape, 0.1))
+    assert out.meta.get("delta_clamped") is True
+
+
 def test_stores_are_isolated_per_trial() -> None:
     approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
     trial_a: dict[str, object] = {}
@@ -333,6 +352,23 @@ def test_displacement_explicit_limit_intersects_box() -> None:
     out = approver.review(Action(data=np.array([0.08, -0.5])), {})
     # dim0: min(high=0.1, +0.05) → 0.05; dim1: max(low=0.0, -0.05) → 0.0.
     assert np.allclose(out.data, [0.05, 0.0])
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_displacement_explicit_limit_broadcasts_to_a_multidimensional_box() -> None:
+    # The displacement branch intersects the limit with the box at construction
+    # time, so a flat delta fails there instead of in review() (#287).
+    shape = (2, 7)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    approver = DeltaLimitApprover(space, max_delta=0.1)
+    out = approver.review(Action(data=np.full(shape, 5.0)), {})
+
+    assert np.allclose(out.data, np.full(shape, 0.1))
     assert out.meta.get("delta_clamped") is True
 
 

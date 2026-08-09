@@ -100,6 +100,52 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "plugin_policy" in registered("policy")
 
 
+def test_entrypoint_discovery_retries_after_a_failed_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising entry-point scan must not mark discovery done (#255)."""
+    calls: list[str] = []
+
+    def exploding_entry_points(*, group: str) -> list[object]:
+        calls.append(group)
+        raise RuntimeError("simulated broken entry-point scan")
+
+    monkeypatch.setattr(reg, "entry_points", exploding_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    # The flag stays clear, so the next call retries instead of silently
+    # serving a registry that is missing every plugin.
+    assert reg._loaded_entrypoints is False
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    assert len(calls) == 2
+
+
+def test_builtin_loading_retries_after_a_failed_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising builtins import must not mark builtins loaded (#255)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def exploding_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "inspect_robots._builtins":
+            raise RuntimeError("simulated broken builtins import")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "inspect_robots._builtins", raising=False)
+    monkeypatch.setattr(builtins, "__import__", exploding_import)
+    monkeypatch.setattr(reg, "_loaded_builtins", False)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", True)
+
+    with pytest.raises(RuntimeError, match="simulated broken builtins import"):
+        reg._ensure_loaded()
+    assert reg._loaded_builtins is False
+
+
 def test_cli_list_runs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "policies"]) == 0
     out = capsys.readouterr().out
@@ -687,9 +733,10 @@ def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Epochs' internal wording, so a regression to "--epochs: Epochs
+    # count must be >= 1" fails here instead of passing a substring check.
+    assert str(excinfo.value) == f"--epochs must be >= 1, got {epochs_value}"
 
 
 @pytest.mark.parametrize("epochs_value", ["0", "-1"])
@@ -708,10 +755,10 @@ def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> 
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
-    assert "cubepick-reach" in message  # the failing task name is named
+    # eval-set runs several tasks, so the message must name which one rejected
+    # the flag — pinned exactly for the same reason as the run case above.
+    expected = f"--epochs (task 'cubepick-reach') must be >= 1, got {epochs_value}"
+    assert str(excinfo.value) == expected
 
 
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
@@ -2879,6 +2926,21 @@ def test_view_serve_options_require_serve(
         main(["view", str(logs), flag, value])
 
 
+@pytest.mark.parametrize("port", ["-1", "65536", "99999"])
+def test_view_serve_rejects_out_of_range_port(port: str, tmp_path: Path) -> None:
+    """An out-of-range --port must exit cleanly, not raise OverflowError (#249)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["view", str(logs), "--serve", "--port", port])
+
+    # Pin the whole message: the flag states its own range instead of letting
+    # socket's "bind(): port must be 0-65535" surface as a traceback.
+    assert str(excinfo.value) == f"--port must be between 0 and 65535, got {port}"
+
+
 def test_view_serve_requires_logs_directory(tmp_path: Path) -> None:
     path = _write_log(_step_limit_log(), tmp_path, "run.json")
 
@@ -4337,6 +4399,30 @@ def test_adhoc_only_flags_rejected_with_task() -> None:
         main([*base, "--max-steps", "10"])
     with pytest.raises(SystemExit, match="--scorer only applies"):
         main([*base, "--scorer", "operator"])
+
+
+@pytest.mark.parametrize("max_steps_value", ["0", "-5"])
+def test_cli_run_zero_max_steps_exits_with_guided_error(max_steps_value: str) -> None:
+    """--max-steps 0 / negative must produce a guided SystemExit, not a raw traceback (#248)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "run",
+                "--instruction",
+                "wipe the table",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--max-steps",
+                max_steps_value,
+                "--no-prompt",
+            ]
+        )
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Task's internal wording, so a regression to
+    # "--max-steps: Task 'adhoc': max_steps must be >= 1" fails here.
+    assert str(excinfo.value) == f"--max-steps must be >= 1, got {max_steps_value}"
 
 
 def test_task_args_rejected_with_instruction() -> None:
@@ -6779,6 +6865,39 @@ def test_cli_eval_set_rejects_invalid_max_action_delta(value: str) -> None:
     """Same guard as run, exercised through eval-set's shared conflict check (#154)."""
     with pytest.raises(SystemExit, match="finite and > 0"):
         main(["eval-set", "cubepick-reach", "--max-action-delta", value])
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_run_rejects_invalid_fail_on_error(value: str, tmp_path: Path) -> None:
+    """An out-of-range --fail-on-error is rejected rather than silently reinterpreted.
+
+    A negative reaches ``errors >= fail_on_error`` and halts on the first error
+    like ``1``; a NaN fails every comparison and never halts. ``0`` stays valid —
+    it is the documented "never halt" value — so it is not in this list.
+    """
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+                "--fail-on-error",
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_eval_set_rejects_invalid_fail_on_error(value: str) -> None:
+    """Same guard as run, exercised through eval-set's shared conflict check."""
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(["eval-set", "cubepick-reach", "--fail-on-error", value])
 
 
 def test_cli_degraded_guardrails_warn_but_run(

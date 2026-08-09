@@ -17,7 +17,7 @@ def _write_config(config_home: Path, body: str) -> Path:
 
 
 def test_public_surface_is_exact_and_resolves() -> None:
-    assert defaults.__all__ == ["Defaults", "config_path", "load_defaults"]
+    assert defaults.__all__ == ["Defaults", "config_path", "init_dotenv", "load_defaults"]
     for name in defaults.__all__:
         assert hasattr(defaults, name)
 

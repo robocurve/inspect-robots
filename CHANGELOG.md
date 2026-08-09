@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
+  one shared helper, and its error reads `--epochs must be >= 1, got 0`
+  (naming the offending task in `eval-set`) instead of doubling the wording
+  as "--epochs: Epochs count must be >= 1, got 0" (#152).
+
 - **Core:** completed HTML reports now combine every stored camera stream into
   one side-by-side run video with a shared playhead. The raw policy exchange is
   renamed from LLM POV to Raw transcript, and dividers now separate transcript
@@ -45,6 +50,12 @@ All notable changes to this project are documented here. The format is based on
   [#333](https://github.com/robocurve/inspect-robots/issues/333)).
 
 ### Added
+
+- **Core:** composite-video HTML reports now restore the transcript rail
+  pioneered in [#272](https://github.com/robocurve/inspect-robots/pull/272),
+  with live step highlighting, click-to-seek turns, and an opt-in Follow toggle
+  ([plan 0065](plans/0065-composite-transcript-rail.md),
+  [#352](https://github.com/robocurve/inspect-robots/issues/352)).
 
 - Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
   the log directory by default. `--rerun-save`/`--no-rerun-save` and the
@@ -229,6 +240,8 @@ All notable changes to this project are documented here. The format is based on
   declared/range-derived limits while policy compatibility deliberately ignores
   embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
 
+- Public user-defaults API: `inspect_robots.defaults` now re-exports `init_dotenv` so plugins can load `.env` configurations without importing private modules (#301).
+
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
@@ -257,6 +270,14 @@ All notable changes to this project are documented here. The format is based on
   included (#194).
 
 ### Changed
+
+- **Capx plugin (0.3.0):** an unset `effort` now omits the field and inherits
+  the provider default (breaking; add `-P effort=low` to pin the previous
+  behavior). `effort=none` sends the true minimum (`reasoning_effort: "none"` on
+  the chat wire, `reasoning: {"effort": "none"}` on responses); programmatic
+  `None` normalizes to `"none"`. Only the chat and responses wires are affected,
+  the two capx speaks. This brings capx to the same contract the agent plugin
+  gained in 0.23.0 ([#319](https://github.com/robocurve/inspect-robots/issues/319)).
 
 - **Agent plugin (0.23.0):** an unset `effort` now omits the field and inherits
   the provider default (breaking; add `-P effort=low` to pin the previous
@@ -293,6 +314,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`inspect-robots run --instruction ... --max-steps 0` (or negative) no longer
+  crashes with a raw `ConfigError` traceback.** The flag is now range-checked up
+  front and exits with a guided `--max-steps must be >= 1, got 0` message,
+  matching how the other numeric run flags are validated (#248).
+
 - `inspect-robots setup` now treats a by-id camera name as ambiguous whenever
   another physical camera can claim the same udev identity, including
   same-model cameras with missing serials. It lists and stores port-stable
@@ -303,6 +329,21 @@ All notable changes to this project are documented here. The format is based on
   serials are shared or missing. It emits port-pinned `KERNELS` rules instead
   when the adapters sit on distinct USB ports
   ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
+
+- **Two `SmoothingController`s in one chain no longer corrupt each other.** The
+  exponential-moving-average state lived under a single module-level store key,
+  so stacking two smoothing layers made each smooth against the other's last
+  write rather than its own — silently emitting neither layer's intended action.
+  The key is now per instance. `_INFER_KEY` stays shared because it is only
+  appended to; this was the one destructively written controller state (#296).
+
+- **`Task` now rejects duplicate scene ids.** Scene ids become per-trial
+  identity downstream — the rollout builds `"{scene.id}-e{epoch}"`, which
+  `FrameStore` turns into a filename — so two scenes sharing an id wrote to the
+  same frame paths and the second silently overwrote the first, losing half a
+  run's stored frames while the log still reported both trials. The same
+  assumption keys the summarize digest's transcripts. Construction now raises
+  `ConfigError` naming the duplicate id (#289).
 
 - `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
   and unplug-identifies cameras as physical USB devices. A camera whose color
@@ -316,6 +357,23 @@ All notable changes to this project are documented here. The format is based on
   the section listing was printed, so a device attached mid-wizard is still
   identifiable.
 
+- **Agent plugin:** a camera whose name contains an apostrophe is no longer
+  re-photographed within one observation. The revealed-camera set was recovered
+  by parsing the rendered `camera {name!r}:` label assuming single quotes, but
+  `repr()` switches to double quotes for such a name, so the label never matched,
+  the revealed set was emptied, and a second `take_pic` re-sent the identical
+  frame instead of being refused — extra image tokens, and a transcript implying
+  the model saw a fresh view. The label prefix is now one shared constant read by
+  both the writer and the reader (#294).
+
+- **`DeltaLimitApprover` now honors an explicit `max_delta` on a
+  multi-dimensional action space.** The validated delta stayed flat `(dim,)`
+  while the derived default was reshaped to the box shape, so a non-1-D box
+  (such as a bimanual `(2, 7)`) either raised a numpy broadcast `ValueError`
+  mid-rollout in an absolute mode, or in a displacement mode made the CLI's
+  guardrail builder skip the limiter altogether and apply only the box bounds
+  that `--max-action-delta` was meant to tighten (#287).
+
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation
   history. Dropping it made Gemini reject any request ending on a tool
@@ -323,15 +381,36 @@ All notable changes to this project are documented here. The format is based on
   "Function call is missing a thought_signature", erroring the trial (#229,
   #230). Non-Gemini requests are unchanged.
 
+
+- **`inspect-robots view --serve --port N` no longer crashes with an uncaught
+  `OverflowError` when `N` is outside 0-65535.** The port is range-checked
+  alongside the existing `--port requires --serve` guard; an in-range but
+  unavailable port keeps its current `OSError` handling (#249).
+
 - **`fail_on_error` as a proportion no longer halts on the first error.** The
   ratio was computed against the trials completed so far, so the first errored
   trial was always 1/1 = 100% and tripped any threshold below 1, making
   `0<x<1` behave identically to `True`. The denominator is now the planned
   trial count (#254).
 
+- **A long task name no longer costs a finished run its log.** `JsonLogSink`
+  derives the filename from the task name without capping its length, so a name
+  past roughly 238 characters pushed the path over the 255-byte limit and
+  `on_eval_end` raised `OSError: File name too long` after every trial had
+  already run — leaving the log directory empty and the results unrecoverable.
+  The slug is now capped; the full name is still recorded in the log body, and
+  the filename's uuid suffix keeps runs distinct (#292).
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
+
+
+- **A failed component-discovery pass no longer leaves the registry
+  permanently empty.** `_ensure_loaded` set its `_loaded_builtins` /
+  `_loaded_entrypoints` flags before the work they guard, so a raising builtins
+  import or entry-point scan made every later call take the "already loaded"
+  path and serve zero components instead of retrying or re-raising (#255).
 
 - **`inspect`/`view` no longer crash on a log's own sanitized non-finite
   metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
@@ -339,6 +418,12 @@ All notable changes to this project are documented here. The format is based on
   with `.4g`, which raises on `None`. A log the sink itself wrote could crash
   `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
   four render sites now show `n/a` for a null metric (#253).
+
+- **`--fail-on-error` now rejects out-of-range values instead of silently
+  reinterpreting them.** A negative reached `errors >= fail_on_error` and halted
+  on the first error exactly like `1`, and a NaN failed every comparison so the
+  run never halted at all. Both are now a guided CLI error; `0` remains the
+  documented "never halt" value. Follow-up to #254.
 
 ### Changed
 
