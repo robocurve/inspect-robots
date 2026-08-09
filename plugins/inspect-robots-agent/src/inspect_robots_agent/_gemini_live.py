@@ -74,7 +74,7 @@ class GeminiLiveClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         """Return one assistant turn after streaming only the unseen suffix."""
         del reasoning_effort

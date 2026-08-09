@@ -29,10 +29,18 @@ if TYPE_CHECKING:
     from inspect_robots.types import Action, Observation, StepResult
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+# Leaves room for the filename's "_" + 8 hex chars + ".json.tmp" suffix inside a
+# 255-byte name, with headroom for filesystems that allow less.
+_SLUG_MAX = 200
 
 
 def _slug(name: str) -> str:
-    return _SLUG_RE.sub("-", name.lower()).strip("-") or "eval"
+    # Capped so the derived filename stays inside the 255-byte limit even for a
+    # long task name: on_eval_end runs after every trial, so an ENAMETOOLONG
+    # there would lose the whole finished run. The name itself is preserved in
+    # the log body, and the filename's uuid suffix keeps distinct runs distinct
+    # even when two long names truncate to the same slug.
+    return _SLUG_RE.sub("-", name.lower()).strip("-")[:_SLUG_MAX].strip("-") or "eval"
 
 
 def _sanitize(obj: object) -> object:

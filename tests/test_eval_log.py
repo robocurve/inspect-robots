@@ -109,6 +109,15 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.eval.max_steps == 1200
 
 
+def test_operator_messages_without_source_remain_readable(tmp_path: Path) -> None:
+    path = tmp_path / "old-operator-message.json"
+    path.write_text(json.dumps(_golden_log().to_dict()), encoding="utf-8")
+
+    restored = read_eval_log(str(path))
+
+    assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
+
+
 def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     # Older schema-v1 logs missing additive fields must remain readable.
     data = _golden_log().to_dict()
@@ -203,7 +212,8 @@ def test_operator_feedback_appears_in_digest_and_escaped_html() -> None:
     document = render_html(log, title="operator feedback")
 
     assert "operator feedback: keep left <now>" in digest
-    assert "Operator feedback" in document
+    assert document.index("Operator feedback") > document.index("Trial 0 transcript")
+    assert 'class="feedback-chip"' not in document
     assert "keep left &lt;now&gt;" in document
     assert "keep left <now>" not in document
 

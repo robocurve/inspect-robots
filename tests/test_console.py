@@ -7,7 +7,14 @@ from collections.abc import Callable
 
 import pytest
 
-from inspect_robots.console import USAGE, ConsolePoll, EndRequest, OperatorConsole, OperatorInput
+from inspect_robots.console import (
+    USAGE,
+    USAGE_END_ONLY,
+    ConsolePoll,
+    EndRequest,
+    OperatorConsole,
+    OperatorInput,
+)
 
 
 def _scripted_source(
@@ -36,7 +43,7 @@ def test_result_values_are_frozen_with_empty_defaults() -> None:
     poll = ConsolePoll()
 
     assert end == EndRequest(verdict=None, note=None)
-    assert poll == ConsolePoll(messages=(), end=None)
+    assert poll == ConsolePoll(messages=(), end=None, sources=())
     with pytest.raises(dataclasses.FrozenInstanceError):
         end.verdict = "y"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -49,10 +56,51 @@ def test_feedback_preserves_spacing_apart_from_the_newline() -> None:
     assert console.poll() == ConsolePoll(messages=("  move farther left  ",))
 
 
-def test_whitespace_only_line_requests_an_unscored_end() -> None:
-    console = _console(["  \t  \n"])
+def test_whitespace_only_line_prints_usage_reminder_without_ending() -> None:
+    output: list[str] = []
+    console = _console(["  \t  \n"], output)
+
+    assert console.poll() == ConsolePoll()
+    assert output == [USAGE]
+
+
+def test_escape_sentinel_line_requests_an_unscored_end() -> None:
+    # str.strip() removes the C0 controls \x1c-\x1f but not \x1b, so the sentinel
+    # survives parsing even with surrounding whitespace.
+    console = _console(["  \x1b  \n"])
 
     assert console.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_stop_command_requests_an_unscored_end() -> None:
+    console = _console(["/stop\n"])
+
+    assert console.poll() == ConsolePoll(end=EndRequest())
+
+
+def test_stop_command_trailing_text_becomes_a_message_not_a_note() -> None:
+    console = _console(["/STOP   wrap it up   \n"])
+
+    assert console.poll() == ConsolePoll(messages=("wrap it up",), end=EndRequest())
+
+
+def test_usage_reminder_prints_at_most_once_per_poll() -> None:
+    output: list[str] = []
+    console = _console(["\n\n/oops\n"], output)
+
+    assert console.poll() == ConsolePoll()
+    assert output == [USAGE]
+
+
+def test_console_prints_its_configured_usage_string() -> None:
+    output: list[str] = []
+    readable, read = _scripted_source(["\n"])
+    console = OperatorConsole(
+        readable=readable, read=read, output_fn=output.append, usage=USAGE_END_ONLY
+    )
+
+    assert console.poll() == ConsolePoll()
+    assert output == [USAGE_END_ONLY]
 
 
 @pytest.mark.parametrize(
@@ -110,7 +158,7 @@ def test_end_then_feedback_returns_both_from_one_poll() -> None:
 
 def test_first_end_request_wins_while_later_lines_still_parse() -> None:
     output: list[str] = []
-    console = _console(["\n/n later verdict\n/oops\nafter end\n"], output)
+    console = _console(["/stop\n/n later verdict\n/oops\nafter end\n"], output)
 
     assert console.poll() == ConsolePoll(messages=("after end",), end=EndRequest())
     assert output == [USAGE]
