@@ -345,6 +345,15 @@ All notable changes to this project are documented here. The format is based on
   the section listing was printed, so a device attached mid-wizard is still
   identifiable.
 
+- **Agent plugin:** a camera whose name contains an apostrophe is no longer
+  re-photographed within one observation. The revealed-camera set was recovered
+  by parsing the rendered `camera {name!r}:` label assuming single quotes, but
+  `repr()` switches to double quotes for such a name, so the label never matched,
+  the revealed set was emptied, and a second `take_pic` re-sent the identical
+  frame instead of being refused — extra image tokens, and a transcript implying
+  the model saw a fresh view. The label prefix is now one shared constant read by
+  both the writer and the reader (#294).
+
 - **`DeltaLimitApprover` now honors an explicit `max_delta` on a
   multi-dimensional action space.** The validated delta stayed flat `(dim,)`
   while the derived default was reshaped to the box shape, so a non-1-D box
