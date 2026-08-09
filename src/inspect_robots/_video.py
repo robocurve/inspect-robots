@@ -370,8 +370,8 @@ def _encode_composite_mp4(
     ordered_streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]],
     fps: float,
     ffmpeg: str,
-) -> tuple[bytes, tuple[str, ...]] | None:
-    """Return one side-by-side report MP4 and its surviving stream keys.
+) -> tuple[bytes, tuple[str, ...], tuple[int, ...]] | None:
+    """Return a report MP4, its surviving stream keys, and emitted steps.
 
     Each stream's frames must be step-sorted (``discover_streams`` order).
     That ordering is what lets the unguarded first ``next(produced)`` below
@@ -394,12 +394,13 @@ def _encode_composite_mp4(
         return None
 
     max_height = max(shape[0] for _key, _frames, shape in probed)
-    timeline = sorted({step for _key, frames, _shape in probed for step, _path in frames})
+    union_steps = sorted({step for _key, frames, _shape in probed for step, _path in frames})
+    timeline: list[int] = []
 
     def composite_frames() -> Iterator[npt.NDArray[np.uint8]]:
         held = [np.zeros(shape, dtype=np.uint8) for _key, _frames, shape in probed]
         by_step = [dict(frames) for _key, frames, _shape in probed]
-        for step in timeline:
+        for step in union_steps:
             contributed = False
             for index, ((_key, _frames, shape), paths) in enumerate(
                 zip(probed, by_step, strict=True)
@@ -421,6 +422,7 @@ def _encode_composite_mp4(
             padded = [
                 np.pad(frame, ((0, max_height - frame.shape[0]), (0, 0), (0, 0))) for frame in held
             ]
+            timeline.append(step)
             yield np.hstack(padded)
 
     produced = composite_frames()
@@ -433,4 +435,4 @@ def _encode_composite_mp4(
     )
     if encoded is None:
         return None
-    return encoded, tuple(key for key, _frames, _shape in probed)
+    return encoded, tuple(key for key, _frames, _shape in probed), tuple(timeline)

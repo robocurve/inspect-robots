@@ -46,6 +46,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** composite-video HTML reports now restore the transcript rail
+  pioneered in [#272](https://github.com/robocurve/inspect-robots/pull/272),
+  with live step highlighting, click-to-seek turns, and an opt-in Follow toggle
+  ([plan 0065](plans/0065-composite-transcript-rail.md),
+  [#352](https://github.com/robocurve/inspect-robots/issues/352)).
+
 - Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
   the log directory by default. `--rerun-save`/`--no-rerun-save` and the
   `rerun_save` config key control tee or record-only operation. For library
