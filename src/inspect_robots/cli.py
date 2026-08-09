@@ -1387,6 +1387,14 @@ def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
         # space can't support) downgrade it to a warning and run with weaker
         # guardrails than the operator explicitly asked for.
         raise SystemExit(f"--max-action-delta must be finite and > 0, got {args.max_action_delta}")
+    if args.fail_on_error is not None and not (
+        math.isfinite(args.fail_on_error) and args.fail_on_error >= 0
+    ):
+        # Out-of-range values are not inert: a negative reaches
+        # ``errors >= fail_on_error`` and silently halts on the first error like
+        # ``1``, and a NaN fails every comparison and silently never halts.
+        # 0 stays valid — it is the documented "never halt" value.
+        raise SystemExit(f"--fail-on-error must be finite and >= 0, got {args.fail_on_error}")
 
 
 def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _ResolvedComponents:

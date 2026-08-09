@@ -6866,6 +6866,39 @@ def test_cli_eval_set_rejects_invalid_max_action_delta(value: str) -> None:
         main(["eval-set", "cubepick-reach", "--max-action-delta", value])
 
 
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_run_rejects_invalid_fail_on_error(value: str, tmp_path: Path) -> None:
+    """An out-of-range --fail-on-error is rejected rather than silently reinterpreted.
+
+    A negative reaches ``errors >= fail_on_error`` and halts on the first error
+    like ``1``; a NaN fails every comparison and never halts. ``0`` stays valid —
+    it is the documented "never halt" value — so it is not in this list.
+    """
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+                "--fail-on-error",
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_eval_set_rejects_invalid_fail_on_error(value: str) -> None:
+    """Same guard as run, exercised through eval-set's shared conflict check."""
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(["eval-set", "cubepick-reach", "--fail-on-error", value])
+
+
 def test_cli_degraded_guardrails_warn_but_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
