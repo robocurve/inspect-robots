@@ -45,6 +45,8 @@ _STYLES = """
   --red-bg: #fbecec;
   --grey: #626a75;
   --grey-bg: #eef0f2;
+  --amber: #8a5700;
+  --amber-bg: #fff5d9;
   --neutral: #45546a;
   --neutral-bg: #edf1f6;
 }
@@ -65,6 +67,8 @@ _STYLES = """
     --red-bg: #492323;
     --grey: #c0c5cd;
     --grey-bg: #343943;
+    --amber: #ffd484;
+    --amber-bg: #3b2d12;
     --neutral: #b9c9df;
     --neutral-bg: #293342;
   }
@@ -125,6 +129,7 @@ a { color: var(--link); }
   white-space: nowrap;
 }
 .status-completed { color: var(--green); background: var(--green-bg); }
+.status-running { color: var(--amber); background: var(--amber-bg); }
 .status-error { color: var(--red); background: var(--red-bg); }
 .status-cancelled { color: var(--grey); background: var(--grey-bg); }
 .status-neutral { color: var(--neutral); background: var(--neutral-bg); }
@@ -143,9 +148,9 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _number(value: int | float) -> str:
+def _number(value: int | float | None) -> str:
     """Format numeric log values compactly before their interpolation boundary."""
-    return f"{value:.4g}"
+    return "n/a" if value is None else f"{value:.4g}"
 
 
 def _link(page: str | None, content: str) -> str:
@@ -209,8 +214,8 @@ def render_index(
     )
     refresh = ""
     if refresh_seconds is not None:
-        # A full refresh resets filter focus/caret once a minute; accepted for
-        # v1 over the extra complexity of a fetch-and-swap index update.
+        # A full refresh resets filter focus/caret at the selected interval;
+        # accepted over the extra complexity of a fetch-and-swap index update.
         refresh = f'<meta http-equiv="refresh" content="{refresh_seconds}">\n'
     return f"""<!doctype html>
 <html lang="en">

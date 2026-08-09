@@ -21,6 +21,9 @@ a read-back guarantee: a newer Inspect Robots always reads an older log.
 Pressing Ctrl-C during a rollout writes a log with `status: "cancelled"` and
 everything gathered so far, including the partial trial record and transcript.
 
+To follow completed trials and the current policy conversation in a browser,
+see [Watching a run live](live-view.md).
+
 ## Sinks
 
 A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecycle
@@ -28,6 +31,7 @@ A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecy
 `on_eval_end`). Builtins:
 
 - [`JsonLogSink`](/api/#inspect_robots.logging.json_log.JsonLogSink): the default; the canonical JSON record.
+- [`LiveLogSink`](/api/#inspect_robots.logging.live_log.LiveLogSink): a transient, schema-valid running snapshot.
 - [`RerunSink`](/api/#inspect_robots.logging.rerun_sink.RerunSink): optional, lazily imported.
 
 Passing `sinks=` replaces the default `JsonLogSink`, it does not add to it.
@@ -39,6 +43,9 @@ from inspect_robots.logging import JsonLogSink, RerunSink
 eval(task, policy, embodiment, sinks=[JsonLogSink("logs"), RerunSink("run.rrd")])
 ```
 
+`eval_set(..., sinks=...)` reuses the same sink instances across its sequential
+task runs. Caller-supplied sinks must reset their run state in `on_eval_start`.
+
 ## Rerun visualization
 
 `RerunSink` streams camera images, proprioception, action vectors, reward, and
@@ -46,10 +53,13 @@ termination markers to a [Rerun](https://github.com/rerun-io/rerun) recording. I
 imports `rerun-sdk` lazily: if it isn't installed, the sink warns once and
 no-ops, so core never depends on it. Install with `pip install "inspect-robots[rerun]"`.
 
-The sink lays out labeled joint series per arm, with commanded `action/*` and
-measured `state/*` together for each side and cameras, the LLM transcript, and
-reward alongside. Embodiments without `dim_labels` get one combined joints
-plot. The layout is re-sent at each trial boundary so it follows the live trial,
+The sink lays out two rows: camera views in left/top/right name order across
+the top, then a tabbed text panel (latest LLM message up front, the full
+transcript and the reward series behind tabs) beside one plot per arm, with
+commanded `action/*` and measured `state/*` together for each side.
+Embodiments without `dim_labels` get one combined joints plot; runs without
+cameras send only the second row.
+The layout is re-sent at each trial boundary so it follows the live trial,
 which resets viewer tweaks then; a single-trial `run` sends it exactly once.
 The layout is built from the declared spaces, so entities logged outside them
 (an undeclared state key, or a camera whose runtime name differs from its
@@ -64,7 +74,10 @@ instead of control: camera frames are dropped first, so scalar plots stay
 complete, then whole steps, and the totals are reported as a `RuntimeWarning`
 when the eval ends. The queue is drained at every trial boundary (bounded by
 `flush_timeout`), so an eval that aborts mid-run loses at most the current
-trial's queued tail; the JSON eval log is synchronous and never affected.
+trial's queued tail. A live viewer and its teed `.rrd` receive the same worker
+stream, so viewer-paced shedding reaches the file too. The `.rrd` records what
+the viewer received, not a guaranteed-complete record. The JSON eval log is
+synchronous and never affected.
 
 Camera frames are JPEG-compressed by default (`jpeg_quality=75`), which cuts
 viewer bandwidth by an order of magnitude. Pass `jpeg_quality=None` for
@@ -74,15 +87,31 @@ at stake either way: scoring reads from the `FrameStore` side-car, not from
 Rerun.
 
 ```python
-RerunSink("run.rrd")                   # record to a file, view later
-RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
-RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
-RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
+RerunSink("run.rrd")                              # record one fixed file
+RerunSink(recording_dir="logs")                  # fresh task_slug_xxxxxxxx.rrd per eval
+RerunSink(spawn=True, recording_dir="logs")      # local viewer plus file
+RerunSink(spawn=True, spawn_port=9877, recording_dir="logs")
+RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy", recording_dir="logs")
+RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # live only, lossless
 ```
 
-The three modes are mutually exclusive: rerun's `save`/`spawn`/`connect_grpc`
-calls each replace the SDK's global sink, so combining them raises `ValueError`
-rather than silently dropping a stream.
+File recording combines with either live mode through `set_sinks` in rerun-sdk
+0.24 or newer. With rerun-sdk 0.20 through 0.23, the sink warns once, continues
+the live view, and skips the teed file. Among the mode combinations, only
+`spawn=True` with `connect_url`, or `recording_path` with `recording_dir`,
+raises `ValueError`.
+
+For `inspect-robots run`, a live viewer or `--rerun-connect` saves a `.rrd` in
+the log directory by default. Replay it later with:
+
+```bash
+rerun logs/task_slug_xxxxxxxx.rrd
+```
+
+Use `--no-rerun-save` for a live-only run, or set `rerun_save = false` under
+`[defaults]` to make that the rig default. Use explicit `--rerun-save` without
+a live-view option to record only; `--rerun-save --no-rerun` also selects this
+headless mode. The CLI prints the resolved `.rrd` path after a completed eval.
 
 ### Live transcript in the viewer
 
@@ -106,7 +135,9 @@ viewer on your own machine instead and stream to it: `rerun` on your laptop,
 `ssh -R 9876:localhost:9876 <robot>` for the tunnel, then
 `inspect-robots run ... --rerun-connect` (a bare `--rerun-connect` targets the
 tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
-and SDK versions must match for live connections.
+and SDK versions must match for live connections. For a replayable file without
+a live connection, use `--rerun-save`. Hosts driving two rigs give each config
+its own `rerun_port` so each run spawns its own viewer window.
 
 ## Frame side-cars
 
@@ -163,7 +194,7 @@ The agent policy records **exactly what each LLM call sent and received** —
 by default, for every run. The saved transcript alone is not that object:
 outgoing requests carry the tool schemas, only the newest `image_horizon`
 frames (older ones become elision stubs), rendered depth composites, and, on
-the Anthropic wire, `cache_control` breakpoints — none of which survive into
+the Messages wire, `cache_control` breakpoints — none of which survive into
 `policy_transcripts`. Wire capture stores the real thing, per attempt,
 including retries and the failed calls a run died on.
 

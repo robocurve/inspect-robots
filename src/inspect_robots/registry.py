@@ -1,4 +1,4 @@
-"""Registry and decorators for tasks, policies, embodiments, scorers, and sinks.
+"""Registry and decorators for framework extension components.
 
 Mirrors Inspect AI's extension model: components register by name via decorators
 and are resolved from strings (so ``eval(policy="scripted")`` and the CLI work).
@@ -8,7 +8,8 @@ being imported first.
 
 Entry-point groups:
 ``inspect_robots.tasks``, ``inspect_robots.policies``, ``inspect_robots.embodiments``,
-``inspect_robots.scorers``, ``inspect_robots.sinks``.
+``inspect_robots.scorers``, ``inspect_robots.graders``, ``inspect_robots.sinks``,
+``inspect_robots.operator_inputs``.
 """
 
 from __future__ import annotations
@@ -18,15 +19,25 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
-Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "sink"
-KINDS: tuple[Kind, ...] = ("task", "policy", "embodiment", "scorer", "sink")
+Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
+KINDS: tuple[Kind, ...] = (
+    "task",
+    "policy",
+    "embodiment",
+    "scorer",
+    "grader",
+    "sink",
+    "operator_input",
+)
 
 _GROUPS: dict[Kind, str] = {
     "task": "inspect_robots.tasks",
     "policy": "inspect_robots.policies",
     "embodiment": "inspect_robots.embodiments",
     "scorer": "inspect_robots.scorers",
+    "grader": "inspect_robots.graders",
     "sink": "inspect_robots.sinks",
+    "operator_input": "inspect_robots.operator_inputs",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -71,18 +82,31 @@ def scorer(name: str | None = None) -> Callable[[F], F]:
     return register("scorer", name)
 
 
+def grader(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register a grader factory under ``name``."""
+    return register("grader", name)
+
+
 def sink(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a log-sink factory under ``name``."""
     return register("sink", name)
 
 
+def operator_input(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register an operator-input factory under ``name``."""
+    return register("operator_input", name)
+
+
 def _ensure_loaded() -> None:
     global _loaded_builtins, _loaded_entrypoints
     if not _loaded_builtins:
-        _loaded_builtins = True
+        # Set the flag only once the import has succeeded: a raising import that
+        # left it set would make every later call take the "already loaded" path
+        # and serve an empty registry instead of re-raising.
         import inspect_robots._builtins  # noqa: F401  (registers builtin components)
+
+        _loaded_builtins = True
     if not _loaded_entrypoints:
-        _loaded_entrypoints = True
         for kind, group in _GROUPS.items():
             for ep in entry_points(group=group):
                 try:
@@ -98,6 +122,7 @@ def _ensure_loaded() -> None:
                     )
                     continue
                 _FACTORIES[kind].setdefault(ep.name, factory)
+        _loaded_entrypoints = True
 
 
 def registered(kind: Kind) -> dict[str, Callable[..., Any]]:

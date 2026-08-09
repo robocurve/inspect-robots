@@ -1,9 +1,9 @@
-"""OpenAI-compatible chat client + provider resolution (plan 0008 §4a).
+"""Wire-neutral provider resolution and the Chat Completions client.
 
-No provider SDKs: one ``httpx`` client speaking the chat-completions wire
-format covers OpenRouter, OpenAI, local vLLM/Ollama, and Anthropic's
-OpenAI-compat endpoint — the same "speak the protocol, don't import the
-package" doctrine as the xpolicylab plugin.
+No provider SDKs: small ``httpx`` clients speak the selected protocol while
+this module resolves direct providers, OpenRouter, and explicit endpoints.
+Chat Completions still covers OpenRouter, OpenAI, local vLLM/Ollama, and
+provider compatibility endpoints (plan 0008 §4a).
 """
 
 from __future__ import annotations
@@ -27,14 +27,16 @@ _OPENROUTER_KEY = "OPENROUTER_API_KEY"
 
 @dataclass(frozen=True)
 class _DirectProvider:
-    """A provider with a stable OpenAI-compatible endpoint and conventional key name."""
+    """A provider with a stable endpoint, native wire, and conventional key name."""
 
     base_url: str
     key_env: str
+    wire: str = "chat"
+    keep_prefix: bool = False
 
 
 # OpenRouter-style prefixes that resolve to the provider's own endpoint when its
-# key is present. The prefix is stripped: these endpoints want the bare model id.
+# key is present. Prefixes are stripped unless an entry requests the full id.
 _DIRECT_PROVIDERS: dict[str, _DirectProvider] = {
     "anthropic": _DirectProvider("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
     "openai": _DirectProvider("https://api.openai.com/v1", "OPENAI_API_KEY"),
@@ -46,6 +48,12 @@ _DIRECT_PROVIDERS: dict[str, _DirectProvider] = {
     "groq": _DirectProvider("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
     "mistralai": _DirectProvider("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
     "deepseek": _DirectProvider("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+    "thinkingmachines": _DirectProvider(
+        "https://tinker.thinkingmachines.dev/services/tinker-prod/anthropic/api/v1",
+        "TINKER_API_KEY",
+        wire="messages",
+        keep_prefix=True,
+    ),
 }
 
 
@@ -62,21 +70,50 @@ def _has_openrouter_variant(model_id: str) -> bool:
     return bool(sep) and suffix in _OPENROUTER_VARIANTS
 
 
-def _provider_key_hints() -> str:
-    """One ``$KEY for prefix/*`` hint per distinct key, for the guided error."""
+def _provider_key_hints(native_wires: frozenset[str]) -> str:
+    """Name keys only for direct providers whose native wire the caller supports."""
     seen: dict[str, str] = {}
     for prefix, direct in _DIRECT_PROVIDERS.items():
+        if direct.wire not in native_wires:
+            continue
         seen.setdefault(direct.key_env, prefix)
     return ", ".join(f"${key} for {prefix}/*" for key, prefix in seen.items())
 
 
+def _direct_claim(
+    model: str | None,
+    env: Mapping[str, str],
+    *,
+    native_wires: frozenset[str] = frozenset({"chat"}),
+) -> tuple[str, _DirectProvider] | None:
+    """Return the claimable prefix and entry, or ``None`` when the ladder must continue."""
+    if not model:
+        return None
+    provider_prefix, _, bare_model = model.partition("/")
+    direct = _DIRECT_PROVIDERS.get(provider_prefix)
+    if (
+        direct is not None
+        and direct.wire in native_wires
+        and bare_model
+        and not _has_openrouter_variant(bare_model)
+        and env.get(direct.key_env)
+    ):
+        return provider_prefix, direct
+    return None
+
+
 @dataclass(frozen=True)
 class Provider:
-    """A resolved OpenAI-compatible endpoint: where, with which key, which model."""
+    """A resolved request target and any direct provider's native-wire opinion.
+
+    ``wire`` is ``"chat"`` for explicit endpoints and OpenRouter, and records
+    a direct table entry's native wire when that entry claims the model.
+    """
 
     base_url: str
     api_key: str
     model: str
+    wire: str = "chat"
 
 
 def resolve_provider(
@@ -84,23 +121,27 @@ def resolve_provider(
     base_url: str | None,
     api_key_env: str | None,
     env: Mapping[str, str],
+    *,
+    native_wires: frozenset[str] = frozenset({"chat"}),
 ) -> Provider:
     """The key/base-url ladder (plan 0008 §4a); first match wins.
 
-    1. Explicit ``base_url`` — any OpenAI-compatible endpoint; the key comes
+    1. Explicit ``base_url``: any caller-compatible endpoint; the key comes
        from ``api_key_env`` (default ``OPENROUTER_API_KEY``), and a missing
        key is allowed (local vLLM/Ollama endpoints are typically keyless).
     2. A known ``prefix/*`` model + that provider's key (``_DIRECT_PROVIDERS``:
-       anthropic, openai, google, x-ai/xai, groq, mistralai, deepseek) — the
-       provider's own endpoint, prefix stripped from the model id. Ids ending
-       in a known OpenRouter variant suffix (``_OPENROUTER_VARIANTS``, e.g.
-       ``:free``, ``:nitro``) are never claimed here — the variant only means
-       something to OpenRouter. Other colons (fine-tune ids) pass through.
-    3. ``OPENROUTER_API_KEY`` — OpenRouter, which takes the full
+       anthropic, openai, google, x-ai/xai, groq, mistralai, deepseek,
+       thinkingmachines): the provider's own endpoint, with the prefix
+       stripped unless the entry requires the full id. ``native_wires`` names
+       the protocols the caller can speak; entries on other wires do not claim
+       and the ladder continues. Ids ending in a known OpenRouter variant
+       suffix (``_OPENROUTER_VARIANTS``, e.g. ``:free``, ``:nitro``) are never
+       claimed here. Other colons (fine-tune and checkpoint ids) pass through.
+    3. ``OPENROUTER_API_KEY``: OpenRouter, which takes the full
        ``provider/model`` string.
 
     Anything else is a guided [`ConfigError`][inspect_robots.errors.ConfigError]
-    naming the fixes — never a traceback at the user.
+    naming the fixes, never a traceback at the user.
     """
     if not model:
         raise ConfigError(
@@ -111,21 +152,22 @@ def resolve_provider(
     if base_url:
         key_env = api_key_env or _OPENROUTER_KEY
         return Provider(base_url=base_url.rstrip("/"), api_key=env.get(key_env, ""), model=model)
-    provider_prefix, _, bare_model = model.partition("/")
-    direct = _DIRECT_PROVIDERS.get(provider_prefix)
-    if (
-        direct is not None
-        and bare_model  # a bare "anthropic" must not resolve to an empty model id
-        and not _has_openrouter_variant(bare_model)
-        and (key := env.get(direct.key_env))
-    ):
-        return Provider(base_url=direct.base_url, api_key=key, model=bare_model)
+    claim = _direct_claim(model, env, native_wires=native_wires)
+    if claim is not None:
+        _, direct = claim
+        _, _, bare_model = model.partition("/")
+        return Provider(
+            base_url=direct.base_url,
+            api_key=env[direct.key_env],
+            model=model if direct.keep_prefix else bare_model,
+            wire=direct.wire,
+        )
     if key := env.get(_OPENROUTER_KEY):
         return Provider(base_url=_OPENROUTER_BASE, api_key=key, model=model)
     raise ConfigError(
         f"no API key found for model {model!r}.\n"
         f"fix: set ${_OPENROUTER_KEY} (works for any model), or the provider's "
-        f"key ({_provider_key_hints()}), "
+        f"key ({_provider_key_hints(native_wires)}), "
         "or pass -P base_url=... (+ -P api_key_env=NAME) for a custom endpoint"
     )
 
@@ -201,7 +243,7 @@ class ChatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         body: dict[str, Any] = {"model": self._provider.model, "messages": messages}
         if tools:

@@ -59,12 +59,15 @@ def test_badge_classes_are_used_verbatim_for_display_status() -> None:
                 status="cancelled",
                 status_class="status-cancelled",
             ),
+            _entry("live.json", status="running", status_class="status-running"),
         ]
     )
 
     assert '<span class="badge status-completed">completed</span>' in document
     assert '<span class="badge status-error">error</span>' in document
     assert '<span class="badge status-cancelled">cancelled</span>' in document
+    assert '<span class="badge status-running">running</span>' in document
+    assert ".status-running { color: var(--amber); background: var(--amber-bg); }" in document
 
 
 def test_rows_are_newest_first_and_metrics_use_four_significant_figures() -> None:
@@ -89,6 +92,16 @@ def test_rows_are_newest_first_and_metrics_use_four_significant_figures() -> Non
     assert "success=0.6667" in document
     assert '<span class="errored">(1 errored)</span>' in document
     assert 'agent <span class="muted">/ claude-test</span>' in document
+
+
+def test_non_finite_metric_written_as_null_renders_as_not_available() -> None:
+    """Regression for #253: sanitize() writes inf/nan metrics as JSON null;
+    the index row must render that ``None`` instead of crashing on ``.4g``."""
+    document = render_index(
+        [_entry("run.json", metrics={"min_distance_to_goal": None})]  # type: ignore[dict-item]
+    )
+
+    assert "min_distance_to_goal=n/a" in document
 
 
 def test_filter_script_and_persisted_key_are_present() -> None:
