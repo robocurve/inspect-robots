@@ -152,9 +152,17 @@ class _ScriptedOperatorInput:
     def poll(self) -> ConsolePoll:
         """Merge pending input with the next scripted poll for the active trial."""
         scripted = self.active.pop(0) if self.active else ConsolePoll()
-        messages = (*self.pending_messages, *scripted.messages)
+        pending = tuple(self.pending_messages)
+        messages = (*pending, *scripted.messages)
+        sources = (
+            *("console" for _ in pending),
+            *(
+                scripted.sources[i] if i < len(scripted.sources) else "console"
+                for i in range(len(scripted.messages))
+            ),
+        )
         self.pending_messages.clear()
-        return ConsolePoll(messages=messages, end=scripted.end)
+        return ConsolePoll(messages=messages, end=scripted.end, sources=sources)
 
     def begin_trial(self) -> None:
         """Discard inter-trial input and activate the next trial's poll script."""
@@ -532,15 +540,18 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
-def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
+def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
     tmp_path: Path,
 ) -> None:
     class _SpaceAware(NullSink):
         def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str]] = []
+            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
 
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.calls.append(("bind_frames_dir", frames_dir))
 
         def on_eval_start(self, spec: EvalSpec) -> None:
             del spec
@@ -548,6 +559,7 @@ def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
 
     class _OddAttr(NullSink):
         bind_spaces = "not a hook"
+        bind_frames_dir = "not a hook"
 
     embodiment = CubePickEmbodiment()
     aware = _SpaceAware()
@@ -569,10 +581,37 @@ def test_eval_bind_spaces_offers_spaces_to_duck_typed_sinks_before_start(
             embodiment.info.action_space,
             embodiment.info.observation_space,
         ),
+        ("bind_frames_dir", None),
         ("on_eval_start",),
     ]
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
+    assert getattr(no_hook, "bind_frames_dir", None) is None
+    assert odd.bind_frames_dir == "not a hook"
+
+
+def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:
+    """The optional hook receives the same string persisted on the final log."""
+
+    class _FrameAware(NullSink):
+        def __init__(self) -> None:
+            self.frames_dir: str | None = None
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.frames_dir = frames_dir
+
+    sink = _FrameAware()
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+
+    assert sink.frames_dir == log.stats.frames_dir
+    assert sink.frames_dir is not None
 
 
 def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:
@@ -957,17 +996,25 @@ def test_eval_begins_console_each_trial_and_discards_scoring_window_input(
     assert operator_input.begin_calls == 2
     assert operator_input.discarded_messages == ["typed during scoring"]
     assert log.samples[0].operator_messages == (
-        ({"t": 0, "text": "trial one feedback"},),
+        ({"t": 0, "text": "trial one feedback", "source": "console"},),
         (),
     )
 
 
-def test_eval_set_operator_messages_round_trip_as_nested_tuples(tmp_path: Path) -> None:
+def test_eval_operator_message_source_round_trips_through_written_log(tmp_path: Path) -> None:
     operator_input = _ScriptedOperatorInput(
-        [[ConsolePoll(messages=("persist this feedback",), end=EndRequest())]]
+        [
+            [
+                ConsolePoll(
+                    messages=("persist this feedback",),
+                    end=EndRequest(),
+                    sources=("voice",),
+                )
+            ]
+        ]
     )
 
-    success, logs = eval_set(
+    (log,) = eval(
         _task(scorer=_CountingScorer()),
         ScriptedPolicy(),
         CubePickEmbodiment(),
@@ -975,13 +1022,13 @@ def test_eval_set_operator_messages_round_trip_as_nested_tuples(tmp_path: Path) 
         operator_input=operator_input,
     )
 
-    assert success is True
-    assert logs[0].samples[0].operator_messages == (({"t": 0, "text": "persist this feedback"},),)
+    expected = (({"t": 0, "text": "persist this feedback", "source": "voice"},),)
+    assert log.samples[0].operator_messages == expected
     (path,) = tmp_path.glob("*.json")
     restored_messages = read_eval_log(str(path)).samples[0].operator_messages
     assert isinstance(restored_messages, tuple)
     assert isinstance(restored_messages[0], tuple)
-    assert restored_messages == (({"t": 0, "text": "persist this feedback"},),)
+    assert restored_messages == expected
 
 
 # --------------------------------------------------------------------------- #
