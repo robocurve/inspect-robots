@@ -410,6 +410,86 @@ def test_goal_runs_to_done_and_config_lands_in_log(tmp_path: Path) -> None:
     assert "data:" not in serialized
 
 
+def test_done_hindsight_lands_in_trial_metadata(tmp_path: Path) -> None:
+    hindsight = "the overhead camera swaps the apparent left and right axes"
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": hindsight})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert logs[0].samples[0].trial_metadata[0]["hindsight"] == hindsight
+
+
+def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> None:
+    script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script, max_llm_calls=1),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    metadata = logs[0].samples[0].trial_metadata[0]
+    assert "hindsight" not in metadata
+    # Pin that the trial really ended via the forced give_up, not max_steps:
+    # a give_up termination with the whole budget consumed cannot be a real
+    # give_up because the script contains no stop response.
+    assert logs[0].samples[0].termination_reasons == ("give_up",)
+    assert metadata["llm_usage"]["llm_calls"] == 1
+
+
+def test_none_sentinel_hindsight_is_not_persisted(tmp_path: Path) -> None:
+    script = _Script([_tool_response("done", {"summary": "cube reached", "hindsight": "None"})])
+
+    logs = ir_eval(
+        _task(),
+        _policy(script),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
+
+
+def test_hindsight_is_reset_before_a_later_forced_give_up(tmp_path: Path) -> None:
+    hindsight = "the gripper closes along the camera's vertical axis"
+    move = _tool_response("move_by", {"deltas": {"dx": 0.01}})
+    script = _Script(
+        [
+            move,
+            _tool_response("done", {"summary": "cube reached", "hindsight": hindsight}),
+            move,
+        ]
+    )
+    task = Task(
+        name="two-trial-hindsight-reset",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=40,
+        epochs=2,
+    )
+
+    logs = ir_eval(
+        task,
+        _policy(script, max_llm_calls=2),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    first, second = logs[0].samples[0].trial_metadata
+    assert first["hindsight"] == hindsight
+    assert "hindsight" not in second
+    # Trial 2 must have ended via the forced give_up (budget consumed on
+    # replayed moves; the script's trailing response is not a stop).
+    assert logs[0].samples[0].termination_reasons == ("done", "give_up")
+    assert second["llm_usage"]["llm_calls"] == 2
+
+
 @pytest.mark.parametrize("wire", ["chat", "responses", "messages"])
 def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     wire: str, tmp_path: Path
@@ -688,6 +768,17 @@ def test_system_prompts_treat_operator_feedback_as_trusted_guidance(template: st
         "the human supervising the robot."
     )
     assert expected in template
+
+
+@pytest.mark.parametrize("template", [_SYSTEM_TEMPLATE, _ON_DEMAND_SYSTEM_TEMPLATE])
+def test_system_prompts_announce_the_hindsight_question(template: str) -> None:
+    rendered = template.format(name="test-robot", budget=10)
+    announcement = (
+        "Note what you are learning about this rig and task as you go: done and give_up will ask "
+        "what you wish you had known from the start."
+    )
+
+    assert announcement in rendered
 
 
 def test_reset_before_bind_uses_the_unchanged_unbound_prompt() -> None:
@@ -2379,31 +2470,84 @@ def test_on_demand_prompt_and_no_tool_nudge_describe_chaining() -> None:
     )
 
 
-def test_effort_defaults_low_and_is_tunable(tmp_path: Path) -> None:
+def test_effort_passthrough_matrix(tmp_path: Path) -> None:
     script = _Script([_tool_response("done", {"summary": "ok"})])
     logs = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
-    # Robot control is latency-sensitive: low effort by default (guardrails
-    # sit below the model, so this trades thinking time, not safety).
-    assert script.requests[0]["reasoning_effort"] == "low"
-    assert logs[0].eval.policy_config["effort"] == "low"
-
-    script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort="high"), CubePickEmbodiment(), log_dir=str(tmp_path))
-    assert script.requests[0]["reasoning_effort"] == "high"
-
-    script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort=None), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert "reasoning_effort" not in script.requests[0]
+    assert logs[0].eval.policy_config["effort"] is None
 
-    # "none" is a wire value, distinct from None (omit the field): GPT-5.x
-    # rejects function tools on chat completions unless reasoning_effort is
-    # explicitly "none", and omitting the field 400s the same way.
     script = _Script([_tool_response("done", {"summary": "ok"})])
-    ir_eval(_task(), _policy(script, effort="none"), CubePickEmbodiment(), log_dir=str(tmp_path))
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort=None),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
     assert script.requests[0]["reasoning_effort"] == "none"
+    assert logs[0].eval.policy_config["effort"] == "none"
 
-    with pytest.raises(ConfigError, match=r"or None to omit the field, got 'turbo'"):
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort="none"),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert script.requests[0]["reasoning_effort"] == "none"
+    assert logs[0].eval.policy_config["effort"] == "none"
+
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    logs = ir_eval(
+        _task(),
+        _policy(script, effort="high"),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert script.requests[0]["reasoning_effort"] == "high"
+    assert logs[0].eval.policy_config["effort"] == "high"
+
+    with pytest.raises(ConfigError) as invalid:
         _policy(_Script([]), effort="turbo")
+    assert str(invalid.value) == (
+        "effort must be one of ['high', 'low', 'max', 'medium', 'minimal', 'none', "
+        "'xhigh'], or a number in [0.0, 1.0) on servers that take a fractional "
+        "effort, got 'turbo'.\nfix: omit -P effort= to use the provider default"
+    )
+
+    live_kwargs: dict[str, Any] = {
+        "model": "m",
+        "base_url": "ws://stub.test",
+        "wire": "gemini-live",
+        "wire_capture": False,
+        "env": {},
+    }
+    with pytest.raises(ConfigError, match="effort is not supported"):
+        LLMAgentPolicy(**live_kwargs, effort=None)
+    with pytest.raises(ConfigError, match="effort is not supported"):
+        LLMAgentPolicy(**live_kwargs, effort="low")
+    live = LLMAgentPolicy(**live_kwargs)
+    assert live.config.effort is None
+
+
+def test_fractional_effort_is_passed_through_and_bounded(tmp_path: Path) -> None:
+    # Tinker's OpenAI-compatible endpoint reads effort as a fraction, so a number
+    # reaches the wire as a number instead of being snapped to a named level.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    policy = _policy(script, effort=0.7)
+    logs = ir_eval(_task(), policy, CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == 0.7
+    assert logs[0].eval.policy_config["effort"] == 0.7
+
+    # `-P effort=0` parses to int 0, which is zero effort, not an omitted field.
+    script = _Script([_tool_response("done", {"summary": "ok"})])
+    ir_eval(_task(), _policy(script, effort=0), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert script.requests[0]["reasoning_effort"] == 0.0
+
+    # 1.0 is past the top of the range every probed server accepts, and a bool is
+    # a mistyped flag rather than a fraction (`-P effort=false` parses to False).
+    for rejected in (1.0, -0.1, float("nan"), float("inf"), True, False, "0.7"):
+        with pytest.raises(ConfigError, match=r"a number in \[0\.0, 1\.0\)"):
+            _policy(_Script([]), effort=rejected)
 
 
 def test_registry_resolves_agent_policy() -> None:

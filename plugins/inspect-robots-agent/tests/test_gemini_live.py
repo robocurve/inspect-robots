@@ -770,14 +770,18 @@ def test_per_wire_default_resolution_and_explicit_none() -> None:
         wire_capture=False,
         env={"GEMINI_API_KEY": "g"},
     )
-    explicit_none = LLMAgentPolicy(
-        model="m",
-        base_url="ws://stub.test",
-        wire="gemini-live",
-        effort=None,
-        image_horizon=None,
-        wire_capture=False,
-        env={},
+    with pytest.raises(ConfigError) as explicit_none_error:
+        LLMAgentPolicy(
+            model="m",
+            base_url="ws://stub.test",
+            wire="gemini-live",
+            effort=None,
+            image_horizon=None,
+            wire_capture=False,
+            env={},
+        )
+    assert str(explicit_none_error.value) == (
+        "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
     )
     chat = LLMAgentPolicy(model="m", base_url="http://stub.test", wire_capture=False, env={})
     responses = LLMAgentPolicy(
@@ -796,18 +800,13 @@ def test_per_wire_default_resolution_and_explicit_none() -> None:
     )
 
     assert isinstance(live.config, AgentPolicyConfig)
-    assert isinstance(explicit_none.config, AgentPolicyConfig)
     assert isinstance(chat.config, AgentPolicyConfig)
     assert isinstance(responses.config, AgentPolicyConfig)
     assert isinstance(anthropic.config, AgentPolicyConfig)
     assert (live.config.effort, live.config.image_horizon) == (None, None)
-    assert (explicit_none.config.effort, explicit_none.config.image_horizon) == (
-        None,
-        None,
-    )
-    assert (chat.config.effort, chat.config.image_horizon) == ("low", 2)
-    assert (responses.config.effort, responses.config.image_horizon) == ("low", 2)
-    assert (anthropic.config.effort, anthropic.config.image_horizon) == ("low", 2)
+    assert (chat.config.effort, chat.config.image_horizon) == (None, 2)
+    assert (responses.config.effort, responses.config.image_horizon) == (None, 2)
+    assert (anthropic.config.effort, anthropic.config.image_horizon) == (None, 2)
 
 
 def test_live_rejects_explicit_effort_and_image_horizon_with_guidance() -> None:
@@ -842,7 +841,8 @@ def test_existing_invalid_effort_and_horizon_messages_are_preserved() -> None:
         LLMAgentPolicy(**common, effort="default")
     assert str(effort_error.value) == (
         "effort must be one of ['high', 'low', 'max', 'medium', 'minimal', 'none', "
-        "'xhigh'], or None to omit the field, got 'default'"
+        "'xhigh'], or a number in [0.0, 1.0) on servers that take a fractional "
+        "effort, got 'default'.\nfix: omit -P effort= to use the provider default"
     )
     with pytest.raises(ConfigError) as horizon_error:
         LLMAgentPolicy(**common, image_horizon=0)

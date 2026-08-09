@@ -33,6 +33,10 @@ EXPECTED = {
     "min_distance_to_goal",
     "reached_goal_state",
     "operator_scorer",
+    "operator_input",
+    # judgement capture (plan 0049)
+    "Grader",
+    "operator_grader",
     # the two swappable inputs
     "Policy",
     "PolicyBase",
@@ -44,6 +48,7 @@ EXPECTED = {
     # attended operator input
     "OperatorInput",
     "OperatorConsole",
+    "OperatorSession",
     "ConsolePoll",
     "EndRequest",
     # types & spaces
@@ -64,6 +69,7 @@ EXPECTED = {
     "policy",
     "embodiment",
     "scorer",
+    "grader",
     "sink",
     "registered",
     "resolve",

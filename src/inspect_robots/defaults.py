@@ -83,9 +83,11 @@ class Defaults:
     sim_embodiment: str | None = None
     sim_embodiment_source: str | None = None
     scorer: str | None = None
+    grader: str | None = None
     max_steps: int | None = None
     store_frames: bool = False
     rerun: bool = False
+    rerun_save: bool = True
     rerun_port: int | None = None
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
@@ -170,6 +172,16 @@ def _read_config(path: Path) -> Defaults:
             raise _die(path, f"[defaults] rerun must be true or false, got {raw_rerun!r}")
         rerun = parsed_rerun
 
+    rerun_save = True
+    if raw_rerun_save := parser.get("defaults", "rerun_save", fallback=None):
+        parsed_rerun_save = _parse_value(raw_rerun_save)
+        if not isinstance(parsed_rerun_save, bool):
+            raise _die(
+                path,
+                f"[defaults] rerun_save must be true or false, got {raw_rerun_save!r}",
+            )
+        rerun_save = parsed_rerun_save
+
     rerun_port: int | None = None
     if raw_port := parser.get("defaults", "rerun_port", fallback=None):
         parsed_port = _parse_value(raw_port)
@@ -195,9 +207,11 @@ def _read_config(path: Path) -> Defaults:
         sim_embodiment=sim_embodiment,
         sim_embodiment_source=source if sim_embodiment else None,
         scorer=parser.get("defaults", "scorer", fallback=None),
+        grader=parser.get("defaults", "grader", fallback=None),
         max_steps=max_steps,
         store_frames=store_frames,
         rerun=rerun,
+        rerun_save=rerun_save,
         rerun_port=rerun_port,
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
@@ -215,9 +229,11 @@ _CONFIG_KEYS = (
     "embodiment",
     "sim_embodiment",
     "scorer",
+    "grader",
     "max_steps",
     "store_frames",
     "rerun",
+    "rerun_save",
     "rerun_port",
 )
 
@@ -239,7 +255,7 @@ def _set_default(env: Mapping[str, str], key: str, value: str) -> Path:
         parsed = _parse_value(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or not 1 <= parsed <= 65535:
             raise SystemExit(f"rerun_port must be an integer in 1-65535, got {value!r}")
-    if key in ("store_frames", "rerun") and not isinstance(_parse_value(value), bool):
+    if key in ("store_frames", "rerun", "rerun_save") and not isinstance(_parse_value(value), bool):
         raise SystemExit(f"{key} must be true or false, got {value!r}")
 
     path = config_path(env)
