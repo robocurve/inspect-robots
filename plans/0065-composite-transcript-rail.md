@@ -1,6 +1,6 @@
 # 0065 — Transcript rail: live turn highlight + click-to-seek on the composite run video
 
-- **Status:** draft (R2 resolved)
+- **Status:** draft (R3 resolved)
 - **Issue:** #352
 - **Critique rounds:** R1: 3 substantive (turn steps are policy-authored and
   not guaranteed ascending — active-turn is now an order-independent argmax
@@ -23,6 +23,14 @@
   test's exact `<section class="turn">` split) plus three folded nits
   (fourth exact-tuple fixture named, `**Core:**` changelog prefix,
   data attributes placed after `preload="metadata"`) — all resolved below.
+  R3: verified all R2 resolutions hold byte-for-byte (tie rule, loop
+  premise, timeline construction, seam, full re-pin sweep, branch
+  inventory, browser semantics); 1 substantive (the R2 replacement string
+  `'data-camera-tab' not in document` is unconditionally false — the bare
+  substring lives in the always-embedded flipbook JS; corrected to the
+  attribute-with-value form `'data-camera-tab="'`) plus two folded nits
+  (gutter appended after the `margin` shorthand; the literal `autoplay`
+  banned from new JS/markup) — resolved below.
 - **Lineage:** successor to PR #272's headline feature (plan 0039's multicam
   player with synced transcript rail). #272 synchronized N per-camera panes
   with custom JS and disk-side `media/` symlinks; plans 0060/0063 have since
@@ -137,8 +145,9 @@ no-op unless `block.querySelector('.video-panel video[data-steps]')` exists
 - Every turn carries the gutter so activation never shifts layout **and**
   the `.turn + .turn` divider spans one uniform width: `.turn {
   border-left: 3px solid transparent; padding-left: 12px; margin-left:
-  -15px; }` (appended to the existing `.turn` rule) with `.turn.active {
-  border-left-color: var(--user); }`.
+  -15px; }` (appended to the existing `.turn` rule, **after** its
+  `margin` shorthand so the shorthand cannot reset `margin-left`) with
+  `.turn.active { border-left-color: var(--user); }`.
 - `.rail-seekable .turn-step { cursor: pointer; }` — the JS adds
   `rail-seekable` to the enclosing `details.transcript` when it wires the
   rail, so pointer affordance appears exactly when clicking works.
@@ -168,12 +177,21 @@ script); Python emissions are what the gate covers:
   `data-step` (attribute emission is video-independent).
 - Fake composite encoders return 3-tuples; the throwing fake is unaffected.
 - Two existing assertions re-pin: the composite-success test's
-  `'class="camera-tab' not in document` becomes `'data-camera-tab' not in
-  document` (Follow now legitimately carries `class="camera-tab"`) plus a
-  Follow-present assert; and the same-step-feedback test's exact
-  `document.split('<section class="turn">')` breaks once turns carry
+  `'class="camera-tab' not in document` becomes
+  `'data-camera-tab="' not in document` — the trailing quote is
+  load-bearing: the bare substring `data-camera-tab` appears in the
+  always-embedded flipbook JS (`querySelectorAll('[data-camera-tab]')`) on
+  every page, so only the attribute-with-value form that
+  `_render_flipbook_media` alone emits is assertable (the same
+  quote-boundary reasoning that made the original `class="camera-tab` pin
+  sound) — plus a Follow-present assert; and the same-step-feedback test's
+  exact `document.split('<section class="turn">')` breaks once turns carry
   `data-step` — split on the unclosed prefix `'<section class="turn'`
   (or a regex) instead.
+- New JS/markup must not contain the literal string `autoplay` (a
+  document-wide absence pin exists), and nothing new may carry
+  `data-camera-panel` or a bare `hidden` attribute inside run-media (regex
+  pins).
 
 ## Docs & changelog
 
