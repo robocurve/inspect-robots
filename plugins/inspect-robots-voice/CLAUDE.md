@@ -15,7 +15,7 @@ Robots runs. It registers the `voice` factory in `inspect_robots.operator_inputs
 | `src/inspect_robots_voice/_parakeet.py` | onnx-asr Parakeet wrapper with timestamped confidence rejection |
 | `src/inspect_robots_voice/_input.py` | worker-thread orchestration, generation-safe trial resets, output polling, and lifecycle hooks |
 | `src/inspect_robots_voice/_tts.py` | lazy Kokoro engine seam plus pinned, verified, atomic model-file caching |
-| `src/inspect_robots_voice/_speaker.py` | defensive note extraction, bounded narration queue, worker lifecycle, and lazy chunked playback |
+| `src/inspect_robots_voice/_speaker.py` | defensive note extraction, blocking, interrupt, and queue delivery modes, worker lifecycle, and lazy chunked playback |
 | `tests/` | deterministic unit tests using fake devices, models, capture, playback, engines, transcribers, segmenters, and threading events |
 
 ## Invariants
@@ -35,7 +35,9 @@ Robots runs. It registers the `voice` factory in `inspect_robots.operator_inputs
   trial.
 - `close()` is idempotent and never raises. It stops capture and joins the worker.
 - `SpeakerSink.log_policy_messages()` never synthesizes or plays audio on the control thread. Its
-  bounded queue drops the oldest stale note, and only a successful eval end drains before close.
+  blocking mode may wait boundedly and fail-open; the default interrupt mode aborts stale speech
+  through a generation counter. Operator-ended trials cut narration in every mode; natural
+  completions drain only on a successful eval end before close.
 
 ## Working here
 

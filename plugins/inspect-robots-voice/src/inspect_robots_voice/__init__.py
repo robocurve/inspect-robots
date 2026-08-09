@@ -9,12 +9,12 @@ dependencies are loaded only when their component starts.
 from __future__ import annotations
 
 from inspect_robots_voice._input import VoiceInput
-from inspect_robots_voice._speaker import SpeakerSink
+from inspect_robots_voice._speaker import _DEFAULT_MODE, _MODES, SpeakerSink
 from inspect_robots_voice._transcriber import _classify_model
 
 __all__ = ["SpeakerSink", "VoiceInput", "speaker_sink", "voice_input"]
 
-__version__ = "0.4.0"
+__version__ = "0.5.1"
 
 ScalarValue = str | int | float | bool | None
 
@@ -25,10 +25,11 @@ def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
     Supported keys are ``voice`` (string, default ``"af_sarah"``), ``speed`` (positive
     number, default ``1.0``), ``volume`` (number from 0 through 1, default ``1.0``),
     ``device`` (string or integer, default system output), ``lang`` (string, default
-    ``"en-us"``), and optional ``model`` and ``voices`` file paths. Unknown, incompatible,
-    or incorrectly typed values raise :class:`TypeError`.
+    ``"en-us"``), ``mode`` (string, one of ``"blocking"``, ``"interrupt"``, or ``"queue"``,
+    default ``"interrupt"``), and optional ``model`` and ``voices`` file paths. Unknown,
+    incompatible, or incorrectly typed values raise :class:`TypeError`.
     """
-    allowed = {"voice", "speed", "volume", "device", "lang", "model", "voices"}
+    allowed = {"voice", "speed", "volume", "device", "lang", "model", "voices", "mode"}
     unknown = sorted(set(kwargs) - allowed)
     if unknown:
         raise TypeError(f"unexpected speaker argument(s): {', '.join(unknown)}")
@@ -40,6 +41,7 @@ def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
     lang = kwargs.get("lang", "en-us")
     model = kwargs.get("model")
     voices = kwargs.get("voices")
+    mode = kwargs.get("mode", _DEFAULT_MODE)
     if not isinstance(voice, str):
         raise TypeError("voice must be a string")
     if not isinstance(speed, (int, float)) or isinstance(speed, bool):
@@ -62,6 +64,8 @@ def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
         raise TypeError("model must be a string or none")
     if voices is not None and not isinstance(voices, str):
         raise TypeError("voices must be a string or none")
+    if not isinstance(mode, str) or mode not in _MODES:
+        raise TypeError(f"mode must be a string and one of: {', '.join(_MODES)}")
     return SpeakerSink(
         voice=voice,
         speed=float(speed),
@@ -70,6 +74,7 @@ def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
         lang=lang,
         model=model,
         voices=voices,
+        mode=mode,
     )
 
 

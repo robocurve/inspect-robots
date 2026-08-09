@@ -217,6 +217,7 @@ def _prompt_defaults(
                 _paint(
                     "no display detected (SSH?): the rerun viewer cannot open here; "
                     "use --rerun-connect to stream to a viewer on another machine; "
+                    "use --rerun-save to keep a replayable .rrd without a local viewer; "
                     "frames still record with store_frames",
                     _YELLOW,
                     out,

@@ -92,8 +92,9 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+policy sees while the robot moves, and saves that stream as a replayable `.rrd`
+beside the eval log. CLI flags override any default (`--no-rerun-save`,
+`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
 

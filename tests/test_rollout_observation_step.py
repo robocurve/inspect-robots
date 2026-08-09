@@ -16,6 +16,7 @@ from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.rollout import TrialRecord, rollout
 from inspect_robots.scene import Scene
+from inspect_robots.session import OperatorSession
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation, StepResult
 
@@ -97,6 +98,40 @@ class _EndingOperatorInput(FakeOperatorInput):
             raise self.end_error
 
 
+class _RaisingFooterSession(OperatorSession):
+    """Open a real footer, then fail at one selected rollout console lifecycle site."""
+
+    def __init__(self, output: list[str], *, fail_at: str) -> None:
+        super().__init__(
+            write=output.append,
+            fd_readable=lambda: False,
+            width_fn=lambda: 200,
+            isatty_fn=lambda: True,
+            raw_mode_fn=object,
+            restore_fn=lambda _state: None,
+        )
+        self.fail_at = fail_at
+        self.end_calls = 0
+        self.enable_footer(label="sent")
+
+    def begin_trial(self) -> None:
+        """Open the footer before raising a configured begin failure."""
+        super().begin_trial()
+        if self.fail_at == "begin":
+            raise RuntimeError("begin failed")
+
+    def poll(self) -> ConsolePoll:
+        """Raise a configured poll failure before the normal console poll."""
+        if self.fail_at == "poll":
+            raise RuntimeError("poll failed")
+        return super().poll()
+
+    def end_trial(self) -> None:
+        """Count every teardown request before idempotently closing the real footer."""
+        self.end_calls += 1
+        super().end_trial()
+
+
 class _TrackingEmbodiment(CubePickEmbodiment):
     """Track reset ordering and how many actions reached the embodiment."""
 
@@ -115,6 +150,19 @@ class _TrackingEmbodiment(CubePickEmbodiment):
     def step(self, action: Action) -> StepResult:
         """Count each action before delegating to the mock world."""
         self.step_calls += 1
+        return super().step(action)
+
+
+class _StatusTrackingEmbodiment(CubePickEmbodiment):
+    """Emit one session status from each step to expose degraded plain rendering."""
+
+    def __init__(self, session: OperatorSession) -> None:
+        super().__init__()
+        self.session = session
+
+    def step(self, action: Action) -> StepResult:
+        """Render a post-disable status before applying the action."""
+        self.session.status("later status")
         return super().step(action)
 
 
@@ -486,7 +534,29 @@ def test_end_trial_still_runs_after_raising_poll_disables_channel() -> None:
     assert len(warning_records) == 1
     assert record.status == "success"
     assert operator_input.poll_calls == 1
-    assert operator_input.end_calls == 1
+    assert operator_input.end_calls == 2
+
+
+def test_raising_poll_closes_footer_at_disable_time_before_later_statuses() -> None:
+    output: list[str] = []
+    operator_input = _RaisingFooterSession(output, fail_at="poll")
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Operator console disabled for this trial after RuntimeError: poll failed",
+    ) as warning_records:
+        record = _run(
+            _ProbePolicy(),
+            _StatusTrackingEmbodiment(operator_input),
+            max_steps=1,
+            operator_input=operator_input,
+        )
+
+    assert len(warning_records) == 1
+    assert record.status == "success"
+    assert operator_input.end_calls == 2
+    assert output == ["\r\x1b[K> ", "\r\x1b[K", "\r  later status   "]
+    assert "Esc ends the episode" not in "".join(output)
 
 
 def test_raising_begin_trial_warns_once_and_disables_channel() -> None:
@@ -509,6 +579,28 @@ def test_raising_begin_trial_warns_once_and_disables_channel() -> None:
     assert len(warning_records) == 1
     assert len(record.steps) == 3
     assert record.status == "success"
+
+
+def test_raising_begin_trial_closes_footer_at_disable_time_before_later_statuses() -> None:
+    output: list[str] = []
+    operator_input = _RaisingFooterSession(output, fail_at="begin")
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Operator console disabled for this trial after RuntimeError: begin failed",
+    ) as warning_records:
+        record = _run(
+            _ProbePolicy(),
+            _StatusTrackingEmbodiment(operator_input),
+            max_steps=1,
+            operator_input=operator_input,
+        )
+
+    assert len(warning_records) == 1
+    assert record.status == "success"
+    assert operator_input.end_calls == 2
+    assert output == ["\r\x1b[K> ", "\r\x1b[K", "\r  later status   "]
+    assert "Esc ends the episode" not in "".join(output)
 
 
 def test_keyboard_interrupt_from_poll_uses_cancelled_trial_path() -> None:

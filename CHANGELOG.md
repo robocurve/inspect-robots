@@ -7,7 +7,74 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
+  instead of draining it at eval end
+  ([plan 0061](plans/0061-speak-operator-end-cut.md),
+  [#343](https://github.com/robocurve/inspect-robots/issues/343)).
+
+### Changed
+
+- **Core:** completed HTML reports now combine every stored camera stream into
+  one side-by-side run video with a shared playhead. The raw policy exchange is
+  renamed from LLM POV to Raw transcript, and dividers now separate transcript
+  steps instead of the raw dropdown
+  ([plan 0063](plans/0063-composite-run-video.md),
+  [#347](https://github.com/robocurve/inspect-robots/issues/347)).
+
+- **Core:** footer status lines now append the framework-owned
+  `Esc ends the episode` hint and replace stale trailing gesture clauses. This
+  prevents a repeat of the yam Enter-to-Esc gesture-prose drift incident while
+  leaving plain-mode embodiment statuses unchanged
+  ([plan 0062](plans/0062-session-owned-end-hint.md),
+  [#345](https://github.com/robocurve/inspect-robots/issues/345)).
+
+- **Voice plugin (0.5.0):** the default `--speak` behavior now interrupts
+  superseded narration so speech stays current. `-S mode=queue` restores the old
+  bounded queueing behavior ([plan 0057](plans/0057-speak-speech-modes.md),
+  [#336](https://github.com/robocurve/inspect-robots/issues/336)).
+
+- **Core:** bare Enter no longer ends an attended episode. Esc ends it in the
+  footer (with a 150 ms grace so split arrow-key sequences are not misread), and
+  `/stop [note]` ends it from any mode, recording the trailing text to the log
+  as an operator message. An empty line now prints the usage reminder, which is
+  mode-aware for end-only sessions. Cmd+Enter is not offered: terminals do not
+  forward the Cmd modifier to stdin
+  ([plan 0056](plans/0056-escape-ends-episode.md),
+  [#333](https://github.com/robocurve/inspect-robots/issues/333)).
+
 ### Added
+
+- Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
+  the log directory by default. `--rerun-save`/`--no-rerun-save` and the
+  `rerun_save` config key control tee or record-only operation. For library
+  users, `RerunSink` now accepts a recording target combined with `spawn` or
+  `connect_url` (previously a `ValueError`) on rerun-sdk 0.24 or newer, and
+  adds `recording_dir` per-eval naming with the attached file exposed as
+  `resolved_recording_path` ([plan 0059](plans/0059-rerun-rrd-tee.md)).
+
+- HTML reports now group chat transcripts into observation turns with concise
+  frame captions, structured feedback, readable tool calls, and a raw LLM POV
+  dropdown. Stored-frame reports add a camera flipbook, while eligible
+  completed pages embed budgeted MP4 streams through ffmpeg. Running scene
+  badges now follow the live trial marker, and `view --no-video` keeps pages on
+  the upgradeable flipbook tier. Closes
+  [#337](https://github.com/robocurve/inspect-robots/issues/337)
+  ([plan 0060](plans/0060-report-turns-and-video.md)).
+
+- Live HTML reports now include recent stored camera frames under a bounded
+  serving budget, while completed reports retain the full frame budget. The
+  agent live-view tip now gives remote and headless sessions a network-serving
+  command and reachable URL
+  ([plan 0058](plans/0058-live-frames-and-headless-tip.md),
+  [#337](https://github.com/robocurve/inspect-robots/issues/337)).
+
+- **Voice plugin (0.5.0):** `--speak` now supports blocking, interrupt, and queue
+  speech delivery through `-S mode=`, including a bounded fail-open blocking
+  wait and generation-based interruption
+  ([plan 0057](plans/0057-speak-speech-modes.md),
+  [#336](https://github.com/robocurve/inspect-robots/issues/336)).
 
 - **Core:** `inspect-robots run` now accepts `--speak` with repeatable `-S k=v`
   options. The CLI resolves the registered `speaker` sink, starts it
@@ -162,6 +229,8 @@ All notable changes to this project are documented here. The format is based on
   declared/range-derived limits while policy compatibility deliberately ignores
   embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
 
+- Public user-defaults API: `inspect_robots.defaults` now re-exports `init_dotenv` so plugins can load `.env` configurations without importing private modules (#301).
+
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
@@ -234,6 +303,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **`inspect-robots run --instruction ... --max-steps 0` (or negative) no longer
+  crashes with a raw `ConfigError` traceback.** The flag is now range-checked up
+  front and exits with a guided `--max-steps must be >= 1, got 0` message,
+  matching how the other numeric run flags are validated (#248).
+
 - `inspect-robots setup` now treats a by-id camera name as ambiguous whenever
   another physical camera can claim the same udev identity, including
   same-model cameras with missing serials. It lists and stores port-stable
@@ -244,6 +318,14 @@ All notable changes to this project are documented here. The format is based on
   serials are shared or missing. It emits port-pinned `KERNELS` rules instead
   when the adapters sit on distinct USB ports
   ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
+
+- **`Task` now rejects duplicate scene ids.** Scene ids become per-trial
+  identity downstream — the rollout builds `"{scene.id}-e{epoch}"`, which
+  `FrameStore` turns into a filename — so two scenes sharing an id wrote to the
+  same frame paths and the second silently overwrote the first, losing half a
+  run's stored frames while the log still reported both trials. The same
+  assumption keys the summarize digest's transcripts. Construction now raises
+  `ConfigError` naming the duplicate id (#289).
 
 - `inspect-robots setup` camera slots (#261, plan 0040): the wizard now lists
   and unplug-identifies cameras as physical USB devices. A camera whose color
@@ -257,6 +339,14 @@ All notable changes to this project are documented here. The format is based on
   the section listing was printed, so a device attached mid-wizard is still
   identifiable.
 
+- **`DeltaLimitApprover` now honors an explicit `max_delta` on a
+  multi-dimensional action space.** The validated delta stayed flat `(dim,)`
+  while the derived default was reshaped to the box shape, so a non-1-D box
+  (such as a bimanual `(2, 7)`) either raised a numpy broadcast `ValueError`
+  mid-rollout in an absolute mode, or in a displacement mode made the CLI's
+  guardrail builder skip the limiter altogether and apply only the box bounds
+  that `--max-action-delta` was meant to tighten (#287).
+
 - **Agent plugin (0.19.1):** the chat wire now round-trips Gemini's
   `tool_calls[].extra_content` (`google.thought_signature`) into conversation
   history. Dropping it made Gemini reject any request ending on a tool
@@ -264,15 +354,36 @@ All notable changes to this project are documented here. The format is based on
   "Function call is missing a thought_signature", erroring the trial (#229,
   #230). Non-Gemini requests are unchanged.
 
+
+- **`inspect-robots view --serve --port N` no longer crashes with an uncaught
+  `OverflowError` when `N` is outside 0-65535.** The port is range-checked
+  alongside the existing `--port requires --serve` guard; an in-range but
+  unavailable port keeps its current `OSError` handling (#249).
+
 - **`fail_on_error` as a proportion no longer halts on the first error.** The
   ratio was computed against the trials completed so far, so the first errored
   trial was always 1/1 = 100% and tripped any threshold below 1, making
   `0<x<1` behave identically to `True`. The denominator is now the planned
   trial count (#254).
 
+- **A long task name no longer costs a finished run its log.** `JsonLogSink`
+  derives the filename from the task name without capping its length, so a name
+  past roughly 238 characters pushed the path over the 255-byte limit and
+  `on_eval_end` raised `OSError: File name too long` after every trial had
+  already run — leaving the log directory empty and the results unrecoverable.
+  The slug is now capped; the full name is still recorded in the log body, and
+  the filename's uuid suffix keeps runs distinct (#292).
+
 - **Task validation rejects boolean `max_steps` values** — `Task(max_steps=True)`
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
+
+
+- **A failed component-discovery pass no longer leaves the registry
+  permanently empty.** `_ensure_loaded` set its `_loaded_builtins` /
+  `_loaded_entrypoints` flags before the work they guard, so a raising builtins
+  import or entry-point scan made every later call take the "already loaded"
+  path and serve zero components instead of retrying or re-raising (#255).
 
 - **`inspect`/`view` no longer crash on a log's own sanitized non-finite
   metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
@@ -280,6 +391,12 @@ All notable changes to this project are documented here. The format is based on
   with `.4g`, which raises on `None`. A log the sink itself wrote could crash
   `inspect`, `view`, and get silently dropped from `view <dir>`'s index. Those
   four render sites now show `n/a` for a null metric (#253).
+
+- **`--fail-on-error` now rejects out-of-range values instead of silently
+  reinterpreting them.** A negative reached `errors >= fail_on_error` and halted
+  on the first error exactly like `1`, and a NaN failed every comparison so the
+  run never halted at all. Both are now a guided CLI error; `0` remains the
+  documented "never halt" value. Follow-up to #254.
 
 ### Changed
 

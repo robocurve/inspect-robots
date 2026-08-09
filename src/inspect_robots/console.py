@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 USAGE = (
-    "operator console: type a message + Enter to send it to the policy; Enter alone ends "
-    "the episode; /y /n /p [note] ends it with a verdict"
+    "operator console: type a message + Enter to send it to the policy; Esc (or /stop "
+    "[note]) ends the episode; /y /n /p [note] ends it with a verdict"
 )
 USAGE_END_ONLY = (
-    "operator console: Enter ends the episode; /y /n /p [note] records a verdict; "
-    "typed notes are saved to the log"
+    "operator console: Esc (or /stop [note]) ends the episode; /y /n /p [note] records "
+    "a verdict; typed notes are saved to the log"
 )
+
+# The end-of-episode sentinel line: a lone ESC byte. ``str.strip()`` removes the C0
+# controls \x1c-\x1f but NOT \x1b, so the sentinel survives ``_parse``'s stripping.
+END_SENTINEL = "\x1b"
 
 
 @dataclass(frozen=True)
@@ -69,9 +73,18 @@ def _parse(line: str) -> tuple[str | None, EndRequest | None, bool]:
     text = line.rstrip("\n")
     stripped = text.strip()
     if not stripped:
+        return None, None, True
+    if stripped == END_SENTINEL:
         return None, EndRequest(), False
 
     token, separator, raw_note = stripped.partition(" ")
+    if token.lower() == "/stop":
+        # Trailing text rides the ordinary message path (recorded to the log before
+        # the end request is honored), never EndRequest.note: rollout persists
+        # end.note only alongside a verdict, and the post-trial verdict prompt would
+        # clobber a verdict-less note.
+        note = raw_note.strip() if separator else ""
+        return note or None, EndRequest(), False
     verdict = {"/y": "y", "/n": "n", "/p": "partial"}.get(token.lower())
     if verdict is not None:
         note = raw_note.strip() if separator else ""
@@ -82,17 +95,23 @@ def _parse(line: str) -> tuple[str | None, EndRequest | None, bool]:
 
 
 class OperatorConsole:
-    """Poll stdin at fd level and preserve partial text until the operator presses Enter."""
+    """Poll stdin at fd level and preserve partial text until the operator presses Enter.
+
+    ``usage`` is the reminder line printed (at most once per poll) for empty lines and
+    unknown slash commands, so end-only sessions can remind with their own wording.
+    """
 
     def __init__(
         self,
         readable: Callable[[], bool] | None = None,
         read: Callable[[], str] | None = None,
         output_fn: Callable[[str], None] = print,
+        usage: str = USAGE,
     ) -> None:
         self._readable = readable if readable is not None else _stdin_readable
         self._read = read if read is not None else _stdin_read
         self._output_fn = output_fn
+        self._usage = usage
         self._buffer = ""
         self._eof = False
 
@@ -103,6 +122,7 @@ class OperatorConsole:
 
         messages: list[str] = []
         end: EndRequest | None = None
+        usage_requested = False
         while self._readable():
             chunk = self._read()
             if chunk == "":
@@ -118,7 +138,11 @@ class OperatorConsole:
                 if parsed_end is not None and end is None:
                     end = parsed_end
                 if show_usage:
-                    self._output_fn(USAGE)
+                    usage_requested = True
+        if usage_requested:
+            # At most one reminder per poll: Enter autorepeat queues many empty
+            # lines, and each print is a full footer repaint.
+            self._output_fn(self._usage)
         return ConsolePoll(messages=tuple(messages), end=end)
 
     def begin_trial(self) -> None:

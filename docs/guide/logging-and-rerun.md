@@ -74,7 +74,10 @@ instead of control: camera frames are dropped first, so scalar plots stay
 complete, then whole steps, and the totals are reported as a `RuntimeWarning`
 when the eval ends. The queue is drained at every trial boundary (bounded by
 `flush_timeout`), so an eval that aborts mid-run loses at most the current
-trial's queued tail; the JSON eval log is synchronous and never affected.
+trial's queued tail. A live viewer and its teed `.rrd` receive the same worker
+stream, so viewer-paced shedding reaches the file too. The `.rrd` records what
+the viewer received, not a guaranteed-complete record. The JSON eval log is
+synchronous and never affected.
 
 Camera frames are JPEG-compressed by default (`jpeg_quality=75`), which cuts
 viewer bandwidth by an order of magnitude. Pass `jpeg_quality=None` for
@@ -84,16 +87,31 @@ at stake either way: scoring reads from the `FrameStore` side-car, not from
 Rerun.
 
 ```python
-RerunSink("run.rrd")                   # record to a file, view later
-RerunSink(spawn=True)                  # live viewer on this machine (CLI: --rerun)
-RerunSink(spawn=True, spawn_port=9877) # chosen viewer port (CLI: --rerun-port 9877)
-RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy")  # stream to a running viewer
-RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # lossless, deeper buffer
+RerunSink("run.rrd")                              # record one fixed file
+RerunSink(recording_dir="logs")                  # fresh task_slug_xxxxxxxx.rrd per eval
+RerunSink(spawn=True, recording_dir="logs")      # local viewer plus file
+RerunSink(spawn=True, spawn_port=9877, recording_dir="logs")
+RerunSink(connect_url="rerun+http://127.0.0.1:9876/proxy", recording_dir="logs")
+RerunSink(spawn=True, jpeg_quality=None, queue_size=128)  # live only, lossless
 ```
 
-The three modes are mutually exclusive: rerun's `save`/`spawn`/`connect_grpc`
-calls each replace the SDK's global sink, so combining them raises `ValueError`
-rather than silently dropping a stream.
+File recording combines with either live mode through `set_sinks` in rerun-sdk
+0.24 or newer. With rerun-sdk 0.20 through 0.23, the sink warns once, continues
+the live view, and skips the teed file. Among the mode combinations, only
+`spawn=True` with `connect_url`, or `recording_path` with `recording_dir`,
+raises `ValueError`.
+
+For `inspect-robots run`, a live viewer or `--rerun-connect` saves a `.rrd` in
+the log directory by default. Replay it later with:
+
+```bash
+rerun logs/task_slug_xxxxxxxx.rrd
+```
+
+Use `--no-rerun-save` for a live-only run, or set `rerun_save = false` under
+`[defaults]` to make that the rig default. Use explicit `--rerun-save` without
+a live-view option to record only; `--rerun-save --no-rerun` also selects this
+headless mode. The CLI prints the resolved `.rrd` path after a completed eval.
 
 ### Live transcript in the viewer
 
@@ -117,8 +135,9 @@ viewer on your own machine instead and stream to it: `rerun` on your laptop,
 `ssh -R 9876:localhost:9876 <robot>` for the tunnel, then
 `inspect-robots run ... --rerun-connect` (a bare `--rerun-connect` targets the
 tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
-and SDK versions must match for live connections. Hosts driving two rigs give
-each config its own `rerun_port` so each run spawns its own viewer window.
+and SDK versions must match for live connections. For a replayable file without
+a live connection, use `--rerun-save`. Hosts driving two rigs give each config
+its own `rerun_port` so each run spawns its own viewer window.
 
 ## Frame side-cars
 

@@ -48,6 +48,10 @@ inspect-robots run --task my-task --policy agent --embodiment my-robot \
     --voice -V model=medium -V device="USB Microphone" -V compute=int8
 ```
 
+The plugin can also narrate streamed policy notes with `run --speak`. Speech defaults to
+`interrupt`, which cuts off superseded narration. Pass `-S mode=blocking` to wait boundedly for
+each previous note, or `-S mode=queue` to retain bounded drop-oldest queueing.
+
 ## Filtering
 
 Audio is segmented locally with an adaptive energy gate. Parakeet applies duration, blank-text,
