@@ -1,6 +1,6 @@
 # 0065 — Transcript rail: live turn highlight + click-to-seek on the composite run video
 
-- **Status:** draft (R3 resolved)
+- **Status:** approved (R4 clean)
 - **Issue:** #352
 - **Critique rounds:** R1: 3 substantive (turn steps are policy-authored and
   not guaranteed ascending — active-turn is now an order-independent argmax
@@ -30,7 +30,10 @@
   substring lives in the always-embedded flipbook JS; corrected to the
   attribute-with-value form `'data-camera-tab="'`) plus two folded nits
   (gutter appended after the `margin` shorthand; the literal `autoplay`
-  banned from new JS/markup) — resolved below.
+  banned from new JS/markup) — resolved below. R4: clean — every claim
+  verified byte-level (re-pin inventory swept complete, encoder pin,
+  browser semantics, gate branches); one foldable nit (the CLAUDE.md
+  `_video.py` return-contract row) folded without a further round.
 - **Lineage:** successor to PR #272's headline feature (plan 0039's multicam
   player with synced transcript rail). #272 synchronized N per-camera panes
   with custom JS and disk-side `media/` symlinks; plans 0060/0063 have since
@@ -201,4 +204,6 @@ script); Python emissions are what the gate covers:
   (plan 0065, issue #352).
 - `docs/guide/cli.md` report section: one short paragraph after the
   run-video paragraph describing the rail.
-- `src/inspect_robots/CLAUDE.md` `_html.py` row gains rail wording.
+- `src/inspect_robots/CLAUDE.md`: the `_html.py` row gains rail wording, and
+  the `_video.py` row's return-contract sentence ("MP4 bytes plus surviving
+  camera keys") gains the step timeline.
