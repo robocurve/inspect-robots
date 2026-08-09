@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box
+    from inspect_robots.task import Task
 
 
 def _styled(text: str, code: str) -> str:
@@ -715,6 +716,32 @@ def _resolve_or_exit(
         raise SystemExit(
             f"invalid arguments for {kind} {name!r}: {exc}; check [{args_section}] and {flag} k=v"
         ) from exc
+
+
+def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = False) -> Task:
+    """Apply ``--epochs`` with a guided error instead of a raw traceback.
+
+    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
+    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
+    already converts to ``SystemExit``.
+
+    ``attribute_task`` names the offending task, which ``eval-set`` needs to
+    say *which* of several tasks rejected the flag; ``run`` has only one.
+    """
+    from dataclasses import replace
+
+    from inspect_robots.errors import ConfigError
+
+    try:
+        return replace(task, epochs=epochs)
+    except ConfigError as exc:
+        # `__post_init__` re-validates every field, but the task was already
+        # valid and only `epochs` changed — so the epoch-count check is the
+        # only rejection this call can newly trigger. That lets the message be
+        # phrased in the flag's own terms instead of echoing Epochs' internal
+        # wording, which read as "--epochs: Epochs count must be >= 1, got 0".
+        where = f" (task {task.name!r})" if attribute_task else ""
+        raise SystemExit(f"--epochs{where} must be >= 1, got {epochs}") from exc
 
 
 def _build_guardrails(
@@ -1536,8 +1563,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "--no-rerun disables the live viewer and --rerun-port requests one: pass only one"
         )
 
-    from dataclasses import replace
-
     from inspect_robots import eval
     from inspect_robots.logging import JsonLogSink, LiveLogSink
     from inspect_robots.scene import Scene
@@ -1592,12 +1617,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     rerun_sink: LogSink | None = None
     try:
         if args.epochs is not None:
-            from inspect_robots.errors import ConfigError
-
-            try:
-                task = replace(task, epochs=args.epochs)
-            except ConfigError as exc:
-                raise SystemExit(f"--epochs: {exc}") from exc
+            task = _apply_epochs_or_exit(task, args.epochs)
 
         _announce_components(resolved)
         approver = _build_and_announce_guardrails(
@@ -1772,7 +1792,6 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     the embodiment once per task), the CLI resolves the embodiment exactly
     once for the whole set, so a real robot is not reconnected between tasks.
     """
-    from dataclasses import replace
 
     from inspect_robots import eval_set
     from inspect_robots.logging import JsonLogSink, LiveLogSink
@@ -1783,16 +1802,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     defaults = load_defaults(os.environ)
     tasks = [_resolve_or_exit("task", name) for name in task_names]
     if args.epochs is not None:
-        from inspect_robots.errors import ConfigError
-        from inspect_robots.task import Task
-
-        patched: list[Task] = []
-        for t in tasks:
-            try:
-                patched.append(replace(t, epochs=args.epochs))
-            except ConfigError as exc:
-                raise SystemExit(f"--epochs (task {t.name!r}): {exc}") from exc
-        tasks = patched
+        tasks = [_apply_epochs_or_exit(t, args.epochs, attribute_task=True) for t in tasks]
 
     resolved = _resolve_components(args, defaults)
     embodiment = resolved.embodiment

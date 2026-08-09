@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
+  one shared helper, and its error reads `--epochs must be >= 1, got 0`
+  (naming the offending task in `eval-set`) instead of doubling the wording
+  as "--epochs: Epochs count must be >= 1, got 0" (#152).
+
 - **Core:** completed HTML reports now combine every stored camera stream into
   one side-by-side run video with a shared playhead. The raw policy exchange is
   renamed from LLM POV to Raw transcript, and dividers now separate transcript
