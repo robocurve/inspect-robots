@@ -100,6 +100,52 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "plugin_policy" in registered("policy")
 
 
+def test_entrypoint_discovery_retries_after_a_failed_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising entry-point scan must not mark discovery done (#255)."""
+    calls: list[str] = []
+
+    def exploding_entry_points(*, group: str) -> list[object]:
+        calls.append(group)
+        raise RuntimeError("simulated broken entry-point scan")
+
+    monkeypatch.setattr(reg, "entry_points", exploding_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    # The flag stays clear, so the next call retries instead of silently
+    # serving a registry that is missing every plugin.
+    assert reg._loaded_entrypoints is False
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    assert len(calls) == 2
+
+
+def test_builtin_loading_retries_after_a_failed_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising builtins import must not mark builtins loaded (#255)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def exploding_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "inspect_robots._builtins":
+            raise RuntimeError("simulated broken builtins import")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "inspect_robots._builtins", raising=False)
+    monkeypatch.setattr(builtins, "__import__", exploding_import)
+    monkeypatch.setattr(reg, "_loaded_builtins", False)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", True)
+
+    with pytest.raises(RuntimeError, match="simulated broken builtins import"):
+        reg._ensure_loaded()
+    assert reg._loaded_builtins is False
+
+
 def test_cli_list_runs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "policies"]) == 0
     out = capsys.readouterr().out

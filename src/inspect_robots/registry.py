@@ -100,10 +100,13 @@ def operator_input(name: str | None = None) -> Callable[[F], F]:
 def _ensure_loaded() -> None:
     global _loaded_builtins, _loaded_entrypoints
     if not _loaded_builtins:
-        _loaded_builtins = True
+        # Set the flag only once the import has succeeded: a raising import that
+        # left it set would make every later call take the "already loaded" path
+        # and serve an empty registry instead of re-raising.
         import inspect_robots._builtins  # noqa: F401  (registers builtin components)
+
+        _loaded_builtins = True
     if not _loaded_entrypoints:
-        _loaded_entrypoints = True
         for kind, group in _GROUPS.items():
             for ep in entry_points(group=group):
                 try:
@@ -119,6 +122,7 @@ def _ensure_loaded() -> None:
                     )
                     continue
                 _FACTORIES[kind].setdefault(ep.name, factory)
+        _loaded_entrypoints = True
 
 
 def registered(kind: Kind) -> dict[str, Callable[..., Any]]:

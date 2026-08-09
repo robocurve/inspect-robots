@@ -344,6 +344,13 @@ All notable changes to this project are documented here. The format is based on
   now raises `ConfigError` instead of silently converting `True` to a 1-step
   horizon (`bool` is a subclass of `int` in Python).
 
+
+- **A failed component-discovery pass no longer leaves the registry
+  permanently empty.** `_ensure_loaded` set its `_loaded_builtins` /
+  `_loaded_entrypoints` flags before the work they guard, so a raising builtins
+  import or entry-point scan made every later call take the "already loaded"
+  path and serve zero components instead of retrying or re-raising (#255).
+
 - **`inspect`/`view` no longer crash on a log's own sanitized non-finite
   metrics.** `JsonLogSink` writes `inf`/`nan` scores as JSON `null` so the log
   stays RFC 8259 valid, but the CLI and HTML renderers formatted every metric
