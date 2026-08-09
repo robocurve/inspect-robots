@@ -1,7 +1,18 @@
 # 0065 — Transcript rail: live turn highlight + click-to-seek on the composite run video
 
-- **Status:** draft (R0)
+- **Status:** draft (R1 resolved)
 - **Issue:** #352
+- **Critique rounds:** R1: 3 substantive (turn steps are policy-authored and
+  not guaranteed ascending — active-turn is now an order-independent argmax
+  matching `_place_feedback`'s precedent, and "same source ordering as the
+  timeline" was factually wrong; Follow scrolled every `timeupdate` — now
+  gated on active-turn *change*, which also amortizes the search cost;
+  the timeline construction is now pinned to append-at-yield + read-after-
+  wrapper so a partial timeline can never escape) plus five folded nits
+  (Follow reuses `class="camera-tab"`; every turn carries a transparent
+  left border so activation never shifts layout and dividers stay uniform;
+  seek lands mid-frame at `(i + 0.5)/fps`; initial active turn set at
+  wire-up; skip-step wording in the intro) — all resolved below.
 - **Lineage:** successor to PR #272's headline feature (plan 0039's multicam
   player with synced transcript rail). #272 synchronized N per-camera panes
   with custom JS and disk-side `media/` symlinks; plans 0060/0063 have since
@@ -25,8 +36,9 @@ Two data attributes bridge Python (which knows the timeline) and one small
 JS addition (which owns playback):
 
 - The composite `<video>` gains `data-steps="0,1,2,…"` — the encoder's step
-  timeline (sorted union, exactly the steps that produced composite frames,
-  so video frame *k* shows step `steps[k]`) — and `data-fps="{fps:g}"`.
+  timeline (sorted union minus skipped all-empty steps: exactly the steps
+  that produced composite frames, so video frame *k* shows step `steps[k]`)
+  — and `data-fps="{fps:g}"`.
   Frame *k* plays at `t = k / fps`; both mappings are exact, no
   `control_hz` re-derivation in JS (the union timeline is not guaranteed
   contiguous, so arithmetic on step numbers would be wrong — index lookup
@@ -39,9 +51,15 @@ JS addition (which owns playback):
 
 `_encode_composite_mp4` returns `tuple[bytes, tuple[str, ...], tuple[int,
 ...]] | None` — bytes, surviving stream keys (plan 0063), and now the
-**emitted-frame step timeline** (union steps minus skipped all-empty steps,
-in yield order; built alongside the frames, so it is exactly index-aligned
-with the encoded video). The monkeypatch seam and fakes in
+**emitted-frame step timeline**. Construction is pinned: the timeline is a
+list closed over by the `composite_frames` generator, appended **immediately
+before each `yield`**, and read **only after `_temporary_mp4` returns
+non-`None`** — the wrapper's `_encode_arrays` loop exhausts the generator on
+every success path and every partial-consumption path returns `None`, so a
+partial timeline can never escape, and index-alignment with the encoded
+frames holds by construction. (Do **not** precompute the timeline in a
+pre-pass: it would double-`_normalize` every frame and can diverge from the
+encode's mid-stream error cutoff.) The monkeypatch seam and fakes in
 `tests/test_html_view.py` widen to the 3-tuple.
 
 ### HTML (`_html.py`)
@@ -52,8 +70,11 @@ with the encoded video). The monkeypatch seam and fakes in
   ffmpeg argv.
 - `_render_turn` adds `data-step="{N}"` to `<section class="turn">` when the
   turn has references.
-- A **Follow** toggle button (`<button type="button" data-follow>Follow</button>`)
-  joins the `run-media-head`, rendered only on the composite success path.
+- A **Follow** toggle button (`<button type="button" class="camera-tab"
+  data-follow>Follow</button>`) joins the `run-media-head`, rendered only on
+  the composite success path. Reusing `class="camera-tab"` gives it the pill
+  styling for free and is safe: the tab-wiring JS selects by
+  `[data-camera-tab]`, which Follow does not carry.
 
 ### JS (inside the existing per-`run-media` `forEach`)
 
@@ -65,25 +86,42 @@ no-op unless `block.querySelector('.video-panel video[data-steps]')` exists
   ('section.turn[data-step]')` scoped to the enclosing `details.transcript`
   (multi-trial pages stay per-trial; a missing `transcript` renders the rail
   inert — single-file pages always have one).
-- On `timeupdate` (and once per `toggle`-driven play): `index =
-  min(floor(video.currentTime * fps), steps.length - 1)`; `step =
-  steps[index]`; the active turn is the last turn whose `data-step <= step`
-  (turns are in ascending step order — same source ordering as the
-  timeline). Move the `active` class; when Follow is on, `scrollIntoView
-  ({block: 'nearest'})`.
-- Click on a turn's `.turn-step` header seeks: `video.currentTime = i /
-  fps` where `i` is the first index with `steps[i] >= turn step` (last
-  index when the turn's step is past the end); playback state is left
-  as-is. Click wiring only attaches when the composite exists, so headers
-  never look interactive on fallback pages.
+- On `timeupdate` (and once at wire-up, so a highlight exists before the
+  first event): `index = min(floor(video.currentTime * fps),
+  steps.length - 1)`; `step = steps[index]`. The active turn is computed
+  **order-independently**: among turns with `data-step <= step`, take the
+  one with the greatest step (first-in-document on ties) — turn steps are
+  policy-authored transcript labels with no monotonicity guarantee, and
+  `_place_feedback` already refuses the ascending assumption with its
+  `max(candidates)` argmax; the rail matches that precedent. (Binary search
+  is valid only over `steps`, which the encoder genuinely emits ascending.)
+  In practice: parse `[step, node]` pairs once at wire-up and sort by
+  `(step, document position)`; then "last sorted entry with step <= current"
+  is the argmax and the per-event work is a bounded scan from the previous
+  position.
+- The `active` class moves — and Follow's `scrollIntoView({block:
+  'nearest'})` fires — **only when the active node changes**, never on
+  every `timeupdate`: unconditional scrolling at 4–66 Hz would fight the
+  user's own scrolling permanently (the composite plays and loops whenever
+  its transcript is open), and change-gating also makes the per-event cost
+  O(1) amortized.
+- Click on a turn's `.turn-step` header seeks: `video.currentTime =
+  (i + 0.5) / fps` where `i` is the first index with `steps[i] >= turn
+  step` (last index when the turn's step is past the end) — the half-frame
+  offset keeps boundary rounding from displaying frame `i - 1`. Playback
+  state is left as-is (a paused video still fires `timeupdate` on seek, so
+  the highlight follows). Click wiring only attaches when the composite
+  exists, so headers never look interactive on fallback pages.
 - Follow button toggles an `active` class on itself; default off
   (auto-scroll is opt-in — #272's demo lesson).
 
 ### CSS
 
-- `.turn.active { border-left: 3px solid var(--user); padding-left: 12px;
-  margin-left: -15px; }` — highlight without layout shift (compensating
-  negative margin).
+- Every turn carries the gutter so activation never shifts layout **and**
+  the `.turn + .turn` divider spans one uniform width: `.turn {
+  border-left: 3px solid transparent; padding-left: 12px; margin-left:
+  -15px; }` (appended to the existing `.turn` rule) with `.turn.active {
+  border-left-color: var(--user); }`.
 - `.rail-seekable .turn-step { cursor: pointer; }` — the JS adds
   `rail-seekable` to the enclosing `details.transcript` when it wires the
   rail, so pointer affordance appears exactly when clicking works.
