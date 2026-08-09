@@ -1,6 +1,6 @@
 # 0065 — Transcript rail: live turn highlight + click-to-seek on the composite run video
 
-- **Status:** draft (R1 resolved)
+- **Status:** draft (R2 resolved)
 - **Issue:** #352
 - **Critique rounds:** R1: 3 substantive (turn steps are policy-authored and
   not guaranteed ascending — active-turn is now an order-independent argmax
@@ -12,7 +12,17 @@
   (Follow reuses `class="camera-tab"`; every turn carries a transparent
   left border so activation never shifts layout and dividers stay uniform;
   seek lands mid-frame at `(i + 0.5)/fps`; initial active turn set at
-  wire-up; skip-step wording in the intro) — all resolved below.
+  wire-up; skip-step wording in the intro) — all resolved below. R2:
+  verified all R1 resolutions hold; 4 substantive (the argmax tie rule said
+  first-in-document while the sorted-array recipe and the `_place_feedback`
+  precedent both give last-in-document — corrected to last; the
+  previous-position scan was direction-ambiguous while the looping video
+  guarantees backward moves — now explicitly bidirectional, with an empty
+  candidate set clearing the active class; two unlisted test re-pins — the
+  composite-success `camera-tab`-absence assert and the same-step-feedback
+  test's exact `<section class="turn">` split) plus three folded nits
+  (fourth exact-tuple fixture named, `**Core:**` changelog prefix,
+  data attributes placed after `preload="metadata"`) — all resolved below.
 - **Lineage:** successor to PR #272's headline feature (plan 0039's multicam
   player with synced transcript rail). #272 synchronized N per-camera panes
   with custom JS and disk-side `media/` symlinks; plans 0060/0063 have since
@@ -66,8 +76,9 @@ encode's mid-stream error cutoff.) The monkeypatch seam and fakes in
 
 - `_render_trial_media` interpolates `data-steps`/`data-fps` into the video
   element (comma-joined ints; ~6 KB for a 1,200-step run — noise next to
-  the MP4 payload). `data-fps` uses the same `{fps:g}` formatting as the
-  ffmpeg argv.
+  the MP4 payload), **after** `preload="metadata"` so the existing
+  attribute-prefix assertion survives unchanged. `data-fps` uses the same
+  `{fps:g}` formatting as the ffmpeg argv.
 - `_render_turn` adds `data-step="{N}"` to `<section class="turn">` when the
   turn has references.
 - A **Follow** toggle button (`<button type="button" class="camera-tab"
@@ -90,15 +101,21 @@ no-op unless `block.querySelector('.video-panel video[data-steps]')` exists
   first event): `index = min(floor(video.currentTime * fps),
   steps.length - 1)`; `step = steps[index]`. The active turn is computed
   **order-independently**: among turns with `data-step <= step`, take the
-  one with the greatest step (first-in-document on ties) — turn steps are
-  policy-authored transcript labels with no monotonicity guarantee, and
-  `_place_feedback` already refuses the ascending assumption with its
-  `max(candidates)` argmax; the rail matches that precedent. (Binary search
-  is valid only over `steps`, which the encoder genuinely emits ascending.)
+  one with the greatest step (**last**-in-document on ties — matching
+  `_place_feedback`'s `max(candidates, key=(step, index))`, pinned by the
+  same-step-tail test) — turn steps are policy-authored transcript labels
+  with no monotonicity guarantee, and `_place_feedback` already refuses the
+  ascending assumption; the rail matches that precedent. (Binary search is
+  valid only over `steps`, which the encoder genuinely emits ascending.)
   In practice: parse `[step, node]` pairs once at wire-up and sort by
-  `(step, document position)`; then "last sorted entry with step <= current"
-  is the argmax and the per-event work is a bounded scan from the previous
-  position.
+  `(step, document position)`; "last sorted entry with step <= current" is
+  the argmax, and the per-event work is a pointer walked **forward or
+  backward** from the previous position — the video carries `loop`, so
+  `currentTime` wraps to 0 every playthrough, and click-to-seek moves
+  backward; a forward-only scan would stick after the first loop. When no
+  entry has `step <= current` (possible at wrap or wire-up when another
+  camera stored earlier steps than the first stepped turn), the candidate
+  set is empty and the active class is **cleared**.
 - The `active` class moves — and Follow's `scrollIntoView({block:
   'nearest'})` fires — **only when the active node changes**, never on
   every `timeupdate`: unconditional scrolling at 4–66 Hz would fight the
@@ -138,7 +155,8 @@ script); Python emissions are what the gate covers:
   `steps == (0, 1)`-style exact tuples; the hold-last/union fixture asserts
   union order; the skip-step fixture asserts the skipped step is absent
   from the returned timeline (index alignment with emitted frames is the
-  contract).
+  contract); the black-prefill/all-empty-drop fixture's exact 2-tuple
+  assert widens too.
 - Migrated wrapper tests re-pin the 3-tuple boundary.
 
 `tests/test_html_view.py`:
@@ -149,12 +167,20 @@ script); Python emissions are what the gate covers:
 - Fallback page: no `data-steps`, no Follow button, turns still carry
   `data-step` (attribute emission is video-independent).
 - Fake composite encoders return 3-tuples; the throwing fake is unaffected.
+- Two existing assertions re-pin: the composite-success test's
+  `'class="camera-tab' not in document` becomes `'data-camera-tab' not in
+  document` (Follow now legitimately carries `class="camera-tab"`) plus a
+  Follow-present assert; and the same-step-feedback test's exact
+  `document.split('<section class="turn">')` breaks once turns carry
+  `data-step` — split on the unclosed prefix `'<section class="turn'`
+  (or a regex) instead.
 
 ## Docs & changelog
 
-- CHANGELOG `[Unreleased]` → Added: transcript rail (live step highlight,
-  click-to-seek, Follow) on composite-video pages, crediting PR #272 as the
-  origin (plan 0065, issue #352).
+- CHANGELOG `[Unreleased]` → Added, with the conventional bold scope prefix
+  (`**Core:**`): transcript rail (live step highlight, click-to-seek,
+  Follow) on composite-video pages, crediting PR #272 as the origin
+  (plan 0065, issue #352).
 - `docs/guide/cli.md` report section: one short paragraph after the
   run-video paragraph describing the rail.
 - `src/inspect_robots/CLAUDE.md` `_html.py` row gains rail wording.
