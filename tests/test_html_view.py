@@ -1261,7 +1261,7 @@ def test_feedback_matches_latest_same_step_turn_and_residual_is_exact(
     document = render_html(
         dataclasses.replace(log, samples=(scene,)), title="feedback", frames_dir=tmp_path
     )
-    turns = document.split('<section class="turn">')[1:]
+    turns = document.split('<section class="turn')[1:]
 
     assert "same step tail" not in turns[0]
     assert "same step tail" in turns[1]
@@ -1354,6 +1354,10 @@ def test_flipbook_reuses_frame_urls_and_requires_two_frames(
     )
     assert 'data-camera="top" data-step="1" data-trial="scene-0-e0"' in document
     assert "no ffmpeg" in document
+    assert 'data-steps="' not in document
+    assert '<button type="button" class="camera-tab" data-follow>Follow</button>' not in document
+    assert '<section class="turn" data-step="1"><div class="turn-step">step 1</div>' in document
+    assert '<section class="turn" data-step="2"><div class="turn-step">step 2</div>' in document
 
     single = _chat({"role": "user", "content": _parts("top", 1)})
     one = render_html(_log(transcripts=(single,)), title="one", frames_dir=tmp_path)
@@ -1368,16 +1372,17 @@ def test_mp4_tier_renders_one_composite_in_turn_order_without_autoplay(
 
     def fake_encode(
         streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], fps: float, ffmpeg: str
-    ) -> tuple[bytes, tuple[str, ...]]:
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
         assert fps == 10.0 and ffmpeg == "/fake/ffmpeg"
         encoded.append([(key, [step for step, _path in frames]) for key, frames in streams])
-        return b"composite", tuple(key for key, _frames in streams)
+        return b"composite", tuple(key for key, _frames in streams), (0, 1)
 
     monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
     for camera in ("alpha", "top camera", "unseen_camera"):
         _save_frame(tmp_path, camera, 0, np.zeros((2, 2, 3), dtype=np.uint8))
         _save_frame(tmp_path, camera, 1, np.ones((2, 2, 3), dtype=np.uint8))
     transcript = _chat(
+        {"role": "assistant", "content": "Preamble"},
         {"role": "user", "content": [*_parts("top camera", 0), *_parts("alpha", 0)]},
         {"role": "user", "content": [*_parts("top camera", 1), *_parts("alpha", 1)]},
     )
@@ -1393,10 +1398,16 @@ def test_mp4_tier_renders_one_composite_in_turn_order_without_autoplay(
     ]
     assert document.count("data:video/mp4;base64,") == 1
     assert document.count("<video") == 1
-    assert 'class="camera-tab' not in document
+    assert 'data-camera-tab="' not in document
+    assert '<button type="button" class="camera-tab" data-follow>Follow</button>' in document
     assert '<div class="camera-order">top camera · alpha · unseen_camera</div>' in document
     assert "autoplay" not in document
-    assert '<video controls muted loop preload="metadata"' in document
+    assert (
+        '<video controls muted loop preload="metadata" data-steps="0,1" data-fps="10"' in document
+    )
+    assert '<section class="turn"><div class="message assistant">' in document
+    assert '<section class="turn" data-step="0"><div class="turn-step">step 0</div>' in document
+    assert '<section class="turn" data-step="1"><div class="turn-step">step 1</div>' in document
     run_media = re.search(
         r'<div class="run-media".*?<div class="conversation">', document, flags=re.DOTALL
     )
@@ -1418,11 +1429,11 @@ def test_composite_caption_omits_an_all_empty_stored_stream(
 
     def fake_encode(
         streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
-    ) -> tuple[bytes, tuple[str, ...]]:
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
         survivors = tuple(
             key for key, frames in streams if any(np.load(path).size for _step, path in frames)
         )
-        return b"composite", survivors
+        return b"composite", survivors, (0, 1)
 
     monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
     for step in (0, 1):
@@ -1453,7 +1464,11 @@ def test_mp4_budget_and_failures_degrade_to_flipbook(
     _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
     monkeypatch.setattr(
         "inspect_robots._video._encode_composite_mp4",
-        lambda streams, *_args: (b"large", tuple(key for key, _frames in streams)),
+        lambda streams, *_args: (
+            b"large",
+            tuple(key for key, _frames in streams),
+            tuple(sorted({step for _key, frames in streams for step, _path in frames})),
+        ),
     )
 
     budget = render_html(
@@ -1480,9 +1495,13 @@ def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
 
     def fake_encode(
         streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
-    ) -> tuple[bytes, tuple[str, ...]]:
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
         encoder_calls.append(streams)
-        return b"overflow", tuple(key for key, _frames in streams)
+        return (
+            b"overflow",
+            tuple(key for key, _frames in streams),
+            tuple(sorted({step for _key, frames in streams for step, _path in frames})),
+        )
 
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
     monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
@@ -1520,9 +1539,13 @@ def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
 
     def overflow(
         streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
-    ) -> tuple[bytes, tuple[str, ...]]:
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
         encoder_calls.append(streams)
-        return b"overflow", tuple(key for key, _frames in streams)
+        return (
+            b"overflow",
+            tuple(key for key, _frames in streams),
+            tuple(sorted({step for _key, frames in streams for step, _path in frames})),
+        )
 
     monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", overflow)
     first = _chat(
@@ -1647,7 +1670,11 @@ def test_video_budget_without_flipbook_source_omits_camera_panel(
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
     monkeypatch.setattr(
         "inspect_robots._video._encode_composite_mp4",
-        lambda streams, *_args: (b"large", tuple(key for key, _frames in streams)),
+        lambda streams, *_args: (
+            b"large",
+            tuple(key for key, _frames in streams),
+            tuple(sorted({step for _key, frames in streams for step, _path in frames})),
+        ),
     )
     _save_frame(tmp_path, "unseen", 0, np.zeros((2, 2, 3), dtype=np.uint8))
     transcript = _chat({"role": "user", "content": "no observation frames"})

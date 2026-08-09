@@ -501,6 +501,10 @@ or pause, and step scrubbing over the existing frame images as a lightweight
 flipbook. The file contains its stylesheet and media inline, so it has no
 network dependency.
 
+On composite-video pages, the transcript is also a timeline rail: the active
+turn highlights as the video plays, clicking a turn's step header seeks to its step, and the
+opt-in Follow button keeps the active turn in view.
+
 By default, `view` replaces the log path's suffix with `.html` and prints the
 written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
 the HTML document to stdout, or `--open` to launch the written file in the
