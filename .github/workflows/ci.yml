@@ -259,6 +259,42 @@ jobs:
           uv run --no-sync python -m pytest plugins/inspect-robots-xpolicylab/tests -q
           --cov=inspect_robots_xpolicylab --cov-report=term-missing --cov-fail-under=0
 
+  # The voice plugin's suite needs no microphone or model download: injected
+  # fakes cover device selection, segmentation, transcription filtering,
+  # threading, backpressure, and trial-generation races offline.
+  plugin-voice:
+    name: plugin · voice
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Sync workspace (core + plugins, dev extras)
+        run: uv sync --locked --python 3.11 --all-packages --extra dev
+      - name: Ruff (plugin, lint)
+        run: uv run --no-sync ruff check plugins/inspect-robots-voice
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-voice
+      - name: Mypy (plugin, strict)
+        run: >
+          uv run --no-sync mypy
+          --config-file plugins/inspect-robots-voice/pyproject.toml
+          plugins/inspect-robots-voice/src/inspect_robots_voice
+          plugins/inspect-robots-voice/tests
+      - name: Pytest (plugin, with coverage)
+        # Report-only, like the other plugin jobs. Tests exercise the real
+        # orchestration through fakes without importing audio/model runtimes.
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-voice/tests -q
+          --cov=inspect_robots_voice --cov-report=term-missing --cov-fail-under=0
+
   # The ROS adapter's suite needs no ROS install or robot: an in-process
   # rosbridge stub covers protocol shapes, threading, pacing, reset, and spaces.
   plugin-ros:
@@ -404,7 +440,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -417,7 +453,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
     runs-on: ubuntu-latest
     permissions:
       issues: write

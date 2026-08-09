@@ -228,6 +228,23 @@ def test_task_rejects_invalid_steps_horizon(max_steps: int) -> None:
         )
 
 
+def test_task_rejects_duplicate_scene_ids() -> None:
+    # Scene ids become per-trial identity (rollout builds "{scene.id}-e{epoch}",
+    # which FrameStore turns into a filename), so a duplicate silently
+    # overwrites another trial's stored frames (#289).
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task
+
+    with pytest.raises(ConfigError, match="duplicate scene id 'same'"):
+        Task(
+            name="t",
+            scenes=[Scene(id="same", instruction="x"), Scene(id="same", instruction="y")],
+            scorer="success_at_end",
+            max_steps=80,
+        )
+
+
 @pytest.mark.parametrize("max_seconds", [True, 0.0, -1.0, float("nan"), float("inf")])
 def test_task_rejects_invalid_seconds_horizon(max_seconds: float) -> None:
     from inspect_robots.errors import ConfigError
