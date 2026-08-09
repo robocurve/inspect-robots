@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import numpy as np
@@ -43,6 +43,16 @@ from inspect_robots_capx._servers import CapxServerClients
 
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 _WIRE_FORMATS = frozenset({"chat", "responses"})
+
+
+# Duplicated from inspect_robots_agent/policy.py; keep the effort contract in sync.
+# The CLI -P parser coerces the literal `none` to Python None, so the constructor
+# needs this marker to tell "operator asked for none" from "operator said nothing".
+class _Unset:
+    """Marker type distinguishing an omitted effort from an explicit one."""
+
+
+_UNSET: Final = _Unset()
 _EXECUTION_REPORT_CHAR_LIMIT = 16_000
 _REPORT_TRUNCATION_MARKER = "[execution report truncated; tail follows]\n"
 
@@ -117,7 +127,10 @@ class CapxPolicyConfig(PolicyConfig):
     base_url: str | None = None
     api_key_env: str | None = None
     wire: str = "chat"
-    effort: str | None = "low"
+    #: Resolved effort level; ``None`` means the field is omitted and the
+    #: provider default applies. The recorded value is the normalized one, so
+    #: an operator ``none`` reads back as ``"none"`` rather than a bare omission.
+    effort: str | None = None
     sam3_url: str = "http://127.0.0.1:8114"
     graspnet_url: str = "http://127.0.0.1:8115"
     pyroki_url: str = "http://127.0.0.1:8116"
@@ -153,7 +166,7 @@ class CapxPolicy(PolicyBase):
         max_llm_calls: int = 100,
         max_code_failures: int = 3,
         temperature: float | None = None,
-        effort: str | None = "low",
+        effort: str | None | _Unset = _UNSET,
         sam3_url: str = "http://127.0.0.1:8114",
         graspnet_url: str = "http://127.0.0.1:8115",
         pyroki_url: str = "http://127.0.0.1:8116",
@@ -214,11 +227,18 @@ class CapxPolicy(PolicyBase):
             raise ValueError("max_speed_frac must be finite and > 0")
         if not np.isfinite(request_timeout_s) or request_timeout_s <= 0:
             raise ValueError("request_timeout_s must be finite and > 0")
-        if effort is not None and effort not in _EFFORT_LEVELS:
-            raise ValueError(
-                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit the field, "
-                f"got {effort!r}"
-            )
+        # Unset leaves effort omitted so the provider default applies. A supplied
+        # value normalizes the CLI-coerced None to the level "none" and is then
+        # validated; ConfigError (not ValueError) so the CLI renders a guided
+        # message instead of a traceback (#168).
+        resolved_effort: str | None = None
+        if not isinstance(effort, _Unset):
+            resolved_effort = "none" if effort is None else effort
+            if resolved_effort not in _EFFORT_LEVELS:
+                raise ConfigError(
+                    f"effort must be one of {sorted(_EFFORT_LEVELS)}, got {resolved_effort!r}.\n"
+                    "fix: omit -P effort= to use the provider default"
+                )
         if wire not in _WIRE_FORMATS:
             raise ValueError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
 
@@ -249,7 +269,7 @@ class CapxPolicy(PolicyBase):
         self._max_llm_calls = max_llm_calls
         self._max_code_failures = max_code_failures
         self._temperature = temperature
-        self._effort = effort
+        self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._gripper_open_is_high = gripper_open_is_high
         self._transcript_echo = transcript_echo
@@ -260,7 +280,7 @@ class CapxPolicy(PolicyBase):
             base_url=provider.base_url,
             api_key_env=api_key_env,
             wire=wire,
-            effort=effort,
+            effort=resolved_effort,
             sam3_url=sam3_url,
             graspnet_url=graspnet_url,
             pyroki_url=pyroki_url,
