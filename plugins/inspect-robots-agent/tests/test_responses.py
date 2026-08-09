@@ -643,9 +643,10 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
 
     assert requests[0].url.path == "/v1/responses"
     body = json.loads(requests[0].content)
-    assert body["reasoning"] == {"effort": "low"}
+    assert "reasoning" not in body
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "responses"
+    assert policy.config.effort is None
 
 
 def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
@@ -653,7 +654,7 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",
-            wire="messages",
+            wire="response",
             env={},
         )
 

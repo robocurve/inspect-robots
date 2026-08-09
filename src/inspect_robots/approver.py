@@ -193,7 +193,11 @@ class DeltaLimitApprover:
         dim = action_space.dim
         low, high = action_space.low, action_space.high
 
-        explicit = _validate_max_delta(max_delta, dim) if max_delta is not None else None
+        explicit = (
+            _validate_max_delta(max_delta, action_space.shape, dim)
+            if max_delta is not None
+            else None
+        )
         if self._absolute:
             if explicit is not None:
                 self._delta = explicit
@@ -271,7 +275,9 @@ class DeltaLimitApprover:
         return replace(action, data=approved, meta={**dict(action.meta), "delta_clamped": True})
 
 
-def _validate_max_delta(max_delta: float | Any, dim: int) -> npt.NDArray[np.float64]:
+def _validate_max_delta(
+    max_delta: float | Any, shape: tuple[int, ...], dim: int
+) -> npt.NDArray[np.float64]:
     try:
         arr = np.broadcast_to(np.asarray(max_delta, dtype=np.float64), (dim,))
     except ValueError as exc:
@@ -280,7 +286,11 @@ def _validate_max_delta(max_delta: float | Any, dim: int) -> npt.NDArray[np.floa
         ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
         raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
-    return arr
+    # Shaped like the box for the same reason the derived default is: review()
+    # clips against the action's own shape, and the displacement branch
+    # intersects with bounds of that shape, so a flat delta fails to broadcast
+    # for multi-dimensional boxes.
+    return arr.reshape(shape)
 
 
 def _intersect(

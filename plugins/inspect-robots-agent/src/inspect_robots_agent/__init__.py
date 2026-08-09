@@ -1,11 +1,10 @@
-"""inspect-robots-agent — frontier LLMs as first-class Inspect Robots policies.
+"""inspect-robots-agent: frontier LLMs as first-class Inspect Robots policies.
 
-An LLM behind any OpenAI-compatible API (OpenRouter, OpenAI, local
-vLLM/Ollama, Anthropic's compat endpoint) drives whatever embodiment it is
+An LLM behind a supported API (OpenRouter, OpenAI, local vLLM/Ollama,
+Anthropic, Tinker, or compatible gateways) drives whatever embodiment it is
 paired with: each tool call becomes one smooth, approver-checked action
-chunk. ``-P wire=anthropic`` swaps the OpenAI-compat shim for Anthropic's
-native Messages API, which is what fast mode needs. Registered as the policy
-``agent``::
+chunk. ``-P wire=messages`` selects the Messages API; the permanent
+``anthropic`` alias remains accepted. Registered as the policy ``agent``::
 
     inspect-robots "pick up the cube" --policy agent \
         -P model=anthropic/claude-fable-5 --embodiment cubepick
