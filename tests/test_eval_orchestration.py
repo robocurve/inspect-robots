@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval, eval_set, read_eval_log
+from inspect_robots.console import ConsolePoll, EndRequest
 from inspect_robots.errors import (
     CompatibilityError,
     ConfigError,
@@ -18,7 +19,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.eval import _git_commit
-from inspect_robots.log import EvalLog
+from inspect_robots.log import EvalLog, EvalSpec
 from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -27,7 +28,7 @@ from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
-from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
@@ -136,6 +137,40 @@ class _CountingScorer:
         del record, target
         self.calls += 1
         return Score(value=1.0)
+
+
+class _ScriptedOperatorInput:
+    """Expose per-trial polls and model input typed between trial boundaries."""
+
+    def __init__(self, trials: list[list[ConsolePoll]]) -> None:
+        self.trials = trials
+        self.active: list[ConsolePoll] = []
+        self.pending_messages: list[str] = []
+        self.discarded_messages: list[str] = []
+        self.begin_calls = 0
+
+    def poll(self) -> ConsolePoll:
+        """Merge pending input with the next scripted poll for the active trial."""
+        scripted = self.active.pop(0) if self.active else ConsolePoll()
+        pending = tuple(self.pending_messages)
+        messages = (*pending, *scripted.messages)
+        sources = (
+            *("console" for _ in pending),
+            *(
+                scripted.sources[i] if i < len(scripted.sources) else "console"
+                for i in range(len(scripted.messages))
+            ),
+        )
+        self.pending_messages.clear()
+        return ConsolePoll(messages=messages, end=scripted.end, sources=sources)
+
+    def begin_trial(self) -> None:
+        """Discard inter-trial input and activate the next trial's poll script."""
+        self.begin_calls += 1
+        self.discarded_messages.extend(self.pending_messages)
+        self.pending_messages.clear()
+        index = self.begin_calls - 1
+        self.active = list(self.trials[index]) if index < len(self.trials) else []
 
 
 # --------------------------------------------------------------------------- #
@@ -505,6 +540,80 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
+def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
+    tmp_path: Path,
+) -> None:
+    class _SpaceAware(NullSink):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
+
+        def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
+            self.calls.append(("bind_spaces", action_space, observation_space))
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.calls.append(("bind_frames_dir", frames_dir))
+
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+            self.calls.append(("on_eval_start",))
+
+    class _OddAttr(NullSink):
+        bind_spaces = "not a hook"
+        bind_frames_dir = "not a hook"
+
+    embodiment = CubePickEmbodiment()
+    aware = _SpaceAware()
+    no_hook = NullSink()
+    odd = _OddAttr()
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        sinks=[aware, no_hook, odd],
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "success"
+    assert aware.calls == [
+        (
+            "bind_spaces",
+            embodiment.info.action_space,
+            embodiment.info.observation_space,
+        ),
+        ("bind_frames_dir", None),
+        ("on_eval_start",),
+    ]
+    assert getattr(no_hook, "bind_spaces", None) is None
+    assert odd.bind_spaces == "not a hook"
+    assert getattr(no_hook, "bind_frames_dir", None) is None
+    assert odd.bind_frames_dir == "not a hook"
+
+
+def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:
+    """The optional hook receives the same string persisted on the final log."""
+
+    class _FrameAware(NullSink):
+        def __init__(self) -> None:
+            self.frames_dir: str | None = None
+
+        def bind_frames_dir(self, frames_dir: str | None) -> None:
+            self.frames_dir = frames_dir
+
+    sink = _FrameAware()
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+
+    assert sink.frames_dir == log.stats.frames_dir
+    assert sink.frames_dir is not None
+
+
 def test_eval_binds_task_envelope_before_reset(tmp_path: Path) -> None:
     """bind_task fires once per eval with the task's envelope, before any reset."""
 
@@ -838,6 +947,7 @@ def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
 def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> None:
     (log,) = eval(_task(epochs=2), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.samples[0].operator_judgements == (None, None)
+    assert log.samples[0].operator_messages == ((), ())
 
 
 def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
@@ -857,7 +967,72 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 9. Policy trial lifecycle hooks: setup and artifact persistence.
+# 9. Attended operator input is trial-scoped and persisted beside each epoch.
+# --------------------------------------------------------------------------- #
+def test_eval_begins_console_each_trial_and_discards_scoring_window_input(
+    tmp_path: Path,
+) -> None:
+    operator_input = _ScriptedOperatorInput(
+        [
+            [ConsolePoll(messages=("trial one feedback",), end=EndRequest())],
+            [ConsolePoll(end=EndRequest())],
+        ]
+    )
+
+    def type_during_scoring(record: TrialRecord, scene: Scene) -> None:
+        del scene
+        if record.epoch == 0:
+            operator_input.pending_messages.append("typed during scoring")
+
+    (log,) = eval(
+        _task(epochs=2, scorer=_CountingScorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        operator_input=operator_input,
+        before_scoring=type_during_scoring,
+    )
+
+    assert operator_input.begin_calls == 2
+    assert operator_input.discarded_messages == ["typed during scoring"]
+    assert log.samples[0].operator_messages == (
+        ({"t": 0, "text": "trial one feedback", "source": "console"},),
+        (),
+    )
+
+
+def test_eval_operator_message_source_round_trips_through_written_log(tmp_path: Path) -> None:
+    operator_input = _ScriptedOperatorInput(
+        [
+            [
+                ConsolePoll(
+                    messages=("persist this feedback",),
+                    end=EndRequest(),
+                    sources=("voice",),
+                )
+            ]
+        ]
+    )
+
+    (log,) = eval(
+        _task(scorer=_CountingScorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        operator_input=operator_input,
+    )
+
+    expected = (({"t": 0, "text": "persist this feedback", "source": "voice"},),)
+    assert log.samples[0].operator_messages == expected
+    (path,) = tmp_path.glob("*.json")
+    restored_messages = read_eval_log(str(path)).samples[0].operator_messages
+    assert isinstance(restored_messages, tuple)
+    assert isinstance(restored_messages[0], tuple)
+    assert restored_messages == expected
+
+
+# --------------------------------------------------------------------------- #
+# 10. Policy trial lifecycle hooks: setup and artifact persistence.
 # --------------------------------------------------------------------------- #
 def test_on_trial_start_runs_before_each_trials_first_act(tmp_path: Path) -> None:
     events: list[tuple[object, ...]] = []
@@ -941,6 +1116,7 @@ def test_raising_on_trial_start_skips_rollout_but_keeps_results_parallel(
         scene.epochs,
         scene.operator_judgements,
         scene.operator_notes,
+        scene.operator_messages,
         scene.trial_metadata,
         scene.termination_reasons,
         scene.policy_transcripts,

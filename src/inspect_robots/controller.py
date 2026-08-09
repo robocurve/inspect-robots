@@ -18,6 +18,7 @@ from __future__ import annotations
 import warnings
 from collections import deque
 from dataclasses import replace
+from itertools import count
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -67,6 +68,8 @@ class DefaultController:
 
 
 _SMOOTH_KEY = "_smoothing_prev_action"
+# Distinguishes stacked instances' keys; process-local and never persisted.
+_smooth_serial = count()
 
 
 class SmoothingController:
@@ -83,6 +86,10 @@ class SmoothingController:
             raise ValueError("alpha must be in (0, 1]")
         self.inner = inner
         self.alpha = alpha
+        # Per instance, not per module: this is the one controller state written
+        # destructively rather than appended to, so two smoothing layers in the
+        # same chain would otherwise overwrite each other's previous action.
+        self._store_key = f"{_SMOOTH_KEY}:{next(_smooth_serial)}"
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
@@ -90,9 +97,9 @@ class SmoothingController:
         """Apply an exponential moving average to the wrapped controller's output."""
         action = self.inner.next_action(policy, observation, t, store)
         raw = np.asarray(action.data, dtype=np.float64)
-        prev = store.get(_SMOOTH_KEY)
+        prev = store.get(self._store_key)
         smoothed = raw if prev is None else self.alpha * raw + (1 - self.alpha) * prev
-        store[_SMOOTH_KEY] = smoothed
+        store[self._store_key] = smoothed
         return replace(action, data=smoothed)
 
 

@@ -577,8 +577,8 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
     absolute_parameters = [schema["function"]["parameters"] for schema in absolute.schemas()]
     assert [parameters["required"] for parameters in absolute_parameters] == [
         ["targets", "note"],
-        ["summary"],
-        ["reason"],
+        ["summary", "hindsight"],
+        ["reason", "hindsight"],
     ]
     assert absolute_parameters[0]["properties"]["note"] == {
         "type": "string",
@@ -600,10 +600,29 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
     ]
     assert [parameters["required"] for parameters in displacement_parameters] == [
         ["deltas", "note"],
-        ["summary"],
-        ["reason"],
+        ["summary", "hindsight"],
+        ["reason", "hindsight"],
     ]
     assert displacement_parameters[0]["properties"]["note"]["type"] == "string"
+
+
+def test_stop_schemas_describe_required_hindsight() -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    expected_description = (
+        "What do you know now that you wish you had known at the start of this episode? "
+        "Concrete, transferable facts about this rig, task, or embodiment (camera mounting "
+        "and extrinsics, table and base geometry, gripper axis and offsets, controller "
+        "behavior, metric scale), written as advice to a future agent attempting the same "
+        "task. Say 'none' if nothing qualifies."
+    )
+
+    for schema, detail_key in zip(toolset.schemas()[1:], ("summary", "reason"), strict=True):
+        parameters = schema["function"]["parameters"]
+        assert parameters["required"] == [detail_key, "hindsight"]
+        assert parameters["properties"]["hindsight"] == {
+            "type": "string",
+            "description": expected_description,
+        }
 
 
 def test_take_pic_schema_is_exposed_only_on_demand() -> None:
@@ -1175,6 +1194,43 @@ def test_done_and_give_up_emit_control_mode_hold() -> None:
     assert result.chunk.actions[0].meta["stop_reason"] == "give_up"
 
 
+def test_done_carries_hindsight_in_stop_meta() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    hindsight = "the jar lid needs two approach angles"
+
+    result = toolset.execute(
+        _call("done", summary="jar opened", hindsight=hindsight),
+        _obs(),
+    )
+
+    assert result.error is None and result.chunk is not None
+    (action,) = result.chunk.actions
+    assert action.meta == {
+        "request_stop": True,
+        "stop_reason": "done",
+        "stop_detail": "jar opened",
+        "stop_hindsight": hindsight,
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"reason": "cannot see"}, {"reason": "cannot see", "hindsight": "  "}],
+)
+def test_give_up_accepts_absent_or_blank_hindsight(arguments: dict[str, object]) -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+
+    result = toolset.execute(_call("give_up", **arguments), _obs({}))
+
+    assert result.error is None and result.chunk is not None
+    assert result.chunk.actions[0].meta == {
+        "request_stop": True,
+        "stop_reason": "give_up",
+        "stop_detail": "cannot see",
+    }
+    assert result.note == "give_up: cannot see"
+
+
 def test_tool_errors_are_messages_not_exceptions() -> None:
     toolset = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
     cases = [
@@ -1286,3 +1342,13 @@ def test_displacement_pose_mode_keeps_move_by() -> None:
     move = toolset.schemas()[0]["function"]
     assert move["name"] == "move_by"
     assert move["description"].startswith("Move BY")
+
+
+def test_chunk_final_metadata_tagged_on_last_action() -> None:
+    result = _execute_absolute(0.5, current=0.0)
+    assert result.chunk is not None
+    actions = result.chunk.actions
+    assert len(actions) > 1
+    for action in actions[:-1]:
+        assert "chunk_final" not in action.meta
+    assert actions[-1].meta.get("chunk_final") is True

@@ -35,7 +35,7 @@ from inspect_robots.scene import ListSceneDataset, Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end, value_to_float
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
 from inspect_robots.task import Task
-from inspect_robots.transcript import approval_event, operator_event
+from inspect_robots.transcript import approval_event, operator_event, operator_message_event
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 _SCENE = Scene(id="s", instruction="reach", init_seed=0)
@@ -307,6 +307,14 @@ def test_list_scene_dataset() -> None:
 def test_transcript_event_helpers() -> None:
     assert approval_event(1, modified=True, detail="clamped").kind == "approval"
     assert operator_event(2, "success").data["verdict"] == "success"
+    assert operator_message_event(3, "typed feedback").data == {
+        "text": "typed feedback",
+        "source": "console",
+    }
+    assert operator_message_event(4, "spoken feedback", "voice").data == {
+        "text": "spoken feedback",
+        "source": "voice",
+    }
 
 
 # --------------------------------------------------------------------------- #

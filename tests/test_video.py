@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -18,6 +19,7 @@ import pytest
 import inspect_robots.cli as cli
 from inspect_robots._video import (
     StreamResult,
+    _encode_composite_mp4,
     count_frames,
     default_fps,
     discover_streams,
@@ -48,6 +50,18 @@ def _write_frames(root: Path, prefix: str, arrays: list[np.ndarray]) -> list[tup
         path = root / f"{prefix}_{t:06d}.npy"
         np.save(path, arr)
         out.append((t, path))
+    return out
+
+
+def _write_step_frames(
+    root: Path, prefix: str, frames: Sequence[tuple[int, np.ndarray]]
+) -> list[tuple[int, Path]]:
+    root.mkdir(parents=True, exist_ok=True)
+    out = []
+    for step, array in frames:
+        path = root / f"{prefix}_{step:06d}.npy"
+        np.save(path, array)
+        out.append((step, path))
     return out
 
 
@@ -125,6 +139,7 @@ class _FakePopen:
     fail_on_write_after: ClassVar[int | None] = None
     fail_at_close = False
     write_exception: ClassVar[type[BaseException]] = BrokenPipeError
+    output_bytes = b"fake mp4"
 
     def __init__(self, argv: list[str], stdin: Any, stdout: Any, stderr: int) -> None:
         self.argv = argv
@@ -153,7 +168,10 @@ class _FakePopen:
         # Like a real child: stderr text lands in the file the parent passed.
         if _FakePopen.stderr_text_next:
             os.write(self._stderr_fd, _FakePopen.stderr_text_next.encode())
-        return 1 if self.killed else _FakePopen.returncode_next
+        returncode = 1 if self.killed else _FakePopen.returncode_next
+        if returncode == 0:
+            Path(self.argv[-1]).write_bytes(_FakePopen.output_bytes)
+        return returncode
 
 
 @pytest.fixture()
@@ -164,6 +182,7 @@ def fake_popen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> type[_FakePop
     _FakePopen.fail_on_write_after = None
     _FakePopen.fail_at_close = False
     _FakePopen.write_exception = BrokenPipeError
+    _FakePopen.output_bytes = b"fake mp4"
     monkeypatch.setattr(subprocess, "Popen", _FakePopen)
     # Keep ffmpeg's stderr temp files inside tmp_path so leaks are assertable.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -453,6 +472,213 @@ def test_encode_popen_raising_is_a_hard_exit_without_temp_leak(
     with pytest.raises(SystemExit, match="could not launch ffmpeg"):
         encode_stream(frames, tmp_path / "s.mp4", 10.0, "/fake/ffmpeg")
     assert _no_temp_leak(tmp_path)
+
+
+def test_composite_hstacks_identical_steps_in_stream_order(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    left_arrays = [np.full((2, 3, 3), value, dtype=np.uint8) for value in (1, 2)]
+    right_arrays = [np.full((2, 2, 3), value, dtype=np.uint8) for value in (3, 4)]
+    left = _write_frames(tmp_path / "left", "left", left_arrays)
+    right = _write_frames(tmp_path / "right", "right", right_arrays)
+
+    result = _encode_composite_mp4([("right", right), ("left", left)], 10.0, "/fake/ffmpeg")
+
+    assert result == (b"fake mp4", ("right", "left"), (0, 1))
+    (proc,) = fake_popen.calls
+    expected = b"".join(
+        np.hstack((right_array, left_array)).tobytes()
+        for right_array, left_array in zip(right_arrays, left_arrays, strict=True)
+    )
+    assert bytes(proc.stdin.piped) == expected
+    assert proc.argv[proc.argv.index("-s") + 1] == "5x2"
+
+
+def test_composite_step_union_holds_each_cameras_last_frame(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    a_arrays = [np.full((2, 2, 3), value, dtype=np.uint8) for value in (1, 2, 3)]
+    b0 = np.full((2, 1, 3), 4, dtype=np.uint8)
+    b2 = np.full((2, 1, 3), 5, dtype=np.uint8)
+    a = _write_step_frames(tmp_path / "a", "a", list(enumerate(a_arrays)))
+    b = _write_step_frames(tmp_path / "b", "b", [(0, b0), (2, b2)])
+
+    result = _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg")
+
+    assert result is not None
+    assert result[2] == (0, 1, 2)
+
+    (proc,) = fake_popen.calls
+    expected = b"".join(
+        np.hstack(pair).tobytes()
+        for pair in ((a_arrays[0], b0), (a_arrays[1], b0), (a_arrays[2], b2))
+    )
+    assert bytes(proc.stdin.piped) == expected
+
+
+def test_composite_black_prefill_and_drops_all_empty_stream(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    a0 = np.full((2, 2, 3), 1, dtype=np.uint8)
+    a1 = np.full((2, 2, 3), 2, dtype=np.uint8)
+    b1 = np.full((2, 1, 3), 3, dtype=np.uint8)
+    empty = np.empty((0,), dtype=np.uint8)
+    a = _write_step_frames(tmp_path / "a", "a", [(0, a0), (1, a1)])
+    b = _write_step_frames(tmp_path / "b", "b", [(0, empty), (1, b1)])
+    warmup = _write_step_frames(tmp_path / "warmup", "warmup", [(0, empty), (1, empty)])
+
+    result = _encode_composite_mp4([("a", a), ("warmup", warmup), ("b", b)], 10.0, "/fake/ffmpeg")
+
+    assert result == (b"fake mp4", ("a", "b"), (0, 1))
+    (proc,) = fake_popen.calls
+    expected = np.hstack((a0, np.zeros_like(b1))).tobytes() + np.hstack((a1, b1)).tobytes()
+    assert bytes(proc.stdin.piped) == expected
+
+
+def test_composite_every_stream_empty_returns_none_without_spawning(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    empty = np.empty((0,), dtype=np.uint8)
+    a = _write_frames(tmp_path / "a", "a", [empty, empty])
+    b = _write_frames(tmp_path / "b", "b", [empty])
+
+    assert _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg") is None
+    assert fake_popen.calls == []
+
+
+def test_composite_probe_frame_error_fails_the_whole_video(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    good = _write_frames(tmp_path / "good", "good", [_rgb(0)])
+    corrupt = _write_frames(tmp_path / "corrupt", "corrupt", [_rgb(1)])
+    _truncate(corrupt[0][1])
+
+    assert (
+        _encode_composite_mp4([("good", good), ("corrupt", corrupt)], 10.0, "/fake/ffmpeg") is None
+    )
+    assert fake_popen.calls == []
+
+
+def test_composite_skips_union_step_when_every_new_frame_is_empty(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    empty = np.empty((0,), dtype=np.uint8)
+    a0 = np.full((2, 1, 3), 1, dtype=np.uint8)
+    a2 = np.full((2, 1, 3), 2, dtype=np.uint8)
+    b0 = np.full((2, 1, 3), 3, dtype=np.uint8)
+    b2 = np.full((2, 1, 3), 4, dtype=np.uint8)
+    a = _write_step_frames(tmp_path / "a", "a", [(0, a0), (1, empty), (2, a2)])
+    b = _write_step_frames(tmp_path / "b", "b", [(0, b0), (1, empty), (2, b2)])
+
+    result = _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg")
+
+    assert result is not None
+    assert result[2] == (0, 2)
+    assert 1 not in result[2]
+
+    (proc,) = fake_popen.calls
+    assert bytes(proc.stdin.piped) == np.hstack((a0, b0)).tobytes() + np.hstack((a2, b2)).tobytes()
+
+
+def test_composite_bottom_pads_mixed_resolutions_and_sums_widths(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    tall = np.full((3, 2, 3), 7, dtype=np.uint8)
+    short = np.full((1, 4, 3), 9, dtype=np.uint8)
+    tall_frames = _write_frames(tmp_path / "tall", "tall", [tall])
+    short_frames = _write_frames(tmp_path / "short", "short", [short])
+
+    assert (
+        _encode_composite_mp4(
+            [("tall", tall_frames), ("short", short_frames)], 10.0, "/fake/ffmpeg"
+        )
+        is not None
+    )
+
+    (proc,) = fake_popen.calls
+    padded_short = np.pad(short, ((0, 2), (0, 0), (0, 0)))
+    assert bytes(proc.stdin.piped) == np.hstack((tall, padded_short)).tobytes()
+    assert proc.argv[proc.argv.index("-s") + 1] == "6x3"
+
+
+def test_composite_mid_stream_shape_change_degrades_and_unlinks(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    changed = _write_frames(
+        tmp_path / "changed",
+        "changed",
+        [np.zeros((2, 2, 3), dtype=np.uint8), np.zeros((3, 2, 3), dtype=np.uint8)],
+    )
+
+    assert _encode_composite_mp4([("changed", changed)], 10.0, "/fake/ffmpeg") is None
+    (proc,) = fake_popen.calls
+    assert proc.killed
+    assert not list(tmp_path.glob("*.mp4"))
+    assert _no_temp_leak(tmp_path)
+
+
+def test_report_encoder_reads_temp_output_and_unlinks_it(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    fake_popen.output_bytes = b"browser mp4"
+
+    assert _encode_composite_mp4([("cam", frames)], 10.0, "/fake/ffmpeg") == (
+        b"browser mp4",
+        ("cam",),
+        (0,),
+    )
+    assert not list(tmp_path.glob("*.mp4"))
+    assert _no_temp_leak(tmp_path)
+
+
+def test_report_encoder_degrades_launch_and_encode_failures_without_temp_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bad shim")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    assert _encode_composite_mp4([("cam", frames)], 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+    assert _no_temp_leak(tmp_path)
+
+    bad = _write_frames(tmp_path / "bad", "s", [np.zeros((2,), dtype=np.uint8)])
+    assert _encode_composite_mp4([("cam", bad)], 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+def test_report_encoder_degrades_temp_output_read_failure(
+    tmp_path: Path,
+    fake_popen: type[_FakePopen],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+
+    def unreadable(_path: Path) -> bytes:
+        raise OSError("read failed")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+
+    assert _encode_composite_mp4([("cam", frames)], 10.0, "/fake/ffmpeg") is None
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+def test_report_encoder_degrades_tempfile_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+
+    def no_tempfile(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise OSError("read-only temp directory")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_tempfile)
+
+    assert _encode_composite_mp4([("cam", frames)], 10.0, "/fake/ffmpeg") is None
 
 
 # --------------------------------------------------------------------------- #

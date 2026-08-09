@@ -24,9 +24,9 @@ inspect-robots "pick up the cube" --policy agent \
 Model strings are OpenRouter-style `provider/model`, resolved from
 `-P model=...` or `$INSPECT_ROBOTS_MODEL`. API keys come from the environment:
 
-1. `-P base_url=...` (with `-P api_key_env=NAME`): any OpenAI-compatible endpoint
+1. `-P base_url=...` (with `-P api_key_env=NAME`): any supported compatible endpoint
 2. A known provider prefix with that provider's key set: the provider's own
-   endpoint, prefix stripped from the model id
+   endpoint, with the prefix stripped unless that endpoint requires the full id
 3. `OPENROUTER_API_KEY`: OpenRouter, any model string. Ids ending in a known
    OpenRouter variant suffix (`:free`, `:nitro`, `:floor`, `:extended`,
    `:online`, `:thinking`) always route here, since the variant means nothing
@@ -37,13 +37,14 @@ Providers resolved directly by prefix:
 
 | Prefix | Key | Endpoint |
 |---|---|---|
-| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat, or native with `-P wire=anthropic`) |
+| `anthropic/*` | `ANTHROPIC_API_KEY` | Anthropic (OpenAI-compat, or native with `-P wire=messages`) |
 | `openai/*` | `OPENAI_API_KEY` | OpenAI |
 | `google/*` | `GEMINI_API_KEY` | Google Gemini (OpenAI-compat) |
 | `x-ai/*` or `xai/*` | `XAI_API_KEY` | xAI |
 | `groq/*` | `GROQ_API_KEY` | Groq (rest of the id passed through, slashes and all) |
 | `mistralai/*` | `MISTRAL_API_KEY` | Mistral |
 | `deepseek/*` | `DEEPSEEK_API_KEY` | DeepSeek |
+| `thinkingmachines/*` | `TINKER_API_KEY` | Tinker Messages API (full model id passed through) |
 
 ### Gemini Robotics ER 2
 
@@ -72,7 +73,7 @@ endpoint support:
 |---|---|---|
 | `chat` (default) | `/chat/completions` | Anything OpenAI-compatible: OpenRouter, vLLM, Ollama, the Anthropic and Gemini compat endpoints |
 | `responses` | `/responses` | A direct OpenAI or compatible endpoint requires the Responses API |
-| `anthropic` | `/messages` | Driving Claude natively, which is what fast mode needs |
+| `messages` (`anthropic` alias) | `/messages` | Anthropic, Tinker, or a compatible Messages endpoint |
 | `gemini-live` | `BidiGenerateContent` (WSS) | Google's Live API: required for the `-streaming-` robotics model ids |
 
 ## How it works
@@ -141,7 +142,16 @@ For displacement modes, `move_by` splits the requested total so every action
 fits the box side in that direction. The action box is the embodiment author's
 per-step speed statement, so `max_speed_frac` does not apply to displacement
 modes. `done` and `give_up` end the trial through the core's policy-stop
-channel.
+channel. Both tools ask for a required `hindsight` argument: what the agent
+knows now that it wishes it had known at the start of the episode, as
+concrete transferable rig and task facts. The system prompt announces the
+question up front so the model tracks learnings during the rollout. The
+answer persists twice deliberately (the transcript naturally carries the tool
+call as well): as `stop_hindsight` in the stop action's meta, and as
+`trial_metadata["hindsight"]` in the JSON log next to `llm_usage`. Missing
+hindsight never fails execution (the budget-exhausted forced `give_up`
+cannot answer). Harvested hindsight is written to be usable as
+`prior_learnings` input on later runs, which closes the relearning loop.
 
 When `control_hz` is `None`, the plugin uses a 10 Hz fallback to compute step
 counts and the per-call playout cap, but leaves the emitted chunk rate unset.
@@ -161,6 +171,14 @@ own. An explicit `--max-action-delta` tighter than 5% of range can truncate
 absolute interpolants. In displacement modes, a value tighter than the action
 box can truncate each `move_by` step. Either setting can make the executed
 motion fall short of the tool's requested total.
+
+### Operator feedback
+
+`LLMAgentPolicy` opts into the framework's live operator channel on attended
+runs. Feedback typed during a trial is included in the next observation sent
+to the model, labeled with the environment step when it was received. The
+model treats these lines as trusted guidance from the human supervising the
+robot. The framework also saves the feedback in the eval log.
 
 ## Motion pre-check
 
@@ -242,8 +260,9 @@ Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 (default `always`; use `on_demand` for model-requested frames),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
 renders), and `prior_learnings`.
-`speed` and `max_output_tokens` apply to `-P wire=anthropic` only, and passing
-either on another wire is an error rather than a silent no-op.
+`speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
+either on another wire is an error. `speed=fast` is meaningful only for Claude
+on Anthropic's API; Tinker accepts and silently ignores it.
 
 | Image option | Default | Behavior |
 |---|---|---|
@@ -261,7 +280,9 @@ stored frames remain complete and unchanged.
 Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
 file to the system prompt after any embodiment notes. The file is read once
 when the policy is constructed, and its resolved path and content hash are
-recorded in the eval configuration.
+recorded in the eval configuration. The `hindsight` answers that `done` and
+`give_up` collect into `trial_metadata` are the natural source material for
+this file: harvest them across runs, distill, and feed them back here.
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
@@ -283,21 +304,34 @@ payloads deduplicated as `$blob:<sha256>` references into
 Requires a core with the `on_trial_start` policy hook; on older cores the
 policy prints one notice and captures nothing.
 At trial end, `record.metadata["llm_usage"]` records `llm_calls` and the summed
-integer token counters returned by the wire. The native Anthropic wire
+integer token counters returned by the wire. The Messages wire
 includes input, output, cache-creation, and cache-read tokens; other wires
 currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
-Reasoning effort defaults to `low` on the HTTP wires: robot control is
-latency-sensitive (the arm stands still while the model thinks), safety
-guardrails sit below the model either way, and frontier models at low effort
-remain strong at this task shape. Raise it for hard manipulation problems
-(`-P effort=high`) or pass `-P effort=none` to omit the parameter for
-endpoints that reject it (the CLI reads a bare `none` as null). To send the
-literal wire value `none` and disable reasoning, quote it:
-`-P effort="'none'"`. GPT-5.x on chat completions requires the literal `none`
-when function tools are in play (any other value, or omitting the field, is a
-400). In Python, `effort=None` omits the field and `effort="none"` sends the
-wire value. Gemini Live has no effort field, so leave it unset on that wire.
+Like `temperature`, reasoning effort is omitted when `-P effort=` is unset, so
+the provider's own default applies. Explicit named levels (`minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`) pass through unchanged. A bare
+`-P effort=none` now requests the true minimum on every HTTP wire:
+
+| Wire | Request field |
+| --- | --- |
+| `chat` | `reasoning_effort: "none"` |
+| `responses` | `reasoning: {"effort": "none"}` |
+| `messages` | `thinking: {"type": "disabled"}` (no `output_config`) |
+
+The older quoted spelling, `-P effort="'none'"`, remains valid but is no longer
+needed. In Python, both `effort=None` and `effort="none"` request the `none`
+level; omit the argument to inherit the provider default. Gemini Live has no
+effort field and rejects any explicit effort, so leave it unset on that wire.
+To pin the behavior from before version 0.23, add `-P effort=low`.
+
+Effort also takes a number in `[0.0, 1.0)` for servers that read it as a
+fraction instead of a named level (`-P effort=0.7`). The number is sent
+unquantized, so an effort sweep keeps whatever resolution the server offers.
+Named levels stay the portable choice: every wire and provider accepts some of
+them, while fractional effort is accepted today only by Tinker's
+OpenAI-compatible endpoint (see below). A server that takes levels only rejects
+a fraction with a guided 4xx naming the wire that does accept one.
 
 ## Depth rendering
 
@@ -336,27 +370,67 @@ HTML viewer shows that placeholder text verbatim below the depth label because
 the frame store has no saved frame for rendered depth. This is a known
 cosmetic artifact; the metric label remains available in the report.
 
+## Inkling on Tinker
+
+Tinker serves Inkling and Inkling-Small directly through the Messages API.
+Set its key and select the model; the provider prefix infers the wire and keeps
+the full model id required by the endpoint:
+
+```bash
+export TINKER_API_KEY=tk-...
+
+inspect-robots "pick up the cube" --policy agent \
+    -P model=thinkingmachines/Inkling -P effort=low \
+    --embodiment cubepick
+```
+
+With effort unset, Inkling inherits Tinker's own default, documented as high in
+the thinking-effort cookbook. That can increase control latency because the arm
+stands still while the model thinks; pass `-P effort=low` for latency-sensitive
+runs or to pin the plugin's pre-0.23 behavior. The endpoint accepts `low`,
+`medium`, `high`, `xhigh`, and `max`; `minimal` is unsupported. `effort=none`
+is sent as disabled thinking, which Tinker's endpoint has not been observed to
+accept — expect a wire rejection until confirmed otherwise.
+
+Fractional effort is a Tinker feature, but only on its OpenAI-compatible
+endpoint, which reads `reasoning_effort` as a number from `0.0` to `0.99`
+(`0.995` and above are a 422). The Messages endpoint that serves Inkling here
+takes named levels only, so `-P effort=0.7` needs
+`-P wire=chat -P base_url=` pointed at `.../tinker-prod/oai/api/v1`. That
+endpoint silently ignores `tools`, so it cannot currently drive a robot episode:
+the policy sees no tool call and fails after three turns. Treat fractional
+effort on Tinker as usable for prompt-level experiments, and named levels as the
+setting for real rollouts until the Messages endpoint accepts a number.
+
+Tinker currently reports `input_tokens: 0` because input usage appears in its
+cache-creation and cache-read counters. EvalLog input-token statistics and the
+live `in=0` transcript line therefore undercount input even though requests are
+processed normally. Tinker is a beta service. `-P speed=fast` is a
+Claude-on-Anthropic-API option and Tinker silently ignores it, returning HTTP
+200 at normal speed. Extended-context model ids ending in `:peft:262144` have
+not been tested with this plugin.
+
 ## Fast mode on Claude
 
-`-P wire=anthropic` drives Claude through the native Messages API instead of
+`-P wire=messages` drives Claude through the native Messages API instead of
 the OpenAI-compat endpoint. That is the only way to reach fast mode, which
 serves the same model at up to 2.5x higher output tokens per second:
 
 ```bash
 inspect-robots "pick up the cube" --policy agent \
-    -P model=anthropic/claude-opus-5 -P wire=anthropic -P speed=fast \
+    -P model=anthropic/claude-opus-5 -P wire=messages -P speed=fast \
     --embodiment cubepick
 ```
 
-The model id keeps the `anthropic/` prefix on this wire, the same as every
-other model string here. Only Anthropic's own endpoint serves `/v1/messages`,
-so anything that resolves elsewhere is refused up front with the fix named: a
-bare `-P model=claude-opus-5`, another provider's prefix such as `openai/`, or
-an OpenRouter `:variant` suffix. Pass `-P base_url=...` to point at a gateway
-that serves the endpoint yourself.
+Direct-provider model-id handling follows the provider table: Anthropic takes
+the bare Claude id, while Tinker keeps `thinkingmachines/`. A Messages run is
+refused up front when its model resolves to an endpoint that does not serve
+`/v1/messages`, with a fix for a missing prefix, provider key, or an OpenRouter
+`:variant` suffix. Pass `-P base_url=...` to point at a compatible Messages
+gateway yourself.
 
 > [!NOTE]
-> With `-P base_url=...` and no `-P api_key_env=`, this wire sends
+> With `-P base_url=...` and no `-P api_key_env=`, the Messages wire sends
 > `$ANTHROPIC_API_KEY` to that host. The other wires default to
 > `$OPENROUTER_API_KEY` instead. Name the variable explicitly
 > (`-P api_key_env=MYGW_KEY`) when the gateway takes its own credential, and
@@ -369,14 +443,18 @@ while standard quota sits idle. It is available on Claude Opus 5 and Opus 4.8,
 on the Claude API only: not Bedrock, Vertex, Foundry, or Claude Platform on
 AWS. A rejection that names fast mode is turned into an error naming the fix.
 
-This wire always requests adaptive thinking, which pre-4.6 models such as
-Sonnet 4.5 and Haiku 4.5 do not support. Use `-P wire=chat` for those.
+With effort unset or set to a named level, this wire requests adaptive
+thinking. Pre-4.6 models such as Sonnet 4.5 and Haiku 4.5 do not support
+adaptive thinking; pass `-P effort=none` to disable thinking and use them on
+`wire=messages`, or use `-P wire=chat`.
 
 The Messages API requires an output cap, so `-P max_output_tokens=` defaults to
 `16000` here. Thinking bills against that same cap, and a response truncated at
 the limit is an error naming the knob rather than a silently missing tool call.
-Keep `-P effort=` at `high` or below on this wire: `xhigh` and `max` want a cap
-of 64000 or more, which needs streaming this client does not implement yet.
+On Anthropic's endpoint, keep `-P effort=` at `high` or below: `xhigh` and
+`max` want a cap of 64000 or more, which needs streaming this client does not
+implement yet. Tinker accepts `xhigh` and `max` with the plugin's non-streaming
+request shape.
 The read timeout scales with the cap and tops out at 600 s per attempt, so a
 large cap plus retries can sit for several minutes before failing.
 
@@ -409,3 +487,7 @@ inspect-robots "pick up the cube" --policy agent \
     -P model=openai/gpt-5.6-sol -P wire=responses -P effort=medium \
     --embodiment cubepick
 ```
+
+To stay on Chat Completions and disable reasoning instead, pass
+`-P effort=none`. It sends the literal `reasoning_effort: "none"`; no nested
+quoting is required.

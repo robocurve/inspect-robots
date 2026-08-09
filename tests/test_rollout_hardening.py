@@ -261,12 +261,20 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)
-    assert store.count > 0
+    assert store.count == len(record.steps) + 1
     first = record.steps[0]
-    assert not first.observation.images  # images stripped from the record
+    assert not first.observation.images
+    assert not first.result.observation.images
     assert first.image_refs is not None and "top" in first.image_refs
+    assert first.result_image_refs is not None and "top" in first.result_image_refs
+    assert first.image_refs["top"].t == 0
+    assert first.result_image_refs["top"].t == 1
     loaded = first.image_refs["top"].load()
     assert loaded.shape == (32, 32, 3)
+    terminal = record.steps[-1]
+    assert terminal.result_image_refs is not None
+    assert terminal.result_image_refs["top"].t == terminal.t + 1
+    assert terminal.result_image_refs["top"].load().shape == (32, 32, 3)
 
 
 def test_per_trial_seed_varies_by_epoch() -> None:
@@ -439,6 +447,50 @@ def test_modified_action_records_approval_event_without_detail() -> None:
     assert approvals[0].data["detail"] is None
 
 
+def test_rollout_surfaces_approvals_in_observation_extra() -> None:
+    class _ObsCapturingPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(name="capturer", action_space=_BOX)
+            self.config = PolicyConfig()
+            self.captured_extras: list[dict[str, object]] = []
+
+        def reset(self, scene: Scene) -> None:
+            self.captured_extras.clear()
+
+        def act(self, observation: Observation) -> ActionChunk:
+            # Capture a deep copy of observation.extra to inspect what policy was given
+            import copy
+
+            self.captured_extras.append(copy.deepcopy(dict(observation.extra)))
+            # Mutate extra dict to verify rollout store is not corrupted by policy
+            if (
+                isinstance(observation.extra.get("approvals"), list)
+                and observation.extra["approvals"]
+            ):
+                observation.extra["approvals"][0]["detail"] = "corrupted"
+            # Emit 2 actions per chunk so step 0 & 1 happen between act() calls
+            act1 = Action(data=np.array([1.0, 1.0]))
+            act2 = Action(data=np.array([1.0, 1.0]))
+            return ActionChunk(actions=[act1, act2])
+
+    space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
+    policy = _ObsCapturingPolicy()
+    _run(policy, CubePickEmbodiment(), approver=ClampApprover(space))
+    assert len(policy.captured_extras) > 1
+    # First inference sees empty approvals (step 0 hasn't approved anything yet)
+    assert policy.captured_extras[0]["approvals"] == []
+    # Second inference sees only the approvals since the previous act() (steps 0 & 1)
+    second_approvals = policy.captured_extras[1]["approvals"]
+    assert isinstance(second_approvals, list) and len(second_approvals) == 2
+    assert second_approvals[0] == {"t": 0, "detail": "clamped"}
+    assert second_approvals[1] == {"t": 1, "detail": "clamped"}
+    # Third inference sees windowed approvals since second act() (steps 2 & 3)
+    if len(policy.captured_extras) > 2:
+        third_approvals = policy.captured_extras[2]["approvals"]
+        assert isinstance(third_approvals, list) and len(third_approvals) == 2
+        assert third_approvals[0] == {"t": 2, "detail": "clamped"}
+
+
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
     task = Task(
         name="t",
@@ -446,9 +498,48 @@ def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
         scorer=success_at_end(),
         max_steps=20,
     )
-    # Every trial raises -> proportion 1.0 >= 0.5 threshold -> eval status error.
+    # Every trial raises -> the 0.5 threshold is reached at 2 of 4 planned trials.
     logs = eval(task, _BoomPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), fail_on_error=0.5)
     assert logs[0].status == "error"
+
+
+class _BoomOncePolicy(_BoomPolicy):
+    """Raises only while running the first scene."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._scene_id = ""
+
+    def reset(self, scene: Scene) -> None:
+        self._scene_id = scene.id
+        return None
+
+    def act(self, observation: Observation) -> ActionChunk:
+        if self._scene_id == "s0":
+            raise RuntimeError("inference exploded")
+        return ScriptedPolicy().act(observation)
+
+
+def test_fail_on_error_proportion_tolerates_errors_below_the_threshold(
+    tmp_path: Path,
+) -> None:
+    """1 error in 4 planned trials is 25%, under a 0.5 threshold, so the eval runs on (#254)."""
+    task = Task(
+        name="t",
+        scenes=[Scene(id=f"s{i}", instruction="x") for i in range(4)],
+        scorer=success_at_end(),
+        max_steps=20,
+    )
+    logs = eval(
+        task, _BoomOncePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), fail_on_error=0.5
+    )
+
+    log = logs[0]
+    # The denominator is the planned trial count, so one failure no longer reads
+    # as 1/1 = 100% and halt the run after the very first trial.
+    assert log.status != "error"
+    assert [s.scene_id for s in log.samples] == ["s0", "s1", "s2", "s3"]
+    assert [s.status for s in log.samples] == ["error", "success", "success", "success"]
 
 
 # --------------------------------------------------------------------------- #
