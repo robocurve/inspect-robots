@@ -484,7 +484,7 @@ def test_composite_hstacks_identical_steps_in_stream_order(
 
     result = _encode_composite_mp4([("right", right), ("left", left)], 10.0, "/fake/ffmpeg")
 
-    assert result == (b"fake mp4", ("right", "left"))
+    assert result == (b"fake mp4", ("right", "left"), (0, 1))
     (proc,) = fake_popen.calls
     expected = b"".join(
         np.hstack((right_array, left_array)).tobytes()
@@ -503,7 +503,10 @@ def test_composite_step_union_holds_each_cameras_last_frame(
     a = _write_step_frames(tmp_path / "a", "a", list(enumerate(a_arrays)))
     b = _write_step_frames(tmp_path / "b", "b", [(0, b0), (2, b2)])
 
-    assert _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg") is not None
+    result = _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg")
+
+    assert result is not None
+    assert result[2] == (0, 1, 2)
 
     (proc,) = fake_popen.calls
     expected = b"".join(
@@ -526,7 +529,7 @@ def test_composite_black_prefill_and_drops_all_empty_stream(
 
     result = _encode_composite_mp4([("a", a), ("warmup", warmup), ("b", b)], 10.0, "/fake/ffmpeg")
 
-    assert result == (b"fake mp4", ("a", "b"))
+    assert result == (b"fake mp4", ("a", "b"), (0, 1))
     (proc,) = fake_popen.calls
     expected = np.hstack((a0, np.zeros_like(b1))).tobytes() + np.hstack((a1, b1)).tobytes()
     assert bytes(proc.stdin.piped) == expected
@@ -567,7 +570,11 @@ def test_composite_skips_union_step_when_every_new_frame_is_empty(
     a = _write_step_frames(tmp_path / "a", "a", [(0, a0), (1, empty), (2, a2)])
     b = _write_step_frames(tmp_path / "b", "b", [(0, b0), (1, empty), (2, b2)])
 
-    assert _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg") is not None
+    result = _encode_composite_mp4([("a", a), ("b", b)], 10.0, "/fake/ffmpeg")
+
+    assert result is not None
+    assert result[2] == (0, 2)
+    assert 1 not in result[2]
 
     (proc,) = fake_popen.calls
     assert bytes(proc.stdin.piped) == np.hstack((a0, b0)).tobytes() + np.hstack((a2, b2)).tobytes()
@@ -619,6 +626,7 @@ def test_report_encoder_reads_temp_output_and_unlinks_it(
     assert _encode_composite_mp4([("cam", frames)], 10.0, "/fake/ffmpeg") == (
         b"browser mp4",
         ("cam",),
+        (0,),
     )
     assert not list(tmp_path.glob("*.mp4"))
     assert _no_temp_leak(tmp_path)

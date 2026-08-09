@@ -56,6 +56,62 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
       else video.pause();
     };
 
+    const railVideo = block.querySelector('.video-panel video[data-steps]');
+    if (railVideo && transcript) {
+      const steps = railVideo.dataset.steps.split(',').map(Number);
+      const fps = Number(railVideo.dataset.fps);
+      const turns = Array.from(transcript.querySelectorAll('section.turn[data-step]'));
+      const documentOrder = new Map(turns.map((turn, index) => [turn, index]));
+      const steppedTurns = turns
+        .map((turn) => [Number(turn.dataset.step), turn])
+        .filter(([step]) => Number.isFinite(step));
+      steppedTurns.sort((left, right) =>
+        left[0] - right[0] || documentOrder.get(left[1]) - documentOrder.get(right[1])
+      );
+      if (steps.length && Number.isFinite(fps) && fps > 0) {
+        const follow = block.querySelector('[data-follow]');
+        let position = -1;
+        let activeTurn = null;
+        const highlight = () => {
+          const index = Math.min(Math.floor(railVideo.currentTime * fps), steps.length - 1);
+          const step = steps[index];
+          while (position + 1 < steppedTurns.length && steppedTurns[position + 1][0] <= step) {
+            position += 1;
+          }
+          while (position >= 0 && steppedTurns[position][0] > step) position -= 1;
+          const nextTurn = position >= 0 ? steppedTurns[position][1] : null;
+          if (nextTurn === activeTurn) return;
+          if (activeTurn) activeTurn.classList.remove('active');
+          if (nextTurn) nextTurn.classList.add('active');
+          activeTurn = nextTurn;
+          if (activeTurn && follow?.classList.contains('active')) {
+            activeTurn.scrollIntoView({block: 'nearest'});
+          }
+        };
+        steppedTurns.forEach(([turnStep, turn]) => {
+          const header = turn.querySelector('.turn-step');
+          if (!header) return;
+          header.addEventListener('click', () => {
+            let low = 0;
+            let high = steps.length;
+            while (low < high) {
+              const middle = Math.floor((low + high) / 2);
+              if (steps[middle] >= turnStep) high = middle;
+              else low = middle + 1;
+            }
+            const index = Math.min(low, steps.length - 1);
+            railVideo.currentTime = (index + 0.5) / fps;
+          });
+        });
+        if (follow) {
+          follow.addEventListener('click', () => follow.classList.toggle('active'));
+        }
+        transcript.classList.add('rail-seekable');
+        railVideo.addEventListener('timeupdate', highlight);
+        highlight();
+      }
+    }
+
     const sourceFrames = (camera) => Array.from(document.querySelectorAll(
       `[data-trial="${CSS.escape(trial)}"][data-camera="${CSS.escape(camera)}"]`
     )).filter((element) => element.matches('img.frame'));
@@ -342,12 +398,17 @@ dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 details { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 12px; }
 summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 .conversation { margin-top: 14px; }
-.turn { margin: 18px 0 24px; }
+.turn {
+  margin: 18px 0 24px;
+  border-left: 3px solid transparent; padding-left: 12px; margin-left: -15px;
+}
+.turn.active { border-left-color: var(--user); }
 .turn + .turn { border-top: 1px solid var(--line); padding-top: 18px; }
 .turn-step {
   margin: 0 0 8px; color: var(--muted); font-size: 12px;
   font-weight: 750; letter-spacing: .07em; text-transform: uppercase;
 }
+.rail-seekable .turn-step { cursor: pointer; }
 .message { margin: 13px 0; padding: 2px 0 2px 13px; border-left: 3px solid var(--system); }
 .message.user { border-color: var(--user); }
 .message.assistant { border-color: var(--assistant); }
@@ -792,6 +853,7 @@ def _unplaced_feedback(
 
 def _render_turn(turn: _Turn, frame_ctx: _FrameContext | None) -> str:
     """Render one human-readable turn followed by its complete raw exchange."""
+    step_attribute = "" if not turn.references else f' data-step="{turn.references[0].step}"'
     header = (
         ""
         if turn.preamble or not turn.references
@@ -801,7 +863,9 @@ def _render_turn(turn: _Turn, frame_ctx: _FrameContext | None) -> str:
     feedback = _render_feedback_chips(turn.feedback or [])
     visible = "".join(_render_visible_message(message) for message in turn.messages)
     pov = _render_pov(turn.messages)
-    return f'<section class="turn">{header}{frames}{feedback}{visible}{pov}</section>'
+    return (
+        f'<section class="turn"{step_attribute}>{header}{frames}{feedback}{visible}{pov}</section>'
+    )
 
 
 def _render_turn_frames(
@@ -1308,7 +1372,7 @@ def _render_trial_media(
         if encoded is None:
             _warn_video_degrade(context, f"encode failed for {trial_prefix} composite")
         else:
-            video, survivors = encoded
+            video, survivors, steps = encoded
             payload = base64.b64encode(video).decode("ascii")
             if not (
                 context.budget.limit
@@ -1316,12 +1380,15 @@ def _render_trial_media(
             ):
                 context.budget.encoded += len(payload)
                 camera_order = " · ".join(display_names.get(key, key) for key in survivors)
+                step_timeline = ",".join(str(step) for step in steps)
                 return (
                     f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
-                    '<div class="run-media-head">Run video</div>'
+                    '<div class="run-media-head">Run video'
+                    '<button type="button" class="camera-tab" data-follow>Follow</button></div>'
                     f'<div class="camera-order">{_escape(camera_order)}</div>'
                     '<div class="camera-panel video-panel">'
                     '<video controls muted loop preload="metadata" '
+                    f'data-steps="{step_timeline}" data-fps="{context.fps:g}" '
                     f'src="data:video/mp4;base64,{payload}"></video></div></div>'
                 )
             context.budget.truncated = True
