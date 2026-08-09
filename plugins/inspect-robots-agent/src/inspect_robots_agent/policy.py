@@ -341,8 +341,6 @@ class LLMAgentPolicy(PolicyBase):
             ("api_key_env", api_key_env),
             ("speed", speed),
         ]:
-            if isinstance(val, _Unset):
-                continue
             if val is not None and not isinstance(val, str):
                 raise ConfigError(
                     f"{name} must be a string, got {val!r}.\n"
