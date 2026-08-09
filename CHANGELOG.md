@@ -325,6 +325,13 @@ All notable changes to this project are documented here. The format is based on
   when the adapters sit on distinct USB ports
   ([plan 0043](plans/0043-can-pinning-port-fallback.md), #275).
 
+- **Two `SmoothingController`s in one chain no longer corrupt each other.** The
+  exponential-moving-average state lived under a single module-level store key,
+  so stacking two smoothing layers made each smooth against the other's last
+  write rather than its own — silently emitting neither layer's intended action.
+  The key is now per instance. `_INFER_KEY` stays shared because it is only
+  appended to; this was the one destructively written controller state (#296).
+
 - **`Task` now rejects duplicate scene ids.** Scene ids become per-trial
   identity downstream — the rollout builds `"{scene.id}-e{epoch}"`, which
   `FrameStore` turns into a filename — so two scenes sharing an id wrote to the
