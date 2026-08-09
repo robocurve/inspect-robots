@@ -353,3 +353,9 @@ def test_set_default_does_not_warn_when_args_have_no_prior_owner(
     _write_config(tmp_path, "[embodiment.args]\nport = can0\n")
     set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "embodiment", "new-arm")
     assert capsys.readouterr().err == ""
+
+
+def test_public_re_export_init_dotenv() -> None:
+    from inspect_robots.defaults import init_dotenv
+
+    assert init_dotenv is not None
