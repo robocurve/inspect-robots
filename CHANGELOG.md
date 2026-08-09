@@ -46,6 +46,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** composite-video HTML reports now restore the transcript rail
+  pioneered in [#272](https://github.com/robocurve/inspect-robots/pull/272),
+  with live step highlighting, click-to-seek turns, and an opt-in Follow toggle
+  ([plan 0065](plans/0065-composite-transcript-rail.md),
+  [#352](https://github.com/robocurve/inspect-robots/issues/352)).
+
 - Live-viewed `run` invocations now save the same Rerun stream as a `.rrd` in
   the log directory by default. `--rerun-save`/`--no-rerun-save` and the
   `rerun_save` config key control tee or record-only operation. For library
@@ -229,6 +235,8 @@ All notable changes to this project are documented here. The format is based on
   declared/range-derived limits while policy compatibility deliberately ignores
   embodiment-only declarations ([plan 0033](plans/0033-per-dim-max-step.md), #223).
 
+- Public user-defaults API: `inspect_robots.defaults` now re-exports `init_dotenv` so plugins can load `.env` configurations without importing private modules (#301).
+
 - `OptionSlot` / `OPTION_SLOTS` (plan 0032): embodiment plugins can declare
   boolean behavior toggles that `inspect-robots setup` interviews as yes/no
   questions and writes into `[embodiment.args]`. First consumer:
@@ -257,6 +265,14 @@ All notable changes to this project are documented here. The format is based on
   included (#194).
 
 ### Changed
+
+- **Capx plugin (0.3.0):** an unset `effort` now omits the field and inherits
+  the provider default (breaking; add `-P effort=low` to pin the previous
+  behavior). `effort=none` sends the true minimum (`reasoning_effort: "none"` on
+  the chat wire, `reasoning: {"effort": "none"}` on responses); programmatic
+  `None` normalizes to `"none"`. Only the chat and responses wires are affected,
+  the two capx speaks. This brings capx to the same contract the agent plugin
+  gained in 0.23.0 ([#319](https://github.com/robocurve/inspect-robots/issues/319)).
 
 - **Agent plugin (0.23.0):** an unset `effort` now omits the field and inherits
   the provider default (breaking; add `-P effort=low` to pin the previous
@@ -335,6 +351,15 @@ All notable changes to this project are documented here. The format is based on
   takes its before snapshot at the moment `u` is answered instead of when
   the section listing was printed, so a device attached mid-wizard is still
   identifiable.
+
+- **Agent plugin:** a camera whose name contains an apostrophe is no longer
+  re-photographed within one observation. The revealed-camera set was recovered
+  by parsing the rendered `camera {name!r}:` label assuming single quotes, but
+  `repr()` switches to double quotes for such a name, so the label never matched,
+  the revealed set was emptied, and a second `take_pic` re-sent the identical
+  frame instead of being refused — extra image tokens, and a transcript implying
+  the model saw a fresh view. The label prefix is now one shared constant read by
+  both the writer and the reader (#294).
 
 - **`DeltaLimitApprover` now honors an explicit `max_delta` on a
   multi-dimensional action space.** The validated delta stayed flat `(dim,)`
