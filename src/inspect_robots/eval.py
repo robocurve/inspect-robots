@@ -33,6 +33,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.frames import FrameStore
+from inspect_robots.grader import Grader
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
@@ -45,6 +46,33 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
+
+
+def _grading_hook(
+    grader: Grader | str | None,
+    before_scoring: Callable[[TrialRecord, Scene], None] | None,
+) -> Callable[[TrialRecord, Scene], None] | None:
+    """Resolve ``grader``/``before_scoring`` into the single pre-scoring hook.
+
+    The two arguments write to the same seam, so passing both is always a
+    caller bug and raises ``ConfigError``. A string resolves through the
+    registry, and the result must satisfy the ``Grader`` protocol — a broken
+    entry point fails here, at configuration time, not deep inside scoring.
+    """
+    if grader is None:
+        return before_scoring
+    if before_scoring is not None:
+        raise ConfigError("pass either grader or before_scoring, not both")
+    if isinstance(grader, str):
+        from inspect_robots.registry import resolve
+
+        grader = cast(Grader, resolve("grader", grader))
+    if not isinstance(grader, Grader):
+        raise ConfigError(
+            f"grader must implement the Grader protocol (a name and a "
+            f"grade(record, scene) method); got {type(grader).__name__}"
+        )
+    return grader.grade
 
 
 def _now_iso() -> str:
@@ -110,6 +138,13 @@ class _Broadcast:
             if callable(hook):
                 hook(action_space, observation_space)
 
+    def bind_frames_dir(self, frames_dir: str | None) -> None:
+        """Offer the run's frame directory to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_frames_dir", None)
+            if callable(hook):
+                hook(frames_dir)
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
             s.on_eval_start(spec)
@@ -148,6 +183,7 @@ def eval(
     store_frames: bool = False,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
+    grader: Grader | str | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -187,12 +223,20 @@ def eval(
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
     ``before_scoring`` is called exactly once per trial that will be scored
-    (never for errored trials, which are recorded but not scored), after the
-    rollout returns and before the scorers run. It may mutate the record —
-    e.g. capture ``TrialRecord.operator_judgement`` (R6) so the ``operator``
-    scorer can read it, and ``TrialRecord.operator_note`` alongside it, which
-    is recorded but never scored. Exceptions it raises propagate to the caller.
-    Note this fires on the *other* side of scoring from ``LogSink.on_trial_end``.
+    (never for errored or cancelled trials, which are recorded but not
+    scored), after the rollout returns and before the scorers run. It may
+    mutate the record — e.g. capture ``TrialRecord.operator_judgement`` (R6)
+    so the ``operator`` scorer can read it, and ``TrialRecord.operator_note``
+    alongside it, which is recorded but never scored. Exceptions it raises
+    propagate to the caller. Note this fires on the *other* side of scoring
+    from ``LogSink.on_trial_end``.
+
+    ``grader`` is the component form of the same seam: a
+    [`Grader`][inspect_robots.grader.Grader] object or registry name whose
+    ``grade`` method becomes the pre-scoring hook. Pass either ``grader`` or
+    ``before_scoring``, not both (``ConfigError``); disable grading with
+    ``grader=None`` (the registry name ``"none"`` is CLI vocabulary, not an
+    API value).
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
@@ -200,6 +244,7 @@ def eval(
     """
     from inspect_robots.registry import resolve
 
+    before_scoring = _grading_hook(grader, before_scoring)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -317,6 +362,7 @@ def _run_eval(
         max_seconds=task.max_seconds,
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
+    bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
@@ -470,7 +516,11 @@ def _run_eval(
                 termination_reasons.append(record.termination_reason)
                 operator_messages.append(
                     tuple(
-                        {"t": event.t, "text": event.data["text"]}
+                        {
+                            "t": event.t,
+                            "text": event.data["text"],
+                            "source": event.data.get("source", "console"),
+                        }
                         for event in record.events
                         if event.kind == "operator_message"
                     )
@@ -589,6 +639,7 @@ def eval_set(
     embodiment: Embodiment | str,
     *,
     log_dir: str = "logs",
+    sinks: list[LogSink] | None = None,
     seed: int | None = 0,
     fail_on_error: bool | float = False,
     controller: Controller | None = None,
@@ -597,16 +648,26 @@ def eval_set(
     store_frames: bool = False,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
+    grader: Grader | str | None = None,
     retry_attempts: int = 0,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
     ``success`` is ``True`` iff every task's log has ``status == "success"``.
 
+    ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
+    hook, not both) and are resolved once here, so every task shares the same
+    grader instance.
+
+    Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
+    sink must reset its per-run state in ``on_eval_start`` and tolerate one
+    complete lifecycle per task.
+
     Resumption of a partially-completed run (skipping already-finished scenes via
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
     """
+    before_scoring = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     logs: list[EvalLog] = []
     for task in task_list:
@@ -616,6 +677,7 @@ def eval_set(
                 policy,
                 embodiment,
                 log_dir=log_dir,
+                sinks=sinks,
                 seed=seed,
                 fail_on_error=fail_on_error,
                 controller=controller,
