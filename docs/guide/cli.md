@@ -106,15 +106,25 @@ persistent default for real runs, not a per-invocation intent. The mapping is
 explicit configuration: the framework never guesses which sim matches your
 robot.
 
-### Operator scoring
+### Operator grading
 
-An arbitrary instruction has no success oracle, so ad-hoc runs default to the
-`operator` scorer. When run on an interactive terminal, the CLI asks after each
-trial unless the embodiment already terminated the episode with a definitive
-`success` or `failure` verdict. In that case, the CLI records the embodiment's
-verdict as the operator judgement instead of asking the operator a second time,
-and prints `operator verdict adopted from embodiment: success` (or `failure`) so
-the operator can catch a mistaken adoption live.
+Judgement capture is a grader component, selected per run: `--grader NAME`
+overrides the `grader` config key, and with neither set an attended run
+(interactive terminal, no `--no-prompt`) uses the builtin `operator` grader
+while an unattended run grades nothing. `--grader none` disables grading
+outright. The grader runs after every scored trial, whatever the task or
+scorer, so a trial the policy ended with its `done()` or `give_up()` tool is
+graded like any other.
+
+An arbitrary instruction has no success oracle, so ad-hoc runs also default to
+the `operator` scorer, which reads the captured judgement. The operator grader
+asks after each trial unless the embodiment already terminated the episode
+with a definitive `success` or `failure` verdict. In that case, it records the
+embodiment's verdict as the operator judgement instead of asking the operator
+a second time, and prints `operator verdict adopted from embodiment: success`
+(or `failure`) so the operator can catch a mistaken adoption live. A trial
+that ended early for any other reason is announced first, for example
+`note: this trial ended early ('done')`.
 
 ```text
 did the robot succeed? [y/n/partial/skip] (partial scores as failure) n
@@ -127,28 +137,86 @@ adopted embodiment verdict is not followed by a notes prompt, so a self-scoring
 embodiment still costs no keypresses per trial.
 `skip` records no judgement, but a grader note entered for that trial is still
 recorded. Notes never affect the score. Piped/CI stdin or `--no-prompt` never
-prompt. A registered `--task` or `eval-set` run prompts only for trials that end
-with `termination_reason="operator_end"` — a human pressed the end-episode key — and
-never adopts an embodiment verdict or prompts for any other ending, so
-unattended runs stay non-blocking. An unjudged trial honestly scores as
-failure with "no operator judgement recorded".
+prompt: without a TTY no grader is selected by default, and `--no-prompt`
+suppresses the operator grader specifically (combining it with an explicit
+`--grader operator` is an error, and a config-set `grader = operator` is
+downgraded with a stderr note whenever the run cannot actually be attended).
+A custom grader named in config or `--grader` runs regardless of TTY-ness,
+which is what a future VLM autograder needs. An unjudged trial honestly
+scores as failure with "no operator judgement recorded".
 
 ### Live operator feedback
 
 On an attended run, an opted-in policy can also receive feedback while the
-episode is running. The CLI prints the operator-console usage hint when this
+episode is running. The CLI prints the operator console usage hint when this
 channel is active. Type a normal line and press Enter to deliver it at the
-policy's next inference. Bare Enter ends the episode, while `/y`, `/n`, or `/p`
-plus an optional note ends it and records the verdict immediately, without a
-second post-trial prompt. Feedback is saved per trial and appears in summaries
-and HTML reports. Piped stdin and `--no-prompt` disable the channel.
+policy's next inference. Esc ends the episode, and so does `/stop`; trailing
+text after `/stop` is recorded to the log before the episode ends. In the
+plain fallback without the footer, stdin is line-buffered, so a lone Esc needs
+an Enter after it; `/stop` works the same everywhere. `/y`, `/n`,
+or `/p` plus an optional note ends it and records the verdict immediately,
+without a second post-trial prompt. Bare Enter never ends the run: it prints
+the usage reminder instead, since Enter is also the key you press right after
+typing feedback. Cmd+Enter is not offered because terminal emulators do not
+forward the Cmd modifier to stdin, so it is indistinguishable from plain
+Enter. Feedback is saved per trial and appears in summaries and HTML reports.
+Piped stdin and `--no-prompt` disable the channel.
 
-The console activates only where stdin has one owner: POSIX platforms and
-either a simulator or a real-hardware embodiment that offers
-`defer_operator_end()`. That hook tells an embodiment to stop polling its own
-end-of-episode keypress while the framework console owns stdin. Older hardware
-embodiments keep their existing keypress behavior, print a notice, and leave
-feedback typing off until they add the hook.
+On an attended run with the console enabled and a real POSIX TTY, the session
+renders a two-row footer. The timer and controls repaint in place above a stable
+`> ` line that the session owns, so ticker updates never tear the operator's
+typing. The framework appends `Esc ends the episode` to the footer status line
+and replaces any older trailing end-gesture clause supplied by an embodiment.
+The hint
+is dropped only when the line is width-clipped, so embodiment status text never
+goes stale when the framework gesture changes:
+
+```text
+  [sent] you might wanna move the right arm out of the way
+  t = 61s / 120s | Esc ends the episode
+  > is there anything I can hand you█
+```
+
+After Enter, feedback moves into scrollback as `[sent] ...`. End-only rows use
+`[noted] ...`, and text that ends the episode (such as a `/stop` note) is
+confirmed as `[noted]` even in a sent-labeled session, because the policy never
+receives it. Keystroke echo is pumped at the rollout poll cadence, so on a
+self-paced robot it can lag up to one control step. Third-party prints can
+smudge one frame; the next repaint heals it. Off-TTY, Windows, and piped-stdin
+rendering is unchanged.
+
+Install `inspect-robots-voice` and pass `--voice` to add local microphone
+transcription to an attended run. Repeat `-V key=value` for voice settings such
+as the model, microphone device, language, and compute type. Voice input is
+feedback-only, so episode end and verdicts remain keyboard actions. See
+[Voice operator input](voice-mode.md) for setup and filtering details.
+
+The plugin also provides `run --speak` for local narration of streamed policy
+notes and terminal summaries. Repeat `-S key=value` to select the speech mode,
+output voice, speed, volume, device, language, or offline model paths. Speaking
+works without a TTY. See [Speaking policy notes](voice-mode.md#speaking-policy-notes---speak)
+for model setup and the microphone echo caveat.
+
+A session-aware embodiment offers `connect_operator_session(session)`. On
+POSIX, the CLI calls that hook once before evaluation and the session becomes
+the only owner of terminal input and status output. The console stays active
+for every policy because it must own the end-of-episode input. A policy that
+accepts messages gets the full feedback usage line. Other policies get the
+end-only mode:
+
+```text
+operator console: Esc (or /stop [note]) ends the episode; /y /n /p [note] records a verdict; typed notes are saved to the log
+```
+
+Without that hook, the compatibility path preserves the previous gating. A
+policy that does not accept operator messages leaves the console off silently.
+For an accepting policy, a simulator enables the console directly and a
+real-hardware embodiment can enable it with the supported legacy
+`defer_operator_end()` hook. Older hardware keeps its existing keypress
+behavior, prints a notice, and leaves feedback typing off. Windows cannot poll
+stdin with this console, so both paths print the Windows notice there: a
+session-aware embodiment is never connected, regardless of policy, and the
+legacy path prints it for an accepting policy.
 
 ## `inspect-robots setup`
 
@@ -158,9 +226,10 @@ policy or embodiment is not registered in the current environment, and then
 helps assign camera devices. It lists every color-capable camera that udev
 names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`
-names when a by-id link is missing or when two cameras share one serial.
-Multi-interface cameras such as the RealSense D435 can lose udev's name race
-between their depth and RGB interfaces.
+names when a by-id link is missing or when multiple physical cameras can claim
+the same by-id identity. This includes cameras with duplicate serials and
+same-model cameras with missing serials. Multi-interface cameras such as the
+RealSense D435 can lose udev's name race between their depth and RGB interfaces.
 
 Answer `u` and unplug the camera when asked to identify the physical USB
 device that disappeared, including cameras the by-id listing cannot name. The
@@ -205,6 +274,7 @@ embodiment = yam_arms     # same plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
+rerun_save = true         # save the live stream as a replayable .rrd (default true)
 rerun_port = 9877         # viewer port for this rig (default 9876)
 store_frames = true       # save each run's camera frames under logs/frames/
 
@@ -223,6 +293,7 @@ Show registered components (builtins + installed plugins):
 inspect-robots list                 # all kinds
 inspect-robots list policies        # just one kind
 inspect-robots list embodiments
+inspect-robots list operator_inputs
 ```
 
 ## `inspect-robots run`
@@ -235,6 +306,10 @@ constructor arguments with `-T` (task), `-P` (policy), and `-E` (embodiment) as
 inspect-robots run --task cubepick-reach --policy scripted --embodiment cubepick
 inspect-robots run --task cubepick-reach -T num_scenes=10 --policy scripted -P chunk_size=8 \
              --embodiment cubepick --log-dir logs --seed 0
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+             --voice -V model=small -V device="USB Microphone"
+inspect-robots run --task my-task --policy agent --embodiment my-robot \
+             --speak -S voice=af_sarah -S volume=0.8
 ```
 
 `--epochs N` overrides the task's epoch count, `--fail-on-error X` halts on
@@ -246,9 +321,18 @@ directory; the log's `stats.frames_dir` records the exact path). A
 `--no-store-frames` disables it for one invocation. When the run finishes,
 the path of the written log is printed.
 
+`--rerun` and `--rerun-connect` also save the viewed stream as a `.rrd` under
+`<log-dir>` by default. Replay it with `rerun <file>`. Pass `--no-rerun-save`,
+or set `rerun_save = false`, to keep the live stream only. Explicit
+`--rerun-save` without an active viewer records to a `.rrd` only. This flag is
+run-only; `eval-set` does not add Rerun sinks.
+
 `--policy`/`--embodiment` may be omitted when defaults are configured (see
 the zero-config section above); `--instruction "..."` replaces `--task` to
-run a single ad-hoc scene.
+run a single ad-hoc scene. `--voice` adds local spoken feedback on attended
+runs; repeat `-V key=value` to configure the installed voice plugin. `--speak`
+narrates streamed policy notes on attended or unattended runs; repeat `-S key=value`
+to select the speech mode, output voice, speed, volume, device, language, or offline model paths.
 
 The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
@@ -275,10 +359,13 @@ embodiment, for example `[120s -> 1200 steps at 10 Hz]`.
 Multiple patterns may match the same task; it still runs once. A pattern that
 matches nothing is an error listing every registered task. `--policy` and
 `--embodiment` (and `-P`/`-E`, `--sim`, `--epochs`, `--fail-on-error`,
-`--store-frames`, `--disable-guardrails`, `--max-action-delta`) apply exactly
+`--store-frames`, `--disable-guardrails`, `--max-action-delta`, `--voice`, and
+`-V`) apply exactly
 as they do for `run`, to every matched task — there is no per-task `-T` in
 this release. The embodiment is resolved once for the whole set, not once per
 task, so a real robot is not reconnected between tasks.
+
+`--speak` and `-S` are run-only options and are not accepted by `eval-set`.
 
 Rather than one full summary per task, the CLI prints the resolved
 policy/embodiment, one status line for the whole set, a compact `[status]
@@ -397,12 +484,22 @@ inspect-robots view logs/cubepick-reach_xxxx.json
 ```
 
 The report puts the run status, configuration, metrics, scene results, and
-recorded policy conversations on one page. Agent notes from tool calls are
-highlighted above their call lines. For runs captured with `--store-frames`,
-the report also embeds the stored camera frames at the exact observation turns
-where the model saw them. The file contains its stylesheet and frame data
-inline and uses native browser controls to collapse transcripts, so it has no
-network or JavaScript dependency.
+recorded policy conversations on one page. Chat transcripts are grouped into
+observation turns. A turn's default view shows its step, camera frames,
+structured operator feedback, assistant prose, agent-note headlines, and
+readable tool argument chips. A collapsed Raw transcript section preserves the
+raw observation, state dumps, calls, and tool results. Non-chat transcripts
+remain available as bounded JSON.
+
+For runs captured with `--store-frames`, the report embeds the stored camera
+frames at the exact observation turns where the model saw them. When ffmpeg is
+available, a completed report rendered outside `--serve` also embeds one
+side-by-side composite MP4 above each trial transcript at the recorded control
+rate. Its caption names the cameras in left-to-right order, and one playhead
+keeps every view aligned. Otherwise the player provides per-camera tabs, play
+or pause, and step scrubbing over the existing frame images as a lightweight
+flipbook. The file contains its stylesheet and media inline, so it has no
+network dependency.
 
 By default, `view` replaces the log path's suffix with `.html` and prints the
 written path. Use `-o REPORT.html` to choose another file, `-o -` to write only
@@ -416,6 +513,15 @@ Use `--no-frames` to keep the transcript placeholders, or
 `--frames-budget MB` to change the default 50 MB inline-frame payload limit.
 `--frames-budget 0` removes the limit. Inlined frames make the HTML document
 larger, so use a smaller budget or `--no-frames` when page size matters.
+
+Embedded MP4 data has a separate 30 MB per-page budget. A trial composite that
+exceeds it falls back to the per-camera flipbook, and later trials skip their
+composite encode. `--no-video` skips MP4 encoding without removing frames or
+the flipbook. Served and running pages also use the flipbook so the two-second
+live render loop never waits for ffmpeg. In directory mode these suppressed
+pages remain upgradeable: the next eligible plain `view` pass re-renders them
+with the composite MP4. Reports created before this behavior need `--force`
+once to gain embedded video.
 
 ## `inspect-robots video`
 

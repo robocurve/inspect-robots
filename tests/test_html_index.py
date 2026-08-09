@@ -59,12 +59,15 @@ def test_badge_classes_are_used_verbatim_for_display_status() -> None:
                 status="cancelled",
                 status_class="status-cancelled",
             ),
+            _entry("live.json", status="running", status_class="status-running"),
         ]
     )
 
     assert '<span class="badge status-completed">completed</span>' in document
     assert '<span class="badge status-error">error</span>' in document
     assert '<span class="badge status-cancelled">cancelled</span>' in document
+    assert '<span class="badge status-running">running</span>' in document
+    assert ".status-running { color: var(--amber); background: var(--amber-bg); }" in document
 
 
 def test_rows_are_newest_first_and_metrics_use_four_significant_figures() -> None:

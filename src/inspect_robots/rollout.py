@@ -212,6 +212,23 @@ def _store_frames(
     return replace(obs, images={}), refs
 
 
+def _end_operator_trial(operator_input: OperatorInput | None) -> None:
+    """Best-effort call the optional operator-input trial teardown hook."""
+    if operator_input is not None:
+        try:
+            end_trial = getattr(operator_input, "end_trial", None)
+            if callable(end_trial):
+                end_trial()
+        except Exception as exc:
+            # stacklevel=3 skips this helper so the warning points at rollout's
+            # caller, like the disable-site warnings issued from rollout() itself.
+            warnings.warn(
+                f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+
 def rollout(
     policy: Policy,
     embodiment: Embodiment,
@@ -278,6 +295,7 @@ def rollout(
                 operator_input.begin_trial()
             except Exception as exc:
                 console_ok = False
+                _end_operator_trial(operator_input)
                 warnings.warn(
                     f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
                     RuntimeWarning,
@@ -293,6 +311,7 @@ def rollout(
                     poll = operator_input.poll()
                 except Exception as exc:
                     console_ok = False
+                    _end_operator_trial(operator_input)
                     warnings.warn(
                         "Operator console disabled for this trial after "
                         f"{type(exc).__name__}: {exc}",
@@ -300,9 +319,12 @@ def rollout(
                         stacklevel=2,
                     )
             if poll is not None:
-                for text in poll.messages:
-                    store.setdefault(_OPERATOR_MSGS_KEY, []).append({"t": t, "text": text})
-                    record.events.append(operator_message_event(t, text))
+                for i, text in enumerate(poll.messages):
+                    source = poll.sources[i] if i < len(poll.sources) else "console"
+                    store.setdefault(_OPERATOR_MSGS_KEY, []).append(
+                        {"t": t, "text": text, "source": source}
+                    )
+                    record.events.append(operator_message_event(t, text, source))
 
             prev_inferences = len(store.get(_INFER_KEY, []))
             all_approvals = store.get(_APPROVALS_KEY, [])
@@ -461,6 +483,7 @@ def rollout(
         record.events.append(error_event(t, "KeyboardInterrupt", "cancelled by user"))
         raise _CancelledTrial(record.error, record) from exc
     finally:
+        _end_operator_trial(operator_input)
         # Preserve measured latencies even when the trial ends in an error.
         record.inference_latencies = [
             lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.18", "hatch-fancy-pypi-readme>=24.1"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-voice"
+version = "0.5.1"
+description = "Local spoken operator feedback for attended Inspect Robots evaluations."
+dynamic = ["readme"]
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+keywords = ["robotics", "voice", "whisper", "operator", "inspect_robots", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "inspect-robots>=0.44",
+    "numpy>=1.24",
+    # The marker preserves the workspace lock's unbounded Python range. Where installed,
+    # kokoro-onnx raises the effective NumPy floor to 2.0.2.
+    "kokoro-onnx>=0.4; python_version < '3.14'",
+    "onnx-asr[cpu,hub]>=0.12,<1",
+    "sounddevice>=0.4.6",
+    "faster-whisper>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
+
+[project.entry-points."inspect_robots.operator_inputs"]
+voice = "inspect_robots_voice:voice_input"
+
+[project.entry-points."inspect_robots.sinks"]
+speaker = "inspect_robots_voice:speaker_sink"
+
+[project.urls]
+Homepage = "https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice"
+Repository = "https://github.com/robocurve/inspect-robots"
+
+[tool.uv.sources]
+inspect-robots = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_voice"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_voice", "tests", "README.md"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_voice"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["sounddevice.*", "faster_whisper.*", "onnx_asr.*", "kokoro_onnx.*"]
+ignore_missing_imports = true
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!NOTE\][ \t]*$'
+replacement = '> **Note:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!TIP\][ \t]*$'
+replacement = '> **Tip:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!IMPORTANT\][ \t]*$'
+replacement = '> **Important:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!WARNING\][ \t]*$'
+replacement = '> **Warning:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!CAUTION\][ \t]*$'
+replacement = '> **Caution:**'
