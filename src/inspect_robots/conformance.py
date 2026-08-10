@@ -288,3 +288,37 @@ def assert_guardrail_contribution_conformant(embodiment: Embodiment, action_spac
     report = check_guardrail_contribution(embodiment, action_space)
     if not report.ok:
         raise AssertionError(report.summary())
+
+
+def check_environment_diagnostics() -> dict[str, str]:
+    """Collect runtime environment, platform, dependency, and package info.
+
+    Returns a dictionary mapping diagnostic category keys to human-readable strings.
+    Never fails or throws exceptions when optional libraries are missing.
+    """
+    import importlib.metadata
+    import importlib.util
+    import platform
+    import sys
+    from contextlib import suppress
+
+    from inspect_robots import __version__
+
+    diag: dict[str, str] = {
+        "python": f"{sys.version.split()[0]} ({sys.executable})",
+        "platform": platform.platform(),
+        "inspect_robots": __version__,
+    }
+
+    for mod in ("rerun", "PIL", "griffe", "torch"):
+        pkg_name = "pillow" if mod == "PIL" else mod
+        spec = importlib.util.find_spec(mod)
+        if spec is None:
+            diag[f"dep:{pkg_name}"] = "not installed"
+            continue
+        ver_str = "installed"
+        with suppress(Exception):
+            ver_str = f"installed ({importlib.metadata.version(pkg_name)})"
+        diag[f"dep:{pkg_name}"] = ver_str
+
+    return diag

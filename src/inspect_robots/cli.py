@@ -153,6 +153,7 @@ _SUBCOMMANDS = (
     "config",
     "setup",
     "doctor",
+    "completion",
 )
 
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
@@ -558,6 +559,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
     _add_config_arg(p_doctor)
+
+    p_completion = sub.add_parser(
+        "completion",
+        help="generate shell completion script (bash or zsh)",
+    )
+    p_completion.add_argument(
+        "shell",
+        choices=["bash", "zsh"],
+        help="shell target ('bash' or 'zsh')",
+    )
 
     p_setup = sub.add_parser(
         "setup",
@@ -2640,8 +2651,18 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.conformance import (
+        check_embodiment,
+        check_environment_diagnostics,
+        missing_runtime_requirements,
+    )
     from inspect_robots.registry import registered
+
+    print("Environment diagnostics:")
+    diag = check_environment_diagnostics()
+    for key, val in diag.items():
+        print(f"  {key}: {val}")
+    print()
 
     defaults = load_defaults(os.environ)
     name, source = _pick_component(
@@ -2664,6 +2685,50 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
     return 1 if not report.ok or missing else 0
+
+
+def _generate_completion_script(shell: str) -> str:
+    """Generate ready-to-source completion script for bash or zsh."""
+    if shell == "bash":
+        subcmds = " ".join(_SUBCOMMANDS)
+        return f"""# inspect-robots bash completion script
+_inspect_robots_completions() {{
+    local cur prev subcommands
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+    prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+    subcommands="{subcmds}"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+        return 0
+    fi
+}}
+complete -F _inspect_robots_completions inspect-robots
+"""
+    elif shell == "zsh":
+        sub_list = "\n        ".join(
+            f"'{cmd}:inspect-robots {cmd} subcommand'" for cmd in _SUBCOMMANDS
+        )
+        return f"""#compdef inspect-robots
+
+_inspect_robots() {{
+    local -a subcommands
+    subcommands=(
+        {sub_list}
+    )
+    _describe -t commands 'inspect-robots subcommand' subcommands
+}}
+
+_inspect_robots "$@"
+"""
+    raise ValueError(f"unsupported shell: {shell}")
+
+
+def _cmd_completion(args: argparse.Namespace) -> int:
+    """Output shell completion script to stdout."""
+    script = _generate_completion_script(args.shell)
+    print(script, end="")
+    return 0
 
 
 def _cmd_setup() -> int:
@@ -2756,6 +2821,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "completion":
+        return _cmd_completion(args)
     parser.print_help()
     return 0
 
