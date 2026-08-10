@@ -129,7 +129,7 @@ class StubRosbridgeServer:
             self._subscriptions[ws] = {}
         try:
             for raw in ws:
-                if not isinstance(raw, (str, bytes)):
+                if not isinstance(raw, str | bytes):
                     continue
                 operation = json.loads(raw)
                 if not isinstance(operation, dict):

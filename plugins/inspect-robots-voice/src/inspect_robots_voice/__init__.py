@@ -44,11 +44,11 @@ def speaker_sink(**kwargs: ScalarValue) -> SpeakerSink:
     mode = kwargs.get("mode", _DEFAULT_MODE)
     if not isinstance(voice, str):
         raise TypeError("voice must be a string")
-    if not isinstance(speed, (int, float)) or isinstance(speed, bool):
+    if not isinstance(speed, int | float) or isinstance(speed, bool):
         raise TypeError("speed must be a number")
     if speed <= 0:
         raise TypeError("speed must be positive")
-    if not isinstance(volume, (int, float)) or isinstance(volume, bool):
+    if not isinstance(volume, int | float) or isinstance(volume, bool):
         raise TypeError("volume must be a number")
     if not 0 <= volume <= 1:
         raise TypeError("volume must be between 0 and 1")

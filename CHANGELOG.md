@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core & Plugins:** modernized `isinstance` checks to Python 3.10+ union syntax (`X | Y`), addressing Ruff UP038 lints across the core framework and plugins.
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),

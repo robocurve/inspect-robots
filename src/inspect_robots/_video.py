@@ -121,7 +121,7 @@ def default_fps(embodiment_info: Mapping[str, Any]) -> tuple[float, str]:
     """
     rate = embodiment_info.get("control_hz")
     if (
-        isinstance(rate, (int, float))
+        isinstance(rate, int | float)
         and not isinstance(rate, bool)
         and rate > 0
         and math.isfinite(rate)

@@ -64,7 +64,7 @@ class StubPolicyServer:
 
     def _handler(self, ws: ServerConnection) -> None:
         for raw in ws:
-            if not isinstance(raw, (bytes, bytearray)):
+            if not isinstance(raw, bytes | bytearray):
                 continue
             frame = decode_frame(bytes(raw))
             self.frames.append(frame)

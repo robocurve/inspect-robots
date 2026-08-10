@@ -638,7 +638,7 @@ def _render_tool_call(raw_call: object) -> str:
             )
         elif isinstance(value, list):
             chips.append(_call_chip(key, ", ".join(str(item) for item in value)))
-        elif value is None or isinstance(value, (str, int, float, bool)):
+        elif value is None or isinstance(value, str | int | float | bool):
             chips.append(_call_chip(key, value))
         else:
             return f"{notes}{_raw_tool_call(name, arguments)}"
@@ -650,7 +650,7 @@ def _render_tool_call(raw_call: object) -> str:
 
 def _is_number(value: object) -> bool:
     """Accept real JSON numbers while excluding booleans from numeric chips."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _call_chip(key: object, value: object) -> str:
@@ -1245,7 +1245,7 @@ def _render_wire_call(
     shown_status = "null" if status is None else status
     shown_duration = (
         f"{_number(duration)} s"
-        if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+        if isinstance(duration, int | float) and not isinstance(duration, bool)
         else "n/a"
     )
     summary = (

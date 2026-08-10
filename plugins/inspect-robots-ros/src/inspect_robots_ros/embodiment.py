@@ -86,7 +86,7 @@ def _parse_numeric_list(value: NumericList | None, arg: str) -> tuple[float, ...
     raw: Sequence[Any]
     if isinstance(value, str):
         raw = tuple(item.strip() for item in value.split(",") if item.strip())
-    elif isinstance(value, (int, float)):
+    elif isinstance(value, int | float):
         raw = (value,)
     else:
         raw = value

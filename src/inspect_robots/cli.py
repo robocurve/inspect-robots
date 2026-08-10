@@ -1018,7 +1018,7 @@ def _seconds_horizon(log: EvalLog) -> tuple[float, int, float | None] | None:
     max_seconds = log.eval.max_seconds
     max_steps = log.eval.max_steps
     if not (
-        isinstance(max_seconds, (int, float))
+        isinstance(max_seconds, int | float)
         and not isinstance(max_seconds, bool)
         and math.isfinite(max_seconds)
         and max_seconds > 0
@@ -1031,7 +1031,7 @@ def _seconds_horizon(log: EvalLog) -> tuple[float, int, float | None] | None:
     rate = log.eval.embodiment_info.get("control_hz")
     valid_rate = (
         float(rate)
-        if isinstance(rate, (int, float))
+        if isinstance(rate, int | float)
         and not isinstance(rate, bool)
         and math.isfinite(rate)
         and rate > 0
@@ -1097,7 +1097,7 @@ def _print_step_limit_notice(log: EvalLog, is_adhoc: bool) -> None:
         parenthetical = f"max_steps={max_steps}"
         rate = log.eval.embodiment_info.get("control_hz")
         if (
-            isinstance(rate, (int, float))
+            isinstance(rate, int | float)
             and not isinstance(rate, bool)
             and math.isfinite(rate)
             and rate > 0
@@ -1253,7 +1253,7 @@ def _print_wire_table(trials: list[_WireTrial]) -> None:
             duration = row.get("duration_s")
             shown_duration = (
                 f"{duration:.3f}s"
-                if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                if isinstance(duration, int | float) and not isinstance(duration, bool)
                 else "-"
             )
             status = "-" if row.get("status") is None else str(row["status"])

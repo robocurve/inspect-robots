@@ -97,7 +97,7 @@ class WireCapture:
             self._relative_path = (Path("wire") / run_id / safe_trial_id / "calls.jsonl").as_posix()
         except BaseException as exc:
             self._disable(exc)
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, KeyboardInterrupt | SystemExit):
                 raise
 
     def record(
@@ -144,7 +144,7 @@ class WireCapture:
             self._rows_written = True
         except BaseException as exc:
             self._disable(exc)
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, KeyboardInterrupt | SystemExit):
                 raise
 
     def end_trial(self) -> str | None:
@@ -159,7 +159,7 @@ class WireCapture:
             return pointer
         except BaseException as exc:
             self._disable(exc)
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            if isinstance(exc, KeyboardInterrupt | SystemExit):
                 raise
             return pointer
 

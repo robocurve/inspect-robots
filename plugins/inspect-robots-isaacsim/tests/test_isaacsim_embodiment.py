@@ -242,7 +242,7 @@ def test_no_ram_leak_over_many_steps() -> None:
     # The adapter itself must hold no per-step accumulation.
     assert fake.step_calls == 3200
     for value in vars(emb).values():
-        assert not isinstance(value, (list, dict)) or len(value) <= 1
+        assert not isinstance(value, list | dict) or len(value) <= 1
 
 
 def test_disable_debug_vis_walks_nested_configs() -> None:

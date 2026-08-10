@@ -282,7 +282,7 @@ class RosbridgeClient:
         try:
             while True:
                 raw = ws.recv()
-                if not isinstance(raw, (str, bytes)):
+                if not isinstance(raw, str | bytes):
                     raise RosbridgeError(
                         "invalid_frame",
                         f"rosbridge sent unsupported frame type {type(raw).__name__}",
