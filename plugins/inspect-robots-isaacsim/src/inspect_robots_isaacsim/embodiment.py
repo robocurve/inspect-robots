@@ -93,7 +93,7 @@ def _disable_debug_vis(cfg: Any) -> None:
         if isinstance(obj, dict):
             stack.extend(obj.values())
             continue
-        if isinstance(obj, (list, tuple, set)):
+        if isinstance(obj, list | tuple | set):
             stack.extend(obj)
             continue
         obj_vars = getattr(obj, "__dict__", None)
@@ -102,7 +102,7 @@ def _disable_debug_vis(cfg: Any) -> None:
         for key, value in obj_vars.items():
             if key == "debug_vis" and value is True:
                 obj.debug_vis = False
-            elif isinstance(value, (dict, list, tuple, set)) or hasattr(value, "__dict__"):
+            elif isinstance(value, dict | list | tuple | set) or hasattr(value, "__dict__"):
                 stack.append(value)
 
 
