@@ -153,6 +153,7 @@ _SUBCOMMANDS = (
     "config",
     "setup",
     "doctor",
+    "completion",
 )
 
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
@@ -558,6 +559,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
     _add_config_arg(p_doctor)
+
+    p_completion = sub.add_parser(
+        "completion",
+        help="generate shell completion script (bash or zsh)",
+    )
+    p_completion.add_argument(
+        "shell",
+        choices=["bash", "zsh"],
+        help="shell target ('bash' or 'zsh')",
+    )
 
     p_setup = sub.add_parser(
         "setup",
@@ -2677,6 +2688,20 @@ def _cmd_setup() -> int:
     )
 
 
+def _generate_completion_script(shell: str) -> str:
+    """Generate ready-to-source completion script for bash or zsh."""
+    from inspect_robots._cli_commands.completion import generate_completion_script
+
+    return generate_completion_script(shell, _SUBCOMMANDS)
+
+
+def _cmd_completion(args: argparse.Namespace) -> int:
+    """Output shell completion script to stdout."""
+    script = _generate_completion_script(args.shell)
+    print(script, end="")
+    return 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
         path = _set_default(os.environ, args.key, args.value)
@@ -2756,6 +2781,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "completion":
+        return _cmd_completion(args)
     parser.print_help()
     return 0
 
