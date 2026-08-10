@@ -438,3 +438,28 @@ def test_report_summary_is_readable() -> None:
     report = check_embodiment(_info(space=Box(shape=(2,))))
     text = report.summary()
     assert "error" in text and "semantics" in text
+
+
+def test_check_environment_diagnostics() -> None:
+    from inspect_robots.conformance import check_environment_diagnostics
+
+    diag = check_environment_diagnostics()
+    assert "python" in diag
+    assert "platform" in diag
+    assert "inspect_robots" in diag
+    assert any(k.startswith("dep:") for k in diag)
+
+
+def test_check_environment_diagnostics_version_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.metadata
+
+    from inspect_robots.conformance import check_environment_diagnostics
+
+    def _raise(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("version lookup failed")
+
+    monkeypatch.setattr(importlib.metadata, "version", _raise)
+    diag = check_environment_diagnostics()
+    assert any("installed" in val for val in diag.values())

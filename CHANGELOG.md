@@ -5,16 +5,21 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the version is
 `0.x`, breaking changes may occur on any minor release.
 
-## [Unreleased]
+### Added
+
+- **CLI:** added `inspect-robots completion bash|zsh` command to generate ready-to-source shell autocompletion scripts.
 
 ### Fixed
 
+- **Core & Plugins:** modernized `isinstance` checks to Python 3.10+ union syntax (`X | Y`), addressing Ruff UP038 lints across the core framework and plugins.
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),
   [#343](https://github.com/robocurve/inspect-robots/issues/343)).
 
 ### Changed
+
+- **CLI:** extended `inspect-robots doctor` to print environment diagnostics (Python interpreter version, OS platform, framework version, and optional package installation statuses).
 
 - **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
   one shared helper, and its error reads `--epochs must be >= 1, got 0`

@@ -136,7 +136,7 @@ class PolicyClient:
                 if remaining <= 0:
                     raise TimeoutError
                 raw = ws.recv(timeout=remaining)
-                if not isinstance(raw, (bytes, bytearray)):
+                if not isinstance(raw, bytes | bytearray):
                     continue  # protocol is binary-only; ignore stray text frames
                 try:
                     reply = decode_frame(bytes(raw))

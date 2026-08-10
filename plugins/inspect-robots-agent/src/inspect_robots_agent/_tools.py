@@ -401,7 +401,7 @@ class Toolset:
                 return ToolResult(
                     error=f"unknown dimension {label!r}; valid names: {', '.join(self._labels)}"
                 )
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            if isinstance(raw, bool) or not isinstance(raw, int | float):
                 return ToolResult(error=f"value for {label!r} must be a finite number, got {raw!r}")
             try:
                 # Arbitrary-precision JSON integers overflow float() (and crash

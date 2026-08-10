@@ -54,7 +54,7 @@ def _sanitize(obj: object) -> object:
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
         return {key: _sanitize(value) for key, value in obj.items()}
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list | tuple):
         return [_sanitize(value) for value in obj]
     return obj
 

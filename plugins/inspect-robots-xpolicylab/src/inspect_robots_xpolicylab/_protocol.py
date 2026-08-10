@@ -146,7 +146,7 @@ class Frame:
 
 def _encode_hook(obj: Any) -> Any:
     # Same restriction as upstream: object-dtype arrays cannot round-trip.
-    if isinstance(obj, (np.ndarray, np.generic)) and obj.dtype.kind == "O":
+    if isinstance(obj, np.ndarray | np.generic) and obj.dtype.kind == "O":
         raise WsError("invalid_frame", "object dtype numpy arrays are not supported")
     return msgpack_numpy.encode(obj)
 
