@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **W&B plugin (0.1.0):** added `plugins/inspect-robots-wandb` implementing `WandbSink` to stream evaluation runs, metrics, and trial summaries to Weights & Biases dashboards.
+
 ### Fixed
 
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration

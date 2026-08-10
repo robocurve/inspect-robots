@@ -402,6 +402,37 @@ jobs:
           uv run --no-sync python -m pytest plugins/inspect-robots-capx/tests -q
           --cov=inspect_robots_capx --cov-report=term-missing --cov-fail-under=0
 
+  plugin-wandb:
+    name: plugin · wandb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Sync workspace (core + plugins, dev extras)
+        run: uv sync --locked --python 3.11 --all-packages --extra dev
+      - name: Ruff (plugin, lint)
+        run: uv run --no-sync ruff check plugins/inspect-robots-wandb
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-wandb
+      - name: Mypy (plugin, strict)
+        run: >
+          uv run --no-sync mypy
+          --config-file plugins/inspect-robots-wandb/pyproject.toml
+          plugins/inspect-robots-wandb/src/inspect_robots_wandb
+          plugins/inspect-robots-wandb/tests
+      - name: Pytest (plugin, with coverage)
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-wandb/tests -q
+          --cov=inspect_robots_wandb --cov-report=term-missing --cov-fail-under=0
+
   # Guard against the #208/#212 accident class: eval outputs (or any large
   # blob) swept into a commit by git add -A. Per-file pre-commit hooks are
   # local-only and GitHub's own limit is 100 MB per file, so 3 GB of small
@@ -440,7 +471,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
+    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, plugin-wandb, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
