@@ -650,16 +650,20 @@ def eval_set(
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
     retry_attempts: int = 0,
+    max_workers: int = 1,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
     ``success`` is ``True`` iff every task's log has ``status == "success"``.
 
+    ``max_workers`` controls parallel task execution. When ``max_workers > 1``,
+    tasks are executed concurrently using a thread pool worker execution queue.
+
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
     hook, not both) and are resolved once here, so every task shares the same
     grader instance.
 
-    Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
+    Caller-supplied ``sinks`` are reused across the set's runs. Each
     sink must reset its per-run state in ``on_eval_start`` and tolerate one
     complete lifecycle per task.
 
@@ -667,26 +671,38 @@ def eval_set(
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
     """
+    if max_workers < 1:
+        raise ConfigError("max_workers must be >= 1")
     before_scoring = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     logs: list[EvalLog] = []
-    for task in task_list:
-        logs.extend(
-            eval(
-                task,
-                policy,
-                embodiment,
-                log_dir=log_dir,
-                sinks=sinks,
-                seed=seed,
-                fail_on_error=fail_on_error,
-                controller=controller,
-                approver=approver,
-                remap=remap,
-                store_frames=store_frames,
-                operator_input=operator_input,
-                before_scoring=before_scoring,
-            )
+
+    def _eval_one(target_task: Task | str) -> list[EvalLog]:
+        return eval(
+            target_task,
+            policy,
+            embodiment,
+            log_dir=log_dir,
+            sinks=sinks,
+            seed=seed,
+            fail_on_error=fail_on_error,
+            controller=controller,
+            approver=approver,
+            remap=remap,
+            store_frames=store_frames,
+            operator_input=operator_input,
+            before_scoring=before_scoring,
         )
+
+    if max_workers > 1 and len(task_list) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for task_logs in executor.map(_eval_one, task_list):
+                logs.extend(task_logs)
+    else:
+        for task in task_list:
+            logs.extend(_eval_one(task))
+
     success = all(log.status == "success" for log in logs)
     return success, logs

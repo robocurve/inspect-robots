@@ -966,6 +966,38 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert logs[0].results.metrics["operator"] == 1.0
 
 
+def test_eval_set_max_workers_validation(tmp_path: Path) -> None:
+    from inspect_robots.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="max_workers must be >= 1"):
+        eval_set(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            max_workers=0,
+        )
+
+
+def test_eval_set_parallel_execution(tmp_path: Path) -> None:
+    task1 = _task(scorer=operator_scorer())
+    task2 = _task(scorer=operator_scorer())
+
+    def judge(record: TrialRecord, scene: Scene) -> None:
+        record.operator_judgement = "pass"
+
+    success, logs = eval_set(
+        [task1, task2],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=judge,
+        max_workers=2,
+    )
+    assert success
+    assert len(logs) == 2
+
+
 # --------------------------------------------------------------------------- #
 # 9. Attended operator input is trial-scoped and persisted beside each epoch.
 # --------------------------------------------------------------------------- #

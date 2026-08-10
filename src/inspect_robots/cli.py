@@ -387,6 +387,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="passed through to eval_set(); resumption of a partial run is "
         "accepted but not yet honored",
     )
+    p_eval_set.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="number of parallel task worker threads for task execution (default: 1)",
+    )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
     p_inspect.add_argument("log", help="path to an EvalLog JSON file")
@@ -1851,6 +1857,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
                 grader=grader,
+                max_workers=args.max_workers,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log

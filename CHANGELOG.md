@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Core & CLI:** added `max_workers` parameter to `eval_set()` and `--max-workers` flag to `inspect-robots eval-set` for concurrent task execution.
+
 ### Fixed
 
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
