@@ -74,7 +74,17 @@ now states plainly that durable artifacts record only the executed action —
 plus 3 nits (test_coverage_completion collects before the new test file, so
 "every litterer" overstated; the `eval()` → `_run_eval` forwarding line
 named alongside `eval_set`'s; the sessionfinish hook derives the repo root
-from conftest `__file__`, not cwd) — all folded in below.
+from conftest `__file__`, not cwd) — all folded in below. R6 (2026-08-11,
+vs main @ aeefa002) re-verified all citations and the twelve-site list;
+its one substantive finding was that an existence-based litter gate
+false-positives on any checkout that ever ran the quickstart (`logs/` is a
+normal dev artifact) — the gate is now delta-based (sessionstart snapshot,
+fail only if the dir appeared) — plus 4 nits (the "repo-level artifact
+list" had no referent, retargeted to `docs/guide/logging-and-rerun.md`;
+the sessionfinish failure mechanism pinned to `session.exitstatus = 1`,
+raising there is an INTERNALERROR; plugin suites don't load
+`tests/conftest.py`, gate-scope note added; the numpy-cast-warning
+justification for `match=` softened) — all folded in below.
 
 ## Problem
 
@@ -296,10 +306,11 @@ assert no `logs/` exists under the repo root after the full suite.
   portably: NaN→int64 casting is 0 on ARM64 but INT64_MIN on x86-64, where
   the render index raises and the trial dies as `EmbodimentFault` before the
   NaN reaches the record. Assert with
-  `pytest.warns(RuntimeWarning, match=<degrade message>)` — numpy's own
-  "invalid value encountered in cast" warning escapes such runs, so a bare
-  `RuntimeWarning` match is not specific enough. Expect: warning, no file,
-  no metadata key, eval status unaffected.
+  `pytest.warns(RuntimeWarning, match=<degrade message>)` — a bare
+  `RuntimeWarning` match is fragile (numpy cast warnings can escape
+  NaN-handling runs depending on the embodiment's arithmetic; `match=` is
+  robust regardless). Expect: warning, no file, no metadata key, eval
+  status unaffected.
 - [ ] Non-finite degrade (helper seam): `_write_action_log` on a hand-built
   record containing a NaN action returns `None` and leaves no file — covers
   the `ValueError` branch without an embodiment in the loop.
@@ -318,14 +329,24 @@ assert no `logs/` exists under the repo root after the full suite.
 - [ ] Existing call sites with custom sinks and default `log_dir` updated so
   the suite leaves no `logs/` litter in the checkout — re-run the scan (list
   above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias).
-  The no-litter gate is a **`pytest_sessionfinish` hook in
-  `tests/conftest.py`** that fails the run if `<repo_root>/logs` exists,
-  deriving the repo root from conftest's `__file__` (not cwd —
-  `test_examples.py` chdirs) — it cannot be an ordinary test in
+  The no-litter gate is **delta-based**: `pytest_sessionstart` in
+  `tests/conftest.py` snapshots whether `<repo_root>/logs` exists, and
+  `pytest_sessionfinish` fails the run (set `session.exitstatus = 1` and
+  print the reason — raising there produces an INTERNALERROR exit) only if
+  the directory **appeared during the session**. Existence alone is not
+  litter: a repo-root `logs/` is a normal artifact of developing here
+  (quickstart and the docs default `log_dir="logs"`), and an
+  existence-based gate would fail every local run forever after one
+  quickstart while CI (clean checkout) stays exactly as strict either way.
+  Derive the repo root from conftest's `__file__`, not cwd
+  (`test_examples.py` chdirs). It cannot be an ordinary test in
   `test_eval_action_log.py`: pytest collects alphabetically, so that file
   runs before most of the potential litterers and the assertion would pass
   vacuously (`git status` is equally blind — `logs/` is gitignored). CI
-  runs plain sequential pytest, so the hook is deterministic.
+  runs plain sequential pytest, so the hook is deterministic. Scope note:
+  plugin test suites run as separate pytest invocations that never load
+  `tests/conftest.py`, so plugin-side litter is protected by the call-site
+  scan only, not by this gate.
 
 Core coverage stays at 100% (`inspect_robots` scope); `mypy --strict` stays
 clean.
@@ -344,8 +365,10 @@ clean.
   caveat, point to the action side-car as the guaranteed-complete record of
   commanded actions ("the `.rrd` is what the viewer saw; the actions JSONL is
   what the robot was told").
-- [ ] `src/inspect_robots/CLAUDE.md` module table (`eval.py` row) and the
-  repo-level artifact list mention the `actions/` side-car.
+- [ ] `src/inspect_robots/CLAUDE.md` module table (`eval.py` row) mentions
+  the `actions/` side-car; add it to the side-car coverage in
+  `docs/guide/logging-and-rerun.md` (alongside its "Frame side-cars"
+  material — there is no other enumerated artifact list in the repo).
 - [ ] `CHANGELOG.md` entry under Unreleased: default-on durable action log,
   `store_actions=` opt-out, and the custom-sink behavior change called out
   explicitly.
