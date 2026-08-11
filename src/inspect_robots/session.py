@@ -1,4 +1,9 @@
-"""Own attended-run operator input, prompts, and terminal rendering."""
+"""Own attended-run operator input, prompts, terminal rendering, and the echo pump.
+
+Footer windows may run a per-trial background echo pump thread (plan 0066) so typing
+stays visible while the rollout thread is blocked in policy inference; the thread is
+joined in ``end_trial()`` before any blocking stdin read can run.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import os
 import select
 import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -36,11 +42,15 @@ _DEFINITIVE_REASONS = frozenset({"success", "failure"})
 _NO_TERMIOS_STATE = object()
 _END_HINT = "Esc ends the episode"
 _END_HINT_PHRASE = "ends the episode"
-# How long a trailing ESC must stay unanswered before a quiet poll reads it as a bare
-# Esc keypress (vim-style escape timeout). A single-poll grace would misread an
-# SSH-delayed arrow-key tail on a fast control loop; a tail delayed past this floor
-# still misreads as bare Esc and then types literally into the buffer.
+# How long a trailing ESC must stay unanswered before a quiet pump reads it as a bare
+# Esc keypress (vim-style escape timeout). With an echo pump running, the grace is
+# tested at ECHO_INTERVAL_S cadence rather than only at quiet rollout polls, so it now
+# applies mid-inference too; the accepted cost is unchanged from plan 0051: a tail
+# delayed past this floor misreads as bare Esc and then types literally into the buffer.
 _ESC_GRACE_S = 0.15
+# Background echo pump cadence. Echo latency while the policy blocks in inference is
+# bounded by this interval; the Esc grace settles within _ESC_GRACE_S + this interval.
+ECHO_INTERVAL_S = 0.05
 
 
 def _flush_stdin_fd() -> None:
@@ -226,6 +236,11 @@ class OperatorSession:
         self._editor = _LineEditor()
         self._line_queue: list[str] = []
         self._pump_eof = False
+        self._echo_interval_s: float | None = None
+        self._lock = threading.RLock()
+        self._pump_thread: threading.Thread | None = None
+        self._pump_stop: threading.Event | None = None
+        self._pump_error: Exception | None = None
         # Monotonic stamp of the byte-feeding pump that left an ESC pending; None means
         # no bare-Esc grace is armed.
         self._esc_stamp: float | None = None
@@ -329,10 +344,11 @@ class OperatorSession:
         self._write(f"\r\x1b[K> {self._clipped_input_text()}")
 
     def _enter_footer(self) -> None:
-        """Enter the footer window for a new trial (decisions 5 and 7).
+        """Enter the footer window for a new trial (decisions 5 and 7, plan 0066).
 
         Drains stale fd bytes with no echo, resets the editor and queue, closes a
-        stale plain-open status line, then draws the (now empty) input row.
+        stale plain-open status line, draws the (now empty) input row, and finally
+        starts the window's echo pump thread when an interval was configured.
         """
         self._footer_active = True
         while self._fd_readable():
@@ -347,6 +363,51 @@ class OperatorSession:
             prefix = "\n"
             self._status_open = False
         self._write(f"{prefix}\r\x1b[K> {self._clipped_input_text()}")
+        if self._echo_interval_s is not None:
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._echo_pump_loop,
+                args=(stop, self._echo_interval_s),
+                name="operator-echo-pump",
+                daemon=True,
+            )
+            # Assign only after a successful start: join() on a never-started thread
+            # raises RuntimeError, and _try_enter_footer's abort path must leave no
+            # handle a later end_trial's _stop_echo_pump would trip over.
+            thread.start()
+            self._pump_stop = stop
+            self._pump_thread = thread
+
+    def _echo_pump_loop(self, stop: threading.Event, interval: float) -> None:
+        """Echo typed bytes between rollout polls while the policy blocks (plan 0066).
+
+        Runs the same pump ``poll()`` runs, under the shared lock, every ``interval``
+        seconds until ``stop`` is set. A raising pump is stored for the next ``poll()``
+        to re-raise (rollout's existing degrade path) and ends this thread; the thread
+        itself never prints or raises.
+        """
+        while not stop.wait(interval):
+            with self._lock:
+                try:
+                    self._pump_input()
+                except Exception as exc:
+                    self._pump_error = exc
+                    return
+
+    def _stop_echo_pump(self) -> None:
+        """Idempotently stop and join the echo pump thread for this footer window.
+
+        The join is unbounded: a pump blocked writing to an XOFF-wedged terminal
+        blocks it, exactly as the same write blocks today's synchronous pump on the
+        rollout thread. Not a regression; accepted.
+        """
+        if self._pump_thread is None:
+            return
+        assert self._pump_stop is not None
+        self._pump_stop.set()
+        self._pump_thread.join()
+        self._pump_thread = None
+        self._pump_stop = None
 
     def _try_enter_footer(self) -> None:
         """Re-evaluate the per-trial gate ladder and silently retain plain mode on failure."""
@@ -377,11 +438,24 @@ class OperatorSession:
         self._line_queue = []
         self._pump_eof = False
         self._esc_stamp = None
+        # Cleared per closed window (decision 5, plan 0066): a stale error from trial N
+        # must not kill trial N+1's plain-mode console when its footer entry fails the
+        # gate ladder. Safe because poll() consumes the error before raising.
+        self._pump_error = None
 
     def _restore_terminal(self) -> None:
-        """Idempotently restore and forget the active termios snapshot."""
+        """Idempotently restore and forget the active termios snapshot.
+
+        As the atexit crash net, also stop a still-live echo pump without taking the
+        lock or joining: a pump blocked on a wedged stdout write must not deadlock
+        interpreter shutdown, so one echo already in flight may land after the
+        restore (accepted cost, plan 0066).
+        """
         if self._saved_termios_state is _NO_TERMIOS_STATE:
             return
+        stop = self._pump_stop
+        if stop is not None:
+            stop.set()
         saved_state = self._saved_termios_state
         self._saved_termios_state = _NO_TERMIOS_STATE
         self._restore_fn(saved_state)
@@ -415,8 +489,16 @@ class OperatorSession:
         else:
             self._write(f"\r\x1b[K{text}\n\r\x1b[K> {self._clipped_input_text()}")
 
-    def enable_footer(self, *, label: str) -> None:
+    def enable_footer(self, *, label: str, echo_interval_s: float | None = None) -> None:
         """Opt into the two-row footer renderer with its feedback confirmation label.
+
+        ``echo_interval_s`` additionally opts each footer window into a background
+        echo pump thread at that cadence, so typing echoes while the rollout thread
+        is blocked in policy inference (plan 0066); ``None`` keeps the footer fully
+        synchronous, which every embedded or injected-seam use wants, and the CLI
+        passes ``ECHO_INTERVAL_S``. While a footer window is open (between
+        ``begin_trial()`` and ``end_trial()``) the session owns stdin; blocking
+        stdin reads are only legal outside it.
 
         A documented no-op when this session was built with a caller-injected
         ``console=...``: the footer requires the session-built console whose seams
@@ -427,6 +509,7 @@ class OperatorSession:
         if self._owns_console:
             self._footer_requested = True
             self._footer_label = label
+            self._echo_interval_s = echo_interval_s
             if not self._atexit_registered:
                 self._atexit_register(self._restore_terminal)
                 self._atexit_registered = True
@@ -438,8 +521,11 @@ class OperatorSession:
         mid-trial, including when ``begin_trial()`` itself raised, and again in the
         per-trial ``finally``. Begin-before-end pairing is not guaranteed, so this
         hook must remain idempotent. A session that did not enter footer mode writes
-        no bytes and leaves plain-renderer state untouched.
+        no bytes and leaves plain-renderer state untouched. The echo pump is stopped
+        and joined first — before the clearing writes and the termios restore — so a
+        pump byte can never land after either (plan 0066).
         """
+        self._stop_echo_pump()
         if not self._footer_active:
             return
         try:
@@ -452,10 +538,21 @@ class OperatorSession:
             self._restore_terminal()
 
     def poll(self) -> ConsolePoll:
-        """Poll the console first, then merge every healthy attached input in order."""
-        if self._footer_active:
-            self._pump_input()
-        console_poll = self._console.poll()
+        """Poll the console first, then merge every healthy attached input in order.
+
+        A stored echo-pump-thread error is re-raised here first (plan 0066), reusing
+        rollout's degrade-and-warn path for a raising ``poll()``. The lock is released
+        before the attached-input merge: attached sources are rollout-thread state,
+        and ``write_line`` re-acquires the lock itself.
+        """
+        with self._lock:
+            if self._pump_error is not None:
+                error = self._pump_error
+                self._pump_error = None
+                raise error
+            if self._footer_active:
+                self._pump_input()
+            console_poll = self._console.poll()
         if not self._attached_inputs:
             self._confirm_console_messages(console_poll)
             return console_poll
@@ -494,7 +591,10 @@ class OperatorSession:
     def begin_trial(self) -> None:
         """Re-decide footer eligibility, then discard feedback predating the next trial."""
         self._try_enter_footer()
-        self._console.begin_trial()
+        with self._lock:
+            # The window's echo pump may already be running; the console drain reads
+            # the shared line queue through the dispatch seams.
+            self._console.begin_trial()
         healthy_inputs: list[tuple[OperatorInput, str]] = []
         for source, label in self._attached_inputs:
             try:
@@ -520,7 +620,8 @@ class OperatorSession:
         instead of the plain single-line ticker.
         """
         if self._footer_active:
-            self._footer_status(line)
+            with self._lock:
+                self._footer_status(line)
             return
         if line is None:
             if self._status_open:
@@ -535,7 +636,8 @@ class OperatorSession:
     def write_line(self, text: str) -> None:
         """Write scrollback text without losing an open status line (or the footer's input row)."""
         if self._footer_active:
-            self._footer_write_line(text)
+            with self._lock:
+                self._footer_write_line(text)
             return
         if self._status_open:
             self._write("\n")
@@ -545,7 +647,12 @@ class OperatorSession:
             self._write(f"\r  {self._status_line}   ")
 
     def gate(self, prompt: str, *, hint: str | None = None) -> None:
-        """Close sticky status, flush stale input, and block for readiness."""
+        """Close sticky status, flush stale input, and block for readiness.
+
+        Must not be called while a footer window is open: the window owns stdin
+        (and may be running its echo pump), so blocking reads are only legal
+        outside ``begin_trial()``/``end_trial()`` (plan 0066).
+        """
         self.status(None)
         try:
             self._flush_fn()

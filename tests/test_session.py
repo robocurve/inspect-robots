@@ -7,11 +7,13 @@ import io
 import os
 import shutil
 import sys
+import time
 from collections.abc import Callable
 
 import pytest
 
 from inspect_robots.console import (
+    END_SENTINEL,
     USAGE,
     USAGE_END_ONLY,
     ConsolePoll,
@@ -23,7 +25,7 @@ from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import operator_scorer
-from inspect_robots.session import _NOTES_PROMPT, _PROMPT, OperatorSession
+from inspect_robots.session import _ESC_GRACE_S, _NOTES_PROMPT, _PROMPT, OperatorSession
 
 
 class _RecordingConsole(OperatorConsole):
@@ -704,6 +706,7 @@ def _footer_session(
     width: int = 200,
     label: str = "sent",
     now_fn: Callable[[], float] | None = None,
+    echo_interval_s: float | None = None,
 ) -> tuple[OperatorSession, _ScriptedFd]:
     """Build a footer-enabled session, run ``begin_trial()``, then drop its input-row draw."""
     fd = fd if fd is not None else _ScriptedFd()
@@ -717,7 +720,7 @@ def _footer_session(
         restore_fn=lambda _state: None,
         now_fn=now_fn,
     )
-    session.enable_footer(label=label)
+    session.enable_footer(label=label, echo_interval_s=echo_interval_s)
     session.begin_trial()
     output.clear()
     return session, fd
@@ -1746,3 +1749,209 @@ def test_footer_dispatch_eof_contract_returns_empty_string_only_on_real_eof() ->
     poll = session.poll()
 
     assert poll == ConsolePoll()
+
+
+# --- Footer echo pump thread (plan 0066) --------------------------------------------------
+
+
+def _wait_until(predicate: Callable[[], bool], timeout_s: float = 5.0) -> None:
+    """Poll ``predicate`` until true or fail the test after ``timeout_s``."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.001)
+    pytest.fail("timed out waiting for background echo pump")
+
+
+def test_echo_pump_thread_echoes_between_polls() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, echo_interval_s=0.001)
+    try:
+        fd.chunks.append(b"hi")
+        _wait_until(lambda: any(entry.endswith("> hi") for entry in output))
+    finally:
+        session.end_trial()
+
+
+def test_echo_pump_lines_are_delivered_by_later_poll() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output, echo_interval_s=0.001)
+    try:
+        fd.chunks.append(b"hello")
+        fd.chunks.append(b"\n")
+        _wait_until(lambda: bool(session._line_queue))
+
+        poll = session.poll()
+
+        assert poll.messages == ("hello",)
+        assert poll.end is None
+    finally:
+        session.end_trial()
+
+
+def test_end_trial_joins_pump_thread_before_clearing() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output, echo_interval_s=0.001)
+    thread = session._pump_thread
+    assert thread is not None
+
+    session.end_trial()
+
+    assert not thread.is_alive()
+    assert session._pump_thread is None
+    assert session._pump_stop is None
+
+
+def test_each_footer_window_gets_a_fresh_pump_thread() -> None:
+    output: list[str] = []
+    session, _fd = _footer_session(output, echo_interval_s=0.001)
+    first = session._pump_thread
+    assert first is not None
+    session.end_trial()
+
+    session.begin_trial()
+    try:
+        second = session._pump_thread
+        assert second is not None
+        assert second is not first
+        assert second.is_alive()
+    finally:
+        session.end_trial()
+
+
+def test_pump_thread_settles_esc_grace_without_poll() -> None:
+    output: list[str] = []
+    clock = _FakeClock()
+    session, fd = _footer_session(output, now_fn=clock.now, echo_interval_s=0.001)
+    try:
+        fd.chunks.append(b"\x1b")
+        _wait_until(lambda: session._esc_stamp is not None)
+
+        clock.t = _ESC_GRACE_S + 1.0
+        _wait_until(lambda: END_SENTINEL in session._line_queue)
+
+        poll = session.poll()
+
+        assert poll.end == EndRequest()
+        assert poll.messages == ()
+    finally:
+        session.end_trial()
+
+
+def test_pump_thread_error_is_raised_from_next_poll() -> None:
+    output: list[str] = []
+    armed: list[bool] = []
+
+    def readable() -> bool:
+        return bool(armed)
+
+    def read() -> bytes:
+        raise RuntimeError("boom")
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=readable,
+        fd_read=read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent", echo_interval_s=0.001)
+    session.begin_trial()
+    try:
+        armed.append(True)
+        _wait_until(lambda: session._pump_error is not None)
+        thread = session._pump_thread
+        assert thread is not None
+        _wait_until(lambda: not thread.is_alive())
+        armed.clear()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            session.poll()
+
+        assert session._pump_error is None
+    finally:
+        session.end_trial()
+
+
+def test_enable_footer_without_interval_starts_no_thread() -> None:
+    output: list[str] = []
+    session, fd = _footer_session(output)
+    try:
+        assert session._pump_thread is None
+
+        fd.chunks.append(b"hi\n")
+        poll = session.poll()
+
+        assert poll.messages == ("hi",)
+    finally:
+        session.end_trial()
+
+
+def test_stale_pump_error_is_cleared_on_window_close() -> None:
+    output: list[str] = []
+    raising: list[bool] = []
+    fd = _ScriptedFd()
+
+    def readable() -> bool:
+        return bool(raising) or fd.readable()
+
+    def read() -> bytes:
+        if raising:
+            raise RuntimeError("boom")
+        return fd.read()
+
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=readable,
+        fd_read=read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent", echo_interval_s=0.001)
+    session.begin_trial()
+    raising.append(True)
+    _wait_until(lambda: session._pump_error is not None)
+
+    session.end_trial()
+    raising.clear()
+
+    assert session._pump_error is None
+
+    session.begin_trial()
+    try:
+        assert session.poll() == ConsolePoll()
+    finally:
+        session.end_trial()
+
+
+def test_atexit_restore_stops_a_live_pump() -> None:
+    output: list[str] = []
+    restores: list[object] = []
+    fd = _ScriptedFd()
+    session = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=restores.append,
+    )
+    session.enable_footer(label="sent", echo_interval_s=0.001)
+    session.begin_trial()
+    try:
+        thread = session._pump_thread
+        assert thread is not None
+
+        session._restore_terminal()
+
+        _wait_until(lambda: not thread.is_alive())
+        assert len(restores) == 1
+    finally:
+        session.end_trial()
+    assert len(restores) == 1
