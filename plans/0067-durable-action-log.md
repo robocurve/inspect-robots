@@ -39,7 +39,21 @@ and lands the file atomically via temp + `os.replace`, matching
 is framework-reserved; a narrower degrade-test seam than patching
 `Path.open` globally; a Windows reserved-device-name acknowledgement for
 `_safe` parity; a follow-up-issue checkbox for the transcripts side-car's
-raw-scene-id bug) — all folded in below.
+raw-scene-id bug) — all folded in below. R3 (2026-08-11, vs main @ aeefa002)
+found 3 more, all test-implementability (the end-to-end NaN test was
+platform-dependent — NaN→int64 casting yields 0 on ARM64 but INT64_MIN on
+x86-64, where CubePick's render indexing then raises and the trial dies as
+`EmbodimentFault` before the NaN ever reaches the record, so the test now
+uses a NaN-tolerant embodiment subclass plus a helper-seam `ValueError`
+test, with `pytest.warns(match=)` because numpy's own cast warning escapes;
+both prior I/O-degrade seams were unimplementable — `run_stamp` is not
+knowable before `eval()` and `Path.mkdir` can only be patched class-wide —
+replaced with pre-creating `<log_dir>/actions` itself as a file; the
+clean-`git status` gate was vacuous because `logs/` is gitignored, replaced
+with asserting no `logs/` dir exists after the suite) plus 3 nits (the
+re-scan must cover `plugins/*/tests` and import aliases like `ir_eval(`;
+fsync before `os.replace` stated explicitly; header `scene_id` is raw) —
+all folded in below.
 
 ## Problem
 
@@ -99,7 +113,9 @@ Line 1 is a header, then one line per step, in step order:
 
 - The header's `run_id` value is `eval()`'s `run_stamp` — the same identifier
   that names the `frames/`, `wire/`, and `transcripts/` subdirectories; there
-  is no other run identifier.
+  is no other run identifier. The header's `scene_id` value is the **raw**
+  scene id (sanitization applies to the filename only), so the original
+  identity survives inside the artifact.
 - `action` is the **executed** action — `StepRecord.action` is post-approval
   (`action = reviewed` precedes both `sink.log_step` and the record append in
   `rollout()`), which is what replay fidelity requires. Approver
@@ -121,8 +137,9 @@ Line 1 is a header, then one line per step, in step order:
   `null` would corrupt a replay artifact — so a non-finite value trips the
   documented degrade path loudly instead: warning, no file, no pointer.
 - **Write strategy (not streaming):** the helper serializes **all** lines in
-  memory first, then writes to a temp path in the destination directory and
-  `os.replace`s it into place — the `json_log.py` atomic-write precedent.
+  memory first, then writes to a temp path in the destination directory
+  (flush + fsync, as `json_log.py` does) and `os.replace`s it into place —
+  the full `json_log.py` atomic-write precedent.
   This makes "no file" literally true on the non-finite `ValueError` path
   (serialization fails before anything touches disk) and leaves no partial
   file on a mid-write `OSError` (disk full). A streaming line-by-line writer
@@ -189,9 +206,13 @@ exactly those paths):
 `tests/test_eval_orchestration.py:248, :293, :334, :447, :475, :845`,
 `tests/test_rerun_sink.py:419, :428, :1046`,
 `tests/test_tracer_eval.py:103`.
-Line numbers drift; re-run the scan at implementation time (every `eval(`/
-`eval_set(` call in `tests/` lacking an explicit `log_dir`) and gate on a
-clean `git status` after the full suite.
+Line numbers drift; re-run the scan at implementation time — every `eval(`/
+`eval_set(` call lacking an explicit `log_dir`, covering `tests/` **and**
+`plugins/*/tests` **and** import aliases (the agent plugin calls it as
+`ir_eval(`; every plugin site passes `log_dir` today, but the scan must not
+assume that). The gate cannot be `git status`: `.gitignore` covers `logs/`,
+so a littering suite still shows clean. Gate on the directory itself —
+assert no `logs/` exists under the repo root after the full suite.
 
 ### What does not change
 
@@ -235,22 +256,37 @@ clean `git status` after the full suite.
   name `frames._safe` yields (collision-suffixed); no directory traversal.
 - [ ] Labels: `null` when semantics is absent; `null` when semantics present
   but `dim_labels` unset; populated when set.
-- [ ] Non-finite degrade: a policy emitting a NaN action under the default
-  approver → `RuntimeWarning`, no file, no metadata key, eval status
-  unaffected.
-- [ ] I/O degrade: force an `OSError` through a seam narrower than a global
-  `Path.open` patch (which would also break `JsonLogSink.on_eval_end` and
-  muddy the "eval status unaffected" assertion) — e.g. monkeypatch
-  `_write_action_log`'s `Path.mkdir`, or pre-create `actions/<run_stamp>` as
-  a file; run completes, `RuntimeWarning` observed, no metadata key, eval
-  status unaffected.
+- [ ] Non-finite degrade (end-to-end): a policy emitting a NaN action, run
+  against a **NaN-tolerant embodiment** — a `CubePickEmbodiment` subclass
+  whose `step()` bypasses render indexing (precedent: `_NoDistanceEmbodiment`
+  in `tests/test_strict_json.py`). Stock CubePick cannot carry this test
+  portably: NaN→int64 casting is 0 on ARM64 but INT64_MIN on x86-64, where
+  the render index raises and the trial dies as `EmbodimentFault` before the
+  NaN reaches the record. Assert with
+  `pytest.warns(RuntimeWarning, match=<degrade message>)` — numpy's own
+  "invalid value encountered in cast" warning escapes such runs, so a bare
+  `RuntimeWarning` match is not specific enough. Expect: warning, no file,
+  no metadata key, eval status unaffected.
+- [ ] Non-finite degrade (helper seam): `_write_action_log` on a hand-built
+  record containing a NaN action returns `None` and leaves no file — covers
+  the `ValueError` branch without an embodiment in the loop.
+- [ ] I/O degrade: pre-create `<log_dir>/actions` **itself as a file** — the
+  helper's `mkdir(parents=True, exist_ok=True)` of `actions/<run_stamp>`
+  then raises `FileExistsError`/`NotADirectoryError` (both `OSError`)
+  without the test needing to know `run_stamp` (generated inside `_run_eval`
+  from wall clock + uuid4, so unknowable in advance), while `JsonLogSink`'s
+  own mkdir of `log_dir` still succeeds. Run completes, `RuntimeWarning`
+  observed, no metadata key, eval status unaffected. (Do not patch
+  `Path.mkdir`/`Path.open` — class-wide, would break `JsonLogSink` and muddy
+  the status assertion.)
 - [ ] `eval_set` forwards behaviorally: `eval_set(..., store_actions=False)`
   → no `actions/` directory (precedent:
   `test_eval_set_forwards_before_scoring`).
 - [ ] Existing call sites with custom sinks and default `log_dir` updated so
   the suite leaves no `logs/` litter in the checkout — re-run the scan (list
-  above is a snapshot), then verify `git status` is clean after the full
-  suite.
+  above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias),
+  then assert no `logs/` directory exists under the repo root after the full
+  suite (`git status` cannot catch this — `logs/` is gitignored).
 
 Core coverage stays at 100% (`inspect_robots` scope); `mypy --strict` stays
 clean.
