@@ -416,7 +416,13 @@ def test_recording_dir_stays_unresolved_when_sdk_is_absent(tmp_path: Path) -> No
 @pytest.mark.skipif(_RERUN_INSTALLED, reason="rerun installed; testing the absent path")
 def test_eval_runs_with_absent_rerun_sink(tmp_path: Path) -> None:
     # A full eval with only the (unavailable) RerunSink must still complete.
-    logs = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[RerunSink()])
+    logs = eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[RerunSink()],
+    )
     assert logs[0].status == "success"
 
 
@@ -425,7 +431,13 @@ def test_rerun_sink_writes_recording(tmp_path: Path) -> None:
     rrd = tmp_path / "run.rrd"
     sink = RerunSink(str(rrd))
     assert sink.available is True
-    eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        store_actions=False,
+    )
     assert rrd.exists()
 
 
@@ -1043,7 +1055,13 @@ def test_eval_drives_the_blueprint_through_bind_spaces(
     """End-to-end: eval() wires bind_spaces into RerunSink and a layout is sent."""
     recorder = _BlueprintRecorder()
     _install_fake_rerun(monkeypatch, blueprint=recorder)
-    eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), sinks=[RerunSink()])
+    eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[RerunSink()],
+        store_actions=False,
+    )
     assert len(recorder.sent) >= 1
     reachable = _sent_tree(recorder.sent[0])
     # CubePick's dx/dy labels collapse to the single combined joints view.
