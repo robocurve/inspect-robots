@@ -1,7 +1,10 @@
 """Threadless, non-blocking operator feedback and episode-end input.
 
 The console owns no background reader. Callers poll it from the rollout loop,
-which leaves stdin available for the ordinary post-trial verdict prompt.
+which leaves stdin available for the ordinary post-trial verdict prompt. (In
+footer mode, ``OperatorSession`` may run its own echo pump thread, joined in
+``end_trial()`` before any verdict prompt — plan 0066 — so that guarantee now
+also rests on the session's window discipline, not on this module alone.)
 """
 
 from __future__ import annotations

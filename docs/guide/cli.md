@@ -180,8 +180,8 @@ goes stale when the framework gesture changes:
 After Enter, feedback moves into scrollback as `[sent] ...`. End-only rows use
 `[noted] ...`, and text that ends the episode (such as a `/stop` note) is
 confirmed as `[noted]` even in a sent-labeled session, because the policy never
-receives it. Keystroke echo is pumped at the rollout poll cadence, so on a
-self-paced robot it can lag up to one control step. Third-party prints can
+receives it. Keystroke echo runs on its own background cadence, so typing shows up
+immediately even while the policy is still thinking. Third-party prints can
 smudge one frame; the next repaint heals it. Off-TTY, Windows, and piped-stdin
 rendering is unchanged.
 
