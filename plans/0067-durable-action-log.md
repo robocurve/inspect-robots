@@ -84,7 +84,14 @@ list" had no referent, retargeted to `docs/guide/logging-and-rerun.md`;
 the sessionfinish failure mechanism pinned to `session.exitstatus = 1`,
 raising there is an INTERNALERROR; plugin suites don't load
 `tests/conftest.py`, gate-scope note added; the numpy-cast-warning
-justification for `match=` softened) — all folded in below.
+justification for `match=` softened) — all folded in below. R7 (2026-08-11,
+vs main @ aeefa002) found NO SUBSTANTIVE ISSUES — every citation, platform
+claim, call-site count, test seam, and gate mechanism independently
+re-verified — with 3 optional nits (the delta gate is one-shot locally, so
+the hook removes the suite-created `logs/` after failing; the header
+example is illustrative, not a fixture spec; the `trial_metadatas.append`
+ordering is an over-constraint since the append stores a reference —
+harmless, kept for readability) — folded in below. **READY.**
 
 ## Problem
 
@@ -134,7 +141,8 @@ so distinct hostile ids cannot collide — do not re-derive a character rule
 here. (The transcripts side-car writes scene ids raw; new code should not
 copy that latent bug.)
 
-Line 1 is a header, then one line per step, in step order:
+Line 1 is a header, then one line per step, in step order (values
+illustrative — tests run 2-dim CubePick with `dx`/`dy` labels):
 
 ```json
 {"kind": "header", "run_id": "<run_stamp>", "scene_id": "...", "epoch": 0, "action_dim": 14, "labels": ["left_j0", ...]}
@@ -333,7 +341,10 @@ assert no `logs/` exists under the repo root after the full suite.
   `tests/conftest.py` snapshots whether `<repo_root>/logs` exists, and
   `pytest_sessionfinish` fails the run (set `session.exitstatus = 1` and
   print the reason — raising there produces an INTERNALERROR exit) only if
-  the directory **appeared during the session**. Existence alone is not
+  the directory **appeared during the session** — and then removes the
+  suite-created directory after failing, so the gate is not one-shot on a
+  local checkout (without cleanup, the second run would pass silently
+  because the dir now pre-exists). Existence alone is not
   litter: a repo-root `logs/` is a normal artifact of developing here
   (quickstart and the docs default `log_dir="logs"`), and an
   existence-based gate would fail every local run forever after one
