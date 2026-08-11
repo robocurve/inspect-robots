@@ -278,36 +278,36 @@ assert no `logs/` exists under the repo root after the full suite.
 `tests/test_eval_action_log.py`, driven end-to-end through `eval()` with the
 `CubePick` mock world (no hardware), plus targeted helper tests:
 
-- [ ] Happy path: `eval(..., log_dir=tmp)` writes
+- [x] Happy path: `eval(..., log_dir=tmp)` writes
   `actions/<run_stamp>/<trial_id>.jsonl`; header parses with correct
   `action_dim`/`labels`/identity; step lines are contiguous `t = 0..N-1`; each
   `action` round-trips equal to the corresponding `record`-side step action;
   `metadata["actions"]` holds the relative path and joins to an existing file.
-- [ ] Executed-action fidelity: with a rewriting approver (e.g. `ClampApprover`
+- [x] Executed-action fidelity: with a rewriting approver (e.g. `ClampApprover`
   and an out-of-bounds scripted policy), the logged vector equals the clamped
   action, not the emitted one.
-- [ ] Errored trial: a policy that raises mid-trial still yields a side-car
+- [x] Errored trial: a policy that raises mid-trial still yields a side-car
   with the steps walked before the failure, and the pointer in that trial's
   metadata.
-- [ ] Cancelled trial: KeyboardInterrupt mid-trial (`_CancelledTrial` path) —
+- [x] Cancelled trial: KeyboardInterrupt mid-trial (`_CancelledTrial` path) —
   the delivered record's side-car and pointer exist even though the interrupt
   re-raises after the log write.
-- [ ] `store_actions=False`: no `actions/` directory, no metadata key.
-- [ ] Zero-step trial: header-only file, via an operator input whose first
+- [x] `store_actions=False`: no `actions/` directory, no metadata key.
+- [x] Zero-step trial: header-only file, via an operator input whose first
   `poll()` ends the episode at t=0 — precedent:
   `FakeOperatorInput([ConsolePoll(end=EndRequest(...))])` in
   `tests/test_rollout_observation_step.py` (not `_EndingOperatorInput`,
   which is the `end_trial()` teardown fixture); eval-level operator
   fixtures in `tests/test_eval_orchestration.py`.
-- [ ] Start-failed trial: `policy.on_trial_start` raises → synthetic record →
+- [x] Start-failed trial: `policy.on_trial_start` raises → synthetic record →
   header-only file and pointer.
-- [ ] `epochs > 1`: two trials of the same scene produce distinct `-e0`/`-e1`
+- [x] `epochs > 1`: two trials of the same scene produce distinct `-e0`/`-e1`
   files under one `run_stamp` directory.
-- [ ] Sanitization: a scene id with a path-hostile character produces the same
+- [x] Sanitization: a scene id with a path-hostile character produces the same
   name `frames._safe` yields (collision-suffixed); no directory traversal.
-- [ ] Labels: `null` when semantics is absent; `null` when semantics present
+- [x] Labels: `null` when semantics is absent; `null` when semantics present
   but `dim_labels` unset; populated when set.
-- [ ] Non-finite degrade (end-to-end): a policy emitting a NaN action, run
+- [x] Non-finite degrade (end-to-end): a policy emitting a NaN action, run
   against a **NaN-tolerant embodiment** — a `CubePickEmbodiment` subclass
   whose `step()` bypasses render indexing (precedent: `_NoDistanceEmbodiment`
   in `tests/test_strict_json.py`). Stock CubePick cannot carry this test
@@ -319,10 +319,10 @@ assert no `logs/` exists under the repo root after the full suite.
   NaN-handling runs depending on the embodiment's arithmetic; `match=` is
   robust regardless). Expect: warning, no file, no metadata key, eval
   status unaffected.
-- [ ] Non-finite degrade (helper seam): `_write_action_log` on a hand-built
+- [x] Non-finite degrade (helper seam): `_write_action_log` on a hand-built
   record containing a NaN action returns `None` and leaves no file — covers
   the `ValueError` branch without an embodiment in the loop.
-- [ ] I/O degrade: pre-create `<log_dir>/actions` **itself as a file** — the
+- [x] I/O degrade: pre-create `<log_dir>/actions` **itself as a file** — the
   helper's `mkdir(parents=True, exist_ok=True)` of `actions/<run_stamp>`
   then raises `FileExistsError`/`NotADirectoryError` (both `OSError`)
   without the test needing to know `run_stamp` (generated inside `_run_eval`
@@ -331,10 +331,10 @@ assert no `logs/` exists under the repo root after the full suite.
   observed, no metadata key, eval status unaffected. (Do not patch
   `Path.mkdir`/`Path.open` — class-wide, would break `JsonLogSink` and muddy
   the status assertion.)
-- [ ] `eval_set` forwards behaviorally: `eval_set(..., store_actions=False)`
+- [x] `eval_set` forwards behaviorally: `eval_set(..., store_actions=False)`
   → no `actions/` directory (precedent:
   `test_eval_set_forwards_before_scoring`).
-- [ ] Existing call sites with custom sinks and default `log_dir` updated so
+- [x] Existing call sites with custom sinks and default `log_dir` updated so
   the suite leaves no `logs/` litter in the checkout — re-run the scan (list
   above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias).
   The no-litter gate is **delta-based**: `pytest_sessionstart` in
@@ -364,22 +364,22 @@ clean.
 
 ## Docs & changelog
 
-- [ ] `eval()` docstring: a `store_actions` paragraph alongside the existing
+- [x] `eval()` docstring: a `store_actions` paragraph alongside the existing
   keyword docs (`store_frames`, `operator_input`, …); one sentence in
   `eval_set()`'s docstring too (its keyword docs defer to `eval()`'s
   contract).
-- [ ] File a follow-up issue for the raw-scene-id bug in the agent plugin's
+- [x] Filed as #370: follow-up issue for the raw-scene-id bug in the agent plugin's
   side-cars — both the transcripts path and the wire-capture path
   (`on_trial_start` passes `f"{scene_id}-e{epoch}"` raw to `begin_trial`);
   one issue covers both.
-- [ ] `docs/guide/logging-and-rerun.md`: in the plan 0059 drop-shedding
+- [x] `docs/guide/logging-and-rerun.md`: in the plan 0059 drop-shedding
   caveat, point to the action side-car as the guaranteed-complete record of
   commanded actions ("the `.rrd` is what the viewer saw; the actions JSONL is
   what the robot was told").
-- [ ] `src/inspect_robots/CLAUDE.md` module table (`eval.py` row) mentions
+- [x] `src/inspect_robots/CLAUDE.md` module table (`eval.py` row) mentions
   the `actions/` side-car; add it to the side-car coverage in
   `docs/guide/logging-and-rerun.md` (alongside its "Frame side-cars"
   material — there is no other enumerated artifact list in the repo).
-- [ ] `CHANGELOG.md` entry under Unreleased: default-on durable action log,
+- [x] `CHANGELOG.md` entry under Unreleased: default-on durable action log,
   `store_actions=` opt-out, and the custom-sink behavior change called out
   explicitly.

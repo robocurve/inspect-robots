@@ -506,7 +506,13 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
     assert sink.available is True  # imports the fake backend
     assert sink.available is True  # cached self._rr path
 
-    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(max_steps=40),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
     assert log.status == "success"
     assert "init" in calls and "save" in calls and "time" in calls
     # Entities are namespaced per trial so trials never overwrite each other.
@@ -536,7 +542,13 @@ def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> Non
     from inspect_robots.logging.rerun_sink import RerunSink
 
     sink = RerunSink(jpeg_quality=None)
-    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(max_steps=40),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        store_actions=False,
+    )
     assert log.status == "success"
     assert "time" in calls  # rr.set_time (>=0.23) was used
     assert paths and all(p.startswith("trial/s/e0/") for p in paths)
