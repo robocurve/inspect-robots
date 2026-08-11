@@ -53,7 +53,19 @@ clean-`git status` gate was vacuous because `logs/` is gitignored, replaced
 with asserting no `logs/` dir exists after the suite) plus 3 nits (the
 re-scan must cover `plugins/*/tests` and import aliases like `ir_eval(`;
 fsync before `os.replace` stated explicitly; header `scene_id` is raw) —
-all folded in below.
+all folded in below. R4 (2026-08-11, vs main @ aeefa002) independently
+re-verified the twelve-site list as exact and every citation/platform claim
+correct; its one substantive finding was that the suite-litter gate was
+vacuously implementable as an ordinary test (pytest collects
+alphabetically, so `test_eval_action_log.py` runs before every litterer) —
+the gate is now a `pytest_sessionfinish` hook in `tests/conftest.py` —
+plus 4 nits (the zero-step precedent is
+`FakeOperatorInput([ConsolePoll(end=EndRequest(...))])`, not
+`_EndingOperatorInput`, which is the `end_trial()` teardown fixture; the
+degrade catch+warn lives inside the helper, callers only check `None`; a
+stranded `*.tmp` on disk-full mirrors `json_log.py` and is not a contract
+violation; the follow-up issue covers the wire-capture side-car's raw ids
+too) — all folded in below.
 
 ## Problem
 
@@ -142,9 +154,16 @@ Line 1 is a header, then one line per step, in step order:
   the full `json_log.py` atomic-write precedent.
   This makes "no file" literally true on the non-finite `ValueError` path
   (serialization fails before anything touches disk) and leaves no partial
-  file on a mid-write `OSError` (disk full). A streaming line-by-line writer
-  is explicitly ruled out: it would strand a header-plus-prefix partial file
-  on exactly the failures the degrade contract promises leave nothing.
+  file **at the final path** on a mid-write `OSError` (a stranded `*.tmp`
+  on disk-full mirrors `json_log.py` and is acceptable). A streaming
+  line-by-line writer is explicitly ruled out: it would strand a
+  header-plus-prefix partial file on exactly the failures the degrade
+  contract promises leave nothing.
+- **Degrade lives inside the helper:** `_write_action_log` itself catches
+  `OSError`/`ValueError`, emits the `RuntimeWarning`, and returns `None`;
+  the caller only checks the return value. (This is the only split
+  consistent with the helper-seam test asserting the helper returns `None`
+  and leaves no file.)
 - `_safe` parity note: like `FrameStore`, Windows reserved device names
   (`CON`, `NUL`) pass through untouched. Accepted — parity with frames, and
   the Windows CI tier is non-blocking.
@@ -245,9 +264,11 @@ assert no `logs/` exists under the repo root after the full suite.
   re-raises after the log write.
 - [ ] `store_actions=False`: no `actions/` directory, no metadata key.
 - [ ] Zero-step trial: header-only file, via an operator input whose first
-  `poll()` ends the episode at t=0 (precedent: `_EndingOperatorInput`,
-  `tests/test_rollout_observation_step.py`; eval-level operator fixtures in
-  `tests/test_eval_orchestration.py`).
+  `poll()` ends the episode at t=0 — precedent:
+  `FakeOperatorInput([ConsolePoll(end=EndRequest(...))])` in
+  `tests/test_rollout_observation_step.py` (not `_EndingOperatorInput`,
+  which is the `end_trial()` teardown fixture); eval-level operator
+  fixtures in `tests/test_eval_orchestration.py`.
 - [ ] Start-failed trial: `policy.on_trial_start` raises → synthetic record →
   header-only file and pointer.
 - [ ] `epochs > 1`: two trials of the same scene produce distinct `-e0`/`-e1`
@@ -284,9 +305,14 @@ assert no `logs/` exists under the repo root after the full suite.
   `test_eval_set_forwards_before_scoring`).
 - [ ] Existing call sites with custom sinks and default `log_dir` updated so
   the suite leaves no `logs/` litter in the checkout — re-run the scan (list
-  above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias),
-  then assert no `logs/` directory exists under the repo root after the full
-  suite (`git status` cannot catch this — `logs/` is gitignored).
+  above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias).
+  The no-litter gate is a **`pytest_sessionfinish` hook in
+  `tests/conftest.py`** that fails the run if `<repo_root>/logs` exists — it
+  cannot be an ordinary test in `test_eval_action_log.py`: pytest collects
+  alphabetically, so that file runs before every potential litterer and the
+  assertion would pass vacuously (`git status` is equally blind — `logs/`
+  is gitignored). CI runs plain sequential pytest, so the hook is
+  deterministic.
 
 Core coverage stays at 100% (`inspect_robots` scope); `mypy --strict` stays
 clean.
@@ -297,9 +323,10 @@ clean.
   keyword docs (`store_frames`, `operator_input`, …); one sentence in
   `eval_set()`'s docstring too (its keyword docs defer to `eval()`'s
   contract).
-- [ ] File a follow-up issue for the transcripts side-car's raw-scene-id bug
-  (noted in Design above) rather than leaving the observation stranded in
-  this plan.
+- [ ] File a follow-up issue for the raw-scene-id bug in the agent plugin's
+  side-cars — both the transcripts path and the wire-capture path
+  (`on_trial_start` passes `f"{scene_id}-e{epoch}"` raw to `begin_trial`);
+  one issue covers both.
 - [ ] `docs/guide/logging-and-rerun.md`: in the plan 0059 drop-shedding
   caveat, point to the action side-car as the guaranteed-complete record of
   commanded actions ("the `.rrd` is what the viewer saw; the actions JSONL is
