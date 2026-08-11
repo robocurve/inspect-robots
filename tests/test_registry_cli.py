@@ -5239,9 +5239,11 @@ def test_build_operator_session_enablement_matrix(
     footer_labels: list[str] = []
     original_enable_footer = OperatorSession.enable_footer
 
-    def record_enable_footer(self: OperatorSession, *, label: str) -> None:
+    def record_enable_footer(
+        self: OperatorSession, *, label: str, echo_interval_s: float | None = None
+    ) -> None:
         footer_labels.append(label)
-        original_enable_footer(self, label=label)
+        original_enable_footer(self, label=label, echo_interval_s=echo_interval_s)
 
     monkeypatch.setattr(OperatorSession, "enable_footer", record_enable_footer)
 
@@ -5258,6 +5260,33 @@ def test_build_operator_session_enablement_matrix(
     # The bare-Enter usage reminder must match the mode: end-only sessions remind
     # with USAGE_END_ONLY, not the type-a-message text.
     assert session._console._usage == (USAGE if accepts_messages else USAGE_END_ONLY)
+
+
+def test_build_operator_session_enables_echo_pump(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Attended CLI sessions get the background echo pump at the module's default cadence."""
+    from inspect_robots import session as session_module
+    from inspect_robots.mock import CubePickEmbodiment
+
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 returns before enable_footer
+    policy = type("PolicyStub", (), {"accepts_operator_messages": True})()
+
+    session, operator_input = cli._build_operator_session(policy, CubePickEmbodiment())
+
+    assert operator_input is session
+    assert session._echo_interval_s == session_module.ECHO_INTERVAL_S
+
+    class HookEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            del session
+
+    hook_session, hook_input = cli._build_operator_session(policy, HookEmbodiment())
+
+    assert hook_input is hook_session
+    assert hook_session._echo_interval_s == session_module.ECHO_INTERVAL_S
+    capsys.readouterr()
 
 
 def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(

@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** the operator footer now echoes typing on a background cadence, so
+  feedback is visible while an agent policy is blocked in inference instead of
+  appearing only when the robot moves
+  ([plan 0066](plans/0066-footer-echo-pump.md),
+  [#367](https://github.com/robocurve/inspect-robots/issues/367)).
+
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),
