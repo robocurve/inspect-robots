@@ -525,7 +525,16 @@ class OperatorSession:
         and joined first — before the clearing writes and the termios restore — so a
         pump byte can never land after either (plan 0066).
         """
-        self._stop_echo_pump()
+        try:
+            self._stop_echo_pump()
+        except BaseException:
+            # A KeyboardInterrupt landing inside the join must not skip the terminal
+            # restore that end_trial guaranteed before the pump existed. The stop
+            # event is already set, so the pump dies within one interval; the rows
+            # are abandoned unclear rather than risking a write race.
+            self._reset_footer_state()
+            self._restore_terminal()
+            raise
         if not self._footer_active:
             return
         try:

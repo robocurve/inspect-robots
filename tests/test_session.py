@@ -1791,8 +1791,28 @@ def test_echo_pump_lines_are_delivered_by_later_poll() -> None:
 
 
 def test_end_trial_joins_pump_thread_before_clearing() -> None:
-    output: list[str] = []
-    session, _fd = _footer_session(output, echo_interval_s=0.001)
+    events: list[str] = []
+    fd = _ScriptedFd()
+
+    class _StopRecordingSession(OperatorSession):
+        """Stamp the join into the same event stream as the terminal writes."""
+
+        def _stop_echo_pump(self) -> None:
+            events.append("stop")
+            super()._stop_echo_pump()
+
+    session = _StopRecordingSession(
+        write=lambda text: events.append(f"write {text}"),
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=lambda _state: None,
+    )
+    session.enable_footer(label="sent", echo_interval_s=0.001)
+    session.begin_trial()
+    events.clear()
     thread = session._pump_thread
     assert thread is not None
 
@@ -1801,6 +1821,45 @@ def test_end_trial_joins_pump_thread_before_clearing() -> None:
     assert not thread.is_alive()
     assert session._pump_thread is None
     assert session._pump_stop is None
+    # The ordering IS the contract: the join must precede the clearing write, or a
+    # final echo could repaint rows end_trial just cleared.
+    assert events[0] == "stop"
+    assert any(entry.startswith("write") for entry in events[1:])
+
+
+def test_end_trial_restores_terminal_when_join_is_interrupted() -> None:
+    output: list[str] = []
+    restores: list[object] = []
+    fd = _ScriptedFd()
+
+    class _InterruptedJoinSession(OperatorSession):
+        """Simulate a KeyboardInterrupt landing inside the pump join."""
+
+        def _stop_echo_pump(self) -> None:
+            raise KeyboardInterrupt
+
+    session = _InterruptedJoinSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=object,
+        restore_fn=restores.append,
+    )
+    session.enable_footer(label="sent")
+    session.begin_trial()
+
+    with pytest.raises(KeyboardInterrupt):
+        session.end_trial()
+
+    assert len(restores) == 1
+    assert session._footer_active is False
+
+    with pytest.raises(KeyboardInterrupt):
+        session.end_trial()
+
+    assert len(restores) == 1
 
 
 def test_each_footer_window_gets_a_fresh_pump_thread() -> None:
