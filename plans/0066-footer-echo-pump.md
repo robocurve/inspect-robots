@@ -10,7 +10,7 @@ This amends plan 0042 (`plans/0042-operator-console.md` — not the identically 
 
 **Tech Stack:** Python 3.10+, stdlib only (`threading` joins `termios`/`select` in session.py); pytest; no dependency changes.
 
-**Critique record:** round 1 — 12 findings (1 blocker: self-contradictory docs; 6 should-fix; 5 nits), all applied; lock coverage, deadlock freedom, degrade path, opt-in coverage, and 100%-coverage reachability traced and confirmed sound. Round 2 — 9 findings (1 blocker: wrong test-file name, the CLI tests live in `tests/test_registry_cli.py`; 3 should-fix, all test determinism/hygiene; 5 nits), all applied; locking, teardown ordering, crash-net interaction, degrade path, and per-line coverage re-verified sound. Round 3 — 7 findings (1 blocker: the existing `test_build_operator_session_enablement_matrix` monkeypatches `enable_footer` with a fixed signature and must forward the new keyword; 2 should-fix: crash-net and lock-invariant claims scoped honestly; 4 nits), all applied. Round 4 — pending.
+**Critique record:** round 1 — 12 findings (1 blocker: self-contradictory docs; 6 should-fix; 5 nits), all applied; lock coverage, deadlock freedom, degrade path, opt-in coverage, and 100%-coverage reachability traced and confirmed sound. Round 2 — 9 findings (1 blocker: wrong test-file name, the CLI tests live in `tests/test_registry_cli.py`; 3 should-fix, all test determinism/hygiene; 5 nits), all applied; locking, teardown ordering, crash-net interaction, degrade path, and per-line coverage re-verified sound. Round 3 — 7 findings (1 blocker: the existing `test_build_operator_session_enablement_matrix` monkeypatches `enable_footer` with a fixed signature and must forward the new keyword; 2 should-fix: crash-net and lock-invariant claims scoped honestly; 4 nits), all applied. Round 4 — clean: no blockers, 1 should-fix (red-run `-k` filter missed four tests) and 4 nits, all applied; helper/matrix citations, locking, teardown, degrade path, and coverage reachability independently re-verified. Plan approved for implementation.
 
 ## Global Constraints
 
@@ -109,7 +109,7 @@ def test_enable_footer_without_interval_starts_no_thread() -> None:
     # enable_footer(label="sent"); begin_trial();
     # assert session._pump_thread is None; poll/echo behavior unchanged; end_trial()
 
-def test_stale_pump_error_is_cleared_on_next_window() -> None:
+def test_stale_pump_error_is_cleared_on_window_close() -> None:
     """An unsurfaced pump error from a closed window cannot fail a later plain-mode poll."""
     # seams driven by a mutable flag: fd_read raises RuntimeError while the flag is set;
     # _wait_until(lambda: session._pump_error is not None)  # REQUIRED before end_trial:
@@ -134,7 +134,7 @@ Reuse the file's existing scaffolding instead of hand-rolling seams: `_ScriptedF
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/test_session.py -q -k "echo_pump or stale_pump or without_interval or atexit_restore"`
+Run: `uv run pytest tests/test_session.py -q -k "echo_pump or pump_thread or stale_pump or without_interval or atexit_restore"`
 Expected: FAIL — `enable_footer() got an unexpected keyword argument 'echo_interval_s'` and missing attributes.
 
 - [ ] **Step 3: Implement in `session.py`**
@@ -207,7 +207,12 @@ The loop and the stopper:
                     return
 
     def _stop_echo_pump(self) -> None:
-        """Idempotently stop and join the echo pump thread for this footer window."""
+        """Idempotently stop and join the echo pump thread for this footer window.
+
+        The join is unbounded: a pump blocked writing to an XOFF-wedged terminal
+        blocks it, exactly as the same write blocks today's synchronous pump on
+        the rollout thread. Not a regression; accepted.
+        """
         if self._pump_thread is None:
             return
         assert self._pump_stop is not None
@@ -230,9 +235,12 @@ The loop and the stopper:
 `_restore_terminal()` — before restoring, arm the crash net (decision 1):
 
 ```python
-        if self._pump_stop is not None:
-            self._pump_stop.set()
+        stop = self._pump_stop
+        if stop is not None:
+            stop.set()
 ```
+
+(local alias, not a double attribute read: hardens the atexit path against a concurrent `_stop_echo_pump` clearing the attribute between check and set)
 
 (placed after the `_NO_TERMIOS_STATE` early return, so a session that never entered footer mode is untouched; no join — atexit must not block on a wedged thread, and a set stop event is enough to end the loop before its next echo).
 
@@ -315,7 +323,9 @@ def test_build_operator_session_enables_echo_pump() -> None:
     # (test_registry_cli.py:5238, :5124) — _build_operator_session returns early on
     # win32 without ever calling enable_footer, so the assertion is unreachable there
     # build via _build_operator_session with a console-safe embodiment and an
-    # accepts_operator_messages policy (same fixtures the neighboring tests use)
+    # accepts_operator_messages policy (small local stubs, mirroring the matrix
+    # test's function-local fakes at test_registry_cli.py:5204-5227 — they are
+    # not shared fixtures)
     # assert session._echo_interval_s == inspect_robots.session.ECHO_INTERVAL_S
     # repeat for the connect_operator_session-hook path (cli.py's other call site)
 ```
