@@ -9,16 +9,20 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
 
 from inspect_robots import __version__
 from inspect_robots.approver import Approver, AutoApprover
@@ -32,7 +36,7 @@ from inspect_robots.errors import (
     SafetyAbort,
     _CancelledTrial,
 )
-from inspect_robots.frames import FrameStore
+from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.policy import Policy
@@ -77,6 +81,61 @@ def _grading_hook(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _write_action_log(
+    record: TrialRecord,
+    log_dir: str,
+    run_stamp: str,
+    action_space: Box,
+) -> str | None:
+    """Atomically persist one trial's executed actions, degrading on write failure."""
+    trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
+    relative_path = Path("actions") / run_stamp / f"{trial_id}.jsonl"
+    path = Path(log_dir) / relative_path
+    semantics = action_space.semantics
+    labels = semantics.dim_labels if semantics is not None else None
+    try:
+        lines = [
+            json.dumps(
+                {
+                    "kind": "header",
+                    "run_id": run_stamp,
+                    "scene_id": record.scene_id,
+                    "epoch": record.epoch,
+                    "action_dim": action_space.dim,
+                    "labels": labels,
+                },
+                allow_nan=False,
+            )
+        ]
+        lines.extend(
+            json.dumps(
+                {
+                    "t": step.t,
+                    "action": [float(value) for value in np.asarray(step.action.data).ravel()],
+                },
+                allow_nan=False,
+            )
+            for step in record.steps
+        )
+        payload = "\n".join(lines) + "\n"
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except (OSError, ValueError) as exc:
+        warnings.warn(
+            f"Action log disabled for this trial after {type(exc).__name__}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    return relative_path.as_posix()
 
 
 def _git_commit() -> str | None:
@@ -181,6 +240,7 @@ def eval(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    store_actions: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -219,6 +279,11 @@ def eval(
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
+
+    ``store_actions`` defaults to ``True`` and writes each trial's complete
+    executed action sequence to ``<log_dir>/actions`` as an atomic JSONL
+    side-car. The ``actions`` trial-metadata key is framework-reserved. Set
+    ``store_actions`` to ``False`` to disable these files.
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
@@ -266,6 +331,7 @@ def eval(
             approver=approver,
             remap=remap,
             store_frames=store_frames,
+            store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
         )
@@ -289,6 +355,7 @@ def _run_eval(
     approver: Approver | None,
     remap: dict[str, str] | None,
     store_frames: bool,
+    store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
 ) -> list[EvalLog]:
@@ -512,6 +579,16 @@ def _run_eval(
                                 status = "error"
                                 error = detail
 
+                if store_actions:
+                    actions_path = _write_action_log(
+                        record,
+                        log_dir,
+                        run_stamp,
+                        embodiment.info.action_space,
+                    )
+                    if actions_path is not None:
+                        record.metadata["actions"] = actions_path
+
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
                 operator_messages.append(
@@ -646,6 +723,7 @@ def eval_set(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    store_actions: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -654,6 +732,8 @@ def eval_set(
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
     ``success`` is ``True`` iff every task's log has ``status == "success"``.
+
+    ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
     hook, not both) and are resolved once here, so every task shares the same
@@ -684,6 +764,7 @@ def eval_set(
                 approver=approver,
                 remap=remap,
                 store_frames=store_frames,
+                store_actions=store_actions,
                 operator_input=operator_input,
                 before_scoring=before_scoring,
             )

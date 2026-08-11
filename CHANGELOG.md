@@ -57,6 +57,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** every delivered trial now writes a default-on, durable JSONL action
+  log with the complete post-approval control-step sequence. Pass
+  `store_actions=False` to `eval()` or `eval_set()` to opt out. Because the
+  side-car is eval-owned, callers that supply custom `sinks=` now also write
+  `actions/` beneath `log_dir` (which defaults to `logs`) unless they opt out
+  explicitly ([plan 0067](plans/0067-durable-action-log.md),
+  [#369](https://github.com/robocurve/inspect-robots/issues/369)).
+
 - **Core:** composite-video HTML reports now restore the transcript rail
   pioneered in [#272](https://github.com/robocurve/inspect-robots/pull/272),
   with live step highlighting, click-to-seek turns, and an opt-in Follow toggle
