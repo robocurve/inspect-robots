@@ -28,7 +28,18 @@ route; the `eval_set` signature-level test verifies nothing and
 cancelled-trial/epochs>1 outcomes were untested) plus 5 nits (`_run_eval` not
 `_eval_one`; header `run_id` is `run_stamp`; the scoring sentence; the
 `eval()` docstring surface; the `resolve_log_pointer` convention note) —
-all folded in below.
+all folded in below. R2 (2026-08-11, vs main @ aeefa002) found 2 more (the
+call-site list was six sites short — the miss was systematic, hitting exactly
+the cancelled/synthetic/halted paths this plan adds files for, so the list is
+now twelve plus a re-scan checkbox and a clean-`git status` gate; the write
+strategy was unspecified and a streaming writer would contradict the
+"no file on degrade" contract, so the helper now serializes fully in memory
+and lands the file atomically via temp + `os.replace`, matching
+`json_log.py`) plus 5 nits (`eval_set` docstring line; `metadata["actions"]`
+is framework-reserved; a narrower degrade-test seam than patching
+`Path.open` globally; a Windows reserved-device-name acknowledgement for
+`_safe` parity; a follow-up-issue checkbox for the transcripts side-car's
+raw-scene-id bug) — all folded in below.
 
 ## Problem
 
@@ -109,6 +120,17 @@ Line 1 is a header, then one line per step, in step order:
   `ClampApprover`, which only the CLI wires by default), and sanitizing it to
   `null` would corrupt a replay artifact — so a non-finite value trips the
   documented degrade path loudly instead: warning, no file, no pointer.
+- **Write strategy (not streaming):** the helper serializes **all** lines in
+  memory first, then writes to a temp path in the destination directory and
+  `os.replace`s it into place — the `json_log.py` atomic-write precedent.
+  This makes "no file" literally true on the non-finite `ValueError` path
+  (serialization fails before anything touches disk) and leaves no partial
+  file on a mid-write `OSError` (disk full). A streaming line-by-line writer
+  is explicitly ruled out: it would strand a header-plus-prefix partial file
+  on exactly the failures the degrade contract promises leave nothing.
+- `_safe` parity note: like `FrameStore`, Windows reserved device names
+  (`CON`, `NUL`) pass through untouched. Accepted — parity with frames, and
+  the Windows CI tier is non-blocking.
 
 ### Wiring in `eval()`
 
@@ -132,7 +154,11 @@ side-car must exist by then too).
   relative and beneath the log dir, deliberately matching the
   `resolve_log_pointer` convention that makes the existing `transcript` and
   `wire_capture` pointers consumable later. The mutation precedes
-  `bus.on_trial_end(record)`, so sinks observe the pointer.
+  `bus.on_trial_end(record)`, so sinks observe the pointer. The `"actions"`
+  metadata key is hereby framework-reserved (alongside `transcript` and
+  `wire_capture`); the write happens after `policy.on_trial_end`, so a
+  policy-set key of the same name would be clobbered — document, don't
+  defend.
 - The write is best-effort: on `OSError`/`ValueError` (non-finite refusal)
   emit a `RuntimeWarning` (mirroring the live-transcript-stream degrade
   style) and skip the pointer — a side-car failure must never fail the eval
@@ -155,10 +181,17 @@ After this change such calls write `actions/` beneath the default
 the artifact must not silently vanish because a caller brought their own
 sinks — but it must be called out in the changelog and docs, and the existing
 test call sites that would start writing `logs/` into the repo checkout must
-be updated to a tmp `log_dir` or `store_actions=False`:
+be updated to a tmp `log_dir` or `store_actions=False`. Twelve sites found
+as of aeefa002 (`tests/conftest.py` does no chdir isolation, and the
+cancelled/errored/halted ones deliver records too — the side-car covers
+exactly those paths):
 `tests/test_coverage_completion.py:509, :539`,
-`tests/test_eval_orchestration.py:447`,
-`tests/test_rerun_sink.py:419, :428, :1046`.
+`tests/test_eval_orchestration.py:248, :293, :334, :447, :475, :845`,
+`tests/test_rerun_sink.py:419, :428, :1046`,
+`tests/test_tracer_eval.py:103`.
+Line numbers drift; re-run the scan at implementation time (every `eval(`/
+`eval_set(` call in `tests/` lacking an explicit `log_dir`) and gate on a
+clean `git status` after the full suite.
 
 ### What does not change
 
@@ -205,13 +238,19 @@ be updated to a tmp `log_dir` or `store_actions=False`:
 - [ ] Non-finite degrade: a policy emitting a NaN action under the default
   approver → `RuntimeWarning`, no file, no metadata key, eval status
   unaffected.
-- [ ] I/O degrade: patch the helper's open to raise `OSError`; run completes,
-  `RuntimeWarning` observed, no metadata key, eval status unaffected.
+- [ ] I/O degrade: force an `OSError` through a seam narrower than a global
+  `Path.open` patch (which would also break `JsonLogSink.on_eval_end` and
+  muddy the "eval status unaffected" assertion) — e.g. monkeypatch
+  `_write_action_log`'s `Path.mkdir`, or pre-create `actions/<run_stamp>` as
+  a file; run completes, `RuntimeWarning` observed, no metadata key, eval
+  status unaffected.
 - [ ] `eval_set` forwards behaviorally: `eval_set(..., store_actions=False)`
   → no `actions/` directory (precedent:
   `test_eval_set_forwards_before_scoring`).
 - [ ] Existing call sites with custom sinks and default `log_dir` updated so
-  the suite leaves no `logs/` litter in the checkout (list above).
+  the suite leaves no `logs/` litter in the checkout — re-run the scan (list
+  above is a snapshot), then verify `git status` is clean after the full
+  suite.
 
 Core coverage stays at 100% (`inspect_robots` scope); `mypy --strict` stays
 clean.
@@ -219,7 +258,12 @@ clean.
 ## Docs & changelog
 
 - [ ] `eval()` docstring: a `store_actions` paragraph alongside the existing
-  keyword docs (`store_frames`, `operator_input`, …).
+  keyword docs (`store_frames`, `operator_input`, …); one sentence in
+  `eval_set()`'s docstring too (its keyword docs defer to `eval()`'s
+  contract).
+- [ ] File a follow-up issue for the transcripts side-car's raw-scene-id bug
+  (noted in Design above) rather than leaving the observation stranded in
+  this plan.
 - [ ] `docs/guide/logging-and-rerun.md`: in the plan 0059 drop-shedding
   caveat, point to the action side-car as the guaranteed-complete record of
   commanded actions ("the `.rrd` is what the viewer saw; the actions JSONL is
