@@ -65,7 +65,16 @@ plus 4 nits (the zero-step precedent is
 degrade catch+warn lives inside the helper, callers only check `None`; a
 stranded `*.tmp` on disk-full mirrors `json_log.py` and is not a contract
 violation; the follow-up issue covers the wire-capture side-car's raw ids
-too) — all folded in below.
+too) — all folded in below. R5 (2026-08-11, vs main @ aeefa002) verified
+every structural element correct and implementable; its one substantive
+finding was a false sentence — approval events do NOT survive into the
+durable `EvalLog` (no events field; the `clamped` flags live on
+`Action.meta`, which this artifact excludes), so the executed-action bullet
+now states plainly that durable artifacts record only the executed action —
+plus 3 nits (test_coverage_completion collects before the new test file, so
+"every litterer" overstated; the `eval()` → `_run_eval` forwarding line
+named alongside `eval_set`'s; the sessionfinish hook derives the repo root
+from conftest `__file__`, not cwd) — all folded in below.
 
 ## Problem
 
@@ -131,7 +140,10 @@ Line 1 is a header, then one line per step, in step order:
 - `action` is the **executed** action — `StepRecord.action` is post-approval
   (`action = reviewed` precedes both `sink.log_step` and the record append in
   `rollout()`), which is what replay fidelity requires. Approver
-  modifications remain visible in the log's approval events.
+  modifications are flagged in the in-memory record's approval events and
+  the RerunSink stream, both non-durable; the durable artifacts record only
+  the executed action. (Persisting approval events durably is a separate
+  feature — out of scope.)
 - `labels` comes from `embodiment.info.action_space.semantics.dim_labels`;
   `null` when semantics is absent **or** `dim_labels` is unset (it defaults
   to `None` even with semantics present).
@@ -171,10 +183,10 @@ Line 1 is a header, then one line per step, in step order:
 ### Wiring in `eval()`
 
 New keyword `store_actions: bool = True` on both `eval()` and `eval_set()`.
-`eval_set` forwards every keyword **explicitly** in its internal `eval(...)`
-call — the forwarding line `store_actions=store_actions` must be added there,
-and its absence is invisible to a signature check (hence the behavioral test
-below).
+Two explicit forwarding lines are required — `eval()` → `_run_eval(...)`
+(explicit keywords) and `eval_set`'s internal `eval(...)` call — and the
+absence of either is invisible to a signature check (hence the behavioral
+test below).
 
 In the per-trial block of `_run_eval`, the write sits **after and outside**
 the `if not policy_start_failed:` guard that wraps the `policy.on_trial_end`
@@ -307,12 +319,13 @@ assert no `logs/` exists under the repo root after the full suite.
   the suite leaves no `logs/` litter in the checkout — re-run the scan (list
   above is a snapshot; include `plugins/*/tests` and the `ir_eval(` alias).
   The no-litter gate is a **`pytest_sessionfinish` hook in
-  `tests/conftest.py`** that fails the run if `<repo_root>/logs` exists — it
-  cannot be an ordinary test in `test_eval_action_log.py`: pytest collects
-  alphabetically, so that file runs before every potential litterer and the
-  assertion would pass vacuously (`git status` is equally blind — `logs/`
-  is gitignored). CI runs plain sequential pytest, so the hook is
-  deterministic.
+  `tests/conftest.py`** that fails the run if `<repo_root>/logs` exists,
+  deriving the repo root from conftest's `__file__` (not cwd —
+  `test_examples.py` chdirs) — it cannot be an ordinary test in
+  `test_eval_action_log.py`: pytest collects alphabetically, so that file
+  runs before most of the potential litterers and the assertion would pass
+  vacuously (`git status` is equally blind — `logs/` is gitignored). CI
+  runs plain sequential pytest, so the hook is deterministic.
 
 Core coverage stays at 100% (`inspect_robots` scope); `mypy --strict` stays
 clean.
