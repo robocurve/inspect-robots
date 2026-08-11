@@ -10,7 +10,7 @@ This amends plan 0042 (`plans/0042-operator-console.md` — not the identically 
 
 **Tech Stack:** Python 3.10+, stdlib only (`threading` joins `termios`/`select` in session.py); pytest; no dependency changes.
 
-**Critique record:** round 1 — 12 findings (1 blocker: self-contradictory docs; 6 should-fix; 5 nits), all applied; lock coverage, deadlock freedom, degrade path, opt-in coverage, and 100%-coverage reachability traced and confirmed sound. Round 2 — 9 findings (1 blocker: wrong test-file name, the CLI tests live in `tests/test_registry_cli.py`; 3 should-fix, all test determinism/hygiene; 5 nits), all applied; locking, teardown ordering, crash-net interaction, degrade path, and per-line coverage re-verified sound. Round 3 — pending.
+**Critique record:** round 1 — 12 findings (1 blocker: self-contradictory docs; 6 should-fix; 5 nits), all applied; lock coverage, deadlock freedom, degrade path, opt-in coverage, and 100%-coverage reachability traced and confirmed sound. Round 2 — 9 findings (1 blocker: wrong test-file name, the CLI tests live in `tests/test_registry_cli.py`; 3 should-fix, all test determinism/hygiene; 5 nits), all applied; locking, teardown ordering, crash-net interaction, degrade path, and per-line coverage re-verified sound. Round 3 — 7 findings (1 blocker: the existing `test_build_operator_session_enablement_matrix` monkeypatches `enable_footer` with a fixed signature and must forward the new keyword; 2 should-fix: crash-net and lock-invariant claims scoped honestly; 4 nits), all applied. Round 4 — pending.
 
 ## Global Constraints
 
@@ -22,10 +22,10 @@ This amends plan 0042 (`plans/0042-operator-console.md` — not the identically 
 
 ## Design decisions (and why)
 
-1. **Per-footer-window thread lifetime.** The thread starts as the last statement of `_enter_footer()` and is stopped + joined at the top of `end_trial()` (before the `_footer_active` guard, so a stale handle from an aborted entry can never survive; before the row-clearing writes and before `_restore_terminal()`). In-repo, verdict prompts and readiness gates only run outside the footer window, so the plan-0042 verdict-prompt guarantee holds — but that is convention, not construction, so the invariant is documented at the seams third parties see: `gate()` and `enable_footer()` docstrings state that the footer window owns stdin and blocking reads are only legal outside it. As a crash net, `_restore_terminal()` (the atexit-registered callable) also sets `_pump_stop` when one exists, so a daemon pump alive at interpreter shutdown stops echoing into a terminal whose termios was just restored.
+1. **Per-footer-window thread lifetime.** The thread starts as the last statement of `_enter_footer()` and is stopped + joined at the top of `end_trial()` (before the `_footer_active` guard, so a stale handle from an aborted entry can never survive; before the row-clearing writes and before `_restore_terminal()`). In-repo, verdict prompts and readiness gates only run outside the footer window, so the plan-0042 verdict-prompt guarantee holds — but that is convention, not construction, so the invariant is documented at the seams third parties see: `gate()` and `enable_footer()` docstrings state that the footer window owns stdin and blocking reads are only legal outside it. As a crash net, `_restore_terminal()` (the atexit-registered callable) also sets `_pump_stop` when one exists, so a daemon pump alive at interpreter shutdown stops promptly. **Accepted cost:** the stop is set without taking the lock, so one echo already in flight may land after termios is restored — taking the lock there would let a pump blocked on a wedged stdout write (Ctrl-S/XOFF) deadlock atexit, which is worse than one stray repaint.
 2. **`Event.wait(interval)` cadence, default 0.05 s.** The loop is `while not stop.wait(interval): pump()`. No blocking reads, no new seams: the pump body is the existing `_pump_input()`, which drains only bytes the zero-timeout `fd_readable` seam reports. Echo latency is bounded by the interval; the 150 ms Esc grace (`_ESC_GRACE_S`) now settles within grace + interval instead of waiting out an entire inference, so a bare Esc is queued promptly (the episode still ends at the rollout loop's next iteration). **Amended accepted cost:** the grace floor is now enforced continuously rather than only at poll boundaries — an escape-sequence tail split more than 150 ms from its ESC byte (very laggy SSH) is consumed as a bare Esc even mid-inference, where today's starved poll cadence would have drained ESC and tail together. This is the same misread plan 0051 already accepts on any self-paced fast control loop (whose poll cadence matches the pump's 50 ms); the grace value stays 150 ms rather than growing a pumped/unpumped conditional, and the `_ESC_GRACE_S` comment is updated to name the pump as the governing cadence.
 3. **Opt-in via `enable_footer(..., echo_interval_s=...)`, wired by the CLI.** Default `None` starts no thread, keeping every existing injected-seam test synchronous and deterministic. `cli._build_operator_session` — the only `enable_footer` caller — passes the session module's `ECHO_INTERVAL_S` constant at both call sites, so every real attended run gets the fix.
-4. **One `threading.RLock` guards all shared footer state**: the line editor, `_line_queue`, `_esc_stamp`, `_pump_eof`, `_pump_error`, and every footer-row write (`_pump_input`'s echo, `_footer_status`, `_footer_write_line`). The lock MUST be re-entrant and its scope in `poll()` MUST end before the attached-input merge; both are load-bearing. Re-entrant because `console.poll()` runs inside the locked region and its usage-reminder path prints through `output_fn=self.write_line` (console.py:142-145), which takes the lock again — a plain `Lock` deadlocks the first time an operator hits bare Enter mid-inference. Scope-limited because the merge calls attached `source.poll()` (e.g. voice) and `_confirm_console_messages`, which must not run under the lock: attached sources can be slow and take only rollout-thread state, and `write_line` re-acquires the lock itself for exactly as long as it needs. `begin_trial()` wraps the console's drain (`self._console.begin_trial()`) in the lock too: with the thread already running, the drain reads `_line_queue` through the dispatch seams.
+4. **One `threading.RLock` guards all shared footer state**: the line editor, `_line_queue`, `_esc_stamp`, `_pump_eof`, `_pump_error`, and every footer-row write that can coexist with a live pump (`_pump_input`'s echo, `_footer_status`, `_footer_write_line`). `end_trial()`'s clearing writes and `_reset_footer_state()` stay outside the lock on purpose: they run strictly after `_stop_echo_pump()` joins, so the join — not the lock — serializes them against the pump. (A third thread calling `status()` concurrently with teardown is a pre-existing race this plan neither introduces nor fixes; in-repo, status comes from the rollout thread.) The lock MUST be re-entrant and its scope in `poll()` MUST end before the attached-input merge; both are load-bearing. Re-entrant because `console.poll()` runs inside the locked region and its usage-reminder path prints through `output_fn=self.write_line` (console.py:142-145), which takes the lock again — a plain `Lock` deadlocks the first time an operator hits bare Enter mid-inference. Scope-limited because the merge calls attached `source.poll()` (e.g. voice) and `_confirm_console_messages`, which must not run under the lock: attached sources can be slow and take only rollout-thread state, and `write_line` re-acquires the lock itself for exactly as long as it needs. `begin_trial()` wraps the console's drain (`self._console.begin_trial()`) in the lock too: with the thread already running, the drain reads `_line_queue` through the dispatch seams.
 5. **Thread errors surface through the next `poll()`.** The pump loop catches `Exception`, stores it in `_pump_error`, and exits; `poll()` re-raises a stored error first thing. Rollout already treats a raising `poll()` as "disable the console for this trial, warn once, close the footer" (plan 0051 decision 1) — the thread reuses that path instead of inventing its own error channel. `_reset_footer_state()` clears `_pump_error` (safe: `poll()` consumes the error before raising, so the degrade path's own `end_trial()` cannot swallow the error it just surfaced) — clearing only in `_enter_footer()` would let a stale error from trial N kill trial N+1's plain-mode console when N+1's footer entry fails the gate ladder. **Accepted cost:** an error stored in the trial's final inter-poll window, with no `poll()` before `end_trial()`, is never surfaced — the window's typed input is lost and no warning fires. Fd-read errors are rare enough that a dedicated side channel is not worth its complexity.
 6. **Threads never print or raise on their own.** The pump thread's only outputs are the same bytes `_pump_input()` always wrote, under the lock. No logging, no stderr, no daemon-thread tracebacks.
 
@@ -78,7 +78,7 @@ def test_end_trial_joins_pump_thread_before_clearing() -> None:
     # after begin_trial, capture session._pump_thread; end_trial();
     # assert thread is not None and not thread.is_alive()
     # assert session._pump_thread is None
-    # record len(writes); sleep(0.01); assert len(writes) unchanged
+    # (no sleep-and-recount assertion: a dead thread cannot write, so is_alive IS the proof)
 
 def test_each_footer_window_gets_a_fresh_pump_thread() -> None:
     """A second begin_trial starts a new thread after the first window closed."""
@@ -129,6 +129,8 @@ def test_atexit_restore_stops_a_live_pump() -> None:
 Seam scripting must be arm-after-begin_trial: `begin_trial` → `_enter_footer` drains readable bytes with no echo before the thread starts, so chunks armed too early are silently consumed by the drain. Use a list the test appends to after `begin_trial()` returns, with `fd_readable = lambda: bool(chunks)` and `fd_read = lambda: chunks.pop(0)`.
 
 Every test that starts a pump MUST call `end_trial()` in a `finally` (or use a small fixture that does): a leaked 1 ms daemon thread keeps pumping test-local closures for the rest of the pytest run and poisons other tests on any assertion failure. `tests/test_session.py` will also need `import time` for `_wait_until`.
+
+Reuse the file's existing scaffolding instead of hand-rolling seams: `_ScriptedFd` (its public mutable `chunks` list is the arm-after-begin_trial vehicle), `_FakeClock` for the Esc-grace test's `now_fn`, and `_footer_session` (which clears recorded output after `begin_trial`) extended with an `echo_interval_s` passthrough parameter defaulting to `None`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -283,7 +285,9 @@ Expected: all green, coverage 100%.
 
 ```bash
 git add src/inspect_robots/session.py src/inspect_robots/console.py src/inspect_robots/CLAUDE.md tests/test_session.py
-git commit -m "feat(session): footer echo pump thread so typing echoes during inference (#367)"
+git commit -m "feat(session): footer echo pump thread so typing echoes during inference (#367)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 (Committed by the main session, not the implementing agent.)
@@ -307,11 +311,16 @@ git commit -m "feat(session): footer echo pump thread so typing echoes during in
 ```python
 def test_build_operator_session_enables_echo_pump() -> None:
     """Attended CLI sessions get the background echo pump at the module's default cadence."""
+    # monkeypatch.setattr(sys, "platform", "linux") like the neighboring tests
+    # (test_registry_cli.py:5238, :5124) — _build_operator_session returns early on
+    # win32 without ever calling enable_footer, so the assertion is unreachable there
     # build via _build_operator_session with a console-safe embodiment and an
     # accepts_operator_messages policy (same fixtures the neighboring tests use)
     # assert session._echo_interval_s == inspect_robots.session.ECHO_INTERVAL_S
     # repeat for the connect_operator_session-hook path (cli.py's other call site)
 ```
+
+Also update the existing `test_build_operator_session_enablement_matrix` (test_registry_cli.py:5240-5246): its monkeypatched `record_enable_footer(self, *, label)` wrapper must gain `echo_interval_s: float | None = None` and forward it in the `original_enable_footer(self, label=label, echo_interval_s=echo_interval_s)` passthrough — otherwise every console-on matrix row raises `TypeError` on the new keyword, and a signature-only fix would silently drop the interval from the matrix's footer rows.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -352,7 +361,9 @@ Expected: all green, coverage 100%.
 
 ```bash
 git add src/inspect_robots/cli.py docs/guide/cli.md CHANGELOG.md tests/test_registry_cli.py
-git commit -m "feat(cli): wire the footer echo pump for attended runs (#367)"
+git commit -m "feat(cli): wire the footer echo pump for attended runs (#367)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 (Committed by the main session, not the implementing agent.)
