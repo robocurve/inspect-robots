@@ -85,7 +85,7 @@ from inspect_robots.defaults import (
     load_defaults,
 )
 from inspect_robots.registry import registered
-from inspect_robots.session import OperatorSession
+from inspect_robots.session import ECHO_INTERVAL_S, OperatorSession
 from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
@@ -839,7 +839,9 @@ def _build_operator_session(
             return session, None
         connect_hook(session)
         usage = USAGE if accepts_messages else USAGE_END_ONLY
-        session.enable_footer(label="sent" if accepts_messages else "noted")
+        session.enable_footer(
+            label="sent" if accepts_messages else "noted", echo_interval_s=ECHO_INTERVAL_S
+        )
         label = "operator console:"
         session.write_line(f"{_styled(label, _CYAN)} {usage.removeprefix(label + ' ')}")
         return session, session
@@ -870,7 +872,7 @@ def _build_operator_session(
         return session, None
 
     label = "operator console:"
-    session.enable_footer(label="sent")
+    session.enable_footer(label="sent", echo_interval_s=ECHO_INTERVAL_S)
     session.write_line(f"{_styled(label, _CYAN)} {USAGE.removeprefix(label + ' ')}")
     return session, session
 
