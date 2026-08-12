@@ -621,6 +621,30 @@ def test_eval_closes_embodiment_before_reraising_owned_policy_close_error(
     assert events == ["embodiment", "policy"]
 
 
+def test_successful_eval_reraises_owned_policy_close_error_inside_outer_except(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events, close_error=RuntimeError("policy close exploded"))
+    embodiment = _TrackedClosableEmbodiment(events)
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+    outer_error = RuntimeError("outer handler")
+
+    try:
+        raise outer_error
+    except RuntimeError:
+        with pytest.raises(RuntimeError, match="policy close exploded"):
+            eval(
+                _task(max_steps=1),
+                "closable-policy",
+                "closable-embodiment",
+                log_dir=str(tmp_path),
+            )
+
+    assert getattr(outer_error, "__notes__", ()) == ()
+    assert events == ["embodiment", "policy"]
+
+
 def test_eval_attempts_owned_policy_cleanup_after_embodiment_close_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

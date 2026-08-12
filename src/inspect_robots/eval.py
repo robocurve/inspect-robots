@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import time
 import uuid
 import warnings
@@ -320,6 +319,7 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    active_error: BaseException | None = None
     try:
         return _run_eval(
             task,
@@ -337,10 +337,12 @@ def eval(
             operator_input=operator_input,
             before_scoring=before_scoring,
         )
+    except BaseException as exc:
+        active_error = exc
+        raise
     finally:
         # Close what we opened. Release the embodiment first so a policy cleanup
         # failure cannot leave real hardware or its transport active.
-        active_error = sys.exc_info()[1]
         cleanup_error: BaseException | None = None
         if owns_embodiment:
             try:
