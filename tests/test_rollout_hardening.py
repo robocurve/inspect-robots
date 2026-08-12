@@ -792,3 +792,15 @@ def test_raising_server_url_property_does_not_mask_policy_failure() -> None:
     assert str(excinfo.value) == "base connection failure"
     assert excinfo.value.record is not None
     assert excinfo.value.record.error == "PolicyError: base connection failure"
+
+
+def test_framestore_long_trial_and_camera_names_truncated(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path))
+    long_trial = "a" * 300
+    long_camera = "c" * 300
+    image = np.zeros((10, 10, 3), dtype=np.uint8)
+    ref = store.put(long_trial, 0, long_camera, image)
+
+    path = Path(ref.path)
+    assert path.exists()
+    assert len(path.name.encode()) <= 255
