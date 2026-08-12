@@ -54,7 +54,7 @@ from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 
-from ._capture import WireCapture
+from ._capture import WireCapture, _safe
 
 _MAX_CONSECUTIVE_FAILURES = 3
 # Shared by the camera label writer and the reader that recovers revealed
@@ -740,7 +740,7 @@ class LLMAgentPolicy(PolicyBase):
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
         """Begin streaming wire attempts for the next trial when enabled."""
         if self._capture is not None:
-            self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
+            self._capture.begin_trial(log_dir, run_id, f"{_safe(scene_id)}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist wire capture, hindsight, usage, and the transcript at trial end."""
@@ -766,7 +766,7 @@ class LLMAgentPolicy(PolicyBase):
         transcript_dir = Path(log_dir) / "transcripts" / run_id
         transcript_dir.mkdir(parents=True, exist_ok=True)
 
-        trial_id = f"{record.scene_id}-e{record.epoch}"
+        trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
         path = transcript_dir / f"{trial_id}.jsonl"
 
         with path.open("w", encoding="utf-8") as f:

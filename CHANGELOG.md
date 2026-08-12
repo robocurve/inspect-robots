@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin:** sanitize scene IDs in wire capture and transcript paths to prevent directory traversal ([#370](https://github.com/robocurve/inspect-robots/issues/370)).
+
 - **Core:** the operator footer now echoes typing on a background cadence, so
   feedback is visible while an agent policy is blocked in inference instead of
   appearing only when the robot moves

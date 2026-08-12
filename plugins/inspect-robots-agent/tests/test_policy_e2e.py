@@ -2791,3 +2791,33 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     )
 
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
+
+
+def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> None:
+    # Scene ID with traversal characters
+    unsafe_id = "unsafe/../id"
+    script = _Script([_tool_response("done", {"summary": "done"})])
+    policy = _policy(script, wire_capture=True)
+    policy.bind(CubePickEmbodiment().info)
+
+    # Reset and start trial
+    policy.reset(Scene(id=unsafe_id, instruction="stop"))
+    policy.on_trial_start(unsafe_id, 0, str(tmp_path), "run-1")
+    policy.act(Observation())
+
+    record = TrialRecord(scene_id=unsafe_id, epoch=0, seed=0)
+    policy.on_trial_end(record, str(tmp_path), "run-1")
+
+    # Assert wire_capture metadata and file exists at sanitized path
+    wire_ptr = record.metadata["wire_capture"]
+    assert "unsafe/../id" not in wire_ptr
+    wire_file = tmp_path / wire_ptr
+    assert wire_file.is_file()
+    assert wire_file.resolve().is_relative_to((tmp_path / "wire" / "run-1").resolve())
+
+    # Assert transcript metadata and file exists at sanitized path
+    transcript_ptr = record.metadata["transcript"]
+    assert "unsafe/../id" not in transcript_ptr
+    transcript_file = tmp_path / transcript_ptr
+    assert transcript_file.is_file()
+    assert transcript_file.resolve().is_relative_to((tmp_path / "transcripts" / "run-1").resolve())
