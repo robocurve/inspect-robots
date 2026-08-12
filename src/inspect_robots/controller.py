@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
+from inspect_robots.errors import PolicyError
 from inspect_robots.policy import Policy
 from inspect_robots.spaces import Box
 from inspect_robots.types import Action, Observation
@@ -58,6 +59,8 @@ class DefaultController:
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
         if not buffer:
             chunk = policy.act(observation)
+            if not chunk.actions:
+                raise PolicyError("policy emitted an empty ActionChunk (0 actions)")
             take = self.replan_interval or len(chunk)
             taken = list(chunk.actions)[:take]
             buffer.extend(taken)
@@ -163,6 +166,8 @@ class EnsemblingController:
     ) -> Action:
         """Query once for step ``t`` and blend every retained prediction for that step."""
         chunk = policy.act(observation)
+        if not chunk.actions:
+            raise PolicyError("policy emitted an empty ActionChunk (0 actions)")
         store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(chunk)))
 
         buffer: list[tuple[int, list[Any], dict[str, Any]]] = store.setdefault(_ENSEMBLE_KEY, [])
@@ -179,6 +184,8 @@ class EnsemblingController:
         buffer.sort(key=lambda e: e[0])
 
         predictions = [acts[t - q] for (q, acts, _meta) in buffer]
+        if not predictions:
+            raise PolicyError("no valid action predictions available for current step")
         weights = np.exp(-self.m * np.arange(len(predictions)))
         weights = weights / weights.sum()
         blended = np.average(np.stack(predictions), axis=0, weights=weights)

@@ -99,3 +99,53 @@ def test_stacked_smoothing_controllers_keep_separate_state() -> None:
         expected.append(outer_prev)
 
     assert np.allclose(actual, expected)
+
+
+class _EmptyChunkPolicy:
+    """Emits an empty ActionChunk with zero actions."""
+
+    def __init__(self) -> None:
+        self.info = PolicyInfo(
+            name="empty",
+            action_space=Box(shape=(2,), semantics=ActionSemantics(control_mode="joint_delta")),
+        )
+        self.config = PolicyConfig()
+
+    def reset(self, scene: Scene) -> None:
+        pass
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = ActionChunk(actions=[Action(data=np.zeros(2))])
+        object.__setattr__(chunk, "actions", [])
+        return chunk
+
+
+def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
+    import pytest
+
+    from inspect_robots.errors import PolicyError
+
+    policy = _EmptyChunkPolicy()
+    embodiment = CubePickEmbodiment()
+    obs = _obs(embodiment)
+    store: dict[str, object] = {}
+    ctrl = DefaultController()
+
+    with pytest.raises(PolicyError, match="empty ActionChunk"):
+        ctrl.next_action(policy, obs, 0, store)
+
+
+def test_ensembling_controller_raises_policy_error_on_empty_chunk() -> None:
+    import pytest
+
+    from inspect_robots.controller import EnsemblingController
+    from inspect_robots.errors import PolicyError
+
+    policy = _EmptyChunkPolicy()
+    embodiment = CubePickEmbodiment()
+    obs = _obs(embodiment)
+    store: dict[str, object] = {}
+    ctrl = EnsemblingController(policy.info.action_space)
+
+    with pytest.raises(PolicyError, match="empty ActionChunk"):
+        ctrl.next_action(policy, obs, 0, store)
