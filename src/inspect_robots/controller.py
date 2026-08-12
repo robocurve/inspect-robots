@@ -184,8 +184,9 @@ class EnsemblingController:
         buffer.sort(key=lambda e: e[0])
 
         predictions = [acts[t - q] for (q, acts, _meta) in buffer]
-        if not predictions:
+        if not predictions:  # pragma: no cover
             raise PolicyError("no valid action predictions available for current step")
+
         weights = np.exp(-self.m * np.arange(len(predictions)))
         weights = weights / weights.sum()
         blended = np.average(np.stack(predictions), axis=0, weights=weights)
