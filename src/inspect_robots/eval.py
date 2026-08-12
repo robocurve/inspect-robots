@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 import warnings
@@ -249,10 +250,10 @@ def eval(
 
     ``task``/``policy``/``embodiment`` may be objects or **registry names**
     (e.g. ``policy="scripted"``), resolved through the registry — the Inspect-style
-    ergonomic that keeps logs and the CLI reproducible. An embodiment resolved
-    from a registry name is owned by ``eval()`` and is closed when the run
-    finishes (even on a halt); a caller-constructed embodiment object stays
-    open — the caller owns its lifecycle.
+    ergonomic that keeps logs and the CLI reproducible. Policies and embodiments
+    resolved from registry names are owned by ``eval()`` and closed when the run
+    finishes (even on a halt); caller-constructed objects stay open — the caller
+    owns their lifecycle.
 
     ``seed=None`` draws a fresh seed from the OS and records it in the log, so
     an "unseeded" run remains reproducible after the fact (and is distinct from
@@ -310,6 +311,7 @@ def eval(
     from inspect_robots.registry import resolve
 
     before_scoring = _grading_hook(grader, before_scoring)
+    owns_policy = isinstance(policy, str)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -336,10 +338,29 @@ def eval(
             before_scoring=before_scoring,
         )
     finally:
-        # Close what we opened: a registry-resolved embodiment is released even
-        # when the run halts, so a real robot never leaks its connection.
+        # Close what we opened. Release the embodiment first so a policy cleanup
+        # failure cannot leave real hardware or its transport active.
+        active_error = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
         if owns_embodiment:
-            embodiment.close()
+            try:
+                embodiment.close()
+            except BaseException as exc:
+                cleanup_error = exc
+        if owns_policy:
+            close_policy = getattr(policy, "close", None)
+            if callable(close_policy):
+                try:
+                    close_policy()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+        if cleanup_error is not None and active_error is None:
+            raise cleanup_error
+        if cleanup_error is not None and active_error is not None:
+            add_note = getattr(active_error, "add_note", None)
+            if callable(add_note):
+                add_note(f"Inspect cleanup also failed: {cleanup_error!r}")
 
 
 def _run_eval(

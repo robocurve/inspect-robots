@@ -521,6 +521,147 @@ class _ClosableEmbodiment(CubePickEmbodiment):
 embodiment_decorator("closable-cubepick")(_ClosableEmbodiment)
 
 
+class _TrackedClosablePolicy(ScriptedPolicy):
+    """A policy whose optional cleanup hook records the lifecycle boundary."""
+
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        bind_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ):
+        super().__init__()
+        self.bind_error = bind_error
+        self.close_error = close_error
+        self.close_calls = 0
+        self.events = events
+
+    def bind(self, embodiment_info: object) -> None:
+        del embodiment_info
+        if self.bind_error is not None:
+            raise self.bind_error
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.events.append("policy")
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _TrackedClosableEmbodiment(CubePickEmbodiment):
+    """A real toy embodiment with observable cleanup for eval ownership tests."""
+
+    def __init__(self, events: list[str], *, close_error: Exception | None = None):
+        super().__init__()
+        self.close_calls = 0
+        self.events = events
+        self.close_error = close_error
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.events.append("embodiment")
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _register_owned_eval_components(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: _TrackedClosablePolicy,
+    embodiment: _TrackedClosableEmbodiment,
+) -> None:
+    """Install per-test factories while leaving eval's real registry resolution intact."""
+    from inspect_robots import registry
+
+    monkeypatch.setitem(registry._FACTORIES["policy"], "closable-policy", lambda: policy)
+    monkeypatch.setitem(
+        registry._FACTORIES["embodiment"], "closable-embodiment", lambda: embodiment
+    )
+
+
+def test_eval_closes_registry_resolved_policy_and_embodiment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events)
+    embodiment = _TrackedClosableEmbodiment(events)
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+
+    eval(_task(max_steps=1), "closable-policy", "closable-embodiment", log_dir=str(tmp_path))
+
+    assert policy.close_calls == 1
+    assert embodiment.close_calls == 1
+    assert events == ["embodiment", "policy"]
+
+
+def test_eval_does_not_close_caller_constructed_policy(tmp_path: Path) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events)
+    embodiment = _TrackedClosableEmbodiment(events)
+
+    eval(_task(max_steps=1), policy, embodiment, log_dir=str(tmp_path))
+
+    assert policy.close_calls == 0
+    assert embodiment.close_calls == 0
+
+
+def test_eval_closes_embodiment_before_reraising_owned_policy_close_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events, close_error=RuntimeError("policy close exploded"))
+    embodiment = _TrackedClosableEmbodiment(events)
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+
+    with pytest.raises(RuntimeError, match="policy close exploded"):
+        eval(_task(max_steps=1), "closable-policy", "closable-embodiment", log_dir=str(tmp_path))
+
+    assert policy.close_calls == 1
+    assert embodiment.close_calls == 1
+    assert events == ["embodiment", "policy"]
+
+
+def test_eval_attempts_owned_policy_cleanup_after_embodiment_close_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events)
+    embodiment = _TrackedClosableEmbodiment(
+        events, close_error=RuntimeError("embodiment close exploded")
+    )
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+
+    with pytest.raises(RuntimeError, match="embodiment close exploded"):
+        eval(_task(max_steps=1), "closable-policy", "closable-embodiment", log_dir=str(tmp_path))
+
+    assert policy.close_calls == 1
+    assert embodiment.close_calls == 1
+    assert events == ["embodiment", "policy"]
+
+
+def test_eval_preserves_active_error_when_owned_policy_close_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(
+        events,
+        bind_error=RuntimeError("evaluation exploded"),
+        close_error=RuntimeError("policy close exploded"),
+    )
+    embodiment = _TrackedClosableEmbodiment(events)
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+
+    with pytest.raises(RuntimeError, match="evaluation exploded") as excinfo:
+        eval(_task(max_steps=1), "closable-policy", "closable-embodiment", log_dir=str(tmp_path))
+
+    assert policy.close_calls == 1
+    assert embodiment.close_calls == 1
+    assert events == ["embodiment", "policy"]
+    if hasattr(excinfo.value, "add_note"):
+        notes = getattr(excinfo.value, "__notes__", ())
+        assert any("policy close exploded" in note for note in notes)
+
+
 def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     """A bind() hook runs after resolution and before compat (plan 0008 §3c).
 
