@@ -249,6 +249,7 @@ def test_cancelled_policy_reset_records_t_minus_one_and_zero_steps(tmp_path: Pat
             _task(),
             _ResetInterruptPolicy(),
             CubePickEmbodiment(),
+            log_dir=str(tmp_path),
             sinks=[records, json_sink],
         )
 
@@ -295,6 +296,7 @@ def test_cancelled_trial_is_never_scored() -> None:
             _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
             CubePickEmbodiment(),
             sinks=[NullSink()],
+            store_actions=False,
         )
 
     assert scorer.calls == 0
@@ -335,6 +337,7 @@ def test_errored_then_cancelled_epochs_preserve_both_records(tmp_path: Path) -> 
             _task(epochs=2),
             _ErrorThenCancelPolicy(),
             CubePickEmbodiment(),
+            log_dir=str(tmp_path),
             sinks=[records, json_sink],
         )
 
@@ -444,7 +447,13 @@ def test_policy_error_partial_record_reaches_sinks() -> None:
             return ActionChunk(actions=[Action(data=np.zeros(2)) for _ in range(4)])
 
     sink = _RecordingSink()
-    (log,) = eval(_task(), _BoomLaterPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(),
+        _BoomLaterPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        store_actions=False,
+    )
     assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
@@ -473,7 +482,11 @@ def test_halt_without_attached_record_still_produces_error_log(
 def test_halt_delivers_partial_record_and_counts_trial() -> None:
     sink = _RecordingSink()
     (log,) = eval(
-        _task(), ScriptedPolicy(), _FaultAfterEpochsEmbodiment(good_epochs=0), sinks=[sink]
+        _task(),
+        ScriptedPolicy(),
+        _FaultAfterEpochsEmbodiment(good_epochs=0),
+        sinks=[sink],
+        store_actions=False,
     )
     assert log.status == "error"
     assert log.results.total_trials == 1  # the aborted trial is counted...
@@ -846,6 +859,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         _task(),
         ScriptedPolicy(),
         CubePickEmbodiment(),
+        log_dir=str(tmp_path),
         sinks=[sink],
         controller=_EagerErrorController(),
     )
@@ -1179,9 +1193,12 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
 
     scene = log.samples[0]
     # The first epoch succeeded so its metadata is retained.
-    # The second epoch failed in the hook, so its metadata contains
-    # whatever was populated before the crash (empty).
-    assert scene.trial_metadata == ({"test_key": "test_val"}, {})
+    # The second epoch failed in the hook, so only framework metadata follows
+    # it into the log; both delivered trials receive action side-car pointers.
+    first_metadata, second_metadata = scene.trial_metadata
+    assert first_metadata["test_key"] == "test_val"
+    assert set(first_metadata) == {"test_key", "actions"}
+    assert set(second_metadata) == {"actions"}
     assert len(seen_ids) == 2
     assert seen_ids[0] == seen_ids[1]
 

@@ -76,8 +76,10 @@ when the eval ends. The queue is drained at every trial boundary (bounded by
 `flush_timeout`), so an eval that aborts mid-run loses at most the current
 trial's queued tail. A live viewer and its teed `.rrd` receive the same worker
 stream, so viewer-paced shedding reaches the file too. The `.rrd` records what
-the viewer received, not a guaranteed-complete record. The JSON eval log is
-synchronous and never affected.
+the viewer received, not a guaranteed-complete record. For commanded motion,
+the `.rrd` is what the viewer saw; the actions JSONL is what the robot was told.
+The JSON eval log and action side-cars are written outside the Rerun worker and
+are never affected by its shedding.
 
 Camera frames are JPEG-compressed by default (`jpeg_quality=75`), which cuts
 viewer bandwidth by an order of magnitude. Pass `jpeg_quality=None` for
@@ -138,6 +140,27 @@ tunnel's localhost URL above; pass a URL to reach a viewer elsewhere). Viewer
 and SDK versions must match for live connections. For a replayable file without
 a live connection, use `--rerun-save`. Hosts driving two rigs give each config
 its own `rerun_port` so each run spawns its own viewer window.
+
+## Action side-cars
+
+Every delivered trial writes its executed action sequence to an atomic JSONL
+side-car by default:
+
+```
+actions/<run_id>/<sanitized_scene_id>-e<epoch>.jsonl
+```
+
+The first row identifies the run, raw scene id, epoch, action dimension, and
+optional dimension labels. Each remaining row records one control step and its
+post-approval action vector in order. This is the complete commanded trajectory,
+including the prefix of an errored or cancelled trial. A zero-step trial writes
+the header alone. The trial metadata stores the relative path in `actions`, so
+consumers should follow that pointer instead of reconstructing filenames.
+
+Action side-cars are owned by `eval()`, not a sink. They are therefore still
+written when `sinks=` replaces `JsonLogSink`. Pass `store_actions=False` to
+disable them. A non-finite action or filesystem failure emits a warning, leaves
+no final file or metadata pointer, and does not change the eval status.
 
 ## Frame side-cars
 
