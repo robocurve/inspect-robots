@@ -313,14 +313,16 @@ def eval(
     owns_policy = isinstance(policy, str)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
-    policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
-    embodiment = (
-        cast(Embodiment, resolve("embodiment", embodiment))
-        if isinstance(embodiment, str)
-        else embodiment
-    )
+    owned_policy: Policy | None = None
+    owned_embodiment: Embodiment | None = None
     active_error: BaseException | None = None
     try:
+        if isinstance(policy, str):
+            policy = cast(Policy, resolve("policy", policy))
+            owned_policy = policy
+        if isinstance(embodiment, str):
+            embodiment = cast(Embodiment, resolve("embodiment", embodiment))
+            owned_embodiment = embodiment
         return _run_eval(
             task,
             policy,
@@ -344,13 +346,13 @@ def eval(
         # Close what we opened. Release the embodiment first so a policy cleanup
         # failure cannot leave real hardware or its transport active.
         cleanup_error: BaseException | None = None
-        if owns_embodiment:
+        if owns_embodiment and owned_embodiment is not None:
             try:
-                embodiment.close()
+                owned_embodiment.close()
             except BaseException as exc:
                 cleanup_error = exc
-        if owns_policy:
-            close_policy = getattr(policy, "close", None)
+        if owns_policy and owned_policy is not None:
+            close_policy = getattr(owned_policy, "close", None)
             if callable(close_policy):
                 try:
                     close_policy()

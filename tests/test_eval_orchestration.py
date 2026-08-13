@@ -594,6 +594,43 @@ def test_eval_closes_registry_resolved_policy_and_embodiment(
     assert events == ["embodiment", "policy"]
 
 
+def test_eval_closes_registry_resolved_policy_when_embodiment_factory_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from inspect_robots import registry
+
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events, close_error=RuntimeError("policy close exploded"))
+
+    class _NotedFactoryError(RuntimeError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.notes: list[str] = []
+
+        def add_note(self, note: str) -> None:
+            self.notes.append(note)
+
+    factory_error = _NotedFactoryError("embodiment factory exploded")
+
+    def raise_from_embodiment_factory() -> _TrackedClosableEmbodiment:
+        raise factory_error
+
+    monkeypatch.setitem(registry._FACTORIES["policy"], "closable-policy", lambda: policy)
+    monkeypatch.setitem(
+        registry._FACTORIES["embodiment"],
+        "failing-embodiment",
+        raise_from_embodiment_factory,
+    )
+
+    with pytest.raises(RuntimeError, match="embodiment factory exploded") as excinfo:
+        eval(_task(max_steps=1), "closable-policy", "failing-embodiment", log_dir=str(tmp_path))
+
+    assert excinfo.value is factory_error
+    assert policy.close_calls == 1
+    assert events == ["policy"]
+    assert any("policy close exploded" in note for note in factory_error.notes)
+
+
 def test_eval_does_not_close_caller_constructed_policy(tmp_path: Path) -> None:
     events: list[str] = []
     policy = _TrackedClosablePolicy(events)
@@ -650,6 +687,24 @@ def test_eval_attempts_owned_policy_cleanup_after_embodiment_close_error(
 ) -> None:
     events: list[str] = []
     policy = _TrackedClosablePolicy(events)
+    embodiment = _TrackedClosableEmbodiment(
+        events, close_error=RuntimeError("embodiment close exploded")
+    )
+    _register_owned_eval_components(monkeypatch, policy, embodiment)
+
+    with pytest.raises(RuntimeError, match="embodiment close exploded"):
+        eval(_task(max_steps=1), "closable-policy", "closable-embodiment", log_dir=str(tmp_path))
+
+    assert policy.close_calls == 1
+    assert embodiment.close_calls == 1
+    assert events == ["embodiment", "policy"]
+
+
+def test_eval_preserves_first_cleanup_error_when_both_owned_closes_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    policy = _TrackedClosablePolicy(events, close_error=RuntimeError("policy close exploded"))
     embodiment = _TrackedClosableEmbodiment(
         events, close_error=RuntimeError("embodiment close exploded")
     )
