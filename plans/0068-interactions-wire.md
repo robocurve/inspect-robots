@@ -15,7 +15,24 @@
   temperature/thinking_level body placement and the thinking_level 4xx fix
   line get dedicated tests; keyless explicit endpoints omit the
   `x-goog-api-key` header; the fold prologue is one joined text block,
-  matching the Live wire's `"\n".join`) — all resolved below.
+  matching the Live wire's `"\n".join`) — all resolved below. R2: verified
+  all R1 resolutions hold (fold state machine, `_call_ids` deletion,
+  `incomplete` nudge-path consistency, renumbering, body-placement pins,
+  keyless header, joined prologue); 2 substantive (chain-loss
+  classification fired on *unchained* 404s too — a first-call 404 from a
+  bad model id or wrong proxy path would loop useless folds; the trigger is
+  now gated on the failed attempt having sent `previous_interaction_id`,
+  and the unchained-404 case is pinned as an immediate error; extending the
+  e2e wire parametrization was unimplementable — that test passes explicit
+  `image_horizon=1` and asserts on elision text, both impossible on this
+  wire, so the plan now specifies a separate scripted interactions e2e test
+  and leaves the existing parametrization untouched) plus three folded nits
+  (the system-instruction wording read as a contradiction — suffix
+  translation *skips* system messages and `system_instruction` always
+  reads `messages[0]` directly; the `incomplete` rationale wrongly claimed
+  no wire inspects finish reasons — the Messages wire does, the precedent
+  cited is now chat/responses; an empty-delta guard matching the Live
+  wire's is now specified) — all resolved below.
 
 ## Problem
 
@@ -113,13 +130,22 @@ State, mirroring `GeminiLiveClient`'s identity-prefix discipline:
   *next* `complete()` call then opens with the fold, so the trial can still
   make progress if the rollout retries the policy step. A fold attempt that
   fails with a transient 5xx keeps the flag set and is retried as a fold.
+  Chain loss is only recognized when the failed attempt actually sent
+  `previous_interaction_id` — a 404 on an unchained request (bad model id,
+  wrong explicit-proxy path, or the fold itself) is the request's own
+  fault and takes the plain-4xx immediate-raise path; folding there would
+  loop identical failures and poison every later call (the Live wire's
+  `bool(self._streamed)` gate is the same idea).
 - Bare model: `provider.model.removeprefix("google/")`, as in the Live wire.
 
 Request construction per `complete()` call:
 
 - Suffix = `messages[len(_streamed):]`. Translate, in order:
-  - `system` (only ever message 0, only on an unchained request) → the
-    `system_instruction` field, not an input block;
+  - `system` → skipped by suffix translation entirely (never an input
+    block); the body's `system_instruction` field always reads
+    `messages[0]` directly when it is a system message, on chained and
+    unchained requests alike, because the field is interaction-scoped and
+    never inherited across the chain;
   - `user` → content blocks (string content → one text block; list content →
     text parts verbatim, `image_url` data-URL parts decoded into
     `{"type": "image", "mime_type": <from the data URL>, "data": <base64>}`;
@@ -128,6 +154,10 @@ Request construction per `complete()` call:
     "result": <content>}` (content must be `str`, else raise);
   - `assistant` → skipped (the server already has it when chained; on an
     unchained fold it arrives inside the sanitized prologue).
+  - A suffix whose translation yields an empty `input` array raises
+    "wire='interactions' has no un-streamed user or tool message to send",
+    the Live wire's guard adapted; structurally unreachable through
+    `act()`, pinned by a client-level test as the Live wire pins its own.
 - Body: `model`, `input` (the translated block/step array), `store: true`,
   `tools` (translated from Chat-Completions shape to the flat Interactions
   shape, every request), `system_instruction` (every request, from
@@ -146,7 +176,10 @@ Response handling:
   `model_output` step's text blocks into `content`. `incomplete` (an
   output-cap truncation) is parsed rather than raised so a partial text
   turn takes the policy's existing no-tool-call nudge path instead of
-  aborting the trial — no other wire inspects finish reasons either. Any
+  aborting the trial — the chat wire ignores `finish_reason` and the
+  Responses wire raises only on `status == "failed"`, so tolerance is the
+  HTTP-wire precedent (the Messages wire's strict `stop_reason` gate is
+  the outlier, tied to its explicit output cap). Any
   other `status` (`failed`, `budget_exceeded`, …) raises `RuntimeError`
   naming it. On success: `_last_interaction_id = response["id"]`,
   `_streamed.extend(suffix)` — the cursor advances only on a parsed 200, so
@@ -155,8 +188,10 @@ Response handling:
 - 429/5xx/transport error → bounded retry with exponential backoff
   (`backoff_s * 2**attempt`), as in `ChatClient`.
 - Chain loss — HTTP 404, or a 400 whose body mentions
-  `previous_interaction`: set `_needs_fold` and continue the attempt loop,
-  which now sends the unchained fold (state machine above).
+  `previous_interaction`, *on an attempt that sent
+  `previous_interaction_id`*: set `_needs_fold` and continue the attempt
+  loop, which now sends the unchained fold (state machine above). The same
+  statuses on an unchained attempt take the plain-4xx path below.
 - Other 4xx → immediate `RuntimeError` with the truncated body (the
   request's fault; retrying cannot help). When the body mentions
   `thinking_level`, append a fix line naming the levels this model accepts
@@ -279,7 +314,10 @@ request body and script responses:
    call chains to the fold's new id. Fold persistence: chain loss followed
    by a 500 on the fold attempt retries the *fold* (never the chained
    delta); chain loss on the final attempt raises, and the next
-   `complete()` call opens with the fold.
+   `complete()` call opens with the fold. Gating: a 404 on an *unchained*
+   request (first call of a trial) raises immediately with the body
+   excerpt and never folds. Empty-delta guard: a suffix with nothing
+   sendable raises the "no un-streamed user or tool message" error.
 8. Rewritten-view guard and fresh-trial reset: same two behaviors the Live
    client pins.
 9. Terminal failure statuses (`failed`) raise with the status named;
@@ -295,15 +333,22 @@ request body and script responses:
     rejection, ws base_url rejection, non-Google resolution rejection with
     the guided message, `api_key_env` default with explicit base_url, and
     client-type selection.
-13. Policy-level e2e: the `test_policy_e2e.py` wire parametrization gains
-    `interactions` (full act() → MockTransport → capture round-trip:
-    tool-call turn, tool result, next observation chained as a delta), and
-    an interactions analog of the Live wire's
-    `test_policy_text_turn_takes_existing_nudge_path_end_to_end` pins the
-    no-tool-call nudge advancing the cursor — this wire is the only HTTP
-    wire that skips assistant messages when building input, so the
-    policy↔client integration must be driven through `act()`, not only
-    `complete()`.
+13. Policy-level e2e: a dedicated scripted test (in
+    `test_interactions.py`, policy-level, MockTransport) rather than an
+    extension of `test_policy_e2e.py`'s wire parametrization — that
+    parametrized test constructs the policy with explicit
+    `image_horizon=1` and asserts on `_evicted_view`'s elision text, both
+    impossible on this wire, so it stays untouched. The dedicated test
+    drives `act()` end to end: a tool-call turn, its tool result and next
+    observation going out as a chained delta (`previous_interaction_id`
+    set, assistant message absent from `input`), and the capture rows
+    blob-inlined round-trip. A second policy-level test is the
+    interactions analog of the Live wire's
+    `test_policy_text_turn_takes_existing_nudge_path_end_to_end`
+    (in `test_gemini_live.py`), pinning the no-tool-call nudge advancing
+    the cursor — this wire is the only HTTP wire that skips assistant
+    messages when building input, so the policy↔client integration must
+    be driven through `act()`, not only `complete()`.
 
 Gates: plugin pytest, `ruff check`, `ruff format --check`, strict mypy —
 same bars the plugin already passes; no core `src/inspect_robots` changes,
