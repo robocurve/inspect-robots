@@ -1,7 +1,21 @@
-# 0066 — wire=interactions: Gemini Interactions API as a stateful HTTP wire
+# 0068 — wire=interactions: Gemini Interactions API as a stateful HTTP wire
 
-- **Status:** draft (R0, not yet critiqued)
+- **Status:** draft (R1 applied, awaiting re-critique)
 - **Issue:** #378
+- **Critique rounds:** R1: 4 substantive (no policy-level e2e coverage for
+  the new wire — the e2e parametrization now includes `interactions` and a
+  Live-analog nudge-path policy test is added; the fold state machine was
+  under-specified — a persistent `_needs_fold` flag now mirrors the Live
+  wire's `_needs_recovery`, including the final-attempt and
+  fold-then-transient-failure paths; `_call_ids` was named but never
+  defined — deleted, `function_result.call_id` comes straight from the tool
+  message's `tool_call_id`; `incomplete` responses killed the trial — now
+  parsed like `completed` so the policy's nudge path can recover) plus four
+  folded nits (renumbered 0066→0068 after the origin collision;
+  temperature/thinking_level body placement and the thinking_level 4xx fix
+  line get dedicated tests; keyless explicit endpoints omit the
+  `x-goog-api-key` header; the fold prologue is one joined text block,
+  matching the Live wire's `"\n".join`) — all resolved below.
 
 ## Problem
 
@@ -79,13 +93,26 @@ State, mirroring `GeminiLiveClient`'s identity-prefix discipline:
 
 - `_streamed: list[dict]` — references (not copies) of the chat-format
   messages already absorbed by the server chain. A changed prefix means a new
-  trial: reset `_streamed`, `_last_interaction_id`, and `_call_ids`. The
+  trial: reset `_streamed`, `_last_interaction_id`, and `_needs_fold`. The
   rewritten-view guard is identical to the Live wire's: same first message
   object but non-prefix history raises "rewritten conversation view without a
   trial reset". This is also why `image_horizon` is rejected on this wire
   (below): `_evicted_view` rewrites history and would trip this guard by
   design.
-- `_last_interaction_id: str | None` — the chain head.
+- `_last_interaction_id: str | None` — the chain head. Unlike the Live
+  wire's `_call_names`, no per-call bookkeeping is needed: a
+  `function_result` step carries only `call_id`, which comes straight from
+  the tool message's `tool_call_id` (the policy writes
+  `{"role": "tool", "tool_call_id": call.id, "content": result_text}`).
+- `_needs_fold: bool` — set when chain loss is detected, cleared only after
+  a successful fold. While set, every attempt (including across the retry
+  backoff loop) sends the unchained fold, never the chained delta — the
+  Live wire's persistent `_needs_recovery` flag, same rationale: a chained
+  resend would 404 again and burn the remaining attempts. Chain loss
+  detected on the final attempt sets the flag and lets the call fail; the
+  *next* `complete()` call then opens with the fold, so the trial can still
+  make progress if the rollout retries the policy step. A fold attempt that
+  fails with a transient 5xx keeps the flag set and is retried as a fold.
 - Bare model: `provider.model.removeprefix("google/")`, as in the Live wire.
 
 Request construction per `complete()` call:
@@ -113,10 +140,14 @@ Request construction per `complete()` call:
 
 Response handling:
 
-- 200 → parse JSON. `status` of `completed` or `requires_action` → walk
-  `steps`: collect every `function_call` step into a `ToolCall` (arguments
-  normalized to JSON text), concatenate every `model_output` step's text
-  blocks into `content`. Any other terminal `status` raises `RuntimeError`
+- 200 → parse JSON. `status` of `completed`, `requires_action`, or
+  `incomplete` → walk `steps`: collect every `function_call` step into a
+  `ToolCall` (arguments normalized to JSON text), concatenate every
+  `model_output` step's text blocks into `content`. `incomplete` (an
+  output-cap truncation) is parsed rather than raised so a partial text
+  turn takes the policy's existing no-tool-call nudge path instead of
+  aborting the trial — no other wire inspects finish reasons either. Any
+  other `status` (`failed`, `budget_exceeded`, …) raises `RuntimeError`
   naming it. On success: `_last_interaction_id = response["id"]`,
   `_streamed.extend(suffix)` — the cursor advances only on a parsed 200, so
   a failed attempt resends the same delta (one POST is atomic server-side;
@@ -124,8 +155,8 @@ Response handling:
 - 429/5xx/transport error → bounded retry with exponential backoff
   (`backoff_s * 2**attempt`), as in `ChatClient`.
 - Chain loss — HTTP 404, or a 400 whose body mentions
-  `previous_interaction`: rebuild as an *unchained* fold (below) and retry
-  within the same attempt loop.
+  `previous_interaction`: set `_needs_fold` and continue the attempt loop,
+  which now sends the unchained fold (state machine above).
 - Other 4xx → immediate `RuntimeError` with the truncated body (the
   request's fault; retrying cannot help). When the body mentions
   `thinking_level`, append a fix line naming the levels this model accepts
@@ -133,13 +164,16 @@ Response handling:
 
 Fold recovery (chain loss only), mirroring `_send_recovery`:
 
-- Anchor = last `user` message. Input =
-  `[text: _RECOVERY_PROLOGUE, *json-lines of _sanitize(history minus system
-  and anchor), text: _RECOVERY_CONTINUATION, *anchor's translated blocks]`,
-  no `previous_interaction_id`. Reuse the Live wire's prologue strings
-  (import them) so transcripts read identically. `_sanitize` is imported
-  deferred inside the function, exactly as `_gemini_live.py` does, to avoid
-  the import cycle. On success the cursor covers the full message list.
+- Anchor = last `user` message. Input = one text block holding
+  `"\n".join([_RECOVERY_PROLOGUE, *one json.dumps line per message of
+  _sanitize(history minus system and anchor), _RECOVERY_CONTINUATION])` —
+  the same single joined prologue the Live wire builds — followed by the
+  anchor user message's translated blocks (images included). No
+  `previous_interaction_id`. Reuse the Live wire's prologue strings (import
+  them) so transcripts read identically. `_sanitize` is imported deferred
+  inside the function, exactly as `_gemini_live.py` does, to avoid the
+  import cycle. On success the cursor covers the full message list and
+  `_needs_fold` clears.
 
 Usage mapping (per call, summed by the policy):
 `total_input_tokens → input_tokens`, `total_output_tokens → output_tokens`,
@@ -150,6 +184,11 @@ Non-int values are skipped, as in the Live wire's `_add_usage`.
 Capture: one `capture.record(...)` per attempt with
 `endpoint="/interactions"`, the exact request body, status, and response
 text — the same shape `ChatClient` records.
+
+Auth: the `x-goog-api-key` header is set only when `provider.api_key` is
+non-empty; a keyless explicit endpoint (the local-proxy case
+`resolve_provider` explicitly supports) sends no auth header, mirroring
+`ChatClient`'s Bearer omission.
 
 `close()`: closes the httpx client. No per-trial teardown hook is needed —
 the identity-prefix check already resets chain state on the next trial's
@@ -232,20 +271,39 @@ request body and script responses:
 5. Usage mapping: the five counters land under the normalized names;
    missing/non-int counters are skipped.
 6. Retry: one 500 then a 200 succeeds; three 500s raise after
-   `max_retries`; a plain 400 raises immediately with the body excerpt.
+   `max_retries`; a plain 400 raises immediately with the body excerpt; a
+   400 mentioning `thinking_level` carries the appended fix line.
 7. Chain-loss fold: a 404 on a chained call triggers an unchained retry
-   whose input starts with the recovery prologue and ends with the anchor
-   user message's blocks; a subsequent call chains to the fold's new id.
+   whose input is one prologue text block (prologue, sanitized json-lines,
+   continuation) followed by the anchor user message's blocks; a subsequent
+   call chains to the fold's new id. Fold persistence: chain loss followed
+   by a 500 on the fold attempt retries the *fold* (never the chained
+   delta); chain loss on the final attempt raises, and the next
+   `complete()` call opens with the fold.
 8. Rewritten-view guard and fresh-trial reset: same two behaviors the Live
    client pins.
-9. Terminal failure statuses (`failed`) raise with the status named.
+9. Terminal failure statuses (`failed`) raise with the status named;
+   `incomplete` parses like `completed` and returns the partial text.
 10. Capture: a recorded row has `endpoint="/interactions"` and the image
     `data` replaced by a `$blob:` sentinel (also covers the `_capture.py`
     branch).
-11. Policy construction: effort accept/reject matrix, image_horizon
+11. Body placement: `temperature` and a validated effort land under
+    `generation_config` as `temperature`/`thinking_level`; both absent when
+    unset (the `test_llm.py` equivalents for this wire). Keyless explicit
+    endpoint sends no `x-goog-api-key` header.
+12. Policy construction: effort accept/reject matrix, image_horizon
     rejection, ws base_url rejection, non-Google resolution rejection with
     the guided message, `api_key_env` default with explicit base_url, and
     client-type selection.
+13. Policy-level e2e: the `test_policy_e2e.py` wire parametrization gains
+    `interactions` (full act() → MockTransport → capture round-trip:
+    tool-call turn, tool result, next observation chained as a delta), and
+    an interactions analog of the Live wire's
+    `test_policy_text_turn_takes_existing_nudge_path_end_to_end` pins the
+    no-tool-call nudge advancing the cursor — this wire is the only HTTP
+    wire that skips assistant messages when building input, so the
+    policy↔client integration must be driven through `act()`, not only
+    `complete()`.
 
 Gates: plugin pytest, `ruff check`, `ruff format --check`, strict mypy —
 same bars the plugin already passes; no core `src/inspect_robots` changes,
