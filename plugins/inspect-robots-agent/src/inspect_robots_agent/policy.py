@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._gemini_live import GeminiLiveClient
+from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
@@ -73,6 +74,9 @@ _GEMINI_LIVE_BASE = (
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
 
+#: Google's native stateful HTTP endpoint, after direct-provider resolution.
+_INTERACTIONS_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
 # The Messages wire reuses the set: "none" becomes thinking-disabled client-side
@@ -87,7 +91,7 @@ _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh",
 # offers. The range is half-open by construction: 1.0 means "past max effort",
 # and servers that cap lower reject it with a guided 4xx.
 _EFFORT_FRACTION_LIMIT = 1.0
-_WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live"})
+_WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live", "interactions"})
 _WIRE_ALIASES = {"anthropic": "messages"}
 _AGENT_NATIVE_WIRES = frozenset({"chat", "messages"})
 _MESSAGES_CAPABLE_PREFIXES = frozenset(
@@ -436,6 +440,19 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError(
                 "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
             )
+        if wire == "interactions" and resolved_effort not in {
+            None,
+            "minimal",
+            "low",
+            "medium",
+            "high",
+        }:
+            raise ConfigError(
+                "effort on wire='interactions' must be minimal, low, medium, or high, "
+                f"got {resolved_effort!r}.\n"
+                "fix: pass -P effort=minimal|low|medium|high (maps to thinking_level), "
+                "or drop -P effort="
+            )
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if images not in _IMAGE_MODES:
@@ -482,7 +499,7 @@ class LLMAgentPolicy(PolicyBase):
                 "image_horizon must be an int >= 1, or None to send full image history.\n"
                 "fix: pass -P image_horizon=N or -P image_horizon=none"
             )
-        resolved_image_horizon: int | None = None if wire == "gemini-live" else 2
+        resolved_image_horizon: int | None = None if wire in {"gemini-live", "interactions"} else 2
         if not isinstance(image_horizon, _Unset):
             resolved_image_horizon = image_horizon
         if wire == "gemini-live" and image_horizon is not _UNSET and image_horizon is not None:
@@ -492,12 +509,25 @@ class LLMAgentPolicy(PolicyBase):
                 "compression is the equivalent mechanism because already-streamed "
                 "frames cannot be evicted"
             )
+        if wire == "interactions" and image_horizon is not _UNSET and image_horizon is not None:
+            raise ConfigError(
+                "image_horizon is not supported on wire='interactions'.\n"
+                "fix: drop -P image_horizon=; the Interactions API's server-side history "
+                "is the equivalent mechanism because frames already absorbed by the chain "
+                "cannot be evicted client-side"
+            )
 
         if wire == "gemini-live" and base_url and not base_url.startswith(("ws://", "wss://")):
             raise ConfigError(
                 "wire='gemini-live' requires a ws:// or wss:// base_url, got "
                 f"{base_url!r}.\nfix: drop -P base_url= to use Google's Live API, "
                 "or pass a websocket endpoint"
+            )
+        if wire == "interactions" and base_url and not base_url.startswith(("http://", "https://")):
+            raise ConfigError(
+                "wire='interactions' requires an http:// or https:// base_url, got "
+                f"{base_url!r}.\nfix: wire='interactions' is HTTP; drop -P base_url= "
+                "or pass the Live wire a websocket endpoint via -P wire=gemini-live"
             )
 
         # resolve_provider reads api_key_env only when base_url is set, where
@@ -514,6 +544,8 @@ class LLMAgentPolicy(PolicyBase):
             effective_key_env = "ANTHROPIC_API_KEY"
         if wire == "gemini-live" and base_url and not api_key_env:
             effective_key_env = "GEMINI_API_KEY"
+        if wire == "interactions" and base_url and not api_key_env:
+            effective_key_env = "GEMINI_API_KEY"
         try:
             provider = resolve_provider(
                 model=requested_model,
@@ -523,8 +555,13 @@ class LLMAgentPolicy(PolicyBase):
                 native_wires=_AGENT_NATIVE_WIRES,
             )
         except ConfigError as exc:
-            if wire != "gemini-live" or base_url:
+            if wire not in {"gemini-live", "interactions"} or base_url:
                 raise
+            if wire == "interactions":
+                raise ConfigError(
+                    "wire='interactions' needs Google's direct provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                ) from exc
             raise ConfigError(
                 "wire='gemini-live' needs Google's direct Live API provider.\n"
                 "fix: use -P model=google/... and set $GEMINI_API_KEY"
@@ -627,6 +664,17 @@ class LLMAgentPolicy(PolicyBase):
                 api_key=provider.api_key,
                 model=provider.model,
             )
+        if wire == "interactions" and not base_url:
+            if provider.base_url != _GOOGLE_BASE:
+                raise ConfigError(
+                    "wire='interactions' needs Google's direct provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                )
+            provider = Provider(
+                base_url=_INTERACTIONS_BASE,
+                api_key=provider.api_key,
+                model=provider.model,
+            )
 
         resolved_max_output_tokens = (
             (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
@@ -634,7 +682,9 @@ class LLMAgentPolicy(PolicyBase):
             else None
         )
         self._capture = WireCapture() if wire_capture else None
-        self._client: ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient
+        self._client: (
+            ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient | InteractionsClient
+        )
         if wire == "messages":
             assert resolved_max_output_tokens is not None
             self._client = AnthropicClient(
@@ -648,6 +698,8 @@ class LLMAgentPolicy(PolicyBase):
             self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
         elif wire == "gemini-live":
             self._client = GeminiLiveClient(provider, capture=self._capture)
+        elif wire == "interactions":
+            self._client = InteractionsClient(provider, transport=transport, capture=self._capture)
         else:
             self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
