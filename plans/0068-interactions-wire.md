@@ -1,6 +1,6 @@
 # 0068 — wire=interactions: Gemini Interactions API as a stateful HTTP wire
 
-- **Status:** draft (R1 applied, awaiting re-critique)
+- **Status:** approved (R3 clean; four folded nits)
 - **Issue:** #378
 - **Critique rounds:** R1: 4 substantive (no policy-level e2e coverage for
   the new wire — the e2e parametrization now includes `interactions` and a
@@ -32,7 +32,15 @@
   reads `messages[0]` directly; the `incomplete` rationale wrongly claimed
   no wire inspects finish reasons — the Messages wire does, the precedent
   cited is now chat/responses; an empty-delta guard matching the Live
-  wire's is now specified) — all resolved below.
+  wire's is now specified) — all resolved below. R3: verified all R2
+  resolutions hold against plan text and code; clean on substantive
+  findings, with four folded nits (the empty-delta guard's "as the Live
+  wire pins its own" cited a test that does not exist — the false
+  precedent claim is dropped, the new test requirement stands; stale
+  status line; the README image_horizon row's "`2` on HTTP wires" default
+  wording becomes false once this HTTP wire defaults to unset — the docs
+  item now covers rewording the default column; "the recorded call_id"
+  leftover phrasing in test 2).
 
 ## Problem
 
@@ -157,7 +165,7 @@ Request construction per `complete()` call:
   - A suffix whose translation yields an empty `input` array raises
     "wire='interactions' has no un-streamed user or tool message to send",
     the Live wire's guard adapted; structurally unreachable through
-    `act()`, pinned by a client-level test as the Live wire pins its own.
+    `act()`, pinned by a client-level test.
 - Body: `model`, `input` (the translated block/step array), `store: true`,
   `tools` (translated from Chat-Completions shape to the flat Interactions
   shape, every request), `system_instruction` (every request, from
@@ -277,7 +285,10 @@ two cannot collide. Module docstring's supported-shapes sentence gains
   history for GA Gemini models, e.g. `gemini-3.7-flash`); a short section
   after the Gemini Robotics ER 2 one with a full example command; the
   effort section gains the thinking_level mapping sentence; the
-  image_horizon table row's "unset on `gemini-live`" note extends to this
+  image_horizon table row's default column is reworded — "`2` on HTTP
+  wires" becomes false once this HTTP wire defaults to unset (e.g. "`2` on
+  the stateless HTTP wires; unset on `gemini-live` and `interactions`") —
+  and its "unset on `gemini-live`" note extends to this
   wire.
 - `__init__.py` module docstring sentence listing wires gains
   `interactions`.
@@ -295,7 +306,8 @@ request body and script responses:
    header set from the provider key.
 2. Chained call: after a 200 with `id: "i1"`, the next `complete()` sends
    `previous_interaction_id: "i1"` and only the delta (the new tool result
-   as a `function_result` step with the recorded `call_id`, plus the new
+   as a `function_result` step whose `call_id` is the tool message's
+   `tool_call_id`, plus the new
    user observation), while still re-sending `tools` and
    `system_instruction`.
 3. Function-call parsing: a `requires_action` response with two
