@@ -92,9 +92,15 @@ long-lived socket.
 No `GEMINI_API_KEY` was available on the authoring machine, so the shapes
 above come from the API reference, not a probe. The implementation therefore:
 
-1. parses defensively — a response missing `steps`, or a step of an unknown
-   type, raises `RuntimeError` naming the field and quoting the first 500
-   characters of the body, never a `KeyError` traceback;
+1. parses defensively — a response missing `steps`, or a known step type
+   with an invalid shape, raises `RuntimeError` naming the field and
+   quoting the first 500 characters of the body, never a `KeyError`
+   traceback; *unknown* step types are skipped rather than raised
+   (implementation-review amendment: the Responses wire already tolerates
+   OpenAI's sibling `reasoning` items the same way, and this wire's
+   `thinking_level` makes server-added thinking steps the most likely
+   surprise — hard-failing a 200 on them would kill trials on the wire's
+   headline feature);
 2. accepts `arguments` as either a JSON object (documented) or a string
    (Chat-Completions habit), normalizing to the JSON-text `ToolCall.arguments`
    contract either way;

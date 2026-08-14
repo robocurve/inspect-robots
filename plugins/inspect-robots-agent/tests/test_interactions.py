@@ -18,9 +18,8 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
-from inspect_robots_agent import LLMAgentPolicy
+from inspect_robots_agent import InteractionsClient, LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
-from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent.policy import _INTERACTIONS_BASE, AgentPolicyConfig
 
@@ -502,22 +501,24 @@ def test_failed_status_raises_and_incomplete_returns_partial_text() -> None:
     assert incomplete.content == "partial"
 
 
-@pytest.mark.parametrize(
-    "payload, field",
-    [
-        ({"id": "i1", "status": "completed"}, "steps"),
-        (
-            _response("i1", {"type": "unexpected", "value": "x"}),
-            r"steps\[\]\.type",
-        ),
-    ],
-)
-def test_malformed_response_shapes_raise_runtime_errors(
-    payload: dict[str, Any], field: str
-) -> None:
-    client = _client(lambda request: httpx.Response(200, json=payload))
-    with pytest.raises(RuntimeError, match=field):
+def test_missing_steps_raise_and_unknown_step_types_are_skipped() -> None:
+    client = _client(lambda request: httpx.Response(200, json={"id": "i1", "status": "completed"}))
+    with pytest.raises(RuntimeError, match="steps"):
         client.complete(_messages(), [])
+
+    tolerant = _client(
+        lambda request: httpx.Response(
+            200,
+            json=_response(
+                "i2",
+                {"type": "thinking", "content": [{"type": "text", "text": "pondering"}]},
+                {"type": "model_output", "content": [{"type": "text", "text": "done"}]},
+            ),
+        )
+    )
+    message = tolerant.complete(_messages(), [])
+    assert message.content == "done"
+    assert message.tool_calls == ()
 
 
 def test_capture_records_interactions_endpoint_and_flat_image_blob(tmp_path: Path) -> None:

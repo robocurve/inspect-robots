@@ -357,8 +357,9 @@ def _parse_response(response: httpx.Response) -> tuple[AssistantMessage, str]:
                     if not isinstance(text, str):
                         raise _shape_error("steps[].content[].text", response.text)
                     text_parts.append(text)
-        else:
-            raise _shape_error("steps[].type", response.text)
+        # Unknown step types (e.g. server-added thinking output once
+        # thinking_level is set) are skipped, matching the Responses wire's
+        # tolerance for OpenAI's reasoning items.
 
     usage = _normalized_usage(payload.get("usage"))
     return (

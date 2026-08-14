@@ -15,6 +15,7 @@ def test_package_imports_and_exports() -> None:
         "AssistantMessage",
         "ChatClient",
         "GeminiLiveClient",
+        "InteractionsClient",
         "LLMAgentPolicy",
         "Provider",
         "ResponsesClient",
