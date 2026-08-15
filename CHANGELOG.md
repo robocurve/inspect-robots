@@ -22,6 +22,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **CLI:** refactored CLI subcommand logic into modular package `inspect_robots._cli_commands`.
+
 - **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
   one shared helper, and its error reads `--epochs must be >= 1, got 0`
   (naming the offending task in `eval-set`) instead of doubling the wording

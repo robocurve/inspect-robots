@@ -7669,3 +7669,24 @@ def test_explicit_custom_config_grader_is_honored_unattended(
 def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "graders"]) == 0
     assert "operator" in capsys.readouterr().out
+
+
+def test_completion_bash(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["completion", "bash"]) == 0
+    out = capsys.readouterr().out
+    assert "_inspect_robots_completions" in out
+    assert "complete -F _inspect_robots_completions inspect-robots" in out
+
+
+def test_completion_zsh(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["completion", "zsh"]) == 0
+    out = capsys.readouterr().out
+    assert "#compdef inspect-robots" in out
+    assert "_describe -t commands" in out
+
+
+def test_completion_invalid_shell() -> None:
+    from inspect_robots._cli_commands.completion import generate_completion_script
+
+    with pytest.raises(ValueError, match="unsupported shell"):
+        generate_completion_script("fish", ("run",))
