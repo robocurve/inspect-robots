@@ -65,6 +65,11 @@ class InteractionsClient:
         self._streamed: list[dict[str, Any]] = []
         self._last_interaction_id: str | None = None
         self._needs_fold = False
+        # The live endpoint requires the function name on every
+        # function_result step (probed 2026-08-14; a call_id-only step gets
+        # an opaque 400), and the chat-format tool message carries only the
+        # id, so names are recorded at parse time as on the Live wire.
+        self._call_names: dict[str, str] = {}
 
     def complete(
         self,
@@ -80,7 +85,11 @@ class InteractionsClient:
 
         for attempt in range(self._max_retries):
             folding = self._needs_fold
-            input_items = self._fold_input(messages) if folding else _translate_suffix(suffix)
+            input_items = (
+                self._fold_input(messages)
+                if folding
+                else _translate_suffix(suffix, self._call_names)
+            )
             body = self._request_body(
                 messages,
                 tools,
@@ -120,8 +129,14 @@ class InteractionsClient:
                     if folding:
                         self._streamed = list(messages)
                         self._needs_fold = False
+                        # Pre-fold calls live inside the sanitized prologue
+                        # now; only calls parsed from here on can still
+                        # receive a result as a delta.
+                        self._call_names.clear()
                     else:
                         self._streamed.extend(suffix)
+                    for call in result.tool_calls:
+                        self._call_names[call.id] = call.name
                     return result
 
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
@@ -165,6 +180,7 @@ class InteractionsClient:
         self._streamed.clear()
         self._last_interaction_id = None
         self._needs_fold = False
+        self._call_names.clear()
 
     def _request_body(
         self,
@@ -256,7 +272,10 @@ def _translate_tool(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _translate_suffix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _translate_suffix(
+    messages: list[dict[str, Any]],
+    call_names: dict[str, str],
+) -> list[dict[str, Any]]:
     translated: list[dict[str, Any]] = []
     for message in messages:
         role = message.get("role")
@@ -264,10 +283,17 @@ def _translate_suffix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             translated.extend(_user_content(message))
         elif role == "tool":
             call_id = str(message["tool_call_id"])
+            name = call_names.get(call_id)
+            if name is None:
+                raise RuntimeError(
+                    f"Interactions has no function name recorded for tool call {call_id!r}"
+                )
             content = message.get("content")
             if not isinstance(content, str):
                 raise RuntimeError(f"Interactions tool result {call_id!r} content must be a string")
-            translated.append({"type": "function_result", "call_id": call_id, "result": content})
+            translated.append(
+                {"type": "function_result", "name": name, "call_id": call_id, "result": content}
+            )
         elif role in {"assistant", "system"}:
             continue
         else:

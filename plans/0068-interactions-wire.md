@@ -110,6 +110,16 @@ above come from the API reference, not a probe. The implementation therefore:
    endpoint when `GEMINI_API_KEY` is set. First run on a keyed machine is a
    release gate for announcing the wire.
 
+*Smoke-gate results (run on omen, 2026-08-14):* the gate caught one real
+mismatch — `function_result` requires the function `name` (issue #380, fix
+described in the `_call_names` bullet below). Two risks resolved
+harmlessly: responses carry `{"type": "thought", "signature": …}` steps,
+absorbed by the unknown-step tolerance the PR #379 review added (the
+original strict parser would have failed every call), and usage carries
+undocumented counters (`total_tool_use_tokens`, `raw_prompt_token`),
+ignored by the allowlist mapping. `arguments` arrives as a JSON object, as
+documented.
+
 ## Design
 
 ### New module: `plugins/inspect-robots-agent/src/inspect_robots_agent/_interactions.py`
@@ -130,11 +140,18 @@ State, mirroring `GeminiLiveClient`'s identity-prefix discipline:
   trial reset". This is also why `image_horizon` is rejected on this wire
   (below): `_evicted_view` rewrites history and would trip this guard by
   design.
-- `_last_interaction_id: str | None` — the chain head. Unlike the Live
-  wire's `_call_names`, no per-call bookkeeping is needed: a
-  `function_result` step carries only `call_id`, which comes straight from
-  the tool message's `tool_call_id` (the policy writes
-  `{"role": "tool", "tool_call_id": call.id, "content": result_text}`).
+- `_last_interaction_id: str | None` — the chain head.
+- `_call_names: dict[str, str]` — call id → function name, recorded at
+  parse time. *Smoke-gate amendment (2026-08-14, issue #380):* R1
+  originally deleted this bookkeeping because the documented contract
+  showed `function_result` carrying only `call_id` — but the live endpoint
+  rejects a name-less step with an opaque 400 and accepts
+  `{"type": "function_result", "name": …, "call_id": …, "result": …}`, so
+  the Live wire's `_call_names` pattern applies here after all: recorded
+  per parsed call, consulted by suffix translation (an unrecorded id
+  raises a guided error), cleared on trial reset and on fold success
+  (pre-fold calls live inside the sanitized prologue and can never
+  legitimately receive a delta result afterward).
 - `_needs_fold: bool` — set when chain loss is detected, cleared only after
   a successful fold. While set, every attempt (including across the retry
   backoff loop) sends the unchained fold, never the chained delta — the

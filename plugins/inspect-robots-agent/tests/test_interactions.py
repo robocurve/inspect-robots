@@ -208,6 +208,7 @@ def test_chained_call_sends_only_tool_and_user_delta_with_scoped_fields() -> Non
     assert second["input"] == [
         {
             "type": "function_result",
+            "name": "move_by",
             "call_id": "tool-call-id",
             "result": "moved",
         },
@@ -463,6 +464,46 @@ def test_empty_delta_guard_rejects_assistant_only_suffix() -> None:
 
     with pytest.raises(RuntimeError, match="no un-streamed user or tool message"):
         client.complete(history, [])
+
+
+def test_tool_result_for_unrecorded_call_id_raises() -> None:
+    client = _client(lambda request: httpx.Response(200, json=_response("i1", _text("ok"))))
+    history = _messages()
+    client.complete(history, [])
+    history.append({"role": "tool", "tool_call_id": "never-issued", "content": "orphan"})
+
+    with pytest.raises(
+        RuntimeError, match="no function name recorded for tool call 'never-issued'"
+    ):
+        client.complete(history, [])
+
+
+def test_fold_clears_recorded_call_names() -> None:
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json=_response("i1", _call("pre-fold", "move_by"), status="requires_action"),
+            ),
+            httpx.Response(404, json={"error": {"message": "interaction not found"}}),
+            httpx.Response(200, json=_response("i2", _text("recovered"))),
+        ]
+    )
+    client = _client(lambda request: next(responses))
+    history = _messages()
+    first = client.complete(history, [_schema("move_by")])
+    history.extend(
+        [
+            first.raw(),
+            {"role": "tool", "tool_call_id": "pre-fold", "content": "moved"},
+            {"role": "user", "content": "next observation"},
+        ]
+    )
+    client.complete(history, [_schema("move_by")])
+    history.append({"role": "tool", "tool_call_id": "pre-fold", "content": "stale"})
+
+    with pytest.raises(RuntimeError, match="no function name recorded for tool call 'pre-fold'"):
+        client.complete(history, [_schema("move_by")])
 
 
 def test_rewritten_view_guard_and_identity_based_fresh_trial_reset() -> None:
