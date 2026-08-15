@@ -208,6 +208,16 @@ def test_rewind_reference_uses_the_limiter_store_key() -> None:
     assert np.array_equal(reference, np.array([0.3, 0.4]))
 
 
+def test_delta_limit_approver_rejects_inf() -> None:
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([float("inf"), 0.0])), store)
+
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([0.0, float("-inf")])), store)
+
+
 def test_substitution_rewinds_the_next_delta_reference() -> None:
     held = Action(data=np.array([0.0, 0.0]))
 

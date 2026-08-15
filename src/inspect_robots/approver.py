@@ -252,14 +252,18 @@ class DeltaLimitApprover:
         the limiter measures subsequent deltas from the pose that actually ran.
         If the limiter has not established a reference, this is a no-op.
         """
-        if _LAST_APPROVED_KEY in store:
+        if _LAST_APPROVED_KEY in store and bool(np.all(np.isfinite(pose))):
             store[_LAST_APPROVED_KEY] = pose.copy()
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Limit per-step change, retaining absolute-mode history in trial state."""
         data = np.asarray(action.data, dtype=np.float64)
-        if bool(np.isnan(data).any()):
-            raise SafetyAbort("DeltaLimitApprover: action contains NaN; refusing to pass it on")
+        if not bool(np.all(np.isfinite(data))):
+            raise SafetyAbort(
+                "DeltaLimitApprover: action contains NaN or non-finite values; "
+                "refusing to pass it on"
+            )
+
         if self._absolute:
             reference = store.get(_LAST_APPROVED_KEY)
             if reference is None:
