@@ -20,7 +20,7 @@ fine). The adapter authoring guide covers the human half.
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -85,6 +85,7 @@ class OptionSlot:
     arg: str
     label: str
     default: bool = False
+    suggest: Callable[[Mapping[str, str]], bool] | None = None
 
 
 def option_slots(factory: object) -> tuple[OptionSlot, ...]:
