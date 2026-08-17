@@ -300,6 +300,18 @@ applied verbatim (decision 5's `{frames_sentence}`).
   `uv run mypy`, `uv run pytest --cov` (100%), core-only import unaffected.
   Push, CI green, fresh-eye review loop, merge (closes #382).
 
+## Amendment: per-scene rubric hand-off (plan 0070, merged mid-flight)
+
+PR #385 (automatic task generation) merged while this plan was in
+implementation and established `scene.metadata["rubric"]` as the documented
+hand-off for generated rubrics. Adopted per the coordination comment on PR
+#383: `grade()` resolves the rubric per trial as `scene.metadata["rubric"]`
+(when a non-blank string) > constructed `rubric`/`rubric_file` > default
+rubric, so `--auto-task --grader vlm` grades against the generated rubric
+with no extra flags. The same merge switched `taskgen.py`'s lazy wire imports
+from `_summarize` to `_chatwire` (the follow-up plan 0070 deferred to this
+branch).
+
 ## Out of scope
 
 - Numeric/partial-credit rubric scores (the judgement path is binary; a

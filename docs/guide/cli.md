@@ -165,8 +165,10 @@ mutually exclusive with `rubric`), `base_url` (default
 `https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
 and `max_cameras` (frames per phase, default 4). Without a rubric the grader
 uses a strict default: success only if the frames show the instruction
-completed, failure when the outcome is ambiguous or not visible. `-G` without
-any selected grader is an error rather than a silent no-op.
+completed, failure when the outcome is ambiguous or not visible. A scene that
+carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
+generates) wins over all of these for that trial. `-G` without any selected
+grader is an error rather than a silent no-op.
 
 Both pieces persist in config, and the args section is owned by the grader it
 was written for (the same rule as `[policy.args]`):

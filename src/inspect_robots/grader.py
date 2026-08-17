@@ -135,9 +135,22 @@ class _VLMGrader:
         self._max_cameras = max_cameras
         self._http_post = http_post
 
+    def _rubric_for(self, scene: Scene) -> str:
+        """Prefer a generated per-scene rubric over the run-level one.
+
+        ``scene.metadata["rubric"]`` is the documented hand-off from task
+        generation (plan 0070); it wins over the constructed
+        ``rubric``/``rubric_file`` whenever it is a non-blank string.
+        """
+        scene_rubric = scene.metadata.get("rubric")
+        if isinstance(scene_rubric, str) and scene_rubric.strip():
+            return scene_rubric
+        return self._rubric
+
     def _messages(
         self,
         instruction: str,
+        rubric: str,
         initial: list[tuple[str, npt.NDArray[np.uint8]]],
         final: list[tuple[str, npt.NDArray[np.uint8]]],
     ) -> list[dict[str, Any]]:
@@ -147,7 +160,7 @@ class _VLMGrader:
         text = (
             "You are grading one robot trial from its camera frames.\n\n"
             f"Task instruction: {instruction}\n\n"
-            f"Rubric:\n{self._rubric}\n\n"
+            f"Rubric:\n{rubric}\n\n"
             f"{frames_sentence} Judge the trial against the rubric using only "
             "what is visible. Explain your judgement briefly, then end your "
             "reply with exactly one line:\nGRADE: success\nor\nGRADE: failure"
@@ -192,7 +205,7 @@ class _VLMGrader:
                 self._base_url,
                 self._api_key,
                 self._model,
-                self._messages(scene.instruction, initial, final),
+                self._messages(scene.instruction, self._rubric_for(scene), initial, final),
                 what="grading",
                 fix_hint="check -G model=... and -G base_url=..., then retry",
                 http_post=self._http_post,

@@ -143,6 +143,34 @@ def test_vlm_grader_prompt_covers_instruction_default_rubric_and_frames(
     assert event.data["verdict"] == "success"
 
 
+def test_vlm_grader_prefers_a_scene_metadata_rubric(monkeypatch: pytest.MonkeyPatch) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch, rubric="run-level rubric")
+    scene = Scene(id="s", instruction="stack", metadata={"rubric": "generated: cube on cube"})
+
+    grader.grade(_framed_record(), scene)
+
+    text = post.message_parts()[0]["text"]
+    assert isinstance(text, str)
+    assert "generated: cube on cube" in text
+    assert "run-level rubric" not in text
+
+
+def test_vlm_grader_ignores_blank_or_nonstring_scene_rubrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for bad in ("   ", 7):
+        post = _CapturePost()
+        grader = _vlm(post, monkeypatch, rubric="run-level rubric")
+        scene = Scene(id="s", instruction="stack", metadata={"rubric": bad})
+
+        grader.grade(_framed_record(), scene)
+
+        text = post.message_parts()[0]["text"]
+        assert isinstance(text, str)
+        assert "run-level rubric" in text
+
+
 def test_vlm_grader_without_initial_frames_reworks_the_frames_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
