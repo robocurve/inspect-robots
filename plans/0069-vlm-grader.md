@@ -92,8 +92,11 @@ deps; mypy strict; pytest at 100% coverage.
    `FrameRef.load()`); final frames from `record.steps[-1]`
    (`result.observation.images`, else `result_image_refs`). Cameras are
    sorted by name and capped at `max_cameras` per phase (deterministic
-   prompt). A trial with no steps or no images in both phases degrades per
-   decision 3 (a vision judge with nothing to look at must not guess).
+   prompt). Final frames are required: a trial with no steps or no final
+   frames degrades per decision 3 (judging completion needs the end state;
+   a vision judge with nothing to look at must not guess). Initial frames
+   are optional context — when absent, their labeled parts are simply
+   omitted and grading proceeds on the final frames alone.
    Frames are encoded with `_pngenc.png_data_url` (strict uint8, already the
    repo's frame-to-data-URL path).
 5. **Prompt and reply contract.** One user message whose `content` is a list
@@ -138,8 +141,10 @@ deps; mypy strict; pytest at 100% coverage.
    a definitive embodiment reason (`record.terminated and
    record.termination_reason in {"success", "failure"}` — the same
    `_DEFINITIVE_REASONS` set `session.py` uses; import it rather than
-   duplicating the literal), adopt that verdict with an
-   `operator_event(..., source="embodiment")` and no model call. Without
+   duplicating the literal), write the `termination_reason` string itself
+   (`"success"`/`"failure"`, consistent with the model path below and
+   scoring identically through `_OPERATOR_SUCCESS`) as the judgement, with
+   an `operator_event(..., source="embodiment")` and no model call. Without
    gate (b) a definitive trial would spend a model call re-judging — and
    possibly contradicting — the embodiment's own ground truth. Otherwise it
    sets
@@ -205,18 +210,21 @@ deps; mypy strict; pytest at 100% coverage.
   - `_urllib_post` must keep the `HttpPost` shape `(url, headers, body) ->
     (status, bytes)` (interchangeable with injected posts), so it cannot
     take `what`/`fix_hint`; its URLError translation is reworded to the
-    neutral "chat request failed: {reason}. fix: check the base URL and
-    network connectivity, then retry" — an accepted summarize UX wording
-    change (the pinning test at `tests/test_summarize.py:482` matches only
-    `offline.*\nfix:` and survives).
-  - `_summarize.py` re-imports only `HttpPost` and `chat_completion`. The
-    two tests monkeypatching `inspect_robots._summarize._urllib_post`
-    (`tests/test_summarize.py:385` and `:548`) are retargeted to
-    `inspect_robots._chatwire._urllib_post` — without this they hit the real
-    network and fail. The direct-call tests patching
-    `urllib.request.urlopen` globally are unaffected.
+    neutral `"chat request failed: {reason}.\nfix: check the base URL and
+    network connectivity, then retry"` — an accepted summarize UX wording
+    change. The `\n` before `fix:` must be preserved: the pinning test at
+    `tests/test_summarize.py:482` matches `offline.*\nfix:` and `.` does
+    not cross newlines, so flattening it to a space fails that test.
+  - `_summarize.py` re-imports only `HttpPost` and `chat_completion`. Three
+    test sites retarget to `inspect_robots._chatwire`: the name-import of
+    `_urllib_post` in the import block (`tests/test_summarize.py:17-26`,
+    which otherwise fails the whole module at collection), and the two
+    monkeypatches of `inspect_robots._summarize._urllib_post`
+    (`tests/test_summarize.py:385` and `:548`, which otherwise hit the real
+    network). The direct-call tests patching `urllib.request.urlopen`
+    globally need no other change.
 
-  Tests: summarize suite passes with only those two patch-target lines
+  Tests: summarize suite passes with only those three retargeted sites
   changed; new `tests/test_chatwire.py` covers the moved paths (2xx parse,
   non-2xx with custom `what`/`fix_hint`, malformed reply,
   HTTPError/URLError translation) via injected `http_post` or a patched
@@ -231,7 +239,9 @@ deps; mypy strict; pytest at 100% coverage.
   with `fix:` in the message); rubric file read once; skip when judgement
   already present (no HTTP call recorded); definitive embodiment
   termination (`success` and `failure`) adopted with `source="embodiment"`
-  and no HTTP call; no-frames degrade with stderr note; frame-load failure
+  and no HTTP call; no-final-frames degrade with stderr note (and
+  initial-frames-absent proceeds on final frames alone, with the initial
+  labels omitted); frame-load failure
   (deleted `.npy` behind a `FrameRef`) degrades without raising; camera
   sort + `max_cameras` cap; prompt contains instruction, rubric, labels,
   and data URLs for first-step and last-step frames (refs and inline both);
@@ -253,8 +263,9 @@ deps; mypy strict; pytest at 100% coverage.
   loud requires-a-grader message; `--grader vlm` without the key env set
   exits with the guided `ConfigError` before any rollout starts;
   `config show` displays the `grader` default; `config set grader X` warns
-  about stale `[grader.args]` written for another owner; `VLMScorer`
-  message test updated.
+  about stale `[grader.args]` written for another owner; add a test pinning
+  `VLMScorer`'s new message (none exists today — the class survives the
+  coverage gate via the `NotImplementedError` exclusion in pyproject).
 - [ ] **4. Public API + docs.** `__all__` += `vlm_grader` (alphabetical;
   the `grader`-decorator shadowing order from plan 0049 is unaffected because
   the submodule import already runs first); update
