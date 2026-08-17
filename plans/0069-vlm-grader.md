@@ -110,9 +110,11 @@ deps; mypy strict; pytest at 100% coverage.
    GRADE: failure
    ```
 
-   Default rubric (when neither `rubric` nor `rubric_file` is given): "The
-   trial succeeds if the final frames show the task instruction has been
-   accomplished. If the outcome is ambiguous or not visible, grade failure."
+   Default rubric (when neither `rubric` nor `rubric_file` is given): "Grade
+   success if the system completed the task instruction, otherwise grade
+   failure. If the outcome is ambiguous or not visible in the frames, grade
+   failure." The binary 1/0 outcome the operator sees comes from the
+   `operator` scorer mapping the judgement to 1.0/0.0 (decision 6).
    The reply is parsed by scanning lines for
    `^\s*GRADE:\s*(success|failure)\s*$` (case-insensitive) and taking the
    **last** match, mirroring Inspect AI's model-graded pattern; no match
