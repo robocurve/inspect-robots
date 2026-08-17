@@ -176,11 +176,18 @@ def generate_scene(
         {"type": "text", "text": f"{meta_instructions}\n\n{_REPLY_CONTRACT}"}
     ]
     for camera, frame in sorted(observation.images.items())[:max_cameras]:
+        try:
+            frame_url = png_data_url(frame)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"task generation could not encode the frame from camera {camera!r}: {exc}\n"
+                "fix: configure the embodiment to return uint8 HxWx3 images"
+            ) from exc
         parts.append({"type": "text", "text": f"camera {camera!r}"})
         parts.append(
             {
                 "type": "image_url",
-                "image_url": {"url": png_data_url(frame)},
+                "image_url": {"url": frame_url},
             }
         )
     messages: list[dict[str, Any]] = [{"role": "user", "content": parts}]

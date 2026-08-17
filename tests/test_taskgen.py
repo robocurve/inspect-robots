@@ -353,3 +353,13 @@ def test_bare_package_import_does_not_import_cli() -> None:
         text=True,
     )
     assert completed.stdout.strip() == "False"
+
+
+def test_unencodable_frame_is_a_guided_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frame the PNG encoder rejects fails fast naming the camera, never a raw TypeError."""
+    embodiment = _MultiCameraEmbodiment({"wrist": np.zeros((4, 4, 3), dtype=np.float32)})
+    with pytest.raises(ConfigError) as error:
+        _generate(monkeypatch, embodiment=embodiment)
+    message = _assert_fix(error)
+    assert "camera 'wrist'" in message
+    assert "uint8" in message

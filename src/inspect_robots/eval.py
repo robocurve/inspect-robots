@@ -460,13 +460,15 @@ def _run_eval(
         termination_reasons: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
+        # One json.dumps call is both the JSON-safety filter and, via loads, a
+        # deep copy: a nested value an adapter later mutates into something
+        # unserializable must not crash the sink at write time.
         scene_metadata: dict[str, Any] = {}
         for key, value in scene.metadata.items():
             try:
-                json.dumps(value)
+                scene_metadata[key] = json.loads(json.dumps(value))
             except (TypeError, ValueError, OverflowError):
                 continue
-            scene_metadata[key] = value
         scene_status = "success"
         scene_error: str | None = None
 

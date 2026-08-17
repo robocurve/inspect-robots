@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -273,6 +274,10 @@ def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
         "rubric": "touch the cube",
         "nested": {"thresholds": [1, 2]},
     }
+    # The persisted copy is deep: mutating the live scene metadata after the
+    # fact (as an adapter might mid-run) must not reach into the log.
+    cast(dict[str, Any], task.scenes[0].metadata["nested"])["thresholds"].append(object())
+    assert log.samples[0].scene_metadata["nested"] == {"thresholds": [1, 2]}
     written = read_eval_log(str(next(tmp_path.glob("*.json"))))
     assert written.samples[0].scene_metadata == log.samples[0].scene_metadata
 
