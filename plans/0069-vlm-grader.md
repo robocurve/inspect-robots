@@ -24,6 +24,11 @@ deps; mypy strict; pytest at 100% coverage.
 
 **Spec:** issue #382 + this plan (the plan is the spec, per repo convention).
 
+**Critique:** three fresh-context subagent rounds (2026-08-17). Round 1: nine
+findings folded in. Round 2: all citations verified, five pins folded in.
+Round 3: confirmed clean apart from one prompt-sentence consistency pin,
+applied verbatim (decision 5's `{frames_sentence}`).
+
 ## Global constraints
 
 - Core stays NumPy-only: no new dependencies, `core-only-import` CI job must
@@ -113,14 +118,20 @@ deps; mypy strict; pytest at 100% coverage.
    Rubric:
    {rubric}
 
-   You will see the initial frames (before the robot acted) and the final
-   frames (after the trial ended). Judge the trial against the rubric using
+   {frames_sentence} Judge the trial against the rubric using
    only what is visible. Explain your judgement briefly, then end your reply
    with exactly one line:
    GRADE: success
    or
    GRADE: failure
    ```
+
+   `{frames_sentence}` is "You will see the initial frames (before the
+   robot acted) and the final frames (after the trial ended)." when initial
+   frames are attached, and "You will see the final frames (after the trial
+   ended)." when decision 4 omitted them — the prompt must never promise
+   frames the judge does not receive, or the default rubric's
+   ambiguity-fails clause punishes the "missing" ones.
 
    Default rubric (when neither `rubric` nor `rubric_file` is given): "Grade
    success if the system completed the task instruction, otherwise grade
@@ -241,7 +252,8 @@ deps; mypy strict; pytest at 100% coverage.
   termination (`success` and `failure`) adopted with `source="embodiment"`
   and no HTTP call; no-final-frames degrade with stderr note (and
   initial-frames-absent proceeds on final frames alone, with the initial
-  labels omitted); frame-load failure
+  labels omitted and the prompt's frames sentence not mentioning initial
+  frames); frame-load failure
   (deleted `.npy` behind a `FrameRef`) degrades without raising; camera
   sort + `max_cameras` cap; prompt contains instruction, rubric, labels,
   and data URLs for first-step and last-step frames (refs and inline both);
