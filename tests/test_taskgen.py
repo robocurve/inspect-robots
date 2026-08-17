@@ -122,7 +122,9 @@ def test_unreadable_instructions_file_has_guidance(tmp_path: Path) -> None:
         )
     message = _assert_fix(exc_info)
     assert "instructions_file" in message
-    assert str(missing) in message
+    # The message interpolates the path with !r, so match its repr form
+    # (Windows backslashes are escaped there, not raw).
+    assert repr(str(missing)) in message
 
 
 def test_api_key_must_be_set_and_non_empty(monkeypatch: pytest.MonkeyPatch) -> None:
