@@ -34,9 +34,10 @@ EXPECTED = {
     "reached_goal_state",
     "operator_scorer",
     "operator_input",
-    # judgement capture (plan 0049)
+    # judgement capture (plans 0049 and 0069)
     "Grader",
     "operator_grader",
+    "vlm_grader",
     # the two swappable inputs
     "Policy",
     "PolicyBase",
