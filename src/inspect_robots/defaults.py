@@ -94,6 +94,7 @@ class Defaults:
     policy_args: dict[str, Any] = field(default_factory=dict)
     embodiment_args: dict[str, Any] = field(default_factory=dict)
     sim_embodiment_args: dict[str, Any] = field(default_factory=dict)
+    grader_args: dict[str, Any] = field(default_factory=dict)
     # The [<kind>.args] sections are written alongside the config file's
     # [defaults] component names; each args dict is only valid for that
     # component (its "owner", issue #44). Env vars override the names above
@@ -102,6 +103,7 @@ class Defaults:
     policy_args_owner: str | None = None
     embodiment_args_owner: str | None = None
     sim_embodiment_args_owner: str | None = None
+    grader_args_owner: str | None = None
 
 
 def config_path(env: Mapping[str, str]) -> Path | None:
@@ -201,6 +203,7 @@ def _read_config(path: Path) -> Defaults:
     policy = parser.get("defaults", "policy", fallback=None)
     embodiment = parser.get("defaults", "embodiment", fallback=None)
     sim_embodiment = parser.get("defaults", "sim_embodiment", fallback=None)
+    grader = parser.get("defaults", "grader", fallback=None)
     return Defaults(
         policy=policy,
         policy_source=source if policy else None,
@@ -209,7 +212,7 @@ def _read_config(path: Path) -> Defaults:
         sim_embodiment=sim_embodiment,
         sim_embodiment_source=source if sim_embodiment else None,
         scorer=parser.get("defaults", "scorer", fallback=None),
-        grader=parser.get("defaults", "grader", fallback=None),
+        grader=grader,
         max_steps=max_steps,
         store_frames=store_frames,
         rerun=rerun,
@@ -218,9 +221,11 @@ def _read_config(path: Path) -> Defaults:
         policy_args=_parse_args_section(parser, "policy.args"),
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
+        grader_args=_parse_args_section(parser, "grader.args"),
         policy_args_owner=policy,
         embodiment_args_owner=embodiment,
         sim_embodiment_args_owner=sim_embodiment,
+        grader_args_owner=grader,
     )
 
 
@@ -272,7 +277,7 @@ def _set_default(env: Mapping[str, str], key: str, value: str) -> Path:
             raise _die(path, f"malformed config: {exc}") from exc
     if not parser.has_section("defaults"):
         parser.add_section("defaults")
-    if key in ("policy", "embodiment", "sim_embodiment"):
+    if key in ("policy", "embodiment", "sim_embodiment", "grader"):
         old_value = parser.get("defaults", key, fallback=None)
         args_section = f"{key}.args"
         if (

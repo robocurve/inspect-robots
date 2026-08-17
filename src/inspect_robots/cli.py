@@ -205,6 +205,7 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     parser.add_argument("-P", dest="policy_args", action="append", metavar="k=v")
     parser.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
+    parser.add_argument("-G", dest="grader_args", action="append", metavar="k=v")
     parser.add_argument(
         "--voice",
         action="store_true",
@@ -710,6 +711,7 @@ def _resolve_or_exit(
             "task": "-T",
             "policy": "-P",
             "embodiment": "-E",
+            "grader": "-G",
             "sink": "-S",
             "operator_input": "-V",
         }.get(kind, "the CLI args flag")
@@ -1000,8 +1002,12 @@ def _build_grader(
     """
     name = _select_grader_name(args, defaults)
     if name is None:
+        if args.grader_args:
+            raise SystemExit("-G requires a grader (--grader or a config default)")
         return None
-    grader = cast("Grader", _resolve_or_exit("grader", name))
+    config_kvs = _config_args("grader", name, defaults.grader_args_owner, defaults.grader_args)
+    grader_kvs = {**config_kvs, **_parse_kvs(args.grader_args)}
+    grader = cast("Grader", _resolve_or_exit("grader", name, **grader_kvs))
     connect = getattr(grader, "connect_session", None)
     if session is not None and callable(connect):
         connect(session)
@@ -2690,6 +2696,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         ("embodiment", defaults.embodiment, defaults.embodiment_source),
         ("sim_embodiment", defaults.sim_embodiment, defaults.sim_embodiment_source),
         ("scorer", defaults.scorer, None),
+        ("grader", defaults.grader, None),
         ("max_steps", defaults.max_steps, None),
         ("store_frames", defaults.store_frames, None),
         ("rerun", defaults.rerun, None),
