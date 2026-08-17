@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import io
+import urllib.error
+import urllib.request
+from email.message import Message
+
 import pytest
 
-from inspect_robots._chatwire import HttpPost, chat_completion
+from inspect_robots._chatwire import HttpPost, _urllib_post, chat_completion
 from inspect_robots.errors import ConfigError
 
 
@@ -47,3 +52,26 @@ def test_malformed_reply_uses_the_what_prefix() -> None:
         chat_completion(
             "https://x.test/v1", "k", "m", [], what="grading", http_post=_post(200, b"not json")
         )
+
+
+def test_urllib_post_preserves_http_error_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.HTTPError(
+            request.full_url, 429, "rate limited", Message(), io.BytesIO(b"slow down")
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert _urllib_post("https://x.test", {}, b"{}") == (429, b"slow down")
+
+
+def test_urllib_post_translates_url_errors_to_neutral_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ConfigError, match=r"chat request failed: offline.\nfix: check the base"):
+        _urllib_post("https://x.test", {}, b"{}")

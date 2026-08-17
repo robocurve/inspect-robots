@@ -90,7 +90,9 @@ def _wire_fix(api_key_env: str) -> str:
 
 def _reword_wire_error(error: ConfigError, api_key_env: str) -> ConfigError:
     lines = str(error).splitlines()
-    diagnosis = [re.sub(r"^summary\b", "task generation", line) for line in lines]
+    # The wire labels its own failures "summary" (chat_completion defaults)
+    # or "chat" (_urllib_post's transport translation); both become ours.
+    diagnosis = [re.sub(r"^(summary|chat)\b", "task generation", line) for line in lines]
     diagnosis = [line for line in diagnosis if not line.startswith("fix:")]
     return ConfigError("\n".join([*diagnosis, _wire_fix(api_key_env)]))
 

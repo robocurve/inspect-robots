@@ -106,11 +106,12 @@ def _phase_frames(
     Cameras come back name-sorted and capped so the prompt is deterministic.
     """
     inline = step.result.observation.images if final else step.observation.images
-    named: dict[str, npt.NDArray[np.uint8]] = dict(inline)
-    if not named:
-        refs = step.result_image_refs if final else step.image_refs
-        named = {camera: ref.load() for camera, ref in (refs or {}).items()}
-    return [(camera, named[camera]) for camera in sorted(named)[:max_cameras]]
+    if inline:
+        return [(camera, inline[camera]) for camera in sorted(inline)[:max_cameras]]
+    refs = (step.result_image_refs if final else step.image_refs) or {}
+    # Cap before loading: skipped cameras cost no disk reads, and a corrupt
+    # frame beyond the cap cannot degrade the trial.
+    return [(camera, refs[camera].load()) for camera in sorted(refs)[:max_cameras]]
 
 
 class _VLMGrader:
@@ -245,6 +246,11 @@ def vlm_grader(
     """
     if not model:
         raise ConfigError("the vlm grader needs a model id.\nfix: pass -G model=...")
+    if isinstance(max_cameras, bool) or not isinstance(max_cameras, int) or max_cameras < 1:
+        raise ConfigError(
+            f"max_cameras must be a positive integer, got {max_cameras!r}.\n"
+            "fix: pass -G max_cameras=<positive int>"
+        )
     if rubric is not None and rubric_file is not None:
         raise ConfigError(
             "rubric and rubric_file are mutually exclusive.\n"

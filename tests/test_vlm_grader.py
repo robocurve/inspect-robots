@@ -89,6 +89,13 @@ def test_vlm_grader_requires_model_and_key(monkeypatch: pytest.MonkeyPatch) -> N
         vlm_grader("m", api_key_env="VLM_MISSING_KEY")
 
 
+def test_vlm_grader_rejects_a_useless_camera_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    for bad in (0, -1, 2.5, True):
+        with pytest.raises(ConfigError, match=r"max_cameras must be a positive integer"):
+            vlm_grader("m", api_key_env="VLM_TEST_KEY", max_cameras=bad)  # type: ignore[arg-type]
+
+
 def test_vlm_grader_rubric_sources_are_exclusive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,6 +223,31 @@ def test_vlm_grader_loads_frame_refs_sorted_and_capped(
         "initial frame, camera 'b_cam'",
         "final frame, camera 'cam'",
     ]
+    assert record.operator_judgement == "success"
+
+
+def test_vlm_grader_never_loads_frames_beyond_the_camera_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    kept = store.put("trial", 1, "a_cam", _frame(7))
+    corrupt = store.put("trial", 1, "z_cam", _frame(8))
+    Path(corrupt.path).unlink()
+    steps = [
+        StepRecord(
+            t=0,
+            observation=Observation(),
+            action=Action(data=np.zeros(2)),
+            result=StepResult(observation=Observation()),
+            result_image_refs={"a_cam": kept, "z_cam": corrupt},
+        )
+    ]
+    record = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    post = _CapturePost()
+
+    _vlm(post, monkeypatch, max_cameras=1).grade(record, _scene())
+
+    assert _labels(post.message_parts()) == ["final frame, camera 'a_cam'"]
     assert record.operator_judgement == "success"
 
 
