@@ -70,6 +70,7 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.task import Epochs, Task, TaskEnvelope
+from inspect_robots.taskgen import generate_scene
 from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation, StepResult
 
 # The public, stability-guaranteed API. Anything not listed here (or prefixed
@@ -120,6 +121,7 @@ __all__ = [
     "episode_length",
     "eval",
     "eval_set",
+    "generate_scene",
     "grader",
     "min_distance_to_goal",
     "operator_grader",

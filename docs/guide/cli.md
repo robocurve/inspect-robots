@@ -338,6 +338,42 @@ The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
 scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
+### Automatic task generation: `--auto-task`
+
+Use `--auto-task` in place of `--task` or `--instruction` to have a
+vision-capable model inspect the embodiment's initial camera frames and write
+both the task and its grading rubric:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+inspect-robots run --auto-task -A model=claude-sonnet-4-5 \
+             --policy agent --embodiment my-robot
+```
+
+The command prints the generated instruction and rubric before rollout. The
+instruction is sent to the policy, and the rubric is shown to the operator
+grader when a verdict is needed. Both are persisted in the eval log.
+
+Repeat `-A key=value` to pass generator arguments. Common arguments are
+`model`, `instructions`, `instructions_file`, `base_url`, `api_key_env`,
+`max_cameras`, and `scene_id`. Values use the same bool/int/float/None/string
+parsing as the component argument flags:
+
+```bash
+inspect-robots run --auto-task \
+             -A model=vision-model \
+             -A instructions_file=task-designer.txt \
+             -A max_cameras=2 \
+             --policy agent --embodiment my-robot
+```
+
+Exactly one of `--task`, `--instruction`, and `--auto-task` is required.
+`-A` requires `--auto-task`, and `-T` cannot be combined with it. Automatic
+tasks use the same `--max-steps` and `--scorer` defaults as instruction runs.
+`--epochs N` repeats the generated scene without regenerating the task. Keep
+the default integer seed, or pass an explicit `--seed N`; task generation and
+evaluation use the same value so the initial peek matches epoch zero.
+
 ## `inspect-robots eval-set`
 
 Run several registered tasks against one resolved policy/embodiment pair in a
