@@ -45,8 +45,11 @@ deps; mypy strict; pytest at 100% coverage.
    `http_post` seam is dependency-free and already lives in core. A core
    builtin means `--grader vlm` works on a bare install, and the 100% coverage
    gate applies (the `http_post` seam makes that cheap). The wire moves to a
-   shared private module `_chatwire.py`; `_summarize.py` re-imports the moved
-   names so its tests and any monkeypatching keep working.
+   shared private module `_chatwire.py`; `_summarize.py` re-imports only the
+   names it genuinely uses (`HttpPost`, `chat_completion`) — unused private
+   re-imports would trip ruff F401, and re-importing `_urllib_post` cannot
+   restore monkeypatch semantics anyway (Task 1 retargets the two affected
+   tests).
 2. **Name and factory.** Registry name `vlm` (the R10 vocabulary this repo
    already uses); factory `vlm_grader(...)` exported in `__all__`:
 
@@ -74,10 +77,16 @@ deps; mypy strict; pytest at 100% coverage.
    one-line `fix:` hint naming the flag or variable. Missing `model` entirely
    is a `TypeError` and both error classes already become guided messages via
    `_resolve_or_exit` (`cli.py:679`). After the rollout, `grade()` never
-   raises (the `Grader` protocol contract): transport failures, non-2xx,
-   malformed replies, and unparseable verdicts print one stderr note
-   (`vlm grader: <reason>; trial left ungraded`) and leave the record
-   unchanged.
+   raises (the `Grader` protocol contract): the whole grading attempt is
+   wrapped in one broad `except Exception` — transport failures (including
+   a raw `TimeoutError` from a read timeout, which `_urllib_post` does not
+   translate to `URLError`), non-2xx, malformed replies, unparseable
+   verdicts, and frame files that fail to load (`FrameRef.load()` raises
+   `OSError`/`ValueError` on missing or corrupt files) all print one stderr
+   note (`vlm grader: <reason>; trial left ungraded`) and leave the record
+   unchanged. Post-rollout, degrading is always right; the robot work is
+   already done and `before_scoring` is invoked uncaught
+   (`eval.py:545-549`), so anything escaping `grade()` would error the run.
 4. **Frame selection.** Initial frames come from `record.steps[0]` (inline
    `observation.images` when present, else `image_refs` loaded via
    `FrameRef.load()`); final frames from `record.steps[-1]`
@@ -115,14 +124,25 @@ deps; mypy strict; pytest at 100% coverage.
    failure. If the outcome is ambiguous or not visible in the frames, grade
    failure." The binary 1/0 outcome the operator sees comes from the
    `operator` scorer mapping the judgement to 1.0/0.0 (decision 6).
-   The reply is parsed by scanning lines for
-   `^\s*GRADE:\s*(success|failure)\s*$` (case-insensitive) and taking the
-   **last** match, mirroring Inspect AI's model-graded pattern; no match
-   degrades per decision 3 with a bounded reply excerpt in the note.
-6. **Record mutation.** If `record.operator_judgement` is already set (a
-   console-typed or embodiment-definitive verdict captured during rollout),
-   `grade()` returns without spending a model call — same adopt-don't-re-ask
-   stance as `prompt_verdict`. Otherwise it sets
+   The reply is parsed with a lenient search — the **last** match of
+   `GRADE:\s*\**\s*(success|failure)` (case-insensitive) anywhere in the
+   text, so markdown emphasis (`**GRADE: success**`) and trailing
+   punctuation do not silently leave cron trials ungraded — mirroring
+   Inspect AI's model-graded pattern; no match degrades per decision 3 with
+   a bounded reply excerpt in the stderr note.
+6. **Record mutation.** Two adopt-before-spend gates, mirroring
+   `prompt_verdict` (`session.py:693-705`): (a) if
+   `record.operator_judgement` is already set (a console-typed verdict is
+   the only judgement rollout itself records, `rollout.py:339-350`),
+   `grade()` returns without a model call; (b) if the trial terminated with
+   a definitive embodiment reason (`record.terminated and
+   record.termination_reason in {"success", "failure"}` — the same
+   `_DEFINITIVE_REASONS` set `session.py` uses; import it rather than
+   duplicating the literal), adopt that verdict with an
+   `operator_event(..., source="embodiment")` and no model call. Without
+   gate (b) a definitive trial would spend a model call re-judging — and
+   possibly contradicting — the embodiment's own ground truth. Otherwise it
+   sets
    `operator_judgement = "success" | "failure"` (`"success"` is in the
    scorer's `_OPERATOR_SUCCESS` set; `"failure"` is not, so the `operator`
    scorer maps them to 1.0/0.0 unchanged), sets `operator_note` to the reply
@@ -138,7 +158,19 @@ deps; mypy strict; pytest at 100% coverage.
    name), and `_build_grader` composes
    `{**_config_args("grader", name, owner, config_args),
    **_parse_kvs(args.grader_args)}` and passes the kwargs through
-   `_resolve_or_exit("grader", name, **kvs)`. Passing `-G` to a grader whose
+   `_resolve_or_exit("grader", name, **kvs)`. When no grader is selected
+   (`_select_grader_name` returns `None`: unattended default, `--grader
+   none`, or the config-`operator` downgrade) but `args.grader_args` is
+   non-empty, exit loudly with `-G requires a grader (--grader or a config
+   default)` — silently dropping the kvs would break the `-V requires
+   --voice` / `-S requires --speak` precedent (`cli.py:884-885,935-936`).
+   Two config-machinery integration points ride along: `_set_default`'s
+   stale-args warning tuple (`defaults.py:275-289`) gains `"grader"` so
+   `config set grader X` warns when `[grader.args]` was written for Y (part
+   of the issue-#44 owner semantics being mirrored), and `config show` gains
+   a `grader` row (`cli.py:2688-2698` currently never displays the existing
+   `grader` key — this plan makes `[defaults] grader = vlm` the flagship
+   cron path, so it must be visible). Passing `-G` to a grader whose
    factory rejects the key (e.g. `operator`) surfaces as the existing guided
    `TypeError` message from `_resolve_or_exit`, not a traceback. Selection
    semantics from plan 0049 are untouched: an explicit `--grader vlm` runs
@@ -160,17 +192,36 @@ deps; mypy strict; pytest at 100% coverage.
 
 - [ ] **1. `_chatwire.py` extraction.** Move `HttpPost`, `_urllib_post`,
   `_response_excerpt`, and `chat_completion` from `_summarize.py` into new
-  `src/inspect_robots/_chatwire.py`; give `chat_completion` a
-  `what: str = "summary"` parameter used in its error prefixes so summarize
-  output stays byte-identical while the grader passes `what="grading"`, and a
-  `fix_hint: str` parameter replacing the hardcoded `--base-url`/`--model`
-  hint lines for the same reason. `_summarize.py` re-imports the moved names
-  (`from inspect_robots._chatwire import ...`) so existing tests and
-  monkeypatch targets keep working. Tests: existing summarize tests pass
-  unmodified; new `tests/test_chatwire.py` covers the moved code paths that
-  coverage attribution moves out of `_summarize` (2xx parse, non-2xx, malformed
-  reply, URLError/HTTPError translation) via injected `http_post` and a fake
-  `urllib` seam, whichever the existing summarize tests already model.
+  `src/inspect_robots/_chatwire.py`, with per-site error handling (the three
+  hardcoded messages differ and one site cannot take parameters):
+  - `chat_completion` gains `what: str = "summary"` (error prefix) and
+    `fix_hint: str = "check --base-url, --model, and the configured API
+    key"` (the non-2xx hint line only), so summarize output stays
+    byte-identical; the malformed-reply message keeps its wire-generic hint
+    (`use an OpenAI-compatible /chat/completions endpoint`) with only the
+    `{what} endpoint returned a malformed reply` prefix parameterized. The
+    grader passes `what="grading"` and a hint naming `-G model=...` /
+    `-G base_url=...`.
+  - `_urllib_post` must keep the `HttpPost` shape `(url, headers, body) ->
+    (status, bytes)` (interchangeable with injected posts), so it cannot
+    take `what`/`fix_hint`; its URLError translation is reworded to the
+    neutral "chat request failed: {reason}. fix: check the base URL and
+    network connectivity, then retry" — an accepted summarize UX wording
+    change (the pinning test at `tests/test_summarize.py:482` matches only
+    `offline.*\nfix:` and survives).
+  - `_summarize.py` re-imports only `HttpPost` and `chat_completion`. The
+    two tests monkeypatching `inspect_robots._summarize._urllib_post`
+    (`tests/test_summarize.py:385` and `:548`) are retargeted to
+    `inspect_robots._chatwire._urllib_post` — without this they hit the real
+    network and fail. The direct-call tests patching
+    `urllib.request.urlopen` globally are unaffected.
+
+  Tests: summarize suite passes with only those two patch-target lines
+  changed; new `tests/test_chatwire.py` covers the moved paths (2xx parse,
+  non-2xx with custom `what`/`fix_hint`, malformed reply,
+  HTTPError/URLError translation) via injected `http_post` or a patched
+  `urllib.request.urlopen`, matching the seams the summarize tests already
+  model.
 - [ ] **2. `vlm_grader` in `grader.py` + registration.** Implement decision
   2–6: `_VLMGrader` class + `vlm_grader()` factory in `grader.py`, registered
   as `"vlm"` in `_builtins.py`. Frame collection helper handles inline images
@@ -178,12 +229,16 @@ deps; mypy strict; pytest at 100% coverage.
   (injected `http_post` capturing the request body): construction fail-fast
   (both rubrics, unreadable `rubric_file`, empty `model`, unset key env, each
   with `fix:` in the message); rubric file read once; skip when judgement
-  already present (no HTTP call recorded); no-frames degrade with stderr
-  note; camera sort + `max_cameras` cap; prompt contains instruction, rubric,
-  labels, and data URLs for first-step and last-step frames (refs and inline
-  both); reply parsing (success, failure, case-insensitive, last-match-wins,
-  no-match degrade with excerpt); note capped at 2000 chars; event has
-  `source="vlm"`; transport error degrades without raising. mypy strict.
+  already present (no HTTP call recorded); definitive embodiment
+  termination (`success` and `failure`) adopted with `source="embodiment"`
+  and no HTTP call; no-frames degrade with stderr note; frame-load failure
+  (deleted `.npy` behind a `FrameRef`) degrades without raising; camera
+  sort + `max_cameras` cap; prompt contains instruction, rubric, labels,
+  and data URLs for first-step and last-step frames (refs and inline both);
+  reply parsing (success, failure, case-insensitive, last-match-wins,
+  markdown-wrapped `**GRADE: success**`, no-match degrade with excerpt);
+  note capped at 2000 chars; event has `source="vlm"`; transport error and
+  a raised `TimeoutError` both degrade without raising. mypy strict.
 - [ ] **3. CLI `-G` + `[grader.args]` config.** Implement decision 7:
   shared `-G` argument, `defaults.py` fields + `[grader.args]` section
   parsing (mirror the `[policy.args]` parser and owner wiring), `_build_grader`
@@ -193,16 +248,27 @@ deps; mypy strict; pytest at 100% coverage.
   `-G k=v` reaches the factory (register a throwaway grader capturing
   kwargs); config args apply only when the configured grader matches the
   owner and explicit `-G` overrides same-named keys; `-G` on the operator
-  grader exits with the guided invalid-argument message; `--grader vlm`
-  without the key env set exits with the guided `ConfigError` before any
-  rollout starts; `VLMScorer` message test updated.
+  grader exits with the guided invalid-argument message; `-G` with no
+  selected grader (unattended default and `--grader none`) exits with the
+  loud requires-a-grader message; `--grader vlm` without the key env set
+  exits with the guided `ConfigError` before any rollout starts;
+  `config show` displays the `grader` default; `config set grader X` warns
+  about stale `[grader.args]` written for another owner; `VLMScorer`
+  message test updated.
 - [ ] **4. Public API + docs.** `__all__` += `vlm_grader` (alphabetical;
   the `grader`-decorator shadowing order from plan 0049 is unaffected because
   the submodule import already runs first); update
   `tests/test_api_snapshot.py` in the same commit. Docs: `docs/guide/scoring.md`
   gains a "Automated grading with a vision model" section (flags, config
-  keys, rubric file, unattended behavior, how `operator` scorer reads the
-  judgement); `docs/guide/cli.md` documents `-G` and `--grader vlm`;
+  keys, rubric file, unattended behavior, how the `operator` scorer reads
+  the judgement, and that the Python API is `eval(grader=vlm_grader(...))` —
+  the string form `eval(grader="vlm")` cannot work because `eval.py:73`
+  resolves names with no kwargs and `model` is required); rewrite the two
+  now-stale sentences the grader obsoletes: `docs/guide/cli.md:144-145`
+  ("which is what a future VLM autograder needs") and the scoring.md line
+  "a VLM autograder over final frames belongs on the same seam (the
+  reserved VLMScorer interface predates it)". `docs/guide/cli.md` documents
+  `-G` and `--grader vlm`;
   `src/inspect_robots/CLAUDE.md` module-map rows for `grader.py`,
   `_chatwire.py`, `_summarize.py`, `cli.py`, `defaults.py`. README only if it
   enumerates graders today (check; do not add a new section). Nothing
