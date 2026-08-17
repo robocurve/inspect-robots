@@ -13,6 +13,7 @@ EXPECTED = {
     # evaluation + logs
     "eval",
     "eval_set",
+    "generate_scene",
     "read_eval_log",
     "EvalLog",
     "EvalResults",
