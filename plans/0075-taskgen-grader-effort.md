@@ -39,7 +39,19 @@ normalization for real parity; and falsy non-string parses
 wire serializes non-empty values verbatim and the endpoint's 4xx
 rejects them loudly. Nitpicks folded in: the CHANGELOG `### Added`
 section already exists (dead fallback removed) and taskgen provenance
-metadata now records the sent effort (new decision 4b).
+metadata now records the sent effort (new decision 4b). Round 2 (fresh
+context) confirmed the round-1 fixes faithful (sentinel mirror, verbatim
+wire semantics, anchors, existing-test safety incl. the exact-equality
+metadata pin at test_taskgen.py:163-169 staying green) and found 1 major
++ 2 minors, all fixed in this revision: the "endpoint 4xx is loud"
+rationale was false for the grader (grade degrades to ungraded with a
+stderr note, grader.py:217-219) — now acknowledged in the constraints,
+docs note, and a dedicated degrade test; `""` no longer silently means
+unset but raises the guided front-loaded ConfigError on both surfaces,
+restoring true `-P effort=` parity; and `""`/provenance tests were added
+so a forgotten guard cannot record effort values that never hit the
+wire. Its nitpicks (exact annotation spelled, normalized-value
+provenance wording, `effort=None` provenance assertion) are folded in.
 
 ## Global constraints
 
@@ -50,10 +62,17 @@ metadata now records the sent effort (new decision 4b).
   existing endpoint sees unchanged behavior and the provider default
   applies. This is the project's flags-omit-means-provider-default
   stance.
-- No client-side value validation: providers disagree on the allowed set
-  (`minimal`/`none`/`xhigh` exist on some, not others); the endpoint's
-  own 4xx is the accurate guided error and already surfaces through the
-  existing non-2xx path.
+- No client-side value validation beyond the empty-string guard:
+  providers disagree on the allowed set (`minimal`/`none`/`xhigh` exist
+  on some, not others), so values pass through verbatim and the
+  endpoint's own 4xx is the authoritative error. Loudness differs by
+  surface and the implementation and docs must reflect it: taskgen
+  fails pre-rollout (`ConfigError` → guided `SystemExit`,
+  cli.py:1673-1675), but `_VLMGrader.grade` deliberately degrades —
+  `except Exception` → stderr note → trial left ungraded
+  (grader.py:217-219) — so a bad `-G effort=` value surfaces per-trial
+  after the rollout, exactly like a typo'd `-G model=` does today. The
+  docs note for `-G effort` names this failure mode.
 - Existing tests must pass without edits; a pre-existing test that seems
   to demand modification is a stop-and-flag conflict, not something to
   edit.
@@ -82,13 +101,18 @@ metadata now records the sent effort (new decision 4b).
 3. **Signatures:** `chat_completion` gains keyword-only
    `effort: str | float | None = None` with the decision-1 semantics
    (`None`/`""` omit, everything else verbatim). `generate_scene` and
-   `vlm_grader` gain keyword-only `effort` defaulting to an `_Unset`
-   sentinel (module-private, mirroring the agent plugin's
-   `policy.py` `_Unset` pattern): sentinel or `""` → call the wire with
-   `effort=None` (omit); key-present `None` → normalize to the string
-   `"none"`; any other value passes through verbatim. `_VLMGrader`
-   stores the normalized value; `grade` passes it to `chat_completion`.
-   `_post_chat` takes the normalized `effort` as a
+   `vlm_grader` gain keyword-only
+   `effort: str | float | None | _Unset = _UNSET` (module-private
+   sentinel per surface, mirroring the agent plugin's `policy.py:106`
+   pattern and its exact annotation at policy.py:332): sentinel → call
+   the wire with `effort=None` (omit); `""` → guided `ConfigError` at
+   construction time, front-loaded like the surface's other config
+   checks ("effort must be a level name or number; omit the key for
+   the provider default"), matching the plugin where
+   `_validated_effort("")` raises; key-present `None` → normalize to
+   the string `"none"`; any other value passes through verbatim.
+   `_VLMGrader` stores the normalized value; `grade` passes it to
+   `chat_completion`. `_post_chat` takes the normalized `effort` as a
    positional-after-token_param parameter (private helper, no default
    needed — both callers pass it explicitly).
 4. **`effort=none` means minimum, absent means provider default —
@@ -98,19 +122,24 @@ metadata now records the sent effort (new decision 4b).
    as `-P effort=none` sends the true minimum since agent 0.23.0
    (policy.py's `"none" if effort is None else effort` on its `_Unset`
    sentinel). Only a key that is absent altogether (no flag, no config
-   key) omits the field for the provider default. The docs note states
-   both halves. This keeps one CLI-wide meaning for `effort=none` and
-   preserves an unquoted spelling for minimum effort.
+   key) omits the field for the provider default, and `""` raises the
+   guided error exactly as `-P effort=` does. The docs note states all
+   three. This keeps one CLI-wide meaning for `effort=none`, preserves
+   an unquoted spelling for minimum effort, and leaves no falsy parse
+   silently changing meaning.
 4b. **Provenance metadata:** `generate_scene` records the taskgen
-   provenance dict (`taskgen.py` ~line 220); when an effort value is
-   sent on the wire, record it there as `"effort"` alongside `model`
-   and `base_url`; when omitted, the key stays absent.
+   provenance dict (`taskgen.py:220`); when an effort value is sent on
+   the wire, record the NORMALIZED wire value there as `"effort"`
+   alongside `model` and `base_url` (so key-present `None` records
+   `"none"`); when omitted, the key stays absent.
 5. **Docs surface:** add `effort` to the two key lists in
    `docs/guide/cli.md`: the `-G` component-argument list (lines ~171-174)
    and the `-A` common-arguments list (lines ~409-411), each stating
-   both halves of the contract: leaving the key out leaves the provider
-   default in charge, and `effort=none` requests the minimum (it does
-   not mean unset). No em dashes in the added prose.
+   the contract: leaving the key out leaves the provider default in
+   charge, `effort=none` requests the minimum (it does not mean unset),
+   and an invalid value fails pre-rollout for `-A` but leaves trials
+   ungraded (stderr note per trial) for `-G`, like any grader wire
+   failure. No em dashes in the added prose.
 6. **CHANGELOG:** one entry under the existing `## [Unreleased]` /
    `### Added` section (present at ~line 65), Core-scoped, linking this
    plan and issue #394, following the existing entry format.
@@ -134,17 +163,22 @@ metadata now records the sent effort (new decision 4b).
       (`"reasoning_effort": 0.5`), pinning the no-silent-swallow rule.
 - [ ] `tests/test_taskgen.py`: tests that `generate_scene(...,
       effort="high")` produces a request body containing
-      `reasoning_effort: "high"` and records `effort` in the taskgen
-      provenance metadata; that `effort=None` (key present) sends the
-      string `"none"`; and that omitting the kwarg sends no
-      `reasoning_effort` key and records no `effort` metadata (capture
-      via the injected `http_post`, following the file's existing fake
+      `reasoning_effort: "high"` and records `"effort": "high"` in the
+      taskgen provenance metadata; that `effort=None` (key present)
+      sends the string `"none"` and records `"effort": "none"`; that
+      omitting the kwarg sends no `reasoning_effort` key and records no
+      `effort` metadata; and that `effort=""` raises the guided
+      `ConfigError` before any request is made (capture via the
+      injected `http_post`, following the file's existing fake
       conventions).
 - [ ] `tests/test_vlm_grader.py`: tests that `vlm_grader(...,
       effort="high")` sends `reasoning_effort: "high"` when grading,
-      that `effort=None` (key present) sends `"none"`, and that
-      omitting the kwarg sends no key (same capture approach as that
-      file's existing wire tests).
+      that `effort=None` (key present) sends `"none"`, that omitting
+      the kwarg sends no key, that `effort=""` raises the guided
+      `ConfigError` at construction (front-loaded, like the missing-key
+      check), and that an endpoint 4xx on an effort-bearing request
+      degrades to an ungraded trial with the stderr note rather than
+      raising (pinning the decision-1 loudness caveat).
 - [ ] Run the three files; every new test must fail against current code
       (each asserts a key that nothing emits yet, or passes a kwarg that
       does not exist yet — the taskgen/grader ones fail with TypeError).
@@ -157,14 +191,17 @@ metadata now records the sent effort (new decision 4b).
       `effort: str | float | None = None` and pass it to both sends;
       extend the module docstring's contract sentence.
 - [ ] `taskgen.py`: add the `_Unset`-sentinel keyword-only `effort` to
-      `generate_scene` per binding decision 3, normalize (sentinel/`""`
-      → omit, `None` → `"none"`), pass the normalized value to
-      `chat_completion`, and record it in the provenance metadata when
-      sent (decision 4b). Docstring states both halves of the `none`
+      `generate_scene` per binding decision 3 (sentinel → omit, `""` →
+      guided `ConfigError` front-loaded with the other config checks,
+      `None` → `"none"`, else verbatim), pass the normalized value to
+      `chat_completion`, and record the normalized value in the
+      provenance metadata when sent (decision 4b). Docstring states the
       contract.
-- [ ] `grader.py`: same sentinel + normalization on `vlm_grader`, store
-      the normalized value on `_VLMGrader`, pass in `grade`'s call.
-      Docstring states both halves.
+- [ ] `grader.py`: same sentinel + normalization + `""` guard on
+      `vlm_grader` (raised at construction, front-loaded), store the
+      normalized value on `_VLMGrader`, pass in `grade`'s call.
+      Docstring states the contract including the degrade-to-ungraded
+      loudness caveat.
 - [ ] Run the three test files until green, then full gates:
       `uv run ruff check .`, `uv run ruff format --check .`,
       `uv run mypy`, `uv run pytest --cov` (must hold 100%).
