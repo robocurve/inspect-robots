@@ -4565,16 +4565,119 @@ def test_auto_task_generation_errors_exit_with_guidance(
 
     message = str(exc_info.value)
     if failure == "unknown":
-        # TypeError earns the CLI's guided wrapper naming the -A flag.
+        # TypeError earns the CLI's guided wrapper naming both knobs.
         assert "invalid arguments for automatic task generation:" in message
         assert "unexpected keyword argument 'unknown_key'" in message
-        assert "-A k=v" in message
+        assert "check [taskgen.args] and -A k=v" in message
     else:
         # ConfigError already carries its own fix: hint and exits verbatim,
         # mirroring _resolve_or_exit: no second, vaguer hint on top.
         assert "injected generation failure" in message
         assert "fix: injected remedy" in message
         assert "-A k=v" not in message
+
+
+def _capture_generate_scene(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """Route auto-task generation to a canned scene, recording the kwargs it got."""
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    def fake_generate_scene(embodiment: object, *, seed: int | None = 0, **kwargs: Any) -> Scene:
+        del embodiment, seed
+        captured.append(kwargs)
+        return Scene(id="auto-0", instruction="Reach.", metadata={"rubric": "Touch it."})
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+
+
+def _run_auto_task(tmp_path: Path, extra: list[str]) -> int:
+    return main(
+        [
+            "run",
+            "--auto-task",
+            *extra,
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--no-prompt",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+
+
+def test_taskgen_config_args_reach_generation_on_bare_auto_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """[taskgen.args] alone configures --auto-task: no -A flags needed."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, []) == 0
+    assert captured == [{"model": "cfg-model", "max_cameras": 3}]
+
+
+def test_explicit_auto_task_args_override_config_per_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """-A wins per key; unrelated [taskgen.args] keys still apply."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, ["-A", "model=cli-model"]) == 0
+    assert captured == [{"model": "cli-model", "max_cameras": 3}]
+
+
+def test_persisted_taskgen_seed_key_exits_with_guided_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """A [taskgen.args] seed key collides with the explicit kwarg and fails loudly (plan 0071)."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nseed = 5\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_auto_task(tmp_path, [])
+    message = str(exc_info.value)
+    assert "invalid arguments for automatic task generation:" in message
+    assert "check [taskgen.args] and -A k=v" in message
+    assert captured == []
+
+
+def test_task_run_ignores_taskgen_args_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """The section is inert outside --auto-task: a registered task run never reads it."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\n")
+    import inspect_robots.taskgen
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("generate_scene must not run for a registered task")
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", explode)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
 
 
 def test_adhoc_only_flags_rejected_with_task() -> None:

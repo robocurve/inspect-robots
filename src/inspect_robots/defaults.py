@@ -19,6 +19,11 @@ comparing names.)
 ``INSPECT_ROBOTS_CONFIG`` selects the config file itself before the standard
 config-home derivation.
 
+One exception to the owner rule: ``taskgen_args`` (``[taskgen.args]``) has
+no owner. Automatic task generation is a single fixed function, not a
+registry-selected component, so there is no differently-selected component
+for its args to leak into; the section applies to every ``--auto-task`` run.
+
 A missing file yields empty defaults. A malformed or type-invalid file raises
 ``SystemExit`` naming the file, with a plain one-line message that callers may
 catch.
@@ -104,6 +109,10 @@ class Defaults:
     embodiment_args_owner: str | None = None
     sim_embodiment_args_owner: str | None = None
     grader_args_owner: str | None = None
+    # [taskgen.args] deliberately has no owner: automatic task generation is
+    # a single fixed function, never registry-selected, so the issue #44
+    # leak hazard cannot occur. Applies to every --auto-task run.
+    taskgen_args: dict[str, Any] = field(default_factory=dict)
 
 
 def config_path(env: Mapping[str, str]) -> Path | None:
@@ -222,6 +231,7 @@ def _read_config(path: Path) -> Defaults:
         embodiment_args=_parse_args_section(parser, "embodiment.args"),
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
         grader_args=_parse_args_section(parser, "grader.args"),
+        taskgen_args=_parse_args_section(parser, "taskgen.args"),
         policy_args_owner=policy,
         embodiment_args_owner=embodiment,
         sim_embodiment_args_owner=sim_embodiment,

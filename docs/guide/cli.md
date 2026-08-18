@@ -70,6 +70,11 @@ top_cam_device = /dev/v4l/by-id/usb-CAM123-video-index0
 
 [sim_embodiment.args]  ; -E pairs used only under --sim
 headless = true
+
+[taskgen.args]         ; default -A pairs for --auto-task (no owner; see below)
+model = gpt-5.2
+base_url = https://api.openai.com/v1
+api_key_env = OPENAI_API_KEY
 ```
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
@@ -78,7 +83,10 @@ same-named config key. An `[*.args]` section belongs to the component named
 in `[defaults]`: it applies whenever that same component is the one selected
 (by default, by flag, or by env var), and is ignored with a stderr note when
 a *different* component is selected. Your YAM rig's `rest_pose` never reaches
-`--embodiment kitchen`. There is deliberately no project-local config file.
+`--embodiment kitchen`. The one exception is `[taskgen.args]`: automatic
+task generation is a single fixed function rather than a component named in
+`[defaults]`, so the section has no owner and applies to every `--auto-task`
+run. There is deliberately no project-local config file.
 Because `.env` values load into the environment, a directory's `.env` can pin
 `INSPECT_ROBOTS_CONFIG` for everything run there. Treat a checked-in `.env`
 that selects hardware with the same suspicion as a checked-in config: either
@@ -410,6 +418,13 @@ inspect-robots run --auto-task \
              -A max_cameras=2 \
              --policy agent --embodiment my-robot
 ```
+
+Generator arguments persist in the `[taskgen.args]` config section, which
+applies to every `--auto-task` run (it has no owner; see the config-file
+section above). An explicit `-A key=value` overrides the same-named config
+key. Set the seed with `--seed`, never a `[taskgen.args] seed` key: the seed
+must reach generation and evaluation together, and a persisted `seed` key
+exits every auto run with a guided error.
 
 Exactly one of `--task`, `--instruction`, and `--auto-task` is required.
 `-A` requires `--auto-task`, and `-T` cannot be combined with it. Automatic
