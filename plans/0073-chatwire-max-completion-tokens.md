@@ -37,7 +37,12 @@ the retry response is the one surfaced (binding decision 3 was otherwise
 unverifiable); the TDD must-fail claim is scoped to the three tests that
 actually fail pre-change, with the other two labeled regression guards;
 and the residual reasoning-token-exhaustion failure mode is named in
-Out of scope so it is not rediscovered as a bug in this fix.
+Out of scope so it is not rediscovered as a bug in this fix. Round 2
+(fresh context) verified all three fixes landed, traced implementability,
+coverage (branch mode), and caller/test impact, and found no substantive
+issues; its nitpicks (docstring opening sentence correction, url/headers
+pinned in the retry test, raise-on-exhaustion recorder) are folded into
+this revision.
 
 ## Global constraints
 
@@ -106,9 +111,10 @@ Out of scope so it is not rediscovered as a bug in this fix.
        )
    ```
 
-5. **Docs surface:** module docstring gains one sentence stating the
-   retry contract. No user-facing docs change (the wire is internal), no
-   CLI docs change.
+5. **Docs surface:** the module docstring is updated to state the retry
+   contract, including correcting its now-false opening claim of "One
+   blocking POST" (the wire may send two). No user-facing docs change
+   (the wire is internal), no CLI docs change.
 6. **CHANGELOG:** one entry under `## [Unreleased]` / `### Fixed`,
    Core-scoped, linking this plan and issue #390, following the existing
    entry format.
@@ -119,14 +125,15 @@ Out of scope so it is not rediscovered as a bug in this fix.
 
 - [ ] In `tests/test_chatwire.py`, add a recording post factory that
       captures each `(url, headers, body_bytes)` and serves scripted
-      responses in sequence (the existing `_post` helper serves one
+      responses in sequence, raising if called past the scripted count so
+      over-posting fails loudly (the existing `_post` helper serves one
       static response; the new tests need per-call scripting and capture).
 - [ ] Test: first response is the OpenAI 400 `unsupported_parameter` body
       naming `max_completion_tokens`, second response is a 200 reply.
       Assert the wire returns the content, exactly two posts were made,
       the second body's JSON has `max_completion_tokens: 8192` and no
-      `max_tokens` key, and `model`/`messages` are unchanged between the
-      two posts.
+      `max_tokens` key, and `url`, `headers`, `model`, and `messages` are
+      unchanged between the two posts.
 - [ ] Test: both responses are 400, with two DIFFERENT bodies (first
       contains the marker, second is distinct text without it, e.g.
       `{"error": {"message": "still rejected"}}`). Assert exactly two
@@ -140,10 +147,10 @@ Out of scope so it is not rediscovered as a bug in this fix.
       (e.g. 500) whose body mentions `max_completion_tokens` raises
       immediately with a single post (the trigger requires both
       conditions).
-- [ ] Test: the marker check reads past 500 bytes: a 400 body with the
-      marker after 500 filler bytes still triggers the retry (guards the
-      full-body-decode decision against regression to
-      `_response_excerpt`).
+- [ ] Test: the marker check reads the full body: a 400 body with the
+      marker after more than 500 characters of ASCII filler still
+      triggers the retry (guards the full-body-decode decision against
+      regression to `_response_excerpt`).
 - [ ] Run `uv run pytest tests/test_chatwire.py`. Exactly three of the
       new tests must fail against the current module: retry-then-success,
       both-400, and marker-past-500-bytes. The two regression guards
