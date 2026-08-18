@@ -24,7 +24,7 @@ HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
 
 _RESPONSE_EXCERPT_LIMIT = 500
 
-_MAX_COMPLETION_TOKENS = 8192
+_TOKEN_CAP = 8192
 
 
 def _response_excerpt(body: bytes) -> str:
@@ -56,9 +56,9 @@ def _post_chat(
     token_param: str,
 ) -> tuple[int, bytes]:
     """Send one chat-completions request with the token cap keyed under ``token_param``."""
-    body = json.dumps(
-        {"model": model, "messages": messages, token_param: _MAX_COMPLETION_TOKENS}
-    ).encode("utf-8")
+    body = json.dumps({"model": model, "messages": messages, token_param: _TOKEN_CAP}).encode(
+        "utf-8"
+    )
     return post(url, headers, body)
 
 

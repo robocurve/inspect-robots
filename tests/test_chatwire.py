@@ -130,9 +130,8 @@ def test_retries_with_max_completion_tokens_when_a_400_names_it() -> None:
 
 
 def test_retry_failure_surfaces_the_retry_response() -> None:
-    post, calls = _scripted_post(
-        [(400, _OPENAI_MAX_TOKENS_400), (400, b'{"error": {"message": "still rejected"}}')]
-    )
+    retry_400 = b'{"error": {"message": "max_completion_tokens still rejected"}}'
+    post, calls = _scripted_post([(400, _OPENAI_MAX_TOKENS_400), (400, retry_400)])
 
     with pytest.raises(ConfigError) as excinfo:
         chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
@@ -159,6 +158,16 @@ def test_a_non_400_with_the_marker_raises_after_a_single_post() -> None:
     with pytest.raises(ConfigError, match=r"summary request failed with HTTP 500"):
         chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
 
+    assert len(calls) == 1
+
+
+def test_a_2xx_with_the_marker_does_not_retry() -> None:
+    reply = b'{"choices":[{"message":{"content":"use max_completion_tokens next time"}}]}'
+    post, calls = _scripted_post([(200, reply)])
+
+    result = chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
+
+    assert result == "use max_completion_tokens next time"
     assert len(calls) == 1
 
 
