@@ -567,7 +567,8 @@ The report puts the run status, configuration, metrics, scene results, and
 recorded policy conversations on one page. Chat transcripts are grouped into
 observation turns. A turn's default view shows its step, camera frames,
 structured operator feedback, assistant prose, agent-note headlines, and
-readable tool argument chips. A collapsed Raw transcript section preserves the
+readable tool argument chips. Scene cards in auto-task logs also include a
+collapsed rubric dropdown. A collapsed Raw transcript section preserves the
 raw observation, state dumps, calls, and tool results. Non-chat transcripts
 remain available as bounded JSON.
 
