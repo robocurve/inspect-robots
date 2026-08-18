@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -73,9 +74,11 @@ def _role_args(flag: str, model: dict[str, Any]) -> list[str]:
 
 def _policy_args(model: dict[str, Any]) -> list[str]:
     """The complete -P set for the drawn test-taker, plus the shared effort."""
-    kvs = dict(model["policy"]) if isinstance(model.get("policy"), dict) else {
-        key: model[key] for key in ("model", "base_url", "api_key_env")
-    }
+    kvs = (
+        dict(model["policy"])
+        if isinstance(model.get("policy"), dict)
+        else {key: model[key] for key in ("model", "base_url", "api_key_env")}
+    )
     kvs["effort"] = EFFORT
     args: list[str] = []
     for key, value in kvs.items():
@@ -128,26 +131,34 @@ def _log_outcome(path: Path | None) -> tuple[float | None, str | None]:
     return score, task if isinstance(task, str) else None
 
 
-def _render_clips(log_path: Path | None) -> dict[str, str]:
-    """Render per-camera MP4 clips for a completed eval; empty on any failure."""
+def _render_clips(log_path: Path | None, eval_index: int) -> dict[str, str]:
+    """Render per-camera MP4 clips for a completed eval; empty on any failure.
+
+    The video command names outputs by scene/epoch only, identical across
+    evals, so render into a scratch dir and move to per-eval names.
+    """
     if log_path is None:
         return {}
-    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    before = set(MEDIA_DIR.glob("*.mp4"))
+    scratch = MEDIA_DIR / f"render_{eval_index}"
+    scratch.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["inspect-robots", "video", str(log_path), "--out", str(MEDIA_DIR), "--fps", "30"],
+            ["inspect-robots", "video", str(log_path), "--out", str(scratch), "--fps", "30"],
             check=True,
             capture_output=True,
             timeout=300,
         )
     except Exception:
+        shutil.rmtree(scratch, ignore_errors=True)
         return {}
     clips: dict[str, str] = {}
-    for path in sorted(set(MEDIA_DIR.glob("*.mp4")) - before):
+    for path in sorted(scratch.glob("*.mp4")):
         for cam in ("left", "top", "right"):
             if cam in path.name:
-                clips[cam] = path.name
+                destination = MEDIA_DIR / f"eval{eval_index:04d}_{cam}.mp4"
+                os.replace(path, destination)
+                clips[cam] = destination.name
+    shutil.rmtree(scratch, ignore_errors=True)
     return clips
 
 
@@ -261,7 +272,7 @@ def main() -> None:
 
             log_path = _newest_final_log(existing_logs)
             score, task = _log_outcome(log_path)
-            clips = _render_clips(log_path)
+            clips = _render_clips(log_path, eval_index)
             _append_result(
                 {
                     "ts": _utc_now(),
