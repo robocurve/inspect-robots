@@ -327,9 +327,18 @@
       const byName = Object.fromEntries(data.map((entry) => [entry.name, entry]));
       const scores = data.filter((entry) => entry.score != null).map((entry) => entry.score);
       const maxScore = scores.length ? Math.max(...scores) : 0;
+      const ranked = [...order].sort((a, b) => {
+        const sa = byName[a] ? byName[a].score : null;
+        const sb = byName[b] ? byName[b].score : null;
+        if (sa == null && sb == null) return order.indexOf(a) - order.indexOf(b);
+        if (sa == null) return 1;
+        if (sb == null) return -1;
+        return sb - sa;
+      });
       for (const name of order) {
         const entry = byName[name] || { name, n: 0, score: null };
         const row = document.querySelector(`[data-name="${name}"]`);
+        row.style.order = ranked.indexOf(name);
         const percentage = entry.score != null && maxScore > 0
           ? 80 * entry.score / maxScore
           : null;
