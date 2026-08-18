@@ -61,7 +61,13 @@ uses `effort=0` — the one shape that distinguishes the specified
 matching taskgen wire+provenance assertion, and decision 1's residual
 unqualified "rejected loudly" wording now defers to the per-surface
 loudness caveat. Its nitpicks (pre-peek front-load assertion, wire
-receives rather than normalizes) are folded in.
+receives rather than normalizes) are folded in. Round 4 (fresh context)
+verified all round-3 fixes present and correct (including that the
+never-reset assertion is implementable with test_taskgen.py's existing
+fake embodiment) and found only 1 minor, fixed in this revision: the
+Task 1 must-fail gate is now scoped to the effort-bearing tests, with
+the three omission tests labeled regression pins that pass both before
+and after. No other substantive issues; the loop is converged.
 
 ## Global constraints
 
@@ -202,9 +208,14 @@ receives rather than normalizes) are folded in.
       check), and that an endpoint 4xx on an effort-bearing request
       degrades to an ungraded trial with the stderr note rather than
       raising (pinning the loudness caveat in Global constraints).
-- [ ] Run the three files; every new test must fail against current code
-      (each asserts a key that nothing emits yet, or passes a kwarg that
-      does not exist yet — the taskgen/grader ones fail with TypeError).
+- [ ] Run the three files. Every effort-bearing test must fail against
+      current code (a kwarg that does not exist yet fails with
+      TypeError; the chatwire effort tests assert a key nothing emits).
+      The three omission tests (chatwire default-call body, taskgen
+      omitted-kwarg, grader omitted-kwarg) are regression pins of the
+      unchanged default path and are expected to pass both before and
+      after — they hold the "unset means absent" constraint, not TDD
+      red; do not "fix" them into failing.
 
 ### Task 2: implement
 
