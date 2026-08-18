@@ -14,3 +14,7 @@ spawned by the run. The `/leaderboard` route is an alias for the same combined s
 
 **Booth setup:** The roster constants in `_roster.py` are meant to be edited on site. Confirm all
 model IDs with their providers before the event.
+
+**Rig config:** `run.py` always passes `--config` with the rig folder's `config.ini` (the file the
+setup wizard writes; see `RIG_CONFIG` at the top of `run.py`). The XDG-global config is not used
+because it can go stale, such as pointing the top camera at the D435's mono IR node.

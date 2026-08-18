@@ -19,6 +19,11 @@ from _roster import EFFORT, ROSTER
 from inspect_robots.log import read_eval_log
 
 HERE = Path(__file__).parent
+# The setup wizard writes the rig folder's config.ini; the XDG-global config
+# can go stale (it pointed the top cam at the D435's mono IR node). Always
+# run against the rig folder's file. Booth-editable; a later --config in the
+# passthrough args after "--" overrides it.
+RIG_CONFIG = Path.home() / "robocurve" / "rig-1" / "config.ini"
 STATE_DIR = HERE / "state"
 LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
@@ -129,6 +134,8 @@ def _command(
     return [
         "inspect-robots",
         "run",
+        "--config",
+        str(RIG_CONFIG),
         "--auto-task",
         *_role_args("-A", tasker),
         "--grader",
@@ -145,6 +152,8 @@ def _command(
 
 
 def main() -> None:
+    if not RIG_CONFIG.is_file():
+        raise SystemExit(f"rig config not found: {RIG_CONFIG}\nfix: edit RIG_CONFIG in run.py")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     extra_args = _extra_args(sys.argv[1:])
