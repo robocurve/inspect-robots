@@ -71,6 +71,17 @@ def test_full_config_parses_with_inline_comments_and_expansion(tmp_path: Path) -
     assert d.embodiment_args == {"cameras": "wrist,front", "port": None}
 
 
+def test_grader_args_section_parses_with_the_grader_as_owner(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "[defaults]\ngrader = vlm\n[grader.args]\nmodel = judge\nmax_cameras = 2\n",
+    )
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    assert d.grader == "vlm"
+    assert d.grader_args == {"model": "judge", "max_cameras": 2}
+    assert d.grader_args_owner == "vlm"
+
+
 def test_config_value_with_literal_percent_loads_unchanged(tmp_path: Path) -> None:
     path = _write_config(tmp_path, "[defaults]\npolicy = 50%off\n")
     defaults = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
@@ -317,7 +328,7 @@ def test_set_default_rejects_malformed_existing_config(tmp_path: Path) -> None:
         set_default({"XDG_CONFIG_HOME": str(tmp_path)}, "policy", "scripted")
 
 
-@pytest.mark.parametrize("key", ["policy", "embodiment", "sim_embodiment"])
+@pytest.mark.parametrize("key", ["policy", "embodiment", "sim_embodiment", "grader"])
 def test_set_default_warns_when_component_change_leaves_owned_args(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], key: str
 ) -> None:

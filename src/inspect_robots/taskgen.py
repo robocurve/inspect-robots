@@ -19,7 +19,7 @@ from inspect_robots.rollout import derive_seed
 from inspect_robots.scene import Scene
 
 if TYPE_CHECKING:
-    from inspect_robots._summarize import HttpPost
+    from inspect_robots._chatwire import HttpPost
 
 _REPLY_EXCERPT_LIMIT = 500
 _TASK_RE = re.compile(r"^\s*TASK:\s*(\S.*)$")
@@ -90,7 +90,9 @@ def _wire_fix(api_key_env: str) -> str:
 
 def _reword_wire_error(error: ConfigError, api_key_env: str) -> ConfigError:
     lines = str(error).splitlines()
-    diagnosis = [re.sub(r"^summary\b", "task generation", line) for line in lines]
+    # The wire labels its own failures "summary" (chat_completion defaults)
+    # or "chat" (_urllib_post's transport translation); both become ours.
+    diagnosis = [re.sub(r"^(summary|chat)\b", "task generation", line) for line in lines]
     diagnosis = [line for line in diagnosis if not line.startswith("fix:")]
     return ConfigError("\n".join([*diagnosis, _wire_fix(api_key_env)]))
 
@@ -192,7 +194,7 @@ def generate_scene(
         )
     messages: list[dict[str, Any]] = [{"role": "user", "content": parts}]
 
-    from inspect_robots._summarize import chat_completion
+    from inspect_robots._chatwire import chat_completion
 
     try:
         reply = chat_completion(

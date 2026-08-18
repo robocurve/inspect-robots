@@ -297,6 +297,11 @@ def test_last_rubric_marker_anchors_last_prior_task(monkeypatch: pytest.MonkeyPa
             "fix: use an OpenAI-compatible endpoint",
             "task generation endpoint returned a malformed reply: injected bytes",
         ),
+        (
+            "chat request failed: injected outage\n"
+            "fix: check the base URL and network connectivity",
+            "task generation request failed: injected outage",
+        ),
     ],
 )
 def test_wire_config_errors_are_reworded_from_injected_messages(

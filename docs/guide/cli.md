@@ -142,8 +142,52 @@ suppresses the operator grader specifically (combining it with an explicit
 `--grader operator` is an error, and a config-set `grader = operator` is
 downgraded with a stderr note whenever the run cannot actually be attended).
 A custom grader named in config or `--grader` runs regardless of TTY-ness,
-which is what a future VLM autograder needs. An unjudged trial honestly
-scores as failure with "no operator judgement recorded".
+which is what the builtin `vlm` autograder relies on. An unjudged trial
+honestly scores as failure with "no operator judgement recorded".
+
+### Automated grading: `--grader vlm`
+
+The builtin `vlm` grader replaces the human verdict with a vision model. It
+sends the trial's first and last camera frames, the task instruction, and a
+rubric to an OpenAI-compatible chat endpoint, then records the model's
+success or failure verdict exactly where the operator grader would have
+written one, so the `operator` scorer reads it unchanged:
+
+```bash
+export ANTHROPIC_API_KEY=...
+inspect-robots "stack the red cube on the blue cube" \
+  --grader vlm -G model=claude-sonnet-5
+```
+
+Grader arguments ride the repeatable `-G k=v` flag (the grader counterpart of
+`-P`): `model` (required), `rubric` (inline text) or `rubric_file` (a path,
+mutually exclusive with `rubric`), `base_url` (default
+`https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
+and `max_cameras` (frames per phase, default 4). Without a rubric the grader
+uses a strict default: success only if the frames show the instruction
+completed, failure when the outcome is ambiguous or not visible. A scene that
+carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
+generates) wins over all of these for that trial. `-G` without any selected
+grader is an error rather than a silent no-op.
+
+Both pieces persist in config, and the args section is owned by the grader it
+was written for (the same rule as `[policy.args]`):
+
+```ini
+[defaults]
+grader = vlm
+
+[grader.args]
+model = claude-sonnet-5
+rubric_file = ~/rigs/stacking-rubric.md
+```
+
+Configuration problems (a missing model or API key, an unreadable rubric
+file) stop the run before the robot moves. After a rollout the grader never
+crashes the run: transport failures or an unparseable reply leave the trial
+ungraded with a stderr note. A trial the embodiment already terminated with a
+definitive `success` or `failure`, or one the operator already judged from
+the console, is adopted without spending a model call.
 
 ### Live operator feedback
 

@@ -7853,3 +7853,112 @@ def test_explicit_custom_config_grader_is_honored_unattended(
 def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "graders"]) == 0
     assert "operator" in capsys.readouterr().out
+
+
+# --- -G grader args and [grader.args] (plan 0069) ------------------------------
+
+
+def _run_adhoc_args(log_dir: Path) -> list[str]:
+    return [
+        "reach the cube",
+        "--scorer",
+        "episode_length",
+        "--max-steps",
+        "3",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(log_dir),
+    ]
+
+
+def _register_argcap_grader(captured: list[dict[str, object]]) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    class _ArgcapGrader:
+        name = "argcap"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            record.operator_judgement = "y"
+
+    def factory(**kwargs: object) -> _ArgcapGrader:
+        captured.append(dict(kwargs))
+        return _ArgcapGrader()
+
+    reg.grader("argcap-test")(factory)
+
+
+def test_grader_args_merge_config_then_cli_flags(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\ngrader = argcap-test\n[grader.args]\nfoo = 1\nbar = base\n",
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        assert main([*_run_adhoc_args(tmp_path / "logs"), "-G", "bar=cli"]) == 0
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert captured == [{"foo": 1, "bar": "cli"}]
+
+
+def test_grader_config_args_are_dropped_for_a_different_grader(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(_hermetic_defaults, "[grader.args]\nfoo = 1\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        rc = main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "argcap-test", "-G", "x=2"])
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert rc == 0
+    assert captured == [{"x": 2}]
+    assert "ignoring [grader.args]" in capsys.readouterr().err
+
+
+def test_grader_args_on_operator_grader_exit_with_guidance(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"invalid arguments for grader 'operator'.*-G"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "operator", "-G", "model=x"])
+
+
+def test_dangling_grader_args_exit_loudly(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"-G requires a grader"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "-G", "model=x"])
+
+
+def test_vlm_grader_without_api_key_exits_before_any_rollout(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    log_dir = tmp_path / "logs"
+    with pytest.raises(SystemExit, match=r"no API key found in \$ANTHROPIC_API_KEY"):
+        main([*_run_adhoc_args(log_dir), "--grader", "vlm", "-G", "model=judge"])
+    assert not log_dir.exists()
+
+
+def test_config_show_displays_the_grader_default(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = vlm\n")
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "grader" in out
+    assert "vlm" in out

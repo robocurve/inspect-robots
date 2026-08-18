@@ -27,7 +27,7 @@ from inspect_robots.embodiment import (
     EmbodimentInfo,
 )
 from inspect_robots.eval import eval, eval_set
-from inspect_robots.grader import Grader, operator_grader
+from inspect_robots.grader import Grader, operator_grader, vlm_grader
 from inspect_robots.log import (
     EvalLog,
     EvalResults,
@@ -136,4 +136,5 @@ __all__ = [
     "sink",
     "success_at_end",
     "task",
+    "vlm_grader",
 ]
