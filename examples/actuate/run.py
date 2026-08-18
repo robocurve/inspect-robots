@@ -137,6 +137,7 @@ def _command(
         "--policy",
         "agent",
         *_role_args("-P", test_taker),
+        *(["-P", f"wire={test_taker['policy_wire']}"] if "policy_wire" in test_taker else []),
         "--log-dir",
         str(LOGS_DIR.resolve()),
         *extra_args,

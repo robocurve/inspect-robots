@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 # Booth-editable. Confirm model IDs against each provider before the event.
+# "policy_wire" applies only when the model is drawn as test-taker: OpenAI
+# rejects function tools with reasoning_effort on /chat/completions, so the
+# agent policy must speak the Responses API there.
 ROSTER: dict[str, dict[str, str]] = {
     "GPT-5.6 Sol": {
         "model": "gpt-5.6-sol",
         "base_url": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
+        "policy_wire": "responses",
     },
     "Opus 5": {
         "model": "claude-opus-5",
