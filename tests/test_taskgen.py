@@ -370,3 +370,53 @@ def test_unencodable_frame_is_a_guided_config_error(monkeypatch: pytest.MonkeyPa
     message = _assert_fix(error)
     assert "camera 'wrist'" in message
     assert "uint8" in message
+
+
+def test_effort_reaches_the_wire_and_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    scene, captured = _generate(monkeypatch, effort="high")
+
+    assert captured["body"]["reasoning_effort"] == "high"
+    assert scene.metadata["taskgen"]["effort"] == "high"
+
+
+def test_effort_none_sends_the_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    scene, captured = _generate(monkeypatch, effort=None)
+
+    assert captured["body"]["reasoning_effort"] == "none"
+    assert scene.metadata["taskgen"]["effort"] == "none"
+
+
+def test_omitted_effort_stays_off_the_wire_and_out_of_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene, captured = _generate(monkeypatch)
+
+    assert "reasoning_effort" not in captured["body"]
+    assert "effort" not in scene.metadata["taskgen"]
+
+
+def test_falsy_effort_reaches_the_wire_and_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    scene, captured = _generate(monkeypatch, effort=0)
+
+    assert captured["body"]["reasoning_effort"] == 0
+    assert scene.metadata["taskgen"]["effort"] == 0
+
+
+def test_empty_effort_fails_fast_before_the_peek(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TASKGEN_KEY", "secret")
+    embodiment = _MultiCameraEmbodiment({"cam": np.zeros((2, 2, 3), dtype=np.uint8)})
+
+    def never_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
+        raise AssertionError("the empty-effort guard must fire before any request")
+
+    with pytest.raises(ConfigError) as exc_info:
+        generate_scene(
+            embodiment,
+            model="vision-model",
+            api_key_env="TASKGEN_KEY",
+            effort="",
+            http_post=never_post,
+        )
+
+    assert "effort" in _assert_fix(exc_info)
+    assert embodiment.reset_scene is None

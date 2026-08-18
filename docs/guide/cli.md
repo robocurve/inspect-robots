@@ -171,7 +171,11 @@ Grader arguments ride the repeatable `-G k=v` flag (the grader counterpart of
 `-P`): `model` (required), `rubric` (inline text) or `rubric_file` (a path,
 mutually exclusive with `rubric`), `base_url` (default
 `https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
-and `max_cameras` (frames per phase, default 4). Without a rubric the grader
+`max_cameras` (frames per phase, default 4), and `effort` (sent to the
+endpoint as `reasoning_effort`: leave it out for the provider default;
+`effort=none` requests the minimum, it does not mean unset; a value the
+endpoint rejects leaves trials ungraded with a stderr note, like any grader
+wire failure). Without a rubric the grader
 uses a strict default: success only if the frames show the instruction
 completed, failure when the outcome is ambiguous or not visible. A scene that
 carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
@@ -408,8 +412,10 @@ grader when a verdict is needed. Both are persisted in the eval log.
 
 Repeat `-A key=value` to pass generator arguments. Common arguments are
 `model`, `instructions`, `instructions_file`, `base_url`, `api_key_env`,
-`max_cameras`, and `scene_id`. Values use the same bool/int/float/None/string
-parsing as the component argument flags:
+`max_cameras`, `scene_id`, and `effort` (sent as `reasoning_effort`: leave
+it out for the provider default; `effort=none` requests the minimum, it
+does not mean unset; an invalid value fails before rollout). Values use the
+same bool/int/float/None/string parsing as the component argument flags:
 
 ```bash
 inspect-robots run --auto-task \

@@ -64,6 +64,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** task generation and the `vlm` grader accept an `effort` key
+  (`-A effort=` / `-G effort=`, or the `[taskgen.args]`/`[grader.args]`
+  config sections) that is sent to the endpoint as `reasoning_effort`.
+  Leaving it unset omits the field so the provider default applies, and
+  `effort=none` requests the minimum, matching `-P effort=`
+  ([plan 0075](plans/0075-taskgen-grader-effort.md),
+  [#394](https://github.com/robocurve/inspect-robots/issues/394)).
+
 - **Core:** every delivered trial now writes a default-on, durable JSONL action
   log with the complete post-approval control-step sequence. Pass
   `store_actions=False` to `eval()` or `eval_set()` to opt out. Because the

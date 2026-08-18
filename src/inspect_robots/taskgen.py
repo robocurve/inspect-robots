@@ -97,6 +97,13 @@ def _reword_wire_error(error: ConfigError, api_key_env: str) -> ConfigError:
     return ConfigError("\n".join([*diagnosis, _wire_fix(api_key_env)]))
 
 
+class _Unset:
+    """Sentinel distinguishing an omitted ``effort`` from an explicit ``None``."""
+
+
+_UNSET = _Unset()
+
+
 def generate_scene(
     embodiment: Embodiment,
     *,
@@ -109,13 +116,18 @@ def generate_scene(
     scene_id: str = "auto-0",
     seed: int | None = 0,
     http_post: HttpPost | None = None,
+    effort: str | float | None | _Unset = _UNSET,
 ) -> Scene:
     """Peek at one seeded world and return a policy instruction plus grader rubric.
 
     ``seed`` is the eval seed the caller will pass to
     [`eval`][inspect_robots.eval.eval]. The peek uses its first-trial derived
     seed so a seedable embodiment presents the same initial world to generation
-    and evaluation. Configuration, transport, and reply-contract failures raise
+    and evaluation. ``effort`` rides the request as ``reasoning_effort``:
+    leaving it unset omits the field for the provider default, ``None``
+    (``-A effort=none``) requests the minimum, any other value passes through
+    verbatim, and ``""`` is a guided error. Configuration, transport, and
+    reply-contract failures raise
     [`ConfigError`][inspect_robots.errors.ConfigError] before rollout starts.
     """
     if model is None or not model.strip():
@@ -124,6 +136,15 @@ def generate_scene(
             "fix: pass model=... (-A model=... from the CLI)"
         )
     model = model.strip()
+    resolved_effort: str | float | None = None
+    if not isinstance(effort, _Unset):
+        if effort == "":
+            raise ConfigError(
+                "task generation effort must be a level name or number, got ''.\n"
+                "fix: omit effort= for the provider default, or pass effort=none "
+                "for minimum reasoning"
+            )
+        resolved_effort = "none" if effort is None else effort
     if instructions is not None and instructions_file is not None:
         raise ConfigError(
             "task generation received both instructions and instructions_file.\n"
@@ -203,6 +224,7 @@ def generate_scene(
             model,
             messages,
             http_post=http_post,
+            effort=resolved_effort,
         )
     except ConfigError as exc:
         raise _reword_wire_error(exc, api_key_env) from exc
@@ -212,11 +234,11 @@ def generate_scene(
         ) from exc
 
     task_instruction, rubric = _parse_reply(reply)
+    taskgen_meta: dict[str, Any] = {"model": model, "base_url": base_url}
+    if resolved_effort is not None:
+        taskgen_meta["effort"] = resolved_effort
     return Scene(
         id=scene_id,
         instruction=task_instruction,
-        metadata={
-            "rubric": rubric,
-            "taskgen": {"model": model, "base_url": base_url},
-        },
+        metadata={"rubric": rubric, "taskgen": taskgen_meta},
     )
