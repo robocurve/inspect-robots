@@ -297,6 +297,56 @@ def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     assert 'class="grader-note"' not in document
 
 
+def test_multiline_rubric_renders_as_an_escaped_dropdown() -> None:
+    """Preserve a rubric's line structure while escaping its foreign text."""
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        scene_metadata={"rubric": "Cube is <lifted> cleanly.\nGripper stays closed."},
+    )
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="rubric")
+
+    assert (
+        '<details class="rubric"><summary>Rubric</summary>'
+        '<p class="rubric-text">Cube is &lt;lifted&gt; cleanly.\n'
+        "Gripper stays closed.</p></details>" in document
+    )
+    assert '<p class="instruction">pick up the cube</p><details class="rubric">' in document
+
+
+@pytest.mark.parametrize(
+    "scene_metadata",
+    [
+        {},
+        {"rubric": " \n\t "},
+        {"rubric": ["not", "a", "string"]},
+    ],
+)
+def test_ineligible_rubric_values_render_nothing(scene_metadata: dict[str, Any]) -> None:
+    """Omit the rubric dropdown for absent, blank, and non-string values."""
+    log = _log()
+    scene = dataclasses.replace(log.samples[0], scene_metadata=scene_metadata)
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="no rubric")
+
+    assert 'class="rubric"' not in document
+
+
+def test_started_log_with_synthetic_scene_metadata_renders_rubric() -> None:
+    """Renderer robustness: render metadata that production started pages never carry."""
+    log = _log(status="started")
+    scene = dataclasses.replace(
+        log.samples[0],
+        scene_metadata={"rubric": "The cube clears the table."},
+    )
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="started rubric")
+
+    assert '<details class="rubric"><summary>Rubric</summary>' in document
+    assert '<p class="rubric-text">The cube clears the table.</p></details>' in document
+
+
 def test_scene_where_no_trial_carried_a_note_renders_no_grader_notes_block() -> None:
     # The ordinary case: operator_notes is parallel to epochs, so an unannotated
     # run is a tuple of Nones, not the empty tuple the omission test above uses.
@@ -348,6 +398,7 @@ def test_every_foreign_text_surface_is_escaped_exactly_once() -> None:
         scene_id=attack,
         status=attack,
         instruction=attack,
+        scene_metadata={"rubric": attack},
         error=attack,
         operator_notes=(attack, None),
     )
@@ -358,7 +409,7 @@ def test_every_foreign_text_surface_is_escaped_exactly_once() -> None:
     )
 
     assert attack not in document
-    assert document.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 8
+    assert document.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 9
     assert "&amp;lt;script" not in document
 
 
