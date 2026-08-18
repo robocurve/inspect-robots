@@ -78,6 +78,11 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
   examples/actuate/state/results.jsonl`.
 - An eval that errors (bad model ID, rejected request) shows as a score-less
   card and costs nothing else; fix `_roster.py` and start the next eval.
+- If every camera and CAN interface vanishes at once, the USB host controller
+  died (seen live on 2026-08-17: kernel log "xHCI host controller not
+  responding, assume dead"). Recover without a reboot, using the controller's
+  PCI address from the kernel log:
+  `echo 1 | sudo tee /sys/bus/pci/devices/<addr>/remove && sleep 3 && echo 1 | sudo tee /sys/bus/pci/rescan`
 
 ## Files
 
