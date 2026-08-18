@@ -36,6 +36,10 @@ DOCS_EXTRA_PATHS = [
 # no log (hardware or config failure) so a broken booth does not hammer retries.
 PAUSE_S = 10
 FAILURE_PAUSE_S = 30
+# Consecutive log-less evals (hardware or config faults fail before any model
+# call) before the loop halts loudly instead of spinning junk all night; a
+# 2026-08-18 arm joint-limit fault produced ~385 junk evals in 5 hours.
+FAILURE_STREAK_STOP = 10
 STATE_DIR = HERE / "state"
 LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
@@ -234,6 +238,7 @@ def main() -> None:
     extra_args = _extra_args(sys.argv[1:])
     roster = list(ROSTER.items())
     eval_index = _next_eval_index()
+    failure_streak = 0
 
     try:
         while True:
@@ -289,6 +294,13 @@ def main() -> None:
             log_text = log_path.name if log_path else "no log"
             print(f"Eval {eval_index} complete: score={score_text}, log={log_text}")
 
+            failure_streak = 0 if log_path is not None else failure_streak + 1
+            if failure_streak >= FAILURE_STREAK_STOP:
+                raise SystemExit(
+                    f"{failure_streak} consecutive evals produced no log; the rig "
+                    "is likely faulted (check arms, CAN, cameras). Fix it and "
+                    "relaunch."
+                )
             pause = PAUSE_S if log_path is not None else FAILURE_PAUSE_S
             print(f"next eval in {pause}s (Ctrl-C to stop)", flush=True)
             time.sleep(pause)
