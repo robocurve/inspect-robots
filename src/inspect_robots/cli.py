@@ -1660,17 +1660,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
             import inspect_robots.taskgen
             from inspect_robots.errors import ConfigError
 
+            # Config supplies generator defaults; explicit -A wins per key.
+            # A persisted [taskgen.args] seed collides with the explicit
+            # kwarg below and fails loudly: the seed knob is --seed.
+            taskgen_kvs = {**defaults.taskgen_args, **_parse_kvs(args.auto_task_args)}
             try:
                 scene = inspect_robots.taskgen.generate_scene(
                     resolved.embodiment,
                     seed=args.seed,
-                    **_parse_kvs(args.auto_task_args),
+                    **taskgen_kvs,
                 )
             except ConfigError as exc:
                 raise SystemExit(str(exc)) from exc
             except TypeError as exc:
                 raise SystemExit(
-                    f"invalid arguments for automatic task generation: {exc}; check -A k=v"
+                    f"invalid arguments for automatic task generation: {exc}; "
+                    "check [taskgen.args] and -A k=v"
                 ) from exc
             task = Task(
                 name="auto",

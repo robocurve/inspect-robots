@@ -82,6 +82,23 @@ def test_grader_args_section_parses_with_the_grader_as_owner(tmp_path: Path) -> 
     assert d.grader_args_owner == "vlm"
 
 
+def test_taskgen_args_section_parses_without_an_owner(tmp_path: Path) -> None:
+    """Parse [taskgen.args] like the other args sections, with no owner field."""
+    _write_config(
+        tmp_path,
+        "[taskgen.args]\nmodel = gpt-5.2\nmax_cameras = 2\n"
+        "instructions_file = ~/prompts/jungle.txt\n",
+    )
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    assert d.taskgen_args["model"] == "gpt-5.2"
+    assert d.taskgen_args["max_cameras"] == 2
+    instructions_file = d.taskgen_args["instructions_file"]
+    assert isinstance(instructions_file, str) and not instructions_file.startswith("~")
+    assert instructions_file.endswith("prompts/jungle.txt")
+    # Deliberately ownerless (plan 0071): taskgen is never registry-selected.
+    assert not hasattr(d, "taskgen_args_owner")
+
+
 def test_config_value_with_literal_percent_loads_unchanged(tmp_path: Path) -> None:
     path = _write_config(tmp_path, "[defaults]\npolicy = 50%off\n")
     defaults = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
