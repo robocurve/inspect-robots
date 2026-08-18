@@ -334,7 +334,7 @@ def test_ineligible_rubric_values_render_nothing(scene_metadata: dict[str, Any])
 
 
 def test_started_log_with_synthetic_scene_metadata_renders_rubric() -> None:
-    """Renderer robustness: render metadata that production started pages never carry."""
+    """Render rubric metadata independently of the log's lifecycle state."""
     log = _log(status="started")
     scene = dataclasses.replace(
         log.samples[0],

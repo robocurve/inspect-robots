@@ -19,9 +19,22 @@ deep-freezes it.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
+
+
+def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Deep-copy each JSON-encodable value and omit values encoding rejects."""
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        try:
+            safe[key] = json.loads(json.dumps(value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return safe
+
 
 SCHEMA_VERSION = 1
 

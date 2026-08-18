@@ -19,6 +19,7 @@ from inspect_robots.log import (
     EvalSpec,
     EvalStats,
     SceneResult,
+    _json_safe_scene_metadata,
 )
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
@@ -72,6 +73,25 @@ def _golden_log() -> EvalLog:
             ),
         ),
     )
+
+
+def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
+    """Retain JSON-safe values while detaching nested data from its source."""
+    nested = {"thresholds": [1, 2]}
+    metadata = {
+        "rubric": "touch the cube",
+        "nested": nested,
+        "adapter_object": object(),
+    }
+
+    safe = _json_safe_scene_metadata(metadata)
+
+    assert safe == {
+        "rubric": "touch the cube",
+        "nested": {"thresholds": [1, 2]},
+    }
+    nested["thresholds"].append(3)
+    assert safe["nested"] == {"thresholds": [1, 2]}
 
 
 def test_eval_log_round_trips_through_dict() -> None:
