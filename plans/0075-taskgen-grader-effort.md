@@ -52,6 +52,16 @@ restoring true `-P effort=` parity; and `""`/provenance tests were added
 so a forgotten guard cannot record effort values that never hit the
 wire. Its nitpicks (exact annotation spelled, normalized-value
 provenance wording, `effort=None` provenance assertion) are folded in.
+Round 3 (fresh context) verified the round-2 fixes landed (including
+that the config-file `effort =` empty-key raise is byte-for-byte the
+existing `[policy.args]` precedent, not a new hazard) and found 1 major
++ 1 minor, both fixed in this revision: the falsy-non-string test now
+uses `effort=0` — the one shape that distinguishes the specified
+`is not None and != ""` guard from a wrong truthiness guard — with a
+matching taskgen wire+provenance assertion, and decision 1's residual
+unqualified "rejected loudly" wording now defers to the per-surface
+loudness caveat. Its nitpicks (pre-peek front-load assertion, wire
+receives rather than normalizes) are folded in.
 
 ## Global constraints
 
@@ -88,12 +98,15 @@ provenance wording, `effort=None` provenance assertion) are folded in.
    chat-completions parameter, which Gemini's OpenAI-compat endpoint
    also honors as its thinking-budget control. At the wire layer,
    `chat_completion(effort=...)` sends the value verbatim when it is
-   neither `None` nor `""`, and omits the key otherwise. Non-string
-   parses (`-A effort=0` → `0`, `effort=false` → `False`) are therefore
-   serialized onto the wire and rejected loudly by the endpoint's own
-   4xx through the existing guided-error path — never silently
-   swallowed. (`""` omits: `-G effort=` parses to `""`, and an empty
-   string must not put `"reasoning_effort": ""` on the wire.)
+   neither `None` nor `""`, and omits the key otherwise. The guard is
+   exactly `is not None and != ""`, NOT truthiness: non-string parses
+   (`-A effort=0` → `0`, `effort=false` → `False`) are serialized onto
+   the wire and rejected by the endpoint's own 4xx — never silently
+   swallowed. That rejection is loud pre-rollout on the taskgen
+   surface; on the grader surface it degrades to an ungraded trial
+   with a stderr note, per the loudness caveat in Global constraints.
+   (`""` omits at this layer; the surfaces above never pass `""` down —
+   they raise on it per decision 3.)
 2. **Placement:** the field is added in `_post_chat`, so the retry send
    carries it identically to the first send. Body key order:
    `model`, `messages`, token cap, then `reasoning_effort` (appended
@@ -112,9 +125,11 @@ provenance wording, `effort=None` provenance assertion) are folded in.
    `_validated_effort("")` raises; key-present `None` → normalize to
    the string `"none"`; any other value passes through verbatim.
    `_VLMGrader` stores the normalized value; `grade` passes it to
-   `chat_completion`. `_post_chat` takes the normalized `effort` as a
-   positional-after-token_param parameter (private helper, no default
-   needed — both callers pass it explicitly).
+   `chat_completion`. `_post_chat` receives the already-normalized
+   `effort` as a positional-after-token_param parameter and applies
+   only the decision-1 omit rule; normalization is the surfaces' job,
+   never the wire's (private helper, no default needed — both callers
+   pass it explicitly).
 4. **`effort=none` means minimum, absent means provider default —
    the agent plugin's contract, mirrored for real:** `-A effort=none` /
    `-G effort=none` parse to key-present Python `None`, which decision 3
@@ -158,18 +173,26 @@ provenance wording, `effort=None` provenance assertion) are folded in.
       `effort=None` both omit the key; (d) when the #390 retry fires
       with `effort="high"`, both the `max_tokens` body and the
       `max_completion_tokens` retry body carry
-      `reasoning_effort: "high"`; (e) a non-string value
-      (`effort=0.5`) is serialized verbatim
-      (`"reasoning_effort": 0.5`), pinning the no-silent-swallow rule.
+      `reasoning_effort: "high"`; (e) the FALSY non-string
+      value `effort=0` is serialized verbatim
+      (`"reasoning_effort": 0` in the body) — this is the one shape
+      that distinguishes the specified `is not None and != ""` guard
+      from a wrong truthiness guard, which every other test would let
+      pass; optionally add `0.5` alongside for the ordinary numeric
+      case.
 - [ ] `tests/test_taskgen.py`: tests that `generate_scene(...,
       effort="high")` produces a request body containing
       `reasoning_effort: "high"` and records `"effort": "high"` in the
       taskgen provenance metadata; that `effort=None` (key present)
       sends the string `"none"` and records `"effort": "none"`; that
       omitting the kwarg sends no `reasoning_effort` key and records no
-      `effort` metadata; and that `effort=""` raises the guided
-      `ConfigError` before any request is made (capture via the
-      injected `http_post`, following the file's existing fake
+      `effort` metadata; that `effort=0` reaches the wire verbatim AND
+      is recorded as `0` in provenance (so a truthiness guard on the
+      "record when sent" condition cannot drop metadata for a value
+      that did hit the wire); and that `effort=""` raises the guided
+      `ConfigError` front-loaded — assert the embodiment was never
+      reset, pinning pre-peek placement, not just pre-request (capture
+      via the injected `http_post`, following the file's existing fake
       conventions).
 - [ ] `tests/test_vlm_grader.py`: tests that `vlm_grader(...,
       effort="high")` sends `reasoning_effort: "high"` when grading,
@@ -178,7 +201,7 @@ provenance wording, `effort=None` provenance assertion) are folded in.
       `ConfigError` at construction (front-loaded, like the missing-key
       check), and that an endpoint 4xx on an effort-bearing request
       degrades to an ungraded trial with the stderr note rather than
-      raising (pinning the decision-1 loudness caveat).
+      raising (pinning the loudness caveat in Global constraints).
 - [ ] Run the three files; every new test must fail against current code
       (each asserts a key that nothing emits yet, or passes a kwarg that
       does not exist yet — the taskgen/grader ones fail with TypeError).
