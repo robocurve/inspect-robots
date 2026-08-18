@@ -36,9 +36,8 @@ ROSTER: dict[str, dict[str, object]] = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "api_key_env": "GEMINI_API_KEY",
         "policy": {
-            "model": "gemini-3.7-flash",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "api_key_env": "GEMINI_API_KEY",
+            "model": "google/gemini-3.7-flash",
+            "wire": "interactions",
         },
     },
 }
