@@ -3,6 +3,7 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -553,18 +554,24 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
-def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
+def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
     tmp_path: Path,
 ) -> None:
+    """Offer optional sink bindings in order and skip absent or non-callable hooks."""
+
     class _SpaceAware(NullSink):
         def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
+            self.calls: list[tuple[object, ...]] = []
 
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
 
         def bind_frames_dir(self, frames_dir: str | None) -> None:
             self.calls.append(("bind_frames_dir", frames_dir))
+
+        def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+            """Record the offered scenes for ordering assertions."""
+            self.calls.append(("bind_scenes", scenes))
 
         def on_eval_start(self, spec: EvalSpec) -> None:
             del spec
@@ -573,14 +580,16 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
     class _OddAttr(NullSink):
         bind_spaces = "not a hook"
         bind_frames_dir = "not a hook"
+        bind_scenes = "not a hook"
 
     embodiment = CubePickEmbodiment()
     aware = _SpaceAware()
     no_hook = NullSink()
     odd = _OddAttr()
 
+    task = _task(max_steps=1)
     (log,) = eval(
-        _task(max_steps=1),
+        task,
         ScriptedPolicy(),
         embodiment,
         sinks=[aware, no_hook, odd],
@@ -595,12 +604,15 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
             embodiment.info.observation_space,
         ),
         ("bind_frames_dir", None),
+        ("bind_scenes", task.scenes),
         ("on_eval_start",),
     ]
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
     assert getattr(no_hook, "bind_frames_dir", None) is None
     assert odd.bind_frames_dir == "not a hook"
+    assert getattr(no_hook, "bind_scenes", None) is None
+    assert odd.bind_scenes == "not a hook"
 
 
 def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:

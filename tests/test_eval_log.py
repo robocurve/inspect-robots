@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -18,6 +19,7 @@ from inspect_robots.log import (
     EvalSpec,
     EvalStats,
     SceneResult,
+    _json_safe_scene_metadata,
 )
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
@@ -53,6 +55,10 @@ def _golden_log() -> EvalLog:
                 reduced={"success_at_end": 1.0},
                 epochs=({"success_at_end": 1.0},),
                 instruction="reach the cube",
+                scene_metadata={
+                    "rubric": "touch the cube",
+                    "taskgen": {"model": "vision"},
+                },
                 operator_judgements=("yes",),
                 operator_notes=("gripper closed early",),
                 operator_messages=(({"t": 3, "text": "keep left <now>"},),),
@@ -67,6 +73,25 @@ def _golden_log() -> EvalLog:
             ),
         ),
     )
+
+
+def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
+    """Retain JSON-safe values while detaching nested data from its source."""
+    nested = {"thresholds": [1, 2]}
+    metadata = {
+        "rubric": "touch the cube",
+        "nested": nested,
+        "adapter_object": object(),
+    }
+
+    safe = _json_safe_scene_metadata(metadata)
+
+    assert safe == {
+        "rubric": "touch the cube",
+        "nested": {"thresholds": [1, 2]},
+    }
+    nested["thresholds"].append(3)
+    assert safe["nested"] == {"thresholds": [1, 2]}
 
 
 def test_eval_log_round_trips_through_dict() -> None:
@@ -93,6 +118,10 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     assert restored.eval.git_commit == "deadbeef"
     assert restored.samples[0].scene_id == "s0"
     assert restored.samples[0].instruction == "reach the cube"
+    assert restored.samples[0].scene_metadata == {
+        "rubric": "touch the cube",
+        "taskgen": {"model": "vision"},
+    }
     assert restored.samples[0].operator_judgements == ("yes",)
     assert restored.samples[0].operator_notes == ("gripper closed early",)
     assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
@@ -125,6 +154,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     del data["eval"]["max_seconds"]
     for sample in data["samples"]:
         del sample["instruction"]
+        del sample["scene_metadata"]
         del sample["operator_judgements"]
         del sample["operator_notes"]
         del sample["operator_messages"]
@@ -136,6 +166,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     restored = read_eval_log(str(path))
     assert restored.samples[0].reduced == {"success_at_end": 1.0}
     assert restored.samples[0].instruction is None
+    assert restored.samples[0].scene_metadata == {}
     assert restored.samples[0].operator_judgements == ()
     assert restored.samples[0].operator_notes == ()
     assert restored.samples[0].operator_messages == ()
@@ -230,6 +261,45 @@ def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
     eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert list(tmp_path.glob("*.json"))
     assert not list(tmp_path.glob("*.tmp"))  # atomic temp+rename left nothing behind
+
+
+def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
+    from inspect_robots import eval
+
+    circular: list[object] = []
+    circular.append(circular)
+    task = Task(
+        name="metadata",
+        scenes=[
+            Scene(
+                id="s0",
+                instruction="reach",
+                init_seed=0,
+                metadata={
+                    "rubric": "touch the cube",
+                    "nested": {"thresholds": [1, 2]},
+                    "adapter_object": object(),
+                    "circular": circular,
+                },
+            )
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    log = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))[0]
+
+    assert log.status == "success"
+    assert log.samples[0].scene_metadata == {
+        "rubric": "touch the cube",
+        "nested": {"thresholds": [1, 2]},
+    }
+    # The persisted copy is deep: mutating the live scene metadata after the
+    # fact (as an adapter might mid-run) must not reach into the log.
+    cast(dict[str, Any], task.scenes[0].metadata["nested"])["thresholds"].append(object())
+    assert log.samples[0].scene_metadata["nested"] == {"thresholds": [1, 2]}
+    written = read_eval_log(str(next(tmp_path.glob("*.json"))))
+    assert written.samples[0].scene_metadata == log.samples[0].scene_metadata
 
 
 def test_store_frames_writes_side_cars(tmp_path: Path) -> None:

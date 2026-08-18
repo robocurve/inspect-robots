@@ -683,13 +683,13 @@ class OperatorSession:
         A verdict already captured by the console is announced and preserved.
         A terminated episode with a definitive embodiment verdict adopts and announces
         that verdict instead of asking the operator to confirm the same outcome a second
-        time. Prompted verdicts are followed by one optional, stripped, case-preserved
-        grader note.
+        time. When prompting, a non-blank string at ``scene.metadata["rubric"]``
+        is displayed first. Prompted verdicts are followed by one optional,
+        stripped, case-preserved grader note.
         """
         self.status(None)
         from inspect_robots.transcript import operator_event
 
-        del scene
         if record.operator_judgement is not None:
             self.write_line(f"operator verdict adopted from console: {record.operator_judgement}")
             return
@@ -703,6 +703,11 @@ class OperatorSession:
                 f"operator verdict adopted from embodiment: {record.termination_reason}"
             )
             return
+        rubric = scene.metadata.get("rubric")
+        if isinstance(rubric, str) and rubric.strip():
+            self.write_line("rubric:")
+            for line in rubric.splitlines():
+                self.write_line(f"  {line}")
         if record.truncated and record.termination_reason == "max_steps":
             self.write_line("note: this trial hit the step limit before terminating")
         elif record.truncated and record.termination_reason is not None:

@@ -70,6 +70,11 @@ top_cam_device = /dev/v4l/by-id/usb-CAM123-video-index0
 
 [sim_embodiment.args]  ; -E pairs used only under --sim
 headless = true
+
+[taskgen.args]         ; default -A pairs for --auto-task (no owner; see below)
+model = gpt-5.2
+base_url = https://api.openai.com/v1
+api_key_env = OPENAI_API_KEY
 ```
 
 Values parse like `-P/-E` args (bool/int/float/None/str), `~` expands in
@@ -78,7 +83,10 @@ same-named config key. An `[*.args]` section belongs to the component named
 in `[defaults]`: it applies whenever that same component is the one selected
 (by default, by flag, or by env var), and is ignored with a stderr note when
 a *different* component is selected. Your YAM rig's `rest_pose` never reaches
-`--embodiment kitchen`. There is deliberately no project-local config file.
+`--embodiment kitchen`. The one exception is `[taskgen.args]`: automatic
+task generation is a single fixed function rather than a component named in
+`[defaults]`, so the section has no owner and applies to every `--auto-task`
+run. There is deliberately no project-local config file.
 Because `.env` values load into the environment, a directory's `.env` can pin
 `INSPECT_ROBOTS_CONFIG` for everything run there. Treat a checked-in `.env`
 that selects hardware with the same suspicion as a checked-in config: either
@@ -142,8 +150,56 @@ suppresses the operator grader specifically (combining it with an explicit
 `--grader operator` is an error, and a config-set `grader = operator` is
 downgraded with a stderr note whenever the run cannot actually be attended).
 A custom grader named in config or `--grader` runs regardless of TTY-ness,
-which is what a future VLM autograder needs. An unjudged trial honestly
-scores as failure with "no operator judgement recorded".
+which is what the builtin `vlm` autograder relies on. An unjudged trial
+honestly scores as failure with "no operator judgement recorded".
+
+### Automated grading: `--grader vlm`
+
+The builtin `vlm` grader replaces the human verdict with a vision model. It
+sends the trial's first and last camera frames, the task instruction, and a
+rubric to an OpenAI-compatible chat endpoint, then records the model's
+success or failure verdict exactly where the operator grader would have
+written one, so the `operator` scorer reads it unchanged:
+
+```bash
+export ANTHROPIC_API_KEY=...
+inspect-robots "stack the red cube on the blue cube" \
+  --grader vlm -G model=claude-sonnet-5
+```
+
+Grader arguments ride the repeatable `-G k=v` flag (the grader counterpart of
+`-P`): `model` (required), `rubric` (inline text) or `rubric_file` (a path,
+mutually exclusive with `rubric`), `base_url` (default
+`https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
+`max_cameras` (frames per phase, default 4), and `effort` (sent to the
+endpoint as `reasoning_effort`: leave it out for the provider default;
+`effort=none` requests the minimum, it does not mean unset; a value the
+endpoint rejects leaves trials ungraded with a stderr note, like any grader
+wire failure). Without a rubric the grader
+uses a strict default: success only if the frames show the instruction
+completed, failure when the outcome is ambiguous or not visible. A scene that
+carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
+generates) wins over all of these for that trial. `-G` without any selected
+grader is an error rather than a silent no-op.
+
+Both pieces persist in config, and the args section is owned by the grader it
+was written for (the same rule as `[policy.args]`):
+
+```ini
+[defaults]
+grader = vlm
+
+[grader.args]
+model = claude-sonnet-5
+rubric_file = ~/rigs/stacking-rubric.md
+```
+
+Configuration problems (a missing model or API key, an unreadable rubric
+file) stop the run before the robot moves. After a rollout the grader never
+crashes the run: transport failures or an unparseable reply leave the trial
+ungraded with a stderr note. A trial the embodiment already terminated with a
+definitive `success` or `failure`, or one the operator already judged from
+the console, is adopted without spending a model call.
 
 ### Live operator feedback
 
@@ -338,6 +394,51 @@ The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
 scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
+### Automatic task generation: `--auto-task`
+
+Use `--auto-task` in place of `--task` or `--instruction` to have a
+vision-capable model inspect the embodiment's initial camera frames and write
+both the task and its grading rubric:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+inspect-robots run --auto-task -A model=claude-sonnet-4-5 \
+             --policy agent --embodiment my-robot
+```
+
+The command prints the generated instruction and rubric before rollout. The
+instruction is sent to the policy, and the rubric is shown to the operator
+grader when a verdict is needed. Both are persisted in the eval log.
+
+Repeat `-A key=value` to pass generator arguments. Common arguments are
+`model`, `instructions`, `instructions_file`, `base_url`, `api_key_env`,
+`max_cameras`, `scene_id`, and `effort` (sent as `reasoning_effort`: leave
+it out for the provider default; `effort=none` requests the minimum, it
+does not mean unset; an invalid value fails before rollout). Values use the
+same bool/int/float/None/string parsing as the component argument flags:
+
+```bash
+inspect-robots run --auto-task \
+             -A model=vision-model \
+             -A instructions_file=task-designer.txt \
+             -A max_cameras=2 \
+             --policy agent --embodiment my-robot
+```
+
+Generator arguments persist in the `[taskgen.args]` config section, which
+applies to every `--auto-task` run (it has no owner; see the config-file
+section above). An explicit `-A key=value` overrides the same-named config
+key. Set the seed with `--seed`, never a `[taskgen.args] seed` key: the seed
+must reach generation and evaluation together, and a persisted `seed` key
+exits every auto run with a guided error.
+
+Exactly one of `--task`, `--instruction`, and `--auto-task` is required.
+`-A` requires `--auto-task`, and `-T` cannot be combined with it. Automatic
+tasks use the same `--max-steps` and `--scorer` defaults as instruction runs.
+`--epochs N` repeats the generated scene without regenerating the task. Keep
+the default integer seed, or pass an explicit `--seed N`; task generation and
+evaluation use the same value so the initial peek matches epoch zero.
+
 ## `inspect-robots eval-set`
 
 Run several registered tasks against one resolved policy/embodiment pair in a
@@ -487,7 +588,8 @@ The report puts the run status, configuration, metrics, scene results, and
 recorded policy conversations on one page. Chat transcripts are grouped into
 observation turns. A turn's default view shows its step, camera frames,
 structured operator feedback, assistant prose, agent-note headlines, and
-readable tool argument chips. A collapsed Raw transcript section preserves the
+readable tool argument chips. Scene cards in auto-task logs also include a
+collapsed rubric dropdown. A collapsed Raw transcript section preserves the
 raw observation, state dumps, calls, and tool results. Non-chat transcripts
 remain available as bounded JSON.
 

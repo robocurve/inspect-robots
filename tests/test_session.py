@@ -401,6 +401,66 @@ def test_prompt_verdict_closes_status_and_flushes_before_reading_answer() -> Non
     assert record.operator_judgement == "y"
 
 
+def test_prompt_verdict_displays_indented_multiline_rubric_before_prompting() -> None:
+    answers = iter(["y", ""])
+    session = _RecordingLinesSession(lambda _prompt: next(answers))
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    scene = Scene(
+        id="s0",
+        instruction="stack",
+        metadata={"rubric": "Red is above blue.\nThe stack remains upright."},
+    )
+
+    session.prompt_verdict(record, scene)
+
+    assert session.lines == [
+        "rubric:",
+        "  Red is above blue.",
+        "  The stack remains upright.",
+    ]
+    assert record.operator_judgement == "y"
+
+
+@pytest.mark.parametrize("rubric", [None, 7, "", " \n\t "])
+def test_prompt_verdict_ignores_absent_non_string_or_blank_rubrics(rubric: object) -> None:
+    answers = iter(["n", ""])
+    session = _RecordingLinesSession(lambda _prompt: next(answers))
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+
+    session.prompt_verdict(
+        record,
+        Scene(id="s0", instruction="reach", metadata={"rubric": rubric}),
+    )
+
+    assert session.lines == []
+    assert record.operator_judgement == "n"
+
+
+@pytest.mark.parametrize("source", ["console", "embodiment"])
+def test_prompt_verdict_does_not_display_rubric_on_adopt_paths(source: str) -> None:
+    session = _RecordingLinesSession(lambda _prompt: pytest.fail("adopt path must not prompt"))
+    record = TrialRecord(
+        scene_id="s0",
+        epoch=0,
+        seed=0,
+        terminated=source == "embodiment",
+        termination_reason="success" if source == "embodiment" else None,
+        operator_judgement="n" if source == "console" else None,
+    )
+
+    session.prompt_verdict(
+        record,
+        Scene(id="s0", instruction="reach", metadata={"rubric": "Must touch cube."}),
+    )
+
+    expected = (
+        "operator verdict adopted from console: n"
+        if source == "console"
+        else "operator verdict adopted from embodiment: success"
+    )
+    assert session.lines == [expected]
+
+
 def test_prompt_verdict_still_prompts_when_stale_input_flush_fails() -> None:
     prompts: list[str] = []
     answers = iter(["n", ""])

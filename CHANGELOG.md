@@ -9,6 +9,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** the shared chat wire behind task generation, the `vlm` grader,
+  and summarize now retries once with `max_completion_tokens` when a 400
+  response names that parameter, so OpenAI reasoning models that reject
+  `max_tokens` work without rerouting through a proxy
+  ([plan 0073](plans/0073-chatwire-max-completion-tokens.md),
+  [#390](https://github.com/robocurve/inspect-robots/issues/390)).
+
 - **Core:** the operator footer now echoes typing on a background cadence, so
   feedback is visible while an agent policy is blocked in inference instead of
   appearing only when the robot moves
@@ -56,6 +63,14 @@ All notable changes to this project are documented here. The format is based on
   [#333](https://github.com/robocurve/inspect-robots/issues/333)).
 
 ### Added
+
+- **Core:** task generation and the `vlm` grader accept an `effort` key
+  (`-A effort=` / `-G effort=`, or the `[taskgen.args]`/`[grader.args]`
+  config sections) that is sent to the endpoint as `reasoning_effort`.
+  Leaving it unset omits the field so the provider default applies, and
+  `effort=none` requests the minimum, matching `-P effort=`
+  ([plan 0075](plans/0075-taskgen-grader-effort.md),
+  [#394](https://github.com/robocurve/inspect-robots/issues/394)).
 
 - **Core:** every delivered trial now writes a default-on, durable JSONL action
   log with the complete post-approval control-step sequence. Pass
