@@ -227,3 +227,5 @@ __marimo__/
 # control; share them as release assets or external storage instead.
 logs/
 *.rrd
+examples/actuate/logs/
+examples/actuate/state/
