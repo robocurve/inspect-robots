@@ -10,6 +10,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,10 @@ HERE = Path(__file__).parent
 # run against the rig folder's file. Booth-editable; a later --config in the
 # passthrough args after "--" overrides it.
 RIG_CONFIG = Path.home() / "robocurve" / "rig-1" / "config.ini"
+# Seconds between evals; the longer pause applies after an eval that produced
+# no log (hardware or config failure) so a broken booth does not hammer retries.
+PAUSE_S = 10
+FAILURE_PAUSE_S = 30
 STATE_DIR = HERE / "state"
 LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
@@ -212,9 +217,9 @@ def main() -> None:
             log_text = log_path.name if log_path else "no log"
             print(f"Eval {eval_index} complete: score={score_text}, log={log_text}")
 
-            answer = input("Enter to run the next eval, q then Enter to quit: ")
-            if answer.strip().lower() == "q":
-                break
+            pause = PAUSE_S if log_path is not None else FAILURE_PAUSE_S
+            print(f"next eval in {pause}s (Ctrl-C to stop)", flush=True)
+            time.sleep(pause)
             eval_index += 1
     except (KeyboardInterrupt, EOFError):
         print("\nExiting.")

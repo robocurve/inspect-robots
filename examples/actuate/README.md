@@ -50,8 +50,10 @@ tmux new -s actuate 'python examples/actuate/run.py -- --config /path/to/rig-fol
 ```
 
 Open http://localhost:8377/ (or `http://<rig-host>:8377/` from another
-machine). In the `actuate` tmux: Esc ends the episode and triggers grading,
-Enter starts the next eval with a fresh draw, `q` then Enter quits.
+machine). The loop is autonomous: each eval ends (Esc in the `actuate` tmux
+ends an episode early and triggers grading) and the next one starts with a
+fresh draw after a short pause (`PAUSE_S` in `run.py`, longer after a failed
+eval). Ctrl-C in the tmux stops the whole loop.
 
 Anything after `--` is passed to `inspect-robots run` verbatim. To watch
 remotely, add `-- --rerun-connect rerun+http://<your-machine>:9888/proxy`;
