@@ -141,6 +141,10 @@ def _command(
         "run",
         "--config",
         str(RIG_CONFIG),
+        # The leaderboard reads the vlm grader's verdict through the operator
+        # scorer; pin it so a rig config's scorer choice cannot unscore evals.
+        "--scorer",
+        "operator",
         "--auto-task",
         *_role_args("-A", tasker),
         "--grader",
