@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -75,3 +76,96 @@ def test_urllib_post_translates_url_errors_to_neutral_guidance(
 
     with pytest.raises(ConfigError, match=r"chat request failed: offline.\nfix: check the base"):
         _urllib_post("https://x.test", {}, b"{}")
+
+
+_Call = tuple[str, dict[str, str], bytes]
+
+_OPENAI_MAX_TOKENS_400 = json.dumps(
+    {
+        "error": {
+            "message": (
+                "Unsupported parameter: 'max_tokens' is not supported with this model. "
+                "Use 'max_completion_tokens' instead."
+            ),
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }
+    }
+).encode("utf-8")
+
+_REPLY_200 = b'{"choices":[{"message":{"content":"hello"}}]}'
+
+
+def _scripted_post(responses: list[tuple[int, bytes]]) -> tuple[HttpPost, list[_Call]]:
+    """A recording transport that serves ``responses`` in order and raises past the script."""
+    calls: list[_Call] = []
+
+    def post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
+        calls.append((url, headers, body_bytes))
+        if len(calls) > len(responses):
+            raise AssertionError(f"post called {len(calls)} times, scripted {len(responses)}")
+        return responses[len(calls) - 1]
+
+    return post, calls
+
+
+def test_retries_with_max_completion_tokens_when_a_400_names_it() -> None:
+    post, calls = _scripted_post([(400, _OPENAI_MAX_TOKENS_400), (200, _REPLY_200)])
+    messages = [{"role": "user", "content": "hi"}]
+
+    assert chat_completion("https://x.test/v1", "k", "m", messages, http_post=post) == "hello"
+
+    assert len(calls) == 2
+    first, second = calls
+    assert first[0] == second[0]
+    assert first[1] == second[1]
+    first_body = json.loads(first[2])
+    second_body = json.loads(second[2])
+    assert first_body["max_tokens"] == 8192
+    assert second_body["max_completion_tokens"] == 8192
+    assert "max_tokens" not in second_body
+    assert second_body["model"] == first_body["model"] == "m"
+    assert second_body["messages"] == first_body["messages"] == messages
+
+
+def test_retry_failure_surfaces_the_retry_response() -> None:
+    post, calls = _scripted_post(
+        [(400, _OPENAI_MAX_TOKENS_400), (400, b'{"error": {"message": "still rejected"}}')]
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
+
+    assert len(calls) == 2
+    message = str(excinfo.value)
+    assert message.startswith("summary request failed with HTTP 400")
+    assert "still rejected" in message
+    assert "Unsupported parameter" not in message
+
+
+def test_a_400_without_the_marker_raises_after_a_single_post() -> None:
+    post, calls = _scripted_post([(400, b'{"error": {"message": "bad request"}}')])
+
+    with pytest.raises(ConfigError, match=r"summary request failed with HTTP 400"):
+        chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
+
+    assert len(calls) == 1
+
+
+def test_a_non_400_with_the_marker_raises_after_a_single_post() -> None:
+    post, calls = _scripted_post([(500, b"try max_completion_tokens later")])
+
+    with pytest.raises(ConfigError, match=r"summary request failed with HTTP 500"):
+        chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
+
+    assert len(calls) == 1
+
+
+def test_the_marker_check_reads_the_full_body() -> None:
+    long_400 = b'{"error": "' + b"x" * 600 + b' use max_completion_tokens"}'
+    post, calls = _scripted_post([(400, long_400), (200, _REPLY_200)])
+
+    assert chat_completion("https://x.test/v1", "k", "m", [], http_post=post) == "hello"
+
+    assert len(calls) == 2

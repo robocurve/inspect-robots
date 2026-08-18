@@ -123,35 +123,35 @@ this revision.
 
 ### Task 1: failing tests first (TDD)
 
-- [ ] In `tests/test_chatwire.py`, add a recording post factory that
+- [x] In `tests/test_chatwire.py`, add a recording post factory that
       captures each `(url, headers, body_bytes)` and serves scripted
       responses in sequence, raising if called past the scripted count so
       over-posting fails loudly (the existing `_post` helper serves one
       static response; the new tests need per-call scripting and capture).
-- [ ] Test: first response is the OpenAI 400 `unsupported_parameter` body
+- [x] Test: first response is the OpenAI 400 `unsupported_parameter` body
       naming `max_completion_tokens`, second response is a 200 reply.
       Assert the wire returns the content, exactly two posts were made,
       the second body's JSON has `max_completion_tokens: 8192` and no
       `max_tokens` key, and `url`, `headers`, `model`, and `messages` are
       unchanged between the two posts.
-- [ ] Test: both responses are 400, with two DIFFERENT bodies (first
+- [x] Test: both responses are 400, with two DIFFERENT bodies (first
       contains the marker, second is distinct text without it, e.g.
       `{"error": {"message": "still rejected"}}`). Assert exactly two
       posts, and the raised `ConfigError` carries the `what` prefix,
       HTTP 400, and the second body's text but not the first's — this is
       what proves binding decision 3 (the retry response is the one
       surfaced); identical bodies could not distinguish the two.
-- [ ] Test (regression guard, passes pre-change): a 400 whose body lacks
+- [x] Test (regression guard, passes pre-change): a 400 whose body lacks
       the marker raises immediately with a single post.
-- [ ] Test (regression guard, passes pre-change): a non-400 failure
+- [x] Test (regression guard, passes pre-change): a non-400 failure
       (e.g. 500) whose body mentions `max_completion_tokens` raises
       immediately with a single post (the trigger requires both
       conditions).
-- [ ] Test: the marker check reads the full body: a 400 body with the
+- [x] Test: the marker check reads the full body: a 400 body with the
       marker after more than 500 characters of ASCII filler still
       triggers the retry (guards the full-body-decode decision against
       regression to `_response_excerpt`).
-- [ ] Run `uv run pytest tests/test_chatwire.py`. Exactly three of the
+- [x] Run `uv run pytest tests/test_chatwire.py`. Exactly three of the
       new tests must fail against the current module: retry-then-success,
       both-400, and marker-past-500-bytes. The two regression guards
       pass against current code by design (today's behavior is already
@@ -159,17 +159,17 @@ this revision.
 
 ### Task 2: implement the retry
 
-- [ ] Add `_MAX_COMPLETION_TOKENS = 8192` and the `_post_chat` helper
+- [x] Add `_MAX_COMPLETION_TOKENS = 8192` and the `_post_chat` helper
       (binding decision 4), with D1 docstrings.
-- [ ] Rewire `chat_completion` per binding decisions 1–3.
-- [ ] Extend the module docstring with the retry contract sentence.
-- [ ] Run `uv run pytest tests/test_chatwire.py` until green, then the
+- [x] Rewire `chat_completion` per binding decisions 1–3.
+- [x] Extend the module docstring with the retry contract sentence.
+- [x] Run `uv run pytest tests/test_chatwire.py` until green, then the
       full gates: `uv run ruff check .`, `uv run ruff format --check .`,
       `uv run mypy`, `uv run pytest --cov` (must hold 100%).
 
 ### Task 3: changelog
 
-- [ ] Add the `### Fixed` entry under `## [Unreleased]` in
+- [x] Add the `### Fixed` entry under `## [Unreleased]` in
       `CHANGELOG.md` (binding decision 6).
 
 ## Out of scope

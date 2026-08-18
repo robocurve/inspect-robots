@@ -1,9 +1,13 @@
 """Dependency-free OpenAI-compatible chat wire shared by summarize and the VLM grader.
 
-One blocking POST to ``<base_url>/chat/completions`` over stdlib ``urllib``,
+Blocking POSTs to ``<base_url>/chat/completions`` over stdlib ``urllib``,
 with an injectable transport seam (``http_post``) so callers and tests never
-touch the network. Errors are raised as guided ``ConfigError``s whose prefix
-and fix hint the caller labels for its own command surface.
+touch the network. The token cap is sent as ``max_tokens``; when a 400
+response body names ``max_completion_tokens`` (OpenAI reasoning models
+reject ``max_tokens`` and suggest that substitute), the identical request
+is retried once with the cap under that key. Errors are raised as guided
+``ConfigError``s whose prefix and fix hint the caller labels for its own
+command surface.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from inspect_robots.errors import ConfigError
 HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
 
 _RESPONSE_EXCERPT_LIMIT = 500
+
+_MAX_COMPLETION_TOKENS = 8192
 
 
 def _response_excerpt(body: bytes) -> str:
@@ -41,6 +47,21 @@ def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[
         ) from exc
 
 
+def _post_chat(
+    post: HttpPost,
+    url: str,
+    headers: dict[str, str],
+    model: str,
+    messages: list[dict[str, Any]],
+    token_param: str,
+) -> tuple[int, bytes]:
+    """Send one chat-completions request with the token cap keyed under ``token_param``."""
+    body = json.dumps(
+        {"model": model, "messages": messages, token_param: _MAX_COMPLETION_TOKENS}
+    ).encode("utf-8")
+    return post(url, headers, body)
+
+
 def chat_completion(
     base_url: str,
     api_key: str,
@@ -61,9 +82,12 @@ def chat_completion(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    body = json.dumps({"model": model, "messages": messages, "max_tokens": 8192}).encode("utf-8")
     post = _urllib_post if http_post is None else http_post
-    status, response_body = post(url, headers, body)
+    status, response_body = _post_chat(post, url, headers, model, messages, "max_tokens")
+    if status == 400 and "max_completion_tokens" in response_body.decode("utf-8", errors="replace"):
+        status, response_body = _post_chat(
+            post, url, headers, model, messages, "max_completion_tokens"
+        )
     if not 200 <= status < 300:
         raise ConfigError(
             f"{what} request failed with HTTP {status}: {_response_excerpt(response_body)}\n"
