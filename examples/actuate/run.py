@@ -25,6 +25,12 @@ HERE = Path(__file__).parent
 # run against the rig folder's file. Booth-editable; a later --config in the
 # passthrough args after "--" overrides it.
 RIG_CONFIG = Path.home() / "robocurve" / "rig-1" / "config.ini"
+# Rig cheat-sheet notes passed to the embodiment docs channel (-E docs_extra),
+# concatenated from whichever of these exist; booth-editable like the roster.
+DOCS_EXTRA_PATHS = [
+    Path.home() / "robocurve" / "test-dir" / f"rig-{name}.md"
+    for name in ("facts", "formulas", "advice")
+]
 # Seconds between evals; the longer pause applies after an eval that produced
 # no log (hardware or config failure) so a broken booth does not hammer retries.
 PAUSE_S = 10
@@ -52,7 +58,7 @@ def _write_status(status: dict[str, Any]) -> None:
     os.replace(temporary_path, STATUS_PATH)
 
 
-def _role_args(flag: str, model: dict[str, str]) -> list[str]:
+def _role_args(flag: str, model: dict[str, Any]) -> list[str]:
     return [
         flag,
         f"model={model['model']}",
@@ -63,6 +69,31 @@ def _role_args(flag: str, model: dict[str, str]) -> list[str]:
         flag,
         f"effort={EFFORT}",
     ]
+
+
+def _policy_args(model: dict[str, Any]) -> list[str]:
+    """The complete -P set for the drawn test-taker, plus the shared effort."""
+    kvs = dict(model["policy"]) if isinstance(model.get("policy"), dict) else {
+        key: model[key] for key in ("model", "base_url", "api_key_env")
+    }
+    kvs["effort"] = EFFORT
+    args: list[str] = []
+    for key, value in kvs.items():
+        args += ["-P", f"{key}={value}"]
+    return args
+
+
+def _docs_extra_args() -> list[str]:
+    """-E docs_extra from whichever rig cheat-sheet files exist, else nothing."""
+    texts = []
+    for path in DOCS_EXTRA_PATHS:
+        try:
+            texts.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    if not texts:
+        return []
+    return ["-E", "docs_extra=" + "\n\n".join(texts)]
 
 
 def _final_log_paths() -> set[Path]:
@@ -176,8 +207,8 @@ def _command(
         *_role_args("-G", grader),
         "--policy",
         "agent",
-        *_role_args("-P", test_taker),
-        *(["-P", f"wire={test_taker['policy_wire']}"] if "policy_wire" in test_taker else []),
+        *_policy_args(test_taker),
+        *_docs_extra_args(),
         "--log-dir",
         str(LOGS_DIR.resolve()),
         *extra_args,
