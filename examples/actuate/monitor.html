@@ -17,7 +17,7 @@
     }
     main {
       display: grid;
-      grid-template-rows: auto minmax(0, 1.18fr) minmax(0, 0.82fr);
+      grid-template-rows: auto minmax(0, 1.1fr) minmax(0, 0.42fr) minmax(0, 0.68fr);
       gap: clamp(10px, 1.4vh, 18px);
       height: 100vh;
       padding: clamp(14px, 1.5vw, 28px);
@@ -91,20 +91,13 @@
       line-height: 1.35;
       white-space: pre-wrap;
     }
-    .bottom {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: clamp(14px, 2vw, 34px);
-      min-height: 0;
-      padding-top: clamp(8px, 1vh, 14px);
-      border-top: 1px solid #252d38;
-      overflow: hidden;
-    }
     .panel {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
       gap: clamp(10px, 1.2vh, 16px);
       min-height: 0;
+      padding-top: clamp(8px, 1vh, 14px);
+      border-top: 1px solid #252d38;
     }
     .panel-heading {
       display: flex;
@@ -158,8 +151,8 @@
     .count { color: #687280; font-size: 0.62em; font-weight: 600; }
     .recent-list {
       display: grid;
-      grid-template-rows: repeat(3, minmax(0, 1fr));
-      gap: clamp(6px, 0.8vh, 10px);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: clamp(10px, 1.2vw, 22px);
       min-height: 0;
     }
     .recent-card {
@@ -260,21 +253,20 @@
       </div>
     </section>
 
-    <section class="bottom">
-      <section class="panel">
-        <div class="panel-heading">
-          <div class="section-title">Leaderboard</div>
-          <div class="subtitle">mean score as test-taker</div>
-        </div>
-        <div id="chart" class="chart"></div>
-      </section>
-      <section class="panel">
-        <div class="panel-heading">
-          <div class="section-title">Previous Evals</div>
-          <div id="recent-failure" class="failure"></div>
-        </div>
-        <div id="recent-list" class="recent-list"></div>
-      </section>
+    <section class="panel">
+      <div class="panel-heading">
+        <div class="section-title">Previous Evals</div>
+        <div id="recent-failure" class="failure"></div>
+      </div>
+      <div id="recent-list" class="recent-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div class="section-title">Leaderboard</div>
+        <div class="subtitle">mean score as test-taker</div>
+      </div>
+      <div id="chart" class="chart"></div>
     </section>
   </main>
 
