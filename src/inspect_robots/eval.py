@@ -38,7 +38,14 @@ from inspect_robots.errors import (
 )
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
-from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from inspect_robots.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    _json_safe_scene_metadata,
+)
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
@@ -203,6 +210,13 @@ class _Broadcast:
             hook = getattr(sink, "bind_frames_dir", None)
             if callable(hook):
                 hook(frames_dir)
+
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        """Offer the run's scenes to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_scenes", None)
+            if callable(hook):
+                hook(scenes)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
@@ -430,6 +444,7 @@ def _run_eval(
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
+    bus.bind_scenes(task.scenes)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
@@ -460,15 +475,7 @@ def _run_eval(
         termination_reasons: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
-        # One json.dumps call is both the JSON-safety filter and, via loads, a
-        # deep copy: a nested value an adapter later mutates into something
-        # unserializable must not crash the sink at write time.
-        scene_metadata: dict[str, Any] = {}
-        for key, value in scene.metadata.items():
-            try:
-                scene_metadata[key] = json.loads(json.dumps(value))
-            except (TypeError, ValueError, OverflowError):
-                continue
+        scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
 

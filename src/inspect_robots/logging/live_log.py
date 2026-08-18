@@ -15,11 +15,19 @@ from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any
 
-from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from inspect_robots.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    _json_safe_scene_metadata,
+)
 from inspect_robots.logging.json_log import _sanitize, _slug
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
     from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -76,10 +84,25 @@ class LiveLogSink:
         self._started_clock = 0.0
         self._last_write_clock: float | None = None
         self._frames_dir: str | None = None
+        self._bound_scenes: dict[str, tuple[str | None, dict[str, Any]]] = {}
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Bind the frame directory that every snapshot for the next run records."""
         self._frames_dir = frames_dir
+
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        """Freeze scene identity for live snapshots before the next run starts.
+
+        Metadata is copied at bind time, so caller mutation during a run can
+        transiently diverge from the final log that replaces the snapshot.
+        """
+        self._bound_scenes = {
+            scene.id: (
+                scene.instruction,
+                _json_safe_scene_metadata(scene.metadata),
+            )
+            for scene in scenes
+        }
 
     def _disable(self, exc: Exception) -> None:
         """Warn once and turn all later hooks into no-ops for this run."""
@@ -224,6 +247,9 @@ class LiveLogSink:
         """Freeze the mutable scene state with an updated active-trial marker."""
         samples: list[SceneResult] = []
         for scene in self._scenes.values():
+            bound_scene = self._bound_scenes.get(scene.scene_id)
+            instruction = bound_scene[0] if bound_scene is not None else None
+            scene_metadata = bound_scene[1] if bound_scene is not None else {}
             metadata = [dict(value) for value in scene.trial_metadata]
             if scene is self._current_scene and self._current_index is not None:
                 metadata[self._current_index] = {
@@ -236,7 +262,8 @@ class LiveLogSink:
                     reduced={},
                     epochs=tuple(scene.epochs),
                     error=scene.error,
-                    instruction=None,
+                    instruction=instruction,
+                    scene_metadata=dict(scene_metadata),
                     operator_judgements=tuple(scene.operator_judgements),
                     operator_notes=tuple(scene.operator_notes),
                     operator_messages=tuple(scene.operator_messages),
