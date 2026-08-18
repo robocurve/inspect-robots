@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,8 @@ STATE_DIR = HERE / "state"
 LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
 RESULTS_PATH = STATE_DIR / "results.jsonl"
+MEDIA_DIR = STATE_DIR / "media"
+_MEDIA_NAME = re.compile(r"^[A-Za-z0-9._-]+\.mp4$")
 
 
 def _status_payload() -> dict[str, Any]:
@@ -103,6 +106,7 @@ def _recent_payload() -> list[dict[str, Any]]:
             if numeric_score is not None and not math.isfinite(numeric_score):
                 continue
             task = result.get("task")
+            clips = result.get("clips")
             eval_index = result.get("eval_index")
             if not isinstance(eval_index, int) or isinstance(eval_index, bool) or eval_index < 1:
                 eval_index = None
@@ -113,6 +117,7 @@ def _recent_payload() -> list[dict[str, Any]]:
                     "models": models,
                     "task": task if isinstance(task, str) else None,
                     "score": numeric_score,
+                    "clips": clips if isinstance(clips, dict) else {},
                 }
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -144,6 +149,18 @@ class DemoHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/recent":
             self._send_json(_recent_payload())
+            return
+        if path.startswith("/media/"):
+            name = path[len("/media/") :]
+            if not _MEDIA_NAME.fullmatch(name):
+                self._send(b"Not found\n", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
+                return
+            try:
+                body = (MEDIA_DIR / name).read_bytes()
+            except OSError:
+                self._send(b"Not found\n", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
+                return
+            self._send(body, "video/mp4")
             return
         if path in {"/", "/leaderboard"}:
             try:

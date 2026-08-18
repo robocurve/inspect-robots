@@ -33,6 +33,7 @@ STATE_DIR = HERE / "state"
 LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
 RESULTS_PATH = STATE_DIR / "results.jsonl"
+MEDIA_DIR = STATE_DIR / "media"
 
 
 def _utc_now() -> str:
@@ -94,6 +95,29 @@ def _log_outcome(path: Path | None) -> tuple[float | None, str | None]:
         return None, None
     score = sum(scores) / len(scores) if scores else None
     return score, task if isinstance(task, str) else None
+
+
+def _render_clips(log_path: Path | None) -> dict[str, str]:
+    """Render per-camera MP4 clips for a completed eval; empty on any failure."""
+    if log_path is None:
+        return {}
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    before = set(MEDIA_DIR.glob("*.mp4"))
+    try:
+        subprocess.run(
+            ["inspect-robots", "video", str(log_path), "--out", str(MEDIA_DIR), "--fps", "30"],
+            check=True,
+            capture_output=True,
+            timeout=300,
+        )
+    except Exception:
+        return {}
+    clips: dict[str, str] = {}
+    for path in sorted(set(MEDIA_DIR.glob("*.mp4")) - before):
+        for cam in ("left", "top", "right"):
+            if cam in path.name:
+                clips[cam] = path.name
+    return clips
 
 
 def _append_result(result: dict[str, Any]) -> None:
@@ -206,6 +230,7 @@ def main() -> None:
 
             log_path = _newest_final_log(existing_logs)
             score, task = _log_outcome(log_path)
+            clips = _render_clips(log_path)
             _append_result(
                 {
                     "ts": _utc_now(),
@@ -215,6 +240,7 @@ def main() -> None:
                     "task": task,
                     "score": score,
                     "log": log_path.name if log_path else None,
+                    "clips": clips,
                 }
             )
             score_text = f"{score:.2f}" if score is not None else "unscored"
