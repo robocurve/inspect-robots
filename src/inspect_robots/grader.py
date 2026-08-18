@@ -128,6 +128,7 @@ class _VLMGrader:
         api_key: str,
         max_cameras: int,
         http_post: HttpPost | None,
+        effort: str | float | None,
     ) -> None:
         self._model = model
         self._rubric = rubric
@@ -135,6 +136,7 @@ class _VLMGrader:
         self._api_key = api_key
         self._max_cameras = max_cameras
         self._http_post = http_post
+        self._effort = effort
 
     def _rubric_for(self, scene: Scene) -> str:
         """Prefer a generated per-scene rubric over the run-level one.
@@ -210,6 +212,7 @@ class _VLMGrader:
                 what="grading",
                 fix_hint="check -G model=... and -G base_url=..., then retry",
                 http_post=self._http_post,
+                effort=self._effort,
             )
             matches = _VERDICT_RE.findall(reply)
             if not matches:
@@ -226,6 +229,13 @@ class _VLMGrader:
         )
 
 
+class _Unset:
+    """Sentinel distinguishing an omitted ``effort`` from an explicit ``None``."""
+
+
+_UNSET = _Unset()
+
+
 def vlm_grader(
     model: str,
     rubric: str | None = None,
@@ -235,15 +245,30 @@ def vlm_grader(
     api_key_env: str = "ANTHROPIC_API_KEY",
     max_cameras: int = 4,
     http_post: HttpPost | None = None,
+    effort: str | float | None | _Unset = _UNSET,
 ) -> _VLMGrader:
     """The builtin automated grader: a vision model judges first and last frames.
 
     Configuration fails fast here (missing model, unreadable rubric file,
-    unset API key) so a misconfigured run stops before any rollout; after the
-    rollout its ``grade`` only ever degrades to an ungraded trial. The
-    judgement lands on the same record fields the operator grader writes, so
-    the ``operator`` scorer reads it unchanged.
+    unset API key, empty effort) so a misconfigured run stops before any
+    rollout; after the rollout its ``grade`` only ever degrades to an
+    ungraded trial, so an effort value the endpoint rejects surfaces as a
+    per-trial stderr note, not a raise. ``effort`` rides each grading
+    request as ``reasoning_effort``: leaving it unset omits the field for
+    the provider default, ``None`` (``-G effort=none``) requests the
+    minimum, and any other value passes through verbatim. The judgement
+    lands on the same record fields the operator grader writes, so the
+    ``operator`` scorer reads it unchanged.
     """
+    resolved_effort: str | float | None = None
+    if not isinstance(effort, _Unset):
+        if effort == "":
+            raise ConfigError(
+                "the vlm grader effort must be a level name or number, got ''.\n"
+                "fix: omit -G effort= for the provider default, or pass -G effort=none "
+                "for minimum reasoning"
+            )
+        resolved_effort = "none" if effort is None else effort
     if not model:
         raise ConfigError("the vlm grader needs a model id.\nfix: pass -G model=...")
     if isinstance(max_cameras, bool) or not isinstance(max_cameras, int) or max_cameras < 1:
@@ -277,4 +302,5 @@ def vlm_grader(
         api_key=api_key,
         max_cameras=max_cameras,
         http_post=http_post,
+        effort=resolved_effort,
     )

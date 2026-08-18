@@ -178,3 +178,47 @@ def test_the_marker_check_reads_the_full_body() -> None:
     assert chat_completion("https://x.test/v1", "k", "m", [], http_post=post) == "hello"
 
     assert len(calls) == 2
+
+
+def test_effort_is_sent_as_reasoning_effort() -> None:
+    post, calls = _scripted_post([(200, _REPLY_200)])
+
+    chat_completion("https://x.test/v1", "k", "m", [], effort="high", http_post=post)
+
+    assert json.loads(calls[0][2])["reasoning_effort"] == "high"
+
+
+def test_the_default_call_sends_no_reasoning_effort() -> None:
+    post, calls = _scripted_post([(200, _REPLY_200)])
+
+    chat_completion("https://x.test/v1", "k", "m", [], http_post=post)
+
+    assert "reasoning_effort" not in json.loads(calls[0][2])
+
+
+@pytest.mark.parametrize("absent", [None, ""])
+def test_none_and_empty_effort_omit_the_key(absent: str | None) -> None:
+    post, calls = _scripted_post([(200, _REPLY_200)])
+
+    chat_completion("https://x.test/v1", "k", "m", [], effort=absent, http_post=post)
+
+    assert "reasoning_effort" not in json.loads(calls[0][2])
+
+
+def test_the_retry_carries_effort_on_both_sends() -> None:
+    post, calls = _scripted_post([(400, _OPENAI_MAX_TOKENS_400), (200, _REPLY_200)])
+
+    chat_completion("https://x.test/v1", "k", "m", [], effort="high", http_post=post)
+
+    assert len(calls) == 2
+    assert json.loads(calls[0][2])["reasoning_effort"] == "high"
+    assert json.loads(calls[1][2])["reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize("falsy_or_numeric", [0, 0.5])
+def test_non_string_effort_is_serialized_verbatim(falsy_or_numeric: float) -> None:
+    post, calls = _scripted_post([(200, _REPLY_200)])
+
+    chat_completion("https://x.test/v1", "k", "m", [], effort=falsy_or_numeric, http_post=post)
+
+    assert json.loads(calls[0][2])["reasoning_effort"] == falsy_or_numeric

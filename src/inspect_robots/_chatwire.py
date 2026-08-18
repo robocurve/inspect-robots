@@ -5,7 +5,9 @@ with an injectable transport seam (``http_post``) so callers and tests never
 touch the network. The token cap is sent as ``max_tokens``; when a 400
 response body names ``max_completion_tokens`` (OpenAI reasoning models
 reject ``max_tokens`` and suggest that substitute), the identical request
-is retried once with the cap under that key. Errors are raised as guided
+is retried once with the cap under that key. A caller-supplied reasoning
+effort rides on both sends as ``reasoning_effort`` and is omitted from the
+body entirely when unset. Errors are raised as guided
 ``ConfigError``s whose prefix and fix hint the caller labels for its own
 command surface.
 """
@@ -54,11 +56,18 @@ def _post_chat(
     model: str,
     messages: list[dict[str, Any]],
     token_param: str,
+    effort: str | float | None,
 ) -> tuple[int, bytes]:
-    """Send one chat-completions request with the token cap keyed under ``token_param``."""
-    body = json.dumps({"model": model, "messages": messages, token_param: _TOKEN_CAP}).encode(
-        "utf-8"
-    )
+    """Send one chat-completions request with the token cap keyed under ``token_param``.
+
+    ``effort`` arrives already normalized by the calling surface and is sent
+    verbatim as ``reasoning_effort``; ``None`` and ``""`` leave the body
+    without the key.
+    """
+    payload: dict[str, Any] = {"model": model, "messages": messages, token_param: _TOKEN_CAP}
+    if effort is not None and effort != "":
+        payload["reasoning_effort"] = effort
+    body = json.dumps(payload).encode("utf-8")
     return post(url, headers, body)
 
 
@@ -71,11 +80,14 @@ def chat_completion(
     what: str = "summary",
     fix_hint: str = "check --base-url, --model, and the configured API key",
     http_post: HttpPost | None = None,
+    effort: str | float | None = None,
 ) -> str:
     """Return one OpenAI-compatible chat completion or raise a guided configuration error.
 
     ``what`` labels error prefixes for the calling command and ``fix_hint``
     names that command's remedy flags in the non-2xx failure message.
+    ``effort`` is sent verbatim as ``reasoning_effort``; ``None`` and ``""``
+    omit the key so the provider default applies.
     """
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {
@@ -83,10 +95,10 @@ def chat_completion(
         "Content-Type": "application/json",
     }
     post = _urllib_post if http_post is None else http_post
-    status, response_body = _post_chat(post, url, headers, model, messages, "max_tokens")
+    status, response_body = _post_chat(post, url, headers, model, messages, "max_tokens", effort)
     if status == 400 and "max_completion_tokens" in response_body.decode("utf-8", errors="replace"):
         status, response_body = _post_chat(
-            post, url, headers, model, messages, "max_completion_tokens"
+            post, url, headers, model, messages, "max_completion_tokens", effort
         )
     if not 200 <= status < 300:
         raise ConfigError(

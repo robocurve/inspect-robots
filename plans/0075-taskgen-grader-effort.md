@@ -171,7 +171,7 @@ and after. No other substantive issues; the loop is converged.
 
 ### Task 1: failing tests first (TDD)
 
-- [ ] `tests/test_chatwire.py`: using the existing `_scripted_post`
+- [x] `tests/test_chatwire.py`: using the existing `_scripted_post`
       recorder, add tests that (a) `effort="high"` puts
       `reasoning_effort: "high"` in the request body; (b) the default
       call's body has no `reasoning_effort` key (write a new test; do
@@ -186,7 +186,7 @@ and after. No other substantive issues; the loop is converged.
       from a wrong truthiness guard, which every other test would let
       pass; optionally add `0.5` alongside for the ordinary numeric
       case.
-- [ ] `tests/test_taskgen.py`: tests that `generate_scene(...,
+- [x] `tests/test_taskgen.py`: tests that `generate_scene(...,
       effort="high")` produces a request body containing
       `reasoning_effort: "high"` and records `"effort": "high"` in the
       taskgen provenance metadata; that `effort=None` (key present)
@@ -200,7 +200,7 @@ and after. No other substantive issues; the loop is converged.
       reset, pinning pre-peek placement, not just pre-request (capture
       via the injected `http_post`, following the file's existing fake
       conventions).
-- [ ] `tests/test_vlm_grader.py`: tests that `vlm_grader(...,
+- [x] `tests/test_vlm_grader.py`: tests that `vlm_grader(...,
       effort="high")` sends `reasoning_effort: "high"` when grading,
       that `effort=None` (key present) sends `"none"`, that omitting
       the kwarg sends no key, that `effort=""` raises the guided
@@ -208,7 +208,7 @@ and after. No other substantive issues; the loop is converged.
       check), and that an endpoint 4xx on an effort-bearing request
       degrades to an ungraded trial with the stderr note rather than
       raising (pinning the loudness caveat in Global constraints).
-- [ ] Run the three files. Every effort-bearing test must fail against
+- [x] Run the three files. Every effort-bearing test must fail against
       current code (a kwarg that does not exist yet fails with
       TypeError; the chatwire effort tests assert a key nothing emits).
       The three omission tests (chatwire default-call body, taskgen
@@ -219,32 +219,32 @@ and after. No other substantive issues; the loop is converged.
 
 ### Task 2: implement
 
-- [ ] `_chatwire.py`: extend `_post_chat` to accept `effort` and append
+- [x] `_chatwire.py`: extend `_post_chat` to accept `effort` and append
       `reasoning_effort` to the body dict when it is neither `None` nor
       `""`; extend `chat_completion` with keyword-only
       `effort: str | float | None = None` and pass it to both sends;
       extend the module docstring's contract sentence.
-- [ ] `taskgen.py`: add the `_Unset`-sentinel keyword-only `effort` to
+- [x] `taskgen.py`: add the `_Unset`-sentinel keyword-only `effort` to
       `generate_scene` per binding decision 3 (sentinel → omit, `""` →
       guided `ConfigError` front-loaded with the other config checks,
       `None` → `"none"`, else verbatim), pass the normalized value to
       `chat_completion`, and record the normalized value in the
       provenance metadata when sent (decision 4b). Docstring states the
       contract.
-- [ ] `grader.py`: same sentinel + normalization + `""` guard on
+- [x] `grader.py`: same sentinel + normalization + `""` guard on
       `vlm_grader` (raised at construction, front-loaded), store the
       normalized value on `_VLMGrader`, pass in `grade`'s call.
       Docstring states the contract including the degrade-to-ungraded
       loudness caveat.
-- [ ] Run the three test files until green, then full gates:
+- [x] Run the three test files until green, then full gates:
       `uv run ruff check .`, `uv run ruff format --check .`,
       `uv run mypy`, `uv run pytest --cov` (must hold 100%).
 
 ### Task 3: docs + changelog
 
-- [ ] `docs/guide/cli.md`: the two key-list additions (binding
+- [x] `docs/guide/cli.md`: the two key-list additions (binding
       decision 5).
-- [ ] `CHANGELOG.md`: the `### Added` entry (binding decision 6).
+- [x] `CHANGELOG.md`: the `### Added` entry (binding decision 6).
 
 ## Out of scope
 

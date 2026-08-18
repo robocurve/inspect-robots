@@ -389,3 +389,50 @@ def test_vlm_grader_degrades_on_transport_failures(
 
         assert record.operator_judgement is None
         assert marker in capsys.readouterr().err
+
+
+def test_effort_reaches_the_grading_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    post = _CapturePost()
+
+    _vlm(post, monkeypatch, effort="high").grade(_framed_record(), _scene())
+
+    assert post.requests[-1]["body"]["reasoning_effort"] == "high"  # type: ignore[index]
+
+
+def test_effort_none_sends_the_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    post = _CapturePost()
+    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=post, effort=None)
+
+    grader.grade(_framed_record(), _scene())
+
+    assert post.requests[-1]["body"]["reasoning_effort"] == "none"  # type: ignore[index]
+
+
+def test_omitted_effort_sends_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    post = _CapturePost()
+
+    _vlm(post, monkeypatch).grade(_framed_record(), _scene())
+
+    assert "reasoning_effort" not in post.requests[-1]["body"]  # type: ignore[operator]
+
+
+def test_empty_effort_fails_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    with pytest.raises(ConfigError, match=r"effort.*\nfix:"):
+        vlm_grader("m", api_key_env="VLM_TEST_KEY", effort="")
+
+
+def test_endpoint_rejection_of_effort_degrades_to_ungraded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    post = _CapturePost()
+    post.response = (400, b'{"error": "unknown reasoning_effort value"}')
+    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=post, effort="hgih")
+    record = _framed_record()
+
+    grader.grade(record, _scene())
+
+    assert record.operator_judgement is None
+    assert "grading request failed with HTTP 400" in capsys.readouterr().err
