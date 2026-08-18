@@ -27,7 +27,19 @@ the same composition.
 **Spec:** issue #394 + this plan (the plan is the spec, per repo
 convention).
 
-**Critique:** pending (rounds recorded here as they complete).
+**Critique:** round 1 (fresh-context subagent) verified the CLI/config
+plumbing, registry forwarding, api-snapshot, docs anchors, coverage
+reachability, and non-collision with #393, and found 1 major + 1 minor,
+both fixed in this revision: the original `effort=none → omit` decision
+inverted the agent plugin's documented contract (`-P effort=none` sends
+the true minimum since agent 0.23.0; only key-absent omits), so
+decisions 3/4 now adopt the same `_Unset`-sentinel + `None → "none"`
+normalization for real parity; and falsy non-string parses
+(`effort=0`, `effort=false`) are no longer silently swallowed — the
+wire serializes non-empty values verbatim and the endpoint's 4xx
+rejects them loudly. Nitpicks folded in: the CHANGELOG `### Added`
+section already exists (dead fallback removed) and taskgen provenance
+metadata now records the sent effort (new decision 4b).
 
 ## Global constraints
 
@@ -55,36 +67,53 @@ convention).
 
 1. **Wire field and name:** `reasoning_effort`, the OpenAI
    chat-completions parameter, which Gemini's OpenAI-compat endpoint
-   also honors as its thinking-budget control. Sent only when `effort`
-   is truthy; `None` and `""` both mean absent. (Truthiness, not
-   `is not None`: `-G effort=` parses to `""`, and an empty string must
-   not put `"reasoning_effort": ""` on the wire — same reasoning as the
-   agent plugin's api_key_env handling.)
+   also honors as its thinking-budget control. At the wire layer,
+   `chat_completion(effort=...)` sends the value verbatim when it is
+   neither `None` nor `""`, and omits the key otherwise. Non-string
+   parses (`-A effort=0` → `0`, `effort=false` → `False`) are therefore
+   serialized onto the wire and rejected loudly by the endpoint's own
+   4xx through the existing guided-error path — never silently
+   swallowed. (`""` omits: `-G effort=` parses to `""`, and an empty
+   string must not put `"reasoning_effort": ""` on the wire.)
 2. **Placement:** the field is added in `_post_chat`, so the retry send
    carries it identically to the first send. Body key order:
    `model`, `messages`, token cap, then `reasoning_effort` (appended
    last; tests assert key presence/values, not order).
-3. **Signatures:** keyword-only `effort: str | None = None` on
-   `chat_completion`, `generate_scene`, and `vlm_grader`. `_VLMGrader`
-   stores it and passes it in `grade`'s `chat_completion` call.
-   `_post_chat` takes `effort: str | None` as a positional-after-
-   token_param parameter (private helper, no default needed — both
-   callers pass it explicitly).
-4. **`none` parses to None:** `-A effort=none` / `-G effort=none` go
-   through the shared kv parser, which yields Python `None` — the field
-   is omitted (provider default), NOT the literal string `"none"`. This
-   mirrors the documented `-P effort=none` behavior. The docs note names
-   the parallel; no code special-cases it.
+3. **Signatures:** `chat_completion` gains keyword-only
+   `effort: str | float | None = None` with the decision-1 semantics
+   (`None`/`""` omit, everything else verbatim). `generate_scene` and
+   `vlm_grader` gain keyword-only `effort` defaulting to an `_Unset`
+   sentinel (module-private, mirroring the agent plugin's
+   `policy.py` `_Unset` pattern): sentinel or `""` → call the wire with
+   `effort=None` (omit); key-present `None` → normalize to the string
+   `"none"`; any other value passes through verbatim. `_VLMGrader`
+   stores the normalized value; `grade` passes it to `chat_completion`.
+   `_post_chat` takes the normalized `effort` as a
+   positional-after-token_param parameter (private helper, no default
+   needed — both callers pass it explicitly).
+4. **`effort=none` means minimum, absent means provider default —
+   the agent plugin's contract, mirrored for real:** `-A effort=none` /
+   `-G effort=none` parse to key-present Python `None`, which decision 3
+   normalizes to the wire string `"none"` (minimum reasoning), exactly
+   as `-P effort=none` sends the true minimum since agent 0.23.0
+   (policy.py's `"none" if effort is None else effort` on its `_Unset`
+   sentinel). Only a key that is absent altogether (no flag, no config
+   key) omits the field for the provider default. The docs note states
+   both halves. This keeps one CLI-wide meaning for `effort=none` and
+   preserves an unquoted spelling for minimum effort.
+4b. **Provenance metadata:** `generate_scene` records the taskgen
+   provenance dict (`taskgen.py` ~line 220); when an effort value is
+   sent on the wire, record it there as `"effort"` alongside `model`
+   and `base_url`; when omitted, the key stays absent.
 5. **Docs surface:** add `effort` to the two key lists in
    `docs/guide/cli.md`: the `-G` component-argument list (lines ~171-174)
-   and the `-A` common-arguments list (lines ~409-411), each with a
-   clause that unset (or `none`) leaves the provider default in charge.
-   No em dashes in the added prose.
-6. **CHANGELOG:** one entry under `## [Unreleased]` / `### Added`,
-   Core-scoped, linking this plan and issue #394, following the existing
-   entry format. (If no `### Added` exists under Unreleased, create it
-   above `### Fixed`, matching Keep-a-Changelog section order used
-   elsewhere in the file.)
+   and the `-A` common-arguments list (lines ~409-411), each stating
+   both halves of the contract: leaving the key out leaves the provider
+   default in charge, and `effort=none` requests the minimum (it does
+   not mean unset). No em dashes in the added prose.
+6. **CHANGELOG:** one entry under the existing `## [Unreleased]` /
+   `### Added` section (present at ~line 65), Core-scoped, linking this
+   plan and issue #394, following the existing entry format.
 7. **Out of scope is binding:** no `--effort` for summarize, no changes
    to `-P effort=`, no validation enums.
 
@@ -95,19 +124,27 @@ convention).
 - [ ] `tests/test_chatwire.py`: using the existing `_scripted_post`
       recorder, add tests that (a) `effort="high"` puts
       `reasoning_effort: "high"` in the request body; (b) the default
-      call's body has no `reasoning_effort` key (may fold into (a) by
-      asserting on the existing happy-path test's body — but do not edit
-      the existing test; write a new one); (c) `effort=""` omits the
-      key; (d) when the #390 retry fires with `effort="high"`, both the
-      `max_tokens` body and the `max_completion_tokens` retry body carry
-      `reasoning_effort: "high"`.
-- [ ] `tests/test_taskgen.py`: one test that `generate_scene(...,
+      call's body has no `reasoning_effort` key (write a new test; do
+      not edit the existing happy-path test); (c) `effort=""` and
+      `effort=None` both omit the key; (d) when the #390 retry fires
+      with `effort="high"`, both the `max_tokens` body and the
+      `max_completion_tokens` retry body carry
+      `reasoning_effort: "high"`; (e) a non-string value
+      (`effort=0.5`) is serialized verbatim
+      (`"reasoning_effort": 0.5`), pinning the no-silent-swallow rule.
+- [ ] `tests/test_taskgen.py`: tests that `generate_scene(...,
       effort="high")` produces a request body containing
-      `reasoning_effort: "high"` (capture via the injected `http_post`,
-      following the file's existing fake conventions).
-- [ ] `tests/test_vlm_grader.py`: one test that `vlm_grader(...,
-      effort="high")` sends `reasoning_effort: "high"` when grading
-      (same capture approach as that file's existing wire tests).
+      `reasoning_effort: "high"` and records `effort` in the taskgen
+      provenance metadata; that `effort=None` (key present) sends the
+      string `"none"`; and that omitting the kwarg sends no
+      `reasoning_effort` key and records no `effort` metadata (capture
+      via the injected `http_post`, following the file's existing fake
+      conventions).
+- [ ] `tests/test_vlm_grader.py`: tests that `vlm_grader(...,
+      effort="high")` sends `reasoning_effort: "high"` when grading,
+      that `effort=None` (key present) sends `"none"`, and that
+      omitting the kwarg sends no key (same capture approach as that
+      file's existing wire tests).
 - [ ] Run the three files; every new test must fail against current code
       (each asserts a key that nothing emits yet, or passes a kwarg that
       does not exist yet — the taskgen/grader ones fail with TypeError).
@@ -115,15 +152,19 @@ convention).
 ### Task 2: implement
 
 - [ ] `_chatwire.py`: extend `_post_chat` to accept `effort` and append
-      `reasoning_effort` to the body dict when truthy; extend
-      `chat_completion` with keyword-only `effort: str | None = None`
-      and pass it to both sends; extend the module docstring's contract
-      sentence.
-- [ ] `taskgen.py`: add keyword-only `effort: str | None = None` to
-      `generate_scene`, pass to `chat_completion`. Docstring mention.
-- [ ] `grader.py`: add keyword-only `effort: str | None = None` to
-      `vlm_grader`, store on `_VLMGrader`, pass in `grade`'s call.
-      Docstring mention.
+      `reasoning_effort` to the body dict when it is neither `None` nor
+      `""`; extend `chat_completion` with keyword-only
+      `effort: str | float | None = None` and pass it to both sends;
+      extend the module docstring's contract sentence.
+- [ ] `taskgen.py`: add the `_Unset`-sentinel keyword-only `effort` to
+      `generate_scene` per binding decision 3, normalize (sentinel/`""`
+      → omit, `None` → `"none"`), pass the normalized value to
+      `chat_completion`, and record it in the provenance metadata when
+      sent (decision 4b). Docstring states both halves of the `none`
+      contract.
+- [ ] `grader.py`: same sentinel + normalization on `vlm_grader`, store
+      the normalized value on `_VLMGrader`, pass in `grade`'s call.
+      Docstring states both halves.
 - [ ] Run the three test files until green, then full gates:
       `uv run ruff check .`, `uv run ruff format --check .`,
       `uv run mypy`, `uv run pytest --cov` (must hold 100%).
