@@ -1,17 +1,18 @@
 # Actuate conference demo
 
-A live eval show for the Actuate conference. Four LLMs rotate through the
-three roles of an automatic-task eval, a browser screen shows who is who, and
+A live eval show for the Actuate conference. Seven LLMs compete as
+test-takers of an automatic-task eval, a browser screen shows who is who, and
 a leaderboard accumulates across evals. This lives on the
 `demo/actuate-conference` branch only (draft PR #397) and is never merged:
 run it from the branch, iterate freely.
 
 ## How it works
 
-Every eval independently draws a roster model for each role from that role's
-eligible pool: GPT, Opus, and Gemini can hold any role, Kimi K3 competes as
-test-taker only. The same model can hold two or three roles, that is intended
-and part of the show:
+Every eval draws each role from that role's eligible pool in `_roster.py`.
+The tasker and grader pools have one member each, so those roles are pinned:
+GPT-5.6 Sol always authors tasks and Gemini 3.7 Flash always grades. The
+test-taker rotates over all seven models, so Sol can be drawn against its
+own task and Flash can grade itself, which is intended and part of the show:
 
 - **tasker:** writes the task and rubric from the initial camera frame
   (`--auto-task`, `-A` args)
@@ -89,14 +90,15 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
   Python that has i2rt installed, such as the rig venv. On machines without
   i2rt or CAN it disables itself with a console warning and the demo runs as
   before. Reading temperatures clears any latched motor fault codes.
-- **Model IDs:** confirm the four IDs at the top of `_roster.py` with their
-  providers. Validated live so far: `claude-opus-5` (tasker and test-taker),
-  `gpt-5.6-sol` (tasker and grader, test-taker over the Responses wire).
-  `gemini-3.7-flash` has not been drawn yet; force one eval with it in each
-  role during setup. Kimi K3 is test-taker only and is served via OpenRouter
-  as `moonshotai/kimi-k3`. `OPENROUTER_API_KEY` must be added to the demo
-  `.env` by copying the existing key from `~/robocurve/test-dir/.env`. It has
-  not yet been validated live, so force one eval with it as test-taker
+- **Model IDs:** confirm the seven IDs at the top of `_roster.py` with their
+  providers. Validated on the rig so far: `claude-opus-5`, `gpt-5.6-sol`
+  (test-taker over the Responses wire, plus its pinned tasker role), and
+  `gemini-3.7-flash` (test-taker plus its pinned grader role). The other
+  four test-takers (`moonshotai/kimi-k3` via OpenRouter, needing
+  `OPENROUTER_API_KEY` in the demo `.env`, copy the existing key from
+  `~/robocurve/test-dir/.env`; `gemini-3.1-pro-preview`; `gpt-5`; `gpt-5.4`,
+  the base thinking model, not `-pro`) are wire-verified off-rig only
+  (function tools plus effort high, 2026-08-19): force one eval with each
   during setup.
 - **Fresh leaderboard:** eval numbering and scores persist in
   `examples/actuate/state/` and survive restarts. To start the show clean at
