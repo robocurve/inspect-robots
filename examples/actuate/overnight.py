@@ -20,7 +20,10 @@ import run
 from _roster import ACCENTS
 
 TRIALS_PER_RIG = 5
-STALL_AFTER_MIN = 30
+# Sized above the eval watchdog (90 min) plus teardown grace: a slow model's
+# single legitimate episode writes nothing to the state dir for its whole
+# duration, so any smaller threshold cries stalled mid-eval.
+STALL_AFTER_MIN = 100
 RIGS = {"rig1": ("state-rig1", "logs-rig1"), "rig2": ("state-rig2", "logs-rig2")}
 
 HERE = Path(__file__).parent
