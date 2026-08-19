@@ -100,6 +100,17 @@ ROSTER: dict[str, dict[str, object]] = {
             "wire": "responses",
         },
     },
+    "Kimi K2 Thinking": {
+        "roles": ("test_taker",),
+        "model": "moonshotai/kimi-k2-thinking",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "policy": {
+            "model": "moonshotai/kimi-k2-thinking",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+        },
+    },
 }
 
 ACCENTS = {
@@ -110,6 +121,7 @@ ACCENTS = {
     "Gemini 3.1 Pro": "#3fb6c9",
     "GPT-5": "#d4608d",
     "GPT-5.4": "#c9a54a",
+    "Kimi K2 Thinking": "#a2b53c",
 }
 
 EFFORT = "high"

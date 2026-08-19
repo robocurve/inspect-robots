@@ -1,6 +1,6 @@
 # Actuate conference demo
 
-A live eval show for the Actuate conference. Seven LLMs compete as
+A live eval show for the Actuate conference. Eight LLMs compete as
 test-takers of an automatic-task eval, a browser screen shows who is who, and
 a leaderboard accumulates across evals. This lives on the
 `demo/actuate-conference` branch only (draft PR #397) and is never merged:
@@ -11,7 +11,7 @@ run it from the branch, iterate freely.
 Every eval draws each role from that role's eligible pool in `_roster.py`.
 The tasker and grader pools have one member each, so those roles are pinned:
 GPT-5.6 Sol always authors tasks and Gemini 3.7 Flash always grades. The
-test-taker rotates over all seven models, so Sol can be drawn against its
+test-taker rotates over all eight models, so Sol can be drawn against its
 own task and Flash can grade itself, which is intended and part of the show:
 
 - **tasker:** writes the task and rubric from the initial camera frame
@@ -75,6 +75,23 @@ Arguments after the launcher name are passed to `inspect-robots run` verbatim.
 To watch remotely, add `--rerun-connect rerun+http://<your-machine>:9888/proxy`;
 at the booth the rig config's `rerun = true` spawns a local viewer instead.
 
+## Fixed-trials campaign
+
+`run_trials.py` runs every test-taker through exactly ten scored evals, then
+prints a per-model summary and exits. Run it manually in the same tmux
+arrangement because `start.sh` stays wired to the rotating demo:
+
+```bash
+tmux new -d -s actuate-serve 'python examples/actuate/serve.py'
+tmux new -s actuate 'python examples/actuate/run_trials.py -- --config /path/to/rig-folder/config.ini'
+```
+
+Arguments after `--` reach `inspect-robots run` verbatim, exactly as with
+`run.py`. Start from a fresh leaderboard for a clean campaign because existing
+scored evals in `state/results.jsonl` count toward the ten. The runner resumes
+where it left off after a restart and exits once every test-taker has ten scored
+evals.
+
 ## Booth checklist
 
 - **Rig config:** `RIG_CONFIG` in `run.py` defaults to
@@ -90,16 +107,16 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
   Python that has i2rt installed, such as the rig venv. On machines without
   i2rt or CAN it disables itself with a console warning and the demo runs as
   before. Reading temperatures clears any latched motor fault codes.
-- **Model IDs:** confirm the seven IDs at the top of `_roster.py` with their
+- **Model IDs:** confirm the eight IDs at the top of `_roster.py` with their
   providers. Validated on the rig so far: `claude-opus-5`, `gpt-5.6-sol`
   (test-taker over the Responses wire, plus its pinned tasker role), and
   `gemini-3.7-flash` (test-taker plus its pinned grader role). The other
-  four test-takers (`moonshotai/kimi-k3` via OpenRouter, needing
-  `OPENROUTER_API_KEY` in the demo `.env`, copy the existing key from
-  `~/robocurve/test-dir/.env`; `gemini-3.1-pro-preview`; `gpt-5`; `gpt-5.4`,
-  the base thinking model, not `-pro`) are wire-verified off-rig only
-  (function tools plus effort high, 2026-08-19): force one eval with each
-  during setup.
+  five test-takers (`moonshotai/kimi-k3` and `moonshotai/kimi-k2-thinking`
+  via OpenRouter, needing `OPENROUTER_API_KEY` in the demo `.env`, copy the
+  existing key from `~/robocurve/test-dir/.env`; `gemini-3.1-pro-preview`;
+  `gpt-5`; `gpt-5.4`, the base thinking model, not `-pro`) are wire-verified
+  off-rig only (function tools plus effort high, 2026-08-19): force one eval
+  with each during setup.
 - **Fresh leaderboard:** eval numbering and scores persist in
   `examples/actuate/state/` and survive restarts. To start the show clean at
   eval 1: `rm examples/actuate/state/status.json
@@ -115,7 +132,10 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
 ## Files
 
 - `run.py`: orchestrator (draws roles, launches evals, records results)
+- `run_trials.py`: deterministic fixed-trials campaign built on run.py
+- `start.sh`: booth launcher for the display server plus the rotating demo
 - `serve.py`: stdlib HTTP server for the display page
 - `monitor.html`: the combined conference screen
 - `_roster.py`: booth-editable models, endpoints, key env vars, accents
+- `_thermal.py`: motor-temperature probe and thermal-gate thresholds
 - `state/`, `logs/`: gitignored run state and eval logs
