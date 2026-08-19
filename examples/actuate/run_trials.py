@@ -142,10 +142,15 @@ def main() -> None:
             log_text = log_path.name if log_path else "no log"
             print(f"Eval {eval_index} complete: score={score_text}, log={log_text}")
 
+            # Only a scored (finite) eval resets the unscored streak: selection
+            # retries the same lagging model, so a rig or model alternating
+            # between no-log and logged-but-unscored failures must not keep
+            # both counters at zero forever. NaN scores count as unscored for
+            # the same reason (they never count as trials).
+            scored = score is not None and math.isfinite(score)
             if log_path is None:
                 failure_streak += 1
-                unscored_streak = 0
-            elif score is None:
+            elif not scored:
                 failure_streak = 0
                 unscored_streak += 1
             else:
@@ -160,12 +165,21 @@ def main() -> None:
             if unscored_streak >= UNSCORED_STREAK_STOP:
                 raise SystemExit(
                     f"{unscored_streak} consecutive evals produced logs but no score; "
-                    f"the grader ({grader_name}) is likely broken. Fix it and relaunch."
+                    f"the grader ({grader_name}) or the repeatedly drawn test-taker "
+                    f"({test_taker_name}) is likely broken. Fix it and relaunch."
                 )
+            eval_index += 1
+            counts = _trial_scores(test_taker_names)
+            if all(len(counts[name]) >= TRIALS_PER_MODEL for name in test_taker_names):
+                # Campaign complete: skip the pause and let the top-of-loop
+                # check print the summary (a Ctrl-C during a pointless final
+                # sleep would eat it). Clear the roles from the status file so
+                # the monitor stops showing the last eval as current.
+                run._write_status({"eval_index": eval_index - 1})
+                continue
             pause = run.PAUSE_S if log_path is not None else run.FAILURE_PAUSE_S
             print(f"next eval in {pause}s (Ctrl-C to stop)", flush=True)
             time.sleep(pause)
-            eval_index += 1
     except (KeyboardInterrupt, EOFError):
         print("\nExiting.")
 
