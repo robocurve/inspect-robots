@@ -162,9 +162,10 @@ finite scored evals on that rig.
   `gemini-3.7-flash` (test-taker plus its pinned grader role), and
   `gemini-3.1-pro-preview` (2026-08-19 forced eval). `moonshotai/kimi-k3`
   (OpenRouter, needs `OPENROUTER_API_KEY` in the demo `.env`, copy the
-  existing key from `~/robocurve/test-dir/.env`) works on the rig but runs
-  100 to 230 seconds per turn at effort high and one call wedged
-  indefinitely; the eval watchdog contains the damage. Kimi K2 Thinking was
+  existing key from `~/robocurve/test-dir/.env`) is validated on the rig
+  but its per-turn latency depends on OpenRouter's provider routing: 4 to
+  90 seconds on a good route, 100 to 230 seconds with one observed
+  indefinite wedge on a bad one; the eval watchdog contains the damage. Kimi K2 Thinking was
   removed 2026-08-19: it is text-only, and OpenRouter rejects the
   test-taker's camera frames with "No endpoints found that support image
   input", which would burn the unscored streak and halt the campaign.
