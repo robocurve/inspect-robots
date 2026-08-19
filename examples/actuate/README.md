@@ -1,6 +1,6 @@
 # Actuate conference demo
 
-A live eval show for the Actuate conference. Eight LLMs compete as
+A live eval show for the Actuate conference. Seven LLMs compete as
 test-takers of an automatic-task eval, a browser screen shows who is who, and
 a leaderboard accumulates across evals. This lives on the
 `demo/actuate-conference` branch only (draft PR #397) and is never merged:
@@ -11,7 +11,7 @@ run it from the branch, iterate freely.
 Every eval draws each role from that role's eligible pool in `_roster.py`.
 The tasker and grader pools have one member each, so those roles are pinned:
 GPT-5.6 Sol always authors tasks and Gemini 3.7 Flash always grades. The
-test-taker rotates over all eight models, so Sol can be drawn against its
+test-taker rotates over all seven models, so Sol can be drawn against its
 own task and Flash can grade itself, which is intended and part of the show:
 
 - **tasker:** writes the task and rubric from the initial camera frame
@@ -96,7 +96,7 @@ where it left off after a restart and exits once every test-taker has ten scored
 evals.
 
 For the dual-rig campaign, each test-taker runs five scored trials on rig-1
-and five on rig-2. That is 8 models x 5 trials x 2 rigs = 80 evals. Measuring
+and five on rig-2. That is 7 models x 5 trials x 2 rigs = 70 evals. Measuring
 every model on both rigs keeps rig differences out of the model comparison.
 The rigs run concurrently, so each uses its own `state-rigN/` and `logs-rigN/`
 directories. Shared directories would race newest-log attribution and
@@ -156,16 +156,18 @@ finite scored evals on that rig.
   Python that has i2rt installed, such as the rig venv. On machines without
   i2rt or CAN it disables itself with a console warning and the demo runs as
   before. Reading temperatures clears any latched motor fault codes.
-- **Model IDs:** confirm the eight IDs at the top of `_roster.py` with their
-  providers. Validated on the rig so far: `claude-opus-5`, `gpt-5.6-sol`
-  (test-taker over the Responses wire, plus its pinned tasker role), and
-  `gemini-3.7-flash` (test-taker plus its pinned grader role). The other
-  five test-takers (`moonshotai/kimi-k3` and `moonshotai/kimi-k2-thinking`
-  via OpenRouter, needing `OPENROUTER_API_KEY` in the demo `.env`, copy the
-  existing key from `~/robocurve/test-dir/.env`; `gemini-3.1-pro-preview`;
-  `gpt-5`; `gpt-5.4`, the base thinking model, not `-pro`) are wire-verified
-  off-rig only (function tools plus effort high, 2026-08-19): force one eval
-  with each during setup.
+- **Model IDs:** confirm the seven IDs at the top of `_roster.py` with their
+  providers. Validated on the rig: `claude-opus-5`, `gpt-5.6-sol`
+  (test-taker over the Responses wire, plus its pinned tasker role),
+  `gemini-3.7-flash` (test-taker plus its pinned grader role), and
+  `gemini-3.1-pro-preview` (2026-08-19 forced eval). `moonshotai/kimi-k3`
+  (OpenRouter, needs `OPENROUTER_API_KEY` in the demo `.env`, copy the
+  existing key from `~/robocurve/test-dir/.env`) works on the rig but runs
+  100 to 230 seconds per turn at effort high and one call wedged
+  indefinitely; the eval watchdog contains the damage. Kimi K2 Thinking was
+  removed 2026-08-19: it is text-only, and OpenRouter rejects the
+  test-taker's camera frames with "No endpoints found that support image
+  input", which would burn the unscored streak and halt the campaign.
 - **Fresh leaderboard:** eval numbering and scores persist in
   `examples/actuate/state/` and survive restarts. To start the show clean at
   eval 1: `rm examples/actuate/state/status.json
