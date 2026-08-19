@@ -338,7 +338,9 @@
         const index = entry.eval_index == null ? "?" : entry.eval_index;
         const scoreValue = finiteNumber(entry.score);
         const score = scoreValue == null ? "unscored" : scoreValue.toFixed(1);
-        const task = typeof entry.task === "string" ? entry.task : "Task unavailable";
+        const task = typeof entry.task === "string"
+          ? entry.task
+          : "eval failed before a task was generated";
         const clip = clipName(entry.clips);
         const video = clip == null
           ? ""
