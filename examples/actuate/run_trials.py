@@ -5,6 +5,8 @@ Run with:  python examples/actuate/run_trials.py [-- extra inspect-robots run ar
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import math
 import subprocess
@@ -60,7 +62,25 @@ def run_campaign(
     run.MEDIA_DIR = state_dir / "media"
 
     if not run.RIG_CONFIG.is_file():
-        raise SystemExit(f"rig config not found: {run.RIG_CONFIG}\nfix: edit RIG_CONFIG in run.py")
+        raise SystemExit(
+            f"rig config not found: {run.RIG_CONFIG}\n"
+            "fix: edit RIG_CONFIG in run.py or in the launching rig script"
+        )
+    # One campaign per rig config, enforced up front: a second campaign on the
+    # same config would probe the live CAN bus mid-eval and burn a failure
+    # streak before the downstream flock claim guard surfaced the conflict.
+    # The handle stays open for the campaign's lifetime; the OS releases the
+    # lock on exit however the process dies.
+    config_key = hashlib.sha1(str(run.RIG_CONFIG.resolve()).encode()).hexdigest()[:12]
+    lock_path = state_dir.parent / f".campaign-{config_key}.lock"
+    lock_handle = lock_path.open("w")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(
+            f"another campaign is already running against {run.RIG_CONFIG}; "
+            "stop it first (each rig config supports one campaign at a time)"
+        ) from None
     # Resolved once from RIG_CONFIG only: a --config override after "--"
     # re-routes the eval but not the gate's probe channels, so on a rig with
     # different channel names the gate degrades to per-round warnings.
