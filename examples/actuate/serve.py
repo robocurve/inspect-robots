@@ -182,9 +182,19 @@ class DemoHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    """Serve the display using paths and a port selected on the command line."""
+    global STATE_DIR, LOGS_DIR, STATUS_PATH, RESULTS_PATH, MEDIA_DIR
+
     parser = argparse.ArgumentParser(description="Serve the Actuate conference display.")
     parser.add_argument("--port", type=int, default=8377)
+    parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
+    parser.add_argument("--logs-dir", type=Path, default=LOGS_DIR)
     args = parser.parse_args()
+    STATE_DIR = args.state_dir
+    LOGS_DIR = args.logs_dir
+    STATUS_PATH = STATE_DIR / "status.json"
+    RESULTS_PATH = STATE_DIR / "results.jsonl"
+    MEDIA_DIR = STATE_DIR / "media"
     server = ThreadingHTTPServer(("", args.port), DemoHandler)
     print(f"Actuate display available at http://localhost:{args.port}/")
     try:

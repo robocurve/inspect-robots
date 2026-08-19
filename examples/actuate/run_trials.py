@@ -10,6 +10,7 @@ import math
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import run
@@ -43,8 +44,21 @@ def _trial_scores(test_taker_names: list[str]) -> dict[str, list[float]]:
     return observations
 
 
-def main() -> None:
-    """Run until every roster test-taker has ten finite scored evals."""
+def run_campaign(
+    rig_config: Path,
+    state_dir: Path,
+    logs_dir: Path,
+    trials_per_model: int,
+    argv: list[str],
+) -> None:
+    """Run a fixed-trials campaign with the requested rig and output directories."""
+    run.RIG_CONFIG = rig_config
+    run.STATE_DIR = state_dir
+    run.LOGS_DIR = logs_dir
+    run.STATUS_PATH = state_dir / "status.json"
+    run.RESULTS_PATH = state_dir / "results.jsonl"
+    run.MEDIA_DIR = state_dir / "media"
+
     if not run.RIG_CONFIG.is_file():
         raise SystemExit(f"rig config not found: {run.RIG_CONFIG}\nfix: edit RIG_CONFIG in run.py")
     # Resolved once from RIG_CONFIG only: a --config override after "--"
@@ -53,7 +67,7 @@ def main() -> None:
     channels = config_channels(run.RIG_CONFIG)
     run.STATE_DIR.mkdir(parents=True, exist_ok=True)
     run.LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    extra_args = run._extra_args(sys.argv[1:])
+    extra_args = run._extra_args(argv)
     taskers = run._eligible("tasker")
     test_takers = run._eligible("test_taker")
     graders = run._eligible("grader")
@@ -76,7 +90,7 @@ def main() -> None:
         while True:
             scores_by_model = _trial_scores(test_taker_names)
             remaining = [
-                entry for entry in test_takers if len(scores_by_model[entry[0]]) < TRIALS_PER_MODEL
+                entry for entry in test_takers if len(scores_by_model[entry[0]]) < trials_per_model
             ]
             if not remaining:
                 for name, _model in test_takers:
@@ -113,7 +127,7 @@ def main() -> None:
             print(
                 f"Eval {eval_index}: tasker={tasker_name}, "
                 f"test-taker={test_taker_name}, grader={grader_name}; "
-                f"trial {completed_trials + 1}/{TRIALS_PER_MODEL} for {test_taker_name}",
+                f"trial {completed_trials + 1}/{trials_per_model} for {test_taker_name}",
                 flush=True,
             )
 
@@ -170,7 +184,7 @@ def main() -> None:
                 )
             eval_index += 1
             counts = _trial_scores(test_taker_names)
-            if all(len(counts[name]) >= TRIALS_PER_MODEL for name in test_taker_names):
+            if all(len(counts[name]) >= trials_per_model for name in test_taker_names):
                 # Campaign complete: skip the pause and let the top-of-loop
                 # check print the summary (a Ctrl-C during a pointless final
                 # sleep would eat it). Clear the roles from the status file so
@@ -182,6 +196,11 @@ def main() -> None:
             time.sleep(pause)
     except (KeyboardInterrupt, EOFError):
         print("\nExiting.")
+
+
+def main() -> None:
+    """Run the fixed-trials campaign with the single-rig defaults."""
+    run_campaign(run.RIG_CONFIG, run.STATE_DIR, run.LOGS_DIR, TRIALS_PER_MODEL, sys.argv[1:])
 
 
 if __name__ == "__main__":

@@ -229,3 +229,5 @@ logs/
 *.rrd
 examples/actuate/logs/
 examples/actuate/state/
+examples/actuate/logs-rig*/
+examples/actuate/state-rig*/

@@ -92,6 +92,42 @@ scored evals in `state/results.jsonl` count toward the ten. The runner resumes
 where it left off after a restart and exits once every test-taker has ten scored
 evals.
 
+For the dual-rig campaign, each test-taker runs five scored trials on rig-1
+and five on rig-2. That is 8 models x 5 trials x 2 rigs = 80 evals. Measuring
+every model on both rigs keeps rig differences out of the model comparison.
+The rigs run concurrently, so each uses its own `state-rigN/` and `logs-rigN/`
+directories. Shared directories would race newest-log attribution and
+interleave the two campaigns in one `results.jsonl`.
+
+Start the rig halves in separate attended terminals. Each rig needs its own
+terminal so an operator can press Esc to end its current episode early:
+
+```bash
+tmux new -s actuate-rig1 'python examples/actuate/run_trials_rig1.py'
+tmux new -s actuate-rig2 'python examples/actuate/run_trials_rig2.py'
+```
+
+Serve each rig's monitor separately, with rig-1 on the default port 8377 and
+rig-2 on port 8378:
+
+```bash
+python examples/actuate/serve.py --state-dir examples/actuate/state-rig1 --logs-dir examples/actuate/logs-rig1
+python examples/actuate/serve.py --port 8378 --state-dir examples/actuate/state-rig2 --logs-dir examples/actuate/logs-rig2
+```
+
+Each rig's own `.env` and key setup supplies its providers, and the existing
+flock claim guard prevents concurrent runs from claiming the same rig. After
+both halves finish, print the per-rig breakdowns and pooled leaderboard with:
+
+```bash
+python examples/actuate/combine_results.py examples/actuate/state-rig1/results.jsonl examples/actuate/state-rig2/results.jsonl
+```
+
+For a fresh dual-rig campaign, clear `state-rig1/`, `state-rig2/`,
+`logs-rig1/`, and `logs-rig2/` instead of `state/`. Each half resumes from its
+own `results.jsonl` after a restart and stops when every test-taker has five
+finite scored evals on that rig.
+
 ## Booth checklist
 
 - **Rig config:** `RIG_CONFIG` in `run.py` defaults to
@@ -120,7 +156,9 @@ evals.
 - **Fresh leaderboard:** eval numbering and scores persist in
   `examples/actuate/state/` and survive restarts. To start the show clean at
   eval 1: `rm examples/actuate/state/status.json
-  examples/actuate/state/results.jsonl`.
+  examples/actuate/state/results.jsonl`. The dual-rig campaign keeps its state
+  in the per-rig dirs and is reset by clearing `state-rig1/`, `state-rig2/`,
+  `logs-rig1/`, and `logs-rig2/` instead.
 - An eval that errors (bad model ID, rejected request) shows as a score-less
   card and costs nothing else; fix `_roster.py` and start the next eval.
 - If every camera and CAN interface vanishes at once, the USB host controller
@@ -133,9 +171,12 @@ evals.
 
 - `run.py`: orchestrator (draws roles, launches evals, records results)
 - `run_trials.py`: deterministic fixed-trials campaign built on run.py
+- `run_trials_rig1.py`, `run_trials_rig2.py`: per-rig dual-campaign entry points
+- `combine_results.py`: per-rig and pooled fixed-trials summaries
 - `start.sh`: booth launcher for the display server plus the rotating demo
-- `serve.py`: stdlib HTTP server for the display page
+- `serve.py`: stdlib HTTP server with `--state-dir` and `--logs-dir` overrides
 - `monitor.html`: the combined conference screen
 - `_roster.py`: booth-editable models, endpoints, key env vars, accents
 - `_thermal.py`: motor-temperature probe and thermal-gate thresholds
 - `state/`, `logs/`: gitignored run state and eval logs
+- `state-rig*/`, `logs-rig*/`: gitignored per-rig campaign state and eval logs
