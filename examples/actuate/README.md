@@ -1,6 +1,6 @@
 # Actuate conference demo
 
-A live eval show for the Actuate conference. Three LLMs rotate through the
+A live eval show for the Actuate conference. Four LLMs rotate through the
 three roles of an automatic-task eval, a browser screen shows who is who, and
 a leaderboard accumulates across evals. This lives on the
 `demo/actuate-conference` branch only (draft PR #397) and is never merged:
@@ -8,9 +8,10 @@ run it from the branch, iterate freely.
 
 ## How it works
 
-Every eval independently draws one of the three roster models for each role
-(the same model can hold two or three roles, that is intended and part of the
-show):
+Every eval independently draws a roster model for each role from that role's
+eligible pool: GPT, Opus, and Gemini can hold any role, Kimi K3 competes as
+test-taker only. The same model can hold two or three roles, that is intended
+and part of the show:
 
 - **tasker:** writes the task and rubric from the initial camera frame
   (`--auto-task`, `-A` args)
@@ -42,7 +43,7 @@ git clone -b demo/actuate-conference https://github.com/robocurve/inspect-robots
 cd actuate-demo
 
 # the CLI auto-loads .env from the working directory
-printf 'OPENAI_API_KEY=...\nANTHROPIC_API_KEY=...\nGEMINI_API_KEY=...\n' > .env
+printf 'OPENAI_API_KEY=...\nANTHROPIC_API_KEY=...\nGEMINI_API_KEY=...\nOPENROUTER_API_KEY=...\n' > .env
 
 # with the rig's venv active:
 ./examples/actuate/start.sh

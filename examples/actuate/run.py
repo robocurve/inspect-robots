@@ -59,9 +59,14 @@ MEDIA_DIR = STATE_DIR / "media"
 
 
 def _eligible(role: str) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        (name, model) for name, model in ROSTER.items() if role in model.get("roles", ALL_ROLES)
-    ]
+    eligible = []
+    for name, model in ROSTER.items():
+        roles = model.get("roles", ALL_ROLES)
+        # A booth edit that drops the tuple ("roles": "test_taker") must not
+        # silently substring-match; treat a bare string as a single role.
+        if role in ((roles,) if isinstance(roles, str) else roles):
+            eligible.append((name, model))
+    return eligible
 
 
 def _utc_now() -> str:
