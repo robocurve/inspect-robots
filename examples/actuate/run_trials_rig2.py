@@ -11,9 +11,9 @@ from pathlib import Path
 from run_trials import run_campaign
 
 TRIALS_PER_RIG = 5  # booth-editable; the combined two-rig target is 2x this
-# Pinned on both rigs so the campaign halves share one episode ceiling of
-# 120 seconds at the rigs' 10 Hz control rate (the rig configs disagree
-# today, 12000 vs 1200). Later user flags still win.
+# Recording pins prevent overnight viewer windows, save per-eval .rrd camera,
+# joint, and action timelines, and drift-proof frame storage while sharing a
+# 120-second ceiling at the rigs' 10 Hz control rate. Later user flags win.
 MAX_STEPS = 1200
 RIG_CONFIG = Path.home() / "robocurve" / "rig-2" / "config.ini"
 HERE = Path(__file__).parent
@@ -27,5 +27,13 @@ if __name__ == "__main__":
         HERE / "state-rig2",
         HERE / "logs-rig2",
         TRIALS_PER_RIG,
-        ["--", "--max-steps", str(MAX_STEPS), *user_args],
+        [
+            "--",
+            "--max-steps",
+            str(MAX_STEPS),
+            "--store-frames",
+            "--no-rerun",
+            "--rerun-save",
+            *user_args,
+        ],
     )

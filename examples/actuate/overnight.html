@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Actuate Overnight</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0e1116;
+      color: #f4f6f8;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(100%, 760px);
+      margin: 0 auto;
+      padding: 18px 14px 40px;
+    }
+    header { margin-bottom: 14px; }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(25px, 7vw, 38px);
+      line-height: 1.05;
+      letter-spacing: -0.025em;
+    }
+    .header-line,
+    .rig-title-row,
+    .recent-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .progress-label { font-size: 14px; font-weight: 750; }
+    .updated { color: #687280; font-size: 12px; }
+    .overall-track {
+      height: 4px;
+      margin-top: 8px;
+      overflow: hidden;
+      background: #252d38;
+      border-radius: 999px;
+    }
+    .overall-bar {
+      width: 0;
+      height: 100%;
+      background: #10a37f;
+      border-radius: inherit;
+      transition: width 400ms ease;
+    }
+    .unreachable {
+      margin: 0 0 14px;
+      padding: 9px 12px;
+      color: #ffb4b4;
+      font-size: 13px;
+      font-weight: 750;
+      background: #3a1d22;
+      border: 1px solid #71313a;
+      border-radius: 8px;
+    }
+    .card {
+      margin-bottom: 14px;
+      padding: 15px;
+      background: #151a22;
+      border: 1px solid #252d38;
+      border-radius: 12px;
+    }
+    .rig-title,
+    .section-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 850;
+    }
+    .state-chip {
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+      border-radius: 999px;
+    }
+    .state-running { color: #85e0bd; background: #17382f; }
+    .state-cooling { color: #8dc8ff; background: #173149; }
+    .state-stalled { color: #ff9c9c; background: #452127; }
+    .state-muted { color: #9aa3af; background: #252d38; }
+    .current-eval {
+      margin: 11px 0 13px;
+      color: #c9cfd7;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .progress-grid {
+      display: grid;
+      grid-template-columns: minmax(96px, 1fr) auto 42px;
+      align-items: center;
+      gap: 8px 10px;
+      padding-top: 12px;
+      border-top: 1px solid #252d38;
+    }
+    .model-name {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 12px;
+      font-weight: 750;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dots { display: flex; gap: 5px; }
+    .dot {
+      width: 10px;
+      height: 10px;
+      background: #252d38;
+      border: 1px solid #3b4552;
+      border-radius: 50%;
+    }
+    .dot-filled { border-color: transparent; }
+    .mean {
+      color: #c9cfd7;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .recent-label {
+      margin: 15px 0 7px;
+      color: #687280;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .recent-strip {
+      display: grid;
+      grid-auto-columns: minmax(210px, 82%);
+      grid-auto-flow: column;
+      gap: 8px;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x proximity;
+    }
+    .recent-card {
+      min-width: 0;
+      padding: 10px;
+      overflow: hidden;
+      background: #10151c;
+      border: 1px solid #252d38;
+      border-radius: 8px;
+      scroll-snap-align: start;
+    }
+    .eval-tag {
+      color: #aab2bd;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .score-badge {
+      padding: 2px 7px;
+      color: #f4f6f8;
+      font-size: 11px;
+      font-weight: 800;
+      background: #252d38;
+      border-radius: 999px;
+    }
+    .recent-model {
+      margin-top: 6px;
+      overflow: hidden;
+      font-size: 12px;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .recent-task {
+      margin-top: 5px;
+      overflow: hidden;
+      color: #687280;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .recent-card video {
+      display: block;
+      width: 100%;
+      max-height: 120px;
+      margin-top: 8px;
+      object-fit: cover;
+      background: #0b0e13;
+      border-radius: 6px;
+    }
+    .empty-recent {
+      color: #687280;
+      font-size: 12px;
+    }
+    .leaderboard-card { padding-bottom: 8px; }
+    table {
+      width: 100%;
+      margin-top: 8px;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th,
+    td {
+      padding: 8px 4px;
+      border-top: 1px solid #252d38;
+      text-align: right;
+    }
+    th {
+      color: #687280;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    th:first-child,
+    td:first-child {
+      text-align: left;
+    }
+    .leader-name { font-weight: 800; }
+    .muted { color: #687280; }
+    [hidden] { display: none !important; }
+    @media (min-width: 560px) {
+      main { padding: 26px 20px 50px; }
+      .card { padding: 19px; }
+      .progress-grid {
+        grid-template-columns: minmax(160px, 1fr) auto 52px;
+      }
+      .model-name,
+      .mean,
+      .current-eval { font-size: 13px; }
+      .dot { width: 12px; height: 12px; }
+      .recent-strip { grid-auto-columns: minmax(210px, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Actuate Overnight</h1>
+      <div class="header-line">
+        <div id="progress-label" class="progress-label">0/0 scored</div>
+        <div id="updated" class="updated">waiting for update</div>
+      </div>
+      <div class="overall-track">
+        <div id="overall-bar" class="overall-bar"></div>
+      </div>
+    </header>
+
+    <div id="unreachable" class="unreachable" hidden>server unreachable</div>
+    <section id="rigs"></section>
+
+    <section class="card leaderboard-card">
+      <h2 class="section-title">Pooled Leaderboard</h2>
+      <table>
+        <thead>
+          <tr><th>Model</th><th>n</th><th>Mean</th></tr>
+        </thead>
+        <tbody id="leaderboard"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const fallbackAccent = "#687280";
+    const htmlEscapes = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#039;"
+    };
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (character) => htmlEscapes[character]);
+    }
+
+    function accentFor(name, accents) {
+      const candidate = accents && accents[name];
+      return typeof candidate === "string" && /^#[0-9a-fA-F]{6}$/.test(candidate)
+        ? candidate
+        : fallbackAccent;
+    }
+
+    function finiteNumber(value) {
+      if (value == null || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+
+    function trialCount(data) {
+      const rosterSize = Array.isArray(data.roster) ? data.roster.length : 0;
+      const target = finiteNumber(data.pooled && data.pooled.target);
+      return rosterSize > 0 && target != null ? target / (2 * rosterSize) : 5;
+    }
+
+    function hasResults(rig, roster) {
+      if (Array.isArray(rig.recent) && rig.recent.length > 0) return true;
+      return roster.some((name) => {
+        const result = rig.results && rig.results[name];
+        return result && Number(result.n) > 0;
+      });
+    }
+
+    function rigState(rig, roster) {
+      const notStarted = !rig.status && !hasResults(rig, roster);
+      if (notStarted) return { label: "NOT STARTED", className: "state-muted", notStarted };
+      if (rig.done) return { label: "DONE", className: "state-muted", notStarted };
+      if (rig.stalled) {
+        const minutes = Math.max(0, Math.floor(Number(rig.last_activity_s) / 60));
+        return { label: `STALLED ${minutes}m`, className: "state-stalled", notStarted };
+      }
+      const cooling = rig.status && rig.status.cooling;
+      if (cooling) {
+        const maxC = finiteNumber(cooling.max_c);
+        const temperature = maxC == null ? "?" : maxC.toFixed(1);
+        return { label: `COOLING ${temperature} C`, className: "state-cooling", notStarted };
+      }
+      return { label: "RUNNING", className: "state-running", notStarted };
+    }
+
+    function runningMinutes(startedAt) {
+      const started = Date.parse(startedAt);
+      if (!Number.isFinite(started)) return 0;
+      return Math.max(0, Math.floor((Date.now() - started) / 60000));
+    }
+
+    function clipName(clips) {
+      if (!clips || typeof clips !== "object") return null;
+      if (typeof clips.top === "string") return clips.top;
+      return Object.values(clips).find((value) => typeof value === "string") || null;
+    }
+
+    function renderRecent(rigKey, recent, accents) {
+      if (!Array.isArray(recent) || recent.length === 0) {
+        return '<div class="empty-recent">No completed evals yet</div>';
+      }
+      return recent.map((entry) => {
+        const model = typeof entry.test_taker === "string" ? entry.test_taker : "unknown";
+        const color = accentFor(model, accents);
+        const index = entry.eval_index == null ? "?" : entry.eval_index;
+        const scoreValue = finiteNumber(entry.score);
+        const score = scoreValue == null ? "unscored" : scoreValue.toFixed(1);
+        const task = typeof entry.task === "string" ? entry.task : "Task unavailable";
+        const clip = clipName(entry.clips);
+        const video = clip == null
+          ? ""
+          : `<video src="/media/${rigKey}/${encodeURIComponent(clip)}" autoplay muted loop playsinline></video>`;
+        return `
+          <article class="recent-card">
+            <div class="recent-head">
+              <span class="eval-tag">Eval #${escapeHtml(index)}</span>
+              <span class="score-badge">${escapeHtml(score)}</span>
+            </div>
+            <div class="recent-model" style="color: ${color}">${escapeHtml(model)}</div>
+            <div class="recent-task">${escapeHtml(task)}</div>
+            ${video}
+          </article>`;
+      }).join("");
+    }
+
+    function renderRig(rigKey, rig, roster, accents, trialsPerRig) {
+      const state = rigState(rig, roster);
+      const title = rigKey === "rig1" ? "Rig 1" : "Rig 2";
+      let current = "";
+      if (!rig.done && !state.notStarted) {
+        const status = rig.status || {};
+        const roles = status.roles && typeof status.roles === "object" ? status.roles : {};
+        const model = typeof roles.test_taker === "string" ? roles.test_taker : "waiting";
+        const result = rig.results && rig.results[model];
+        const completed = result ? Number(result.n) || 0 : 0;
+        const evalIndex = status.eval_index == null ? "?" : status.eval_index;
+        current = `
+          <div class="current-eval">
+            Eval #${escapeHtml(evalIndex)} - ${escapeHtml(model)} - trial
+            ${escapeHtml(completed + 1)}/${escapeHtml(trialsPerRig)} - running
+            ${escapeHtml(runningMinutes(status.started_at))} min
+          </div>`;
+      }
+      const progress = roster.map((name) => {
+        const result = rig.results && rig.results[name] ? rig.results[name] : { n: 0, mean: null };
+        const count = Math.max(0, Number(result.n) || 0);
+        const mean = finiteNumber(result.mean);
+        const color = accentFor(name, accents);
+        const dots = Array.from({ length: trialsPerRig }, (_unused, index) =>
+          index < Math.min(count, trialsPerRig)
+            ? `<span class="dot dot-filled" style="background: ${color}"></span>`
+            : '<span class="dot"></span>'
+        ).join("");
+        return `
+          <div class="model-name" style="color: ${color}" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+          <div class="dots">${dots}</div>
+          <div class="mean">${mean == null ? "-" : mean.toFixed(1)}</div>`;
+      }).join("");
+      return `
+        <article class="card">
+          <div class="rig-title-row">
+            <h2 class="rig-title">${title}</h2>
+            <span class="state-chip ${state.className}">${escapeHtml(state.label)}</span>
+          </div>
+          ${current}
+          <div class="progress-grid">${progress}</div>
+          <div class="recent-label">Recent</div>
+          <div class="recent-strip">${renderRecent(rigKey, rig.recent, accents)}</div>
+        </article>`;
+    }
+
+    function renderLeaderboard(data, trialsPerRig) {
+      const roster = Array.isArray(data.roster) ? data.roster : [];
+      const results = data.pooled && data.pooled.results ? data.pooled.results : {};
+      const ranked = [...roster].sort((left, right) => {
+        const leftEntry = results[left] || { n: 0, mean: null };
+        const rightEntry = results[right] || { n: 0, mean: null };
+        const leftMean = finiteNumber(leftEntry.mean);
+        const rightMean = finiteNumber(rightEntry.mean);
+        if (Number(leftEntry.n) === 0 && Number(rightEntry.n) !== 0) return 1;
+        if (Number(rightEntry.n) === 0 && Number(leftEntry.n) !== 0) return -1;
+        if (leftMean == null && rightMean == null) return roster.indexOf(left) - roster.indexOf(right);
+        if (leftMean == null) return 1;
+        if (rightMean == null) return -1;
+        return rightMean - leftMean;
+      });
+      document.getElementById("leaderboard").innerHTML = ranked.map((name) => {
+        const entry = results[name] || { n: 0, mean: null };
+        const mean = finiteNumber(entry.mean);
+        const color = accentFor(name, data.accents);
+        return `
+          <tr>
+            <td class="leader-name" style="color: ${color}">${escapeHtml(name)}</td>
+            <td>${escapeHtml(Number(entry.n) || 0)}/${escapeHtml(2 * trialsPerRig)}</td>
+            <td>${mean == null ? "-" : mean.toFixed(1)}</td>
+          </tr>`;
+      }).join("");
+    }
+
+    function render(data) {
+      const roster = Array.isArray(data.roster) ? data.roster : [];
+      const rigs = data.rigs || {};
+      const pooled = data.pooled || {};
+      const total = Math.max(0, Number(pooled.total_scored) || 0);
+      const target = Math.max(0, Number(pooled.target) || 0);
+      const trialsPerRig = trialCount(data);
+      document.getElementById("progress-label").textContent = `${total}/${target} scored`;
+      document.getElementById("overall-bar").style.width =
+        `${target > 0 ? Math.min(100, 100 * total / target) : 0}%`;
+      const generated = new Date(data.generated_at);
+      document.getElementById("updated").textContent = Number.isNaN(generated.getTime())
+        ? "updated unknown"
+        : `updated ${generated.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false
+          })}`;
+      document.getElementById("rigs").innerHTML = ["rig1", "rig2"]
+        .map((rigKey) => renderRig(
+          rigKey,
+          rigs[rigKey] || { results: {}, recent: [] },
+          roster,
+          data.accents || {},
+          trialsPerRig
+        ))
+        .join("");
+      renderLeaderboard(data, trialsPerRig);
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/overnight", { cache: "no-store" });
+        if (!response.ok) throw new Error("overnight API unavailable");
+        const data = await response.json();
+        render(data);
+        document.getElementById("unreachable").hidden = true;
+      } catch (_error) {
+        document.getElementById("unreachable").hidden = false;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 30000);
+  </script>
+</body>
+</html>

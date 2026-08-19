@@ -23,6 +23,12 @@ from _thermal import config_channels
 TRIALS_PER_MODEL = 10
 # Consecutive logged evals without a score before halting; booth-editable.
 UNSCORED_STREAK_STOP = 10
+# Wall-clock kill switch per eval; booth-editable. OpenRouter keeps feeding
+# keepalive bytes while a wedged upstream provider grinds, so the agent
+# plugin's httpx read timeout never fires and a single eval can hang a rig's
+# whole overnight half. A killed eval produces no final log, so the existing
+# failure-streak machinery counts and reports it.
+EVAL_TIMEOUT_S = 1800
 
 
 def _trial_scores(test_taker_names: list[str]) -> dict[str, list[float]]:
@@ -157,10 +163,19 @@ def run_campaign(
             )
 
             existing_logs = run._final_log_paths()
-            subprocess.run(
-                run._command(tasker, test_taker, grader, extra_args),
-                check=False,
-            )
+            try:
+                subprocess.run(
+                    run._command(tasker, test_taker, grader, extra_args),
+                    check=False,
+                    timeout=EVAL_TIMEOUT_S,
+                )
+            except subprocess.TimeoutExpired:
+                print(
+                    f"eval exceeded {EVAL_TIMEOUT_S}s and was killed (wedged "
+                    "provider or hardware); the next eval's reset re-homes the "
+                    "arms",
+                    flush=True,
+                )
 
             log_path = run._newest_final_log(existing_logs)
             score, task = run._log_outcome(log_path)

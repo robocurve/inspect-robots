@@ -102,16 +102,19 @@ The rigs run concurrently, so each uses its own `state-rigN/` and `logs-rigN/`
 directories. Shared directories would race newest-log attribution and
 interleave the two campaigns in one `results.jsonl`.
 
-Start the rig halves in separate attended terminals. Each rig needs its own
-terminal so an operator can press Esc to end its current episode early:
+Start the overnight page alongside the rig halves. Each rig campaign runs in
+its own attended terminal so an operator can press Esc to end its current
+episode early:
 
 ```bash
+tmux new -d -s actuate-overnight 'python examples/actuate/overnight.py'
 tmux new -s actuate-rig1 'python examples/actuate/run_trials_rig1.py'
 tmux new -s actuate-rig2 'python examples/actuate/run_trials_rig2.py'
 ```
 
-Serve each rig's monitor separately, with rig-1 on the default port 8377 and
-rig-2 on port 8378:
+The combined overnight page is available on the tailnet at
+`http://<rig-host>:8380/`. For attended watching, the individual monitor pages
+remain optional. Serve rig-1 on the default port 8377 and rig-2 on port 8378:
 
 ```bash
 python examples/actuate/serve.py --state-dir examples/actuate/state-rig1 --logs-dir examples/actuate/logs-rig1
@@ -123,10 +126,11 @@ Both halves run from the clone root and share its single `.env` (the per-rig
 keyed to its rig config, so a second campaign against the same rig refuses
 to start, and the flock claim guard still protects the devices underneath.
 The rig scripts pin `--max-steps 1200` (120 seconds at 10 Hz) on both rigs
-so the two configs cannot give the halves different episode ceilings. Keep `rerun = false` on
-at least one rig, or give each rig config its own `rerun_port`, so two live
-viewers do not merge their streams. After both halves finish, print the
-per-rig breakdowns and pooled leaderboard with:
+so the two configs cannot give the halves different episode ceilings. They
+also run without live viewer windows and record everything needed for morning
+review: a per-eval rrd with camera and joint-state timelines, stored frames,
+actions logs, and LLM transcripts. After both halves finish, print the per-rig
+breakdowns and pooled leaderboard with:
 
 ```bash
 python examples/actuate/combine_results.py examples/actuate/state-rig1/results.jsonl examples/actuate/state-rig2/results.jsonl
@@ -181,6 +185,8 @@ finite scored evals on that rig.
 - `run.py`: orchestrator (draws roles, launches evals, records results)
 - `run_trials.py`: deterministic fixed-trials campaign built on run.py
 - `run_trials_rig1.py`, `run_trials_rig2.py`: per-rig dual-campaign entry points
+- `overnight.py`: stdlib server for the combined overnight campaign view
+- `overnight.html`: phone-friendly dual-rig progress page
 - `combine_results.py`: per-rig and pooled fixed-trials summaries
 - `start.sh`: booth launcher for the display server plus the rotating demo
 - `serve.py`: stdlib HTTP server with `--state-dir` and `--logs-dir` overrides
