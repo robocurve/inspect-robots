@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from _roster import EFFORT, ROSTER
+from _roster import ALL_ROLES, EFFORT, ROSTER
 from _thermal import (
     COOL_POLL_S,
     COOL_PROBE_ERRORS_GIVE_UP,
@@ -56,6 +56,12 @@ LOGS_DIR = HERE / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
 RESULTS_PATH = STATE_DIR / "results.jsonl"
 MEDIA_DIR = STATE_DIR / "media"
+
+
+def _eligible(role: str) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (name, model) for name, model in ROSTER.items() if role in model.get("roles", ALL_ROLES)
+    ]
 
 
 def _utc_now() -> str:
@@ -311,7 +317,11 @@ def main() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     extra_args = _extra_args(sys.argv[1:])
-    roster = list(ROSTER.items())
+    taskers = _eligible("tasker")
+    test_takers = _eligible("test_taker")
+    graders = _eligible("grader")
+    if not taskers or not test_takers or not graders:
+        raise SystemExit("a role has no eligible models; fix the roster in _roster.py")
     eval_index = _next_eval_index()
     failure_streak = 0
     gate_state: dict[str, Any] = {"channels": channels, "disabled": False}
@@ -319,9 +329,9 @@ def main() -> None:
     try:
         while True:
             _thermal_gate(eval_index, gate_state)
-            tasker_name, tasker = random.choice(roster)
-            test_taker_name, test_taker = random.choice(roster)
-            grader_name, grader = random.choice(roster)
+            tasker_name, tasker = random.choice(taskers)
+            test_taker_name, test_taker = random.choice(test_takers)
+            grader_name, grader = random.choice(graders)
             roles = {
                 "tasker": tasker_name,
                 "test_taker": test_taker_name,

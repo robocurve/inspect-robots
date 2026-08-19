@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+ALL_ROLES = ("tasker", "test_taker", "grader")
+
 # Booth-editable. Confirm model IDs against each provider before the event.
 # model/base_url/api_key_env drive the task maker (-A) and grader (-G) over
 # each provider's OpenAI-compatible chat endpoint. "policy" is the complete
@@ -40,12 +42,28 @@ ROSTER: dict[str, dict[str, object]] = {
             "wire": "interactions",
         },
     },
+    "Kimi K3": {
+        # test-taker only: drives the robot but never authors tasks or grades.
+        "roles": ("test_taker",),
+        # OpenRouter because the rig already holds OPENROUTER_API_KEY; for
+        # Moonshot direct use model=kimi-k3, base_url=https://api.moonshot.ai/v1,
+        # api_key_env=MOONSHOT_API_KEY.
+        "model": "moonshotai/kimi-k3",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "policy": {
+            "model": "moonshotai/kimi-k3",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+        },
+    },
 }
 
 ACCENTS = {
     "GPT-5.6 Sol": "#10a37f",
     "Opus 5": "#d97757",
     "Gemini 3.7 Flash": "#4796e3",
+    "Kimi K3": "#9067e8",
 }
 
 EFFORT = "high"

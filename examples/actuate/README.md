@@ -45,9 +45,23 @@ cd actuate-demo
 printf 'OPENAI_API_KEY=...\nANTHROPIC_API_KEY=...\nGEMINI_API_KEY=...\n' > .env
 
 # with the rig's venv active:
+./examples/actuate/start.sh
+
+# arguments after the script name reach inspect-robots run verbatim:
+./examples/actuate/start.sh --config /path/to/rig-folder/config.ini
+```
+
+The launcher starts or reuses the detached display server, then starts the
+eval loop in an attached tmux session. These are the equivalent manual
+commands:
+
+```bash
 tmux new -d -s actuate-serve 'python examples/actuate/serve.py'
 tmux new -s actuate 'python examples/actuate/run.py -- --config /path/to/rig-folder/config.ini'
 ```
+
+The launcher does not forward arguments to `serve.py`. To pass `--port`, use
+the manual recipe and add it to the `serve.py` command.
 
 Open http://localhost:8377/ (or `http://<rig-host>:8377/` from another
 machine). The loop is autonomous: each eval ends (Esc in the `actuate` tmux
@@ -55,8 +69,8 @@ ends an episode early and triggers grading) and the next one starts with a
 fresh draw after a short pause (`PAUSE_S` in `run.py`, longer after a failed
 eval). Ctrl-C in the tmux stops the whole loop.
 
-Anything after `--` is passed to `inspect-robots run` verbatim. To watch
-remotely, add `-- --rerun-connect rerun+http://<your-machine>:9888/proxy`;
+Arguments after the launcher name are passed to `inspect-robots run` verbatim.
+To watch remotely, add `--rerun-connect rerun+http://<your-machine>:9888/proxy`;
 at the booth the rig config's `rerun = true` spawns a local viewer instead.
 
 ## Booth checklist
@@ -74,11 +88,15 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
   Python that has i2rt installed, such as the rig venv. On machines without
   i2rt or CAN it disables itself with a console warning and the demo runs as
   before. Reading temperatures clears any latched motor fault codes.
-- **Model IDs:** confirm the three IDs at the top of `_roster.py` with their
+- **Model IDs:** confirm the four IDs at the top of `_roster.py` with their
   providers. Validated live so far: `claude-opus-5` (tasker and test-taker),
   `gpt-5.6-sol` (tasker and grader, test-taker over the Responses wire).
   `gemini-3.7-flash` has not been drawn yet; force one eval with it in each
-  role during setup.
+  role during setup. Kimi K3 is test-taker only and is served via OpenRouter
+  as `moonshotai/kimi-k3`. `OPENROUTER_API_KEY` must be added to the demo
+  `.env` by copying the existing key from `~/robocurve/test-dir/.env`. It has
+  not yet been validated live, so force one eval with it as test-taker
+  during setup.
 - **Fresh leaderboard:** eval numbering and scores persist in
   `examples/actuate/state/` and survive restarts. To start the show clean at
   eval 1: `rm examples/actuate/state/status.json
