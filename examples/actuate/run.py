@@ -304,6 +304,9 @@ def _command(
 def main() -> None:
     if not RIG_CONFIG.is_file():
         raise SystemExit(f"rig config not found: {RIG_CONFIG}\nfix: edit RIG_CONFIG in run.py")
+    # Resolved once from RIG_CONFIG only: a --config override after "--"
+    # re-routes the eval but not the gate's probe channels, so on a rig with
+    # different channel names the gate degrades to per-round warnings.
     channels = config_channels(RIG_CONFIG)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)

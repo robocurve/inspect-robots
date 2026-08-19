@@ -93,7 +93,7 @@ def read_motor_temps(channels: Iterable[str]) -> list[MotorTemp]:
         payload = json.loads(completed.stdout)
         if not isinstance(payload, list):
             raise TypeError("probe output is not a list")
-        return [
+        temps = [
             MotorTemp(
                 channel=str(item["channel"]),
                 motor_id=int(item["motor_id"]),
@@ -104,6 +104,9 @@ def read_motor_temps(channels: Iterable[str]) -> list[MotorTemp]:
         ]
     except Exception as error:
         raise ThermalProbeError(f"invalid probe output ({type(error).__name__})") from error
+    if not temps:
+        raise ThermalProbeError("probe returned no temperatures")
+    return temps
 
 
 def hottest(temps: Iterable[MotorTemp]) -> MotorTemp:

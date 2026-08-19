@@ -53,6 +53,7 @@
       min-height: 0;
     }
     .cards { display: flex; gap: clamp(10px, 1.2vw, 22px); }
+    .cards[hidden] { display: none; }
     .card {
       flex: 1 1 0;
       min-width: 0;
@@ -346,9 +347,15 @@
         card.style.borderTopColor = color;
       }
       const instruction = document.getElementById("instruction");
-      instruction.textContent = data.task == null ? "generating…" : data.task;
-      instruction.classList.toggle("muted", data.task == null);
-      instruction.classList.toggle("pulse", data.task == null);
+      if (cooling) {
+        instruction.textContent = "paused while motors cool";
+        instruction.classList.add("muted");
+        instruction.classList.remove("pulse");
+      } else {
+        instruction.textContent = data.task == null ? "generating…" : data.task;
+        instruction.classList.toggle("muted", data.task == null);
+        instruction.classList.toggle("pulse", data.task == null);
+      }
     }
 
     function renderLeaderboard(data) {
