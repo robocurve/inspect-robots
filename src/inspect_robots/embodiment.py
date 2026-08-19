@@ -98,6 +98,20 @@ class Embodiment(Protocol):
     The hook stays outside this Protocol so older embodiments remain
     conformant.
 
+    Embodiments may additionally offer an optional ``observe_parked()`` hook:
+    when a scored trial is about to be graded, ``eval()`` calls it so the
+    embodiment can move itself to its parked/rest pose and return one fresh
+    [`Observation`][inspect_robots.types.Observation] whose cameras see the
+    scene unobstructed; the vlm grader then judges those final frames instead
+    of the last step's. Returning ``None`` declines (right when parking would
+    alter the state being graded, e.g. a held object). Raising
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort] or
+    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault] halts the eval;
+    any other failure degrades to last-step frames with a ``RuntimeWarning``.
+    The hook is optional input, not a guarantee: it never fires on direct
+    ``rollout()`` calls, without a grading hook, or on older cores, and it
+    stays outside this Protocol so older embodiments remain conformant.
+
     The optional ``defer_operator_end()`` hook is superseded by
     ``connect_operator_session`` but remains supported. An embodiment that
     polls stdin for the end-of-episode keypress must stop doing so when called;

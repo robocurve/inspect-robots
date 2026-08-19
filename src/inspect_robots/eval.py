@@ -301,6 +301,13 @@ def eval(
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
+    Before a grader runs, an embodiment's optional duck-typed
+    ``observe_parked()`` hook may move the robot to its parked/rest pose so the
+    cameras see the scene unobstructed and return one fresh ``Observation``.
+    Returning ``None`` declines. Other failures degrade with a
+    ``RuntimeWarning`` and grading uses the last-step frames, except
+    ``SafetyAbort`` and ``EmbodimentFault``, which halt the eval.
+
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
     scored), after the rollout returns and before the scorers run. It may
@@ -375,6 +382,8 @@ def _run_eval(
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
+    from inspect_robots.session import _DEFINITIVE_REASONS
+    from inspect_robots.types import Observation
 
     # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
     # runs before the compatibility check so the policy can adopt the
@@ -562,6 +571,34 @@ def _run_eval(
                         # The only trials the hook sees are the ones scorers
                         # will read — an operator verdict on a crashed trial
                         # would be dead data (errored trials are never scored).
+                        if record.operator_judgement is None and not (
+                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                        ):
+                            observe_parked = getattr(embodiment, "observe_parked", None)
+                            if callable(observe_parked):
+                                try:
+                                    parked_observation = observe_parked()
+                                except (SafetyAbort, EmbodimentFault):
+                                    raise
+                                except Exception as exc:
+                                    warnings.warn(
+                                        "embodiment.observe_parked() failed with "
+                                        f"{type(exc).__name__}: {exc}; grading from "
+                                        "last-step frames",
+                                        RuntimeWarning,
+                                        stacklevel=2,
+                                    )
+                                else:
+                                    if isinstance(parked_observation, Observation):
+                                        record.parked_observation = parked_observation
+                                    elif parked_observation is not None:
+                                        warnings.warn(
+                                            "embodiment.observe_parked() returned "
+                                            f"{type(parked_observation).__name__}; expected "
+                                            "Observation or None; grading from last-step frames",
+                                            RuntimeWarning,
+                                            stacklevel=2,
+                                        )
                         before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
