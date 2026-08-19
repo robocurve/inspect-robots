@@ -1,5 +1,11 @@
 # 0078: Actuate demo fixed-trials runner
 
+> Amended 2026-08-19 (commit on demo branch): selection is now a randomized
+> block design. Fewest-completed still bounds every model to one trial per
+> round, but ties are drawn randomly instead of in roster order, so a
+> position-in-round effect cannot align with any one model. Everything else
+> in this plan stands.
+
 Demo-branch only. New sibling script; `run.py` and `start.sh` are not
 modified.
 

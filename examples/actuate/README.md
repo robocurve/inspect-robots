@@ -87,7 +87,10 @@ tmux new -s actuate 'python examples/actuate/run_trials.py -- --config /path/to/
 ```
 
 Arguments after `--` reach `inspect-robots run` verbatim, exactly as with
-`run.py`. Start from a fresh leaderboard for a clean campaign because existing
+`run.py`. Trials interleave as randomized blocks: every model runs once per
+round of the roster, in a fresh random order each round, so drift over the
+campaign (motor heat, lighting, scene wear) cannot align with any one model's
+slot. Start from a fresh leaderboard for a clean campaign because existing
 scored evals in `state/results.jsonl` count toward the ten. The runner resumes
 where it left off after a restart and exits once every test-taker has ten scored
 evals.

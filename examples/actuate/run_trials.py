@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import math
+import random
 import subprocess
 import sys
 import time
@@ -119,10 +120,14 @@ def run_campaign(
                     print(f"{name}: n={len(scores)}, mean={mean_score:.2f}", flush=True)
                 return
 
-            test_taker_name, test_taker = min(
-                remaining,
-                key=lambda entry: len(scores_by_model[entry[0]]),
-            )
+            # Randomized block design: fewest-completed keeps every model to
+            # one trial per round of the roster, and drawing randomly among
+            # the tied models randomizes each round's order, so a
+            # position-in-round effect (coolest motors right after a cooling
+            # pause, freshest scene reset) cannot align with any one model.
+            fewest = min(len(scores_by_model[entry[0]]) for entry in remaining)
+            block = [entry for entry in remaining if len(scores_by_model[entry[0]]) == fewest]
+            test_taker_name, test_taker = random.choice(block)
             completed_trials = len(scores_by_model[test_taker_name])
 
             run._thermal_gate(eval_index, gate_state)
