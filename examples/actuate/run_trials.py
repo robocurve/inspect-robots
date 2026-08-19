@@ -29,9 +29,11 @@ UNSCORED_STREAK_STOP = 10
 # Wall-clock kill switch per eval; booth-editable. OpenRouter keeps feeding
 # keepalive bytes while a wedged upstream provider grinds, so the agent
 # plugin's httpx read timeout never fires and a single eval can hang a rig's
-# whole overnight half. A killed eval produces no final log, so the existing
-# failure-streak machinery counts and reports it.
-EVAL_TIMEOUT_S = 1800
+# whole overnight half. Sized well above a slow model's legitimate full
+# episode: at 1800 the watchdog cancelled every GPT-5/GPT-5.4 run on
+# 2026-08-19 (their 25-65s turns need 40+ minutes for a 120s-robot-time
+# episode), which burned four hours producing logged-but-unscored evals.
+EVAL_TIMEOUT_S = 5400
 # Grace between the interrupt and the hard kill. SIGINT gives the eval its
 # normal teardown (park the arms, release cameras); a bare SIGKILL left a
 # rig-2 arm slumped past its joint limit and wedged the cameras mid-campaign
