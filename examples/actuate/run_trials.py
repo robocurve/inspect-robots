@@ -5,11 +5,14 @@ Run with:  python examples/actuate/run_trials.py [-- extra inspect-robots run ar
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import math
+import os
 import random
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +32,36 @@ UNSCORED_STREAK_STOP = 10
 # whole overnight half. A killed eval produces no final log, so the existing
 # failure-streak machinery counts and reports it.
 EVAL_TIMEOUT_S = 1800
+# Grace between the interrupt and the hard kill. SIGINT gives the eval its
+# normal teardown (park the arms, release cameras); a bare SIGKILL left a
+# rig-2 arm slumped past its joint limit and wedged the cameras mid-campaign
+# on 2026-08-19, failing every later eval at bring-up.
+EVAL_KILL_GRACE_S = 120
+
+
+def _run_eval_with_watchdog(cmd: list[str]) -> bool:
+    """Run one eval; True if it finished, False if the watchdog killed it.
+
+    The eval runs in its own process group. On timeout the whole group gets
+    SIGINT first so the embodiment tears down cleanly, then SIGKILL after
+    EVAL_KILL_GRACE_S for a process too wedged to honor the interrupt.
+    """
+    process = subprocess.Popen(cmd, start_new_session=True)
+    try:
+        process.wait(timeout=EVAL_TIMEOUT_S)
+        return True
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+        process.wait(timeout=EVAL_KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    except ProcessLookupError:
+        pass
+    return False
 
 
 def _trial_scores(test_taker_names: list[str]) -> dict[str, list[float]]:
@@ -163,17 +196,12 @@ def run_campaign(
             )
 
             existing_logs = run._final_log_paths()
-            try:
-                subprocess.run(
-                    run._command(tasker, test_taker, grader, extra_args),
-                    check=False,
-                    timeout=EVAL_TIMEOUT_S,
-                )
-            except subprocess.TimeoutExpired:
+            finished = _run_eval_with_watchdog(run._command(tasker, test_taker, grader, extra_args))
+            if not finished:
                 print(
-                    f"eval exceeded {EVAL_TIMEOUT_S}s and was killed (wedged "
-                    "provider or hardware); the next eval's reset re-homes the "
-                    "arms",
+                    f"eval exceeded {EVAL_TIMEOUT_S}s; interrupted for a clean "
+                    "park-and-release teardown (hard kill only if that hangs "
+                    f"{EVAL_KILL_GRACE_S}s)",
                     flush=True,
                 )
 
