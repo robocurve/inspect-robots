@@ -455,6 +455,21 @@ def test_vlm_grader_degrades_on_unparseable_reply(
     assert "the trial went fine" in err
 
 
+def test_vlm_grader_leaves_no_marker_when_grading_degrades(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A degraded trial leaves the record unchanged, provenance marker included."""
+    post = _CapturePost(reply="no verdict here")
+    record = _framed_record()
+    record.parked_observation = Observation(images={"parked": _frame(7)})
+
+    _vlm(post, monkeypatch).grade(record, _scene())
+
+    assert record.operator_judgement is None
+    assert "graded_frames" not in record.metadata
+    assert "no GRADE line in the reply" in capsys.readouterr().err
+
+
 def test_vlm_grader_caps_the_note(monkeypatch: pytest.MonkeyPatch) -> None:
     post = _CapturePost(reply=("x" * 3000) + "\nGRADE: success")
     record = _framed_record()

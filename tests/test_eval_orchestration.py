@@ -142,16 +142,23 @@ class _CountingScorer:
 
 
 class _CaptureGrader:
-    """Record every trial presented to the pre-scoring grader seam."""
+    """Record every trial presented to the pre-scoring grader seam.
+
+    ``parked_at_grade`` snapshots ``parked_observation`` at call time, so a
+    regression that populated the field only after ``before_scoring`` returned
+    cannot slip past assertions made on the shared mutable record.
+    """
 
     name = "capture"
 
     def __init__(self) -> None:
         self.records: list[TrialRecord] = []
+        self.parked_at_grade: list[object] = []
 
     def grade(self, record: TrialRecord, scene: Scene) -> None:
         del scene
         self.records.append(record)
+        self.parked_at_grade.append(record.parked_observation)
 
 
 class _ParkedEmbodiment(CubePickEmbodiment):
@@ -1037,7 +1044,7 @@ def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
     assert log.status == "success"
     assert embodiment.park_calls == 1
     assert len(grader.records) == 1
-    assert grader.records[0].parked_observation is parked
+    assert grader.parked_at_grade[0] is parked
 
 
 def test_eval_does_not_observe_parked_without_a_grader(tmp_path: Path) -> None:
@@ -1169,13 +1176,15 @@ def test_eval_ignores_non_callable_observe_parked(tmp_path: Path) -> None:
     grader = _CaptureGrader()
     embodiment = _OddAttr()
 
-    eval(
-        _task(max_steps=1),
-        ScriptedPolicy(),
-        embodiment,
-        grader=grader,
-        log_dir=str(tmp_path),
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
 
     assert grader.records[0].parked_observation is None
     assert _OddAttr.observe_parked == "not a hook"

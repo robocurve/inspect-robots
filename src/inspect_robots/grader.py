@@ -222,8 +222,6 @@ class _VLMGrader:
                 else []
             )
             messages = self._messages(scene.instruction, self._rubric_for(scene), initial, final)
-            if parked:
-                record.metadata["graded_frames"] = "parked"
             reply = chat_completion(
                 self._base_url,
                 self._api_key,
@@ -242,6 +240,10 @@ class _VLMGrader:
             return
         judgement = str(matches[-1]).lower()
         note = reply.strip()[:_NOTE_CHAR_LIMIT]
+        # Written only alongside a verdict: a degraded (ungraded) trial must
+        # leave the record unchanged, marker included.
+        if parked:
+            record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
         record.operator_note = note
         record.events.append(
