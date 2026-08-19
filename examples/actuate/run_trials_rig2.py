@@ -11,9 +11,10 @@ from pathlib import Path
 from run_trials import run_campaign
 
 TRIALS_PER_RIG = 5  # booth-editable; the combined two-rig target is 2x this
-# Pinned on both rigs so the campaign halves share one episode ceiling: the
-# rig configs disagree today (12000 vs 1200). Later user flags still win.
-MAX_STEPS = 12000
+# Pinned on both rigs so the campaign halves share one episode ceiling of
+# 120 seconds at the rigs' 10 Hz control rate (the rig configs disagree
+# today, 12000 vs 1200). Later user flags still win.
+MAX_STEPS = 1200
 RIG_CONFIG = Path.home() / "robocurve" / "rig-2" / "config.ini"
 HERE = Path(__file__).parent
 

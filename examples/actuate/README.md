@@ -122,8 +122,8 @@ Both halves run from the clone root and share its single `.env` (the per-rig
 `~/robocurve/rig-N/.env` pins are not loaded). Each campaign holds a lock
 keyed to its rig config, so a second campaign against the same rig refuses
 to start, and the flock claim guard still protects the devices underneath.
-The rig scripts pin `--max-steps 12000` on both rigs so the two configs
-cannot give the halves different episode ceilings. Keep `rerun = false` on
+The rig scripts pin `--max-steps 1200` (120 seconds at 10 Hz) on both rigs
+so the two configs cannot give the halves different episode ceilings. Keep `rerun = false` on
 at least one rig, or give each rig config its own `rerun_port`, so two live
 viewers do not merge their streams. After both halves finish, print the
 per-rig breakdowns and pooled leaderboard with:
