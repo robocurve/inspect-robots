@@ -67,6 +67,13 @@ at the booth the rig config's `rerun = true` spawns a local viewer instead.
   file the setup wizard writes: the XDG-global config drifts stale (it once
   pinned the top camera to the D435's mono IR node, giving a black-and-white
   stream).
+- **Motor thermal gate:** the loop checks motor temperatures before every
+  eval. At or above 60 C it suspends evals and shows the cooling banner, then
+  resumes below 50 C. Thresholds live in `_thermal.py`, and channel names come
+  from the rig config. The gate only exists when `run.py` is launched with a
+  Python that has i2rt installed, such as the rig venv. On machines without
+  i2rt or CAN it disables itself with a console warning and the demo runs as
+  before. Reading temperatures clears any latched motor fault codes.
 - **Model IDs:** confirm the three IDs at the top of `_roster.py` with their
   providers. Validated live so far: `claude-opus-5` (tasker and test-taker),
   `gpt-5.6-sol` (tasker and grader, test-taker over the Responses wire).

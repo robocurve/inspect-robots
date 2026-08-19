@@ -35,12 +35,13 @@ def _status_payload() -> dict[str, Any]:
         "started_at": None,
         "task": None,
         "rubric": None,
+        "cooling": None,
     }
     drawn_at: float | None = None
     with suppress(Exception):
         with STATUS_PATH.open(encoding="utf-8") as status_file:
             status = json.load(status_file)
-        for key in ("roles", "models", "eval_index", "started_at"):
+        for key in ("roles", "models", "eval_index", "started_at", "cooling"):
             payload[key] = status.get(key)
         drawn_at = STATUS_PATH.stat().st_mtime
 

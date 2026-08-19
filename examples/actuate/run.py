@@ -17,6 +17,17 @@ from pathlib import Path
 from typing import Any
 
 from _roster import EFFORT, ROSTER
+from _thermal import (
+    COOL_POLL_S,
+    COOL_PROBE_ERRORS_GIVE_UP,
+    TEMP_RESUME_C,
+    TEMP_WAIT_C,
+    ThermalProbeError,
+    ThermalProbeUnavailable,
+    config_channels,
+    hottest,
+    read_motor_temps,
+)
 
 from inspect_robots.log import read_eval_log
 
@@ -200,6 +211,66 @@ def _next_eval_index() -> int:
     return index + 1 if index is not None else 1
 
 
+def _thermal_gate(eval_index: int, gate_state: dict[str, Any]) -> None:
+    if gate_state["disabled"]:
+        return
+
+    try:
+        hottest_motor = hottest(read_motor_temps(gate_state["channels"]))
+    except ThermalProbeUnavailable as error:
+        print(f"warning: thermal probe unavailable; disabling gate: {error}", flush=True)
+        gate_state["disabled"] = True
+        return
+    except ThermalProbeError as error:
+        print(f"warning: thermal probe failed; proceeding with eval: {error}", flush=True)
+        return
+
+    if hottest_motor.max_c < TEMP_WAIT_C:
+        print(
+            f"motor temps ok: max {hottest_motor.max_c:.1f}C ({hottest_motor.label})",
+            flush=True,
+        )
+        return
+
+    cooling_since = _utc_now()
+    probe_error_streak = 0
+    while True:
+        cooling = {
+            "max_c": hottest_motor.max_c,
+            "hottest": hottest_motor.label,
+            "wait_c": TEMP_WAIT_C,
+            "resume_c": TEMP_RESUME_C,
+            "since": cooling_since,
+        }
+        _write_status({"eval_index": eval_index, "cooling": cooling})
+        print(
+            f"Cooling motors: {hottest_motor.max_c:.1f}C at {hottest_motor.label}. "
+            f"Evals resume below {TEMP_RESUME_C:g}C.",
+            flush=True,
+        )
+        time.sleep(COOL_POLL_S)
+        try:
+            hottest_motor = hottest(read_motor_temps(gate_state["channels"]))
+        except ThermalProbeError as error:
+            probe_error_streak += 1
+            print(
+                f"warning: thermal probe failed while cooling "
+                f"({probe_error_streak}/{COOL_PROBE_ERRORS_GIVE_UP}): {error}",
+                flush=True,
+            )
+            if probe_error_streak >= COOL_PROBE_ERRORS_GIVE_UP:
+                print(
+                    "THERMAL GATE: TOO MANY PROBE ERRORS; PROCEEDING WITH THE EVAL.",
+                    flush=True,
+                )
+                return
+            continue
+
+        probe_error_streak = 0
+        if hottest_motor.max_c < TEMP_RESUME_C:
+            return
+
+
 def _command(
     tasker: dict[str, str],
     test_taker: dict[str, str],
@@ -233,15 +304,18 @@ def _command(
 def main() -> None:
     if not RIG_CONFIG.is_file():
         raise SystemExit(f"rig config not found: {RIG_CONFIG}\nfix: edit RIG_CONFIG in run.py")
+    channels = config_channels(RIG_CONFIG)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     extra_args = _extra_args(sys.argv[1:])
     roster = list(ROSTER.items())
     eval_index = _next_eval_index()
     failure_streak = 0
+    gate_state: dict[str, Any] = {"channels": channels, "disabled": False}
 
     try:
         while True:
+            _thermal_gate(eval_index, gate_state)
             tasker_name, tasker = random.choice(roster)
             test_taker_name, test_taker = random.choice(roster)
             grader_name, grader = random.choice(roster)

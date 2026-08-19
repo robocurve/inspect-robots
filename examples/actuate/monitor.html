@@ -76,6 +76,12 @@
       line-height: 1.04;
       overflow-wrap: anywhere;
     }
+    .cooling {
+      align-content: center;
+      font-size: clamp(19px, 1.45vw, 30px);
+      font-weight: 750;
+      text-align: center;
+    }
     .task-box {
       min-height: 0;
       padding: clamp(10px, 1vw, 18px);
@@ -243,7 +249,8 @@
 
     <section class="current">
       <div class="section-title">Current Eval</div>
-      <div class="cards">
+      <div id="cooling" class="card cooling muted" hidden></div>
+      <div id="role-cards" class="cards">
         <article class="card" data-role="tasker">
           <div class="role">Task Maker</div>
           <div class="model">Waiting…</div>
@@ -318,6 +325,17 @@
     function renderStatus(data) {
       document.getElementById("eval-index").textContent =
         data.eval_index == null ? "Eval #–" : `Eval #${data.eval_index}`;
+      const cooling = data.cooling;
+      const coolingBanner = document.getElementById("cooling");
+      coolingBanner.hidden = !cooling;
+      document.getElementById("role-cards").hidden = Boolean(cooling);
+      if (cooling) {
+        const maxC = Number(cooling.max_c).toFixed(1);
+        const resumeC = Number(cooling.resume_c).toFixed(1).replace(/\.0$/, "");
+        coolingBanner.textContent =
+          `Cooling motors: ${maxC}°C at ${cooling.hottest}. ` +
+          `Evals resume below ${resumeC}°C.`;
+      }
       for (const role of ["tasker", "test_taker", "grader"]) {
         const card = document.querySelector(`[data-role="${role}"]`);
         const model = card.querySelector(".model");
