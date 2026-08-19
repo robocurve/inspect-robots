@@ -114,6 +114,18 @@ def _phase_frames(
     return [(camera, refs[camera].load()) for camera in sorted(refs)[:max_cameras]]
 
 
+def _parked_frames(
+    record: TrialRecord, max_cameras: int
+) -> list[tuple[str, npt.NDArray[np.uint8]]]:
+    """Collect deterministic, capped frames from a fresh parked observation."""
+    observation = record.parked_observation
+    if observation is None or not observation.images:
+        return []
+    return [
+        (camera, observation.images[camera]) for camera in sorted(observation.images)[:max_cameras]
+    ]
+
+
 class _VLMGrader:
     """Judge a trial from its first and last frames with a vision model."""
 
@@ -196,19 +208,25 @@ class _VLMGrader:
             )
             return
         try:
-            final = (
+            parked = _parked_frames(record, self._max_cameras)
+            final = parked or (
                 _phase_frames(record.steps[-1], final=True, max_cameras=self._max_cameras)
                 if record.steps
                 else []
             )
             if not final:
                 raise ConfigError("no final frames recorded")
-            initial = _phase_frames(record.steps[0], final=False, max_cameras=self._max_cameras)
+            initial = (
+                _phase_frames(record.steps[0], final=False, max_cameras=self._max_cameras)
+                if record.steps
+                else []
+            )
+            messages = self._messages(scene.instruction, self._rubric_for(scene), initial, final)
             reply = chat_completion(
                 self._base_url,
                 self._api_key,
                 self._model,
-                self._messages(scene.instruction, self._rubric_for(scene), initial, final),
+                messages,
                 what="grading",
                 fix_hint="check -G model=... and -G base_url=..., then retry",
                 http_post=self._http_post,
@@ -222,6 +240,10 @@ class _VLMGrader:
             return
         judgement = str(matches[-1]).lower()
         note = reply.strip()[:_NOTE_CHAR_LIMIT]
+        # Written only alongside a verdict: a degraded (ungraded) trial must
+        # leave the record unchanged, marker included.
+        if parked:
+            record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
         record.operator_note = note
         record.events.append(
