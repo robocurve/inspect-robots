@@ -25,15 +25,29 @@ A duck-typed embodiment hook, following the existing `bind`, `bind_task`,
   `Observation`; returning `None` declines (for example, when the task's
   success state involves the robot holding an object, parking would alter
   the state being graded — the decision belongs to the embodiment/config,
-  not the framework). Exceptions degrade: one stderr note, grading proceeds
-  on the last step's frames.
+  not the framework). Failures degrade — one
+  `warnings.warn(RuntimeWarning)` (the `eval.py` degrade precedent,
+  assertable with `pytest.warns`), grading proceeds on the last step's
+  frames — with one carve-out: `SafetyAbort` and `EmbodimentFault`
+  re-raise. The repo invariant is that those two classes always halt the
+  eval, and the park is real robot motion; reducing an embodiment-raised
+  halt to a note would let the run drive hardware again at the next
+  trial's reset.
 - **Call site and conditions** (`eval.py`, in the scored-trial branch,
   immediately before `before_scoring(record, scene)`): call only when
-  `before_scoring is not None` (no grader, no pointless motion) and
+  `before_scoring is not None` (no grader, no pointless motion), when
   `record.operator_judgement is None` (a console verdict already recorded
-  means `grade()` will return without looking at frames). The
-  definitive-termination shortcut inside `grade()` cannot be seen from the
-  eval loop; that rarer case pays one harmless park-and-capture.
+  means `grade()` will return without looking at frames), and when the
+  trial is not definitively terminated — mirror `grade()`'s shortcut with
+  the identical check (`record.terminated and record.termination_reason in
+  _DEFINITIVE_REASONS`, imported from `session`), because an
+  embodiment-definitive termination would otherwise trigger a real park
+  motion whose observation is guaranteed unused. The attribute is fetched
+  with `getattr` and guarded by `callable()` (the `bind_task` precedent,
+  including its non-callable-attribute test). A return value that is
+  neither `Observation` nor `None` is rejected at the call site with a
+  precise degrade note (`isinstance` check) instead of surfacing later as
+  a misleading `AttributeError` inside `grade()`'s broad except.
 - **Record carriage**: new `TrialRecord` field
   `parked_observation: Observation | None = None` (`rollout.py`).
   In-memory only: `EvalLog` embeds `SceneResult` aggregates, never
@@ -44,38 +58,54 @@ A duck-typed embodiment hook, following the existing `bind`, `bind_task`,
   `record.parked_observation.images` with the same sorted-name order and
   camera cap as `_phase_frames`, or `[]` when the field is `None` or has no
   images. In `grade()`, the final frames become `_parked_frames(...) or
-  _phase_frames(record.steps[-1], final=True, ...)`. The existing
-  "no final frames recorded" `ConfigError` still fires only when both
-  sources are empty. Prompt text unchanged ("after the trial ended" remains
-  true). The grader transcript (the chat request) already embeds whatever
-  frames were sent, so the judged images stay auditable without any log
-  change.
+  _phase_frames(record.steps[-1], final=True, ...)`, and the initial frames
+  become `_phase_frames(record.steps[0], ...) if record.steps else []` —
+  parked frames make a zero-step scored trial (operator Esc at t=0)
+  gradeable through the existing final-frames-only prompt path for the
+  first time, and without the guard `record.steps[0]` would `IndexError`
+  into the broad except and degrade. The existing "no final frames
+  recorded" `ConfigError` still fires only when both final sources are
+  empty. Prompt text unchanged ("after the trial ended" remains true).
+- **Audit marker**: nothing persists the grading request, and the parked
+  frames are deliberately not serialized, so the HTML/rerun views can show
+  last-step frames that contradict a verdict judged on parked ones. When
+  the grader uses parked frames it records the JSON-safe marker
+  `record.metadata["graded_frames"] = "parked"`, which flows into
+  `SceneResult.trial_metadata` and makes the provenance visible in the
+  log.
 
 ## Changes
 
 - `src/inspect_robots/rollout.py`: the `TrialRecord` field plus its
   invariant comment.
-- `src/inspect_robots/eval.py`: the guarded hook call plus stderr degrade;
-  document the hook contract in the `eval()` docstring beside the other
-  duck-typed hooks.
+- `src/inspect_robots/eval.py`: the guarded hook call plus RuntimeWarning
+  degrade and the SafetyAbort/EmbodimentFault re-raise; document the hook
+  contract in the `eval()` docstring beside the other duck-typed hooks.
 - `src/inspect_robots/grader.py`: `_parked_frames` and the preference in
   `grade()`.
-- Docs: if a docs page enumerates the embodiment's optional duck-typed
-  hooks, add `observe_parked` there; otherwise the `eval()` docstring is
-  the documentation of record.
+- Docs: no `docs/` page enumerates the duck-typed embodiment hooks
+  (verified), so the `eval()` docstring is the documentation of record.
+  `src/inspect_robots/CLAUDE.md`'s `embodiment.py` row does enumerate
+  `bind_task` and gains `observe_parked` beside it.
 
 ## Tests (100% coverage gate)
 
 - Eval loop: hook called exactly once for a scored trial with a grader;
   not called without a grader; not called when an operator judgement
-  already exists; a raising hook prints the stderr note, leaves
-  `parked_observation` as `None`, and the trial still grades and scores; a
-  `None` return leaves the field `None` without a note.
+  already exists; not called on a definitive termination; a raising hook
+  warns (pytest.warns RuntimeWarning), leaves `parked_observation` as
+  `None`, and the trial still grades and scores; `SafetyAbort` and
+  `EmbodimentFault` from the hook halt the eval; a `None` return leaves
+  the field `None` without a warning; a non-Observation return degrades
+  with a precise warning; a non-callable `observe_parked` attribute is
+  ignored.
 - Grader: with a parked observation present, the request contains the
   parked images (assert via the injected `http_post`) and not the last
-  step's; the camera cap and sorted order match `_phase_frames`; with the
-  field `None` or images empty, the last step's frames are used; both
-  empty still raises the existing `ConfigError` path.
+  step's, and `record.metadata["graded_frames"] == "parked"`; the camera
+  cap and sorted order match `_phase_frames`; with the field `None` or
+  images empty, the last step's frames are used and no marker is written;
+  both empty still raises the existing `ConfigError` path; a zero-step
+  trial with parked frames grades through the final-frames-only prompt.
 - `TrialRecord`: field defaults to `None`; existing construction sites
   unaffected.
 - API snapshot: unchanged (`__all__` untouched); mypy strict and ruff D1

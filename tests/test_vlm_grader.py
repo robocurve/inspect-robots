@@ -9,6 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from inspect_robots._pngenc import png_data_url
 from inspect_robots.errors import ConfigError
 from inspect_robots.frames import FrameStore
 from inspect_robots.grader import Grader, vlm_grader
@@ -72,6 +73,25 @@ def _scene() -> Scene:
 
 def _labels(parts: list[dict[str, object]]) -> list[object]:
     return [p["text"] for p in parts if p["type"] == "text"][1:]
+
+
+def _image_urls(parts: list[dict[str, object]]) -> list[str]:
+    urls: list[str] = []
+    for part in parts:
+        if part["type"] != "image_url":
+            continue
+        image_url = part["image_url"]
+        assert isinstance(image_url, dict)
+        url = image_url["url"]
+        assert isinstance(url, str)
+        urls.append(url)
+    return urls
+
+
+def test_trial_record_parked_observation_defaults_to_none() -> None:
+    record = TrialRecord(scene_id="s", epoch=0, seed=0)
+
+    assert record.parked_observation is None
 
 
 def test_vlm_grader_registry_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,6 +212,85 @@ def test_vlm_grader_without_initial_frames_reworks_the_frames_sentence(
     assert "You will see the final frames (after the trial ended)." in text
     assert "initial frames" not in text
     assert _labels(parts) == ["final frame, camera 'cam'"]
+
+
+def test_vlm_grader_prefers_parked_frames_and_records_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch)
+    last = _frame(9)
+    parked = _frame(7)
+    record = _framed_record(final={"last": last})
+    record.parked_observation = Observation(images={"parked": parked})
+
+    grader.grade(record, _scene())
+
+    parts = post.message_parts()
+    assert _labels(parts) == ["final frame, camera 'parked'"]
+    assert png_data_url(parked) in _image_urls(parts)
+    assert png_data_url(last) not in _image_urls(parts)
+    assert record.metadata["graded_frames"] == "parked"
+
+
+def test_vlm_grader_sorts_and_caps_parked_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch, max_cameras=2)
+    record = _framed_record()
+    record.parked_observation = Observation(
+        images={"z_cam": _frame(3), "b_cam": _frame(2), "a_cam": _frame(1)}
+    )
+
+    grader.grade(record, _scene())
+
+    assert _labels(post.message_parts()) == [
+        "final frame, camera 'a_cam'",
+        "final frame, camera 'b_cam'",
+    ]
+
+
+@pytest.mark.parametrize("parked", [None, Observation()])
+def test_vlm_grader_falls_back_when_parked_frames_are_absent(
+    parked: Observation | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch)
+    last = _frame(9)
+    record = _framed_record(final={"last": last})
+    record.parked_observation = parked
+
+    grader.grade(record, _scene())
+
+    parts = post.message_parts()
+    assert _labels(parts) == ["final frame, camera 'last'"]
+    assert png_data_url(last) in _image_urls(parts)
+    assert "graded_frames" not in record.metadata
+
+
+def test_vlm_grader_grades_zero_step_trial_from_parked_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch)
+    record = TrialRecord(
+        scene_id="s",
+        epoch=0,
+        seed=0,
+        parked_observation=Observation(images={"parked": _frame(7)}),
+    )
+
+    grader.grade(record, _scene())
+
+    parts = post.message_parts()
+    text = parts[0]["text"]
+    assert isinstance(text, str)
+    assert "You will see the final frames (after the trial ended)." in text
+    assert "initial frames" not in text
+    assert _labels(parts) == ["final frame, camera 'parked'"]
+    assert record.operator_judgement == "success"
+    assert record.metadata["graded_frames"] == "parked"
 
 
 def test_vlm_grader_loads_frame_refs_sorted_and_capped(

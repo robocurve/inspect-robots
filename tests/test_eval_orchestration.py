@@ -3,6 +3,7 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -138,6 +139,34 @@ class _CountingScorer:
         del record, target
         self.calls += 1
         return Score(value=1.0)
+
+
+class _CaptureGrader:
+    """Record every trial presented to the pre-scoring grader seam."""
+
+    name = "capture"
+
+    def __init__(self) -> None:
+        self.records: list[TrialRecord] = []
+
+    def grade(self, record: TrialRecord, scene: Scene) -> None:
+        del scene
+        self.records.append(record)
+
+
+class _ParkedEmbodiment(CubePickEmbodiment):
+    """Return or raise one configured result from the optional park hook."""
+
+    def __init__(self, park_result: object) -> None:
+        super().__init__()
+        self.park_result = park_result
+        self.park_calls = 0
+
+    def observe_parked(self) -> object:
+        self.park_calls += 1
+        if isinstance(self.park_result, BaseException):
+            raise self.park_result
+        return self.park_result
 
 
 class _ScriptedOperatorInput:
@@ -990,6 +1019,166 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
+    parked = Observation(images={"parked": np.zeros((2, 2, 3), dtype=np.uint8)})
+    embodiment = _ParkedEmbodiment(parked)
+    grader = _CaptureGrader()
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 1
+    assert len(grader.records) == 1
+    assert grader.records[0].parked_observation is parked
+
+
+def test_eval_does_not_observe_parked_without_a_grader(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 0
+
+
+def test_eval_does_not_observe_parked_after_operator_judgement(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    grader = _CaptureGrader()
+    operator_input = _ScriptedOperatorInput([[ConsolePoll(end=EndRequest(verdict="y"))]])
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        operator_input=operator_input,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].operator_judgement == "y"
+
+
+def test_eval_does_not_observe_parked_after_definitive_termination(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    embodiment.goal_radius = 2.0
+    grader = _CaptureGrader()
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].termination_reason == "success"
+
+
+def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(RuntimeError("park jammed"))
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"observe_parked\(\) failed with RuntimeError: park jammed",
+    ):
+        (log,) = eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+    assert log.samples[0].epochs[0] == {"success_at_end": 0.0}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("park unsafe"), EmbodimentFault("park faulted")],
+)
+def test_eval_halts_when_observe_parked_raises_a_halt_error(
+    error: Exception, tmp_path: Path
+) -> None:
+    embodiment = _ParkedEmbodiment(error)
+
+    with pytest.raises(type(error), match=str(error)):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=_CaptureGrader(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(None)
+    grader = _CaptureGrader()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_rejects_non_observation_parked_result(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment("not an observation")
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=(
+            "observe_parked\\(\\) returned str; expected Observation or None; "
+            "grading from last-step frames"
+        ),
+    ):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_ignores_non_callable_observe_parked(tmp_path: Path) -> None:
+    class _OddAttr(CubePickEmbodiment):
+        observe_parked = "not a hook"
+
+    grader = _CaptureGrader()
+    embodiment = _OddAttr()
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert grader.records[0].parked_observation is None
+    assert _OddAttr.observe_parked == "not a hook"
 
 
 # --------------------------------------------------------------------------- #
