@@ -606,8 +606,11 @@ def build_toolset(
         if len(matching) > 1:
             # An embodiment may expose several same-shaped state fields — e.g.
             # a 14-D joint_pos next to a 14-D Cartesian eef_state. Prefer the
-            # field whose canonical key family (CANONICAL_STATE_UNITS naming)
-            # matches the control mode before declaring the shape ambiguous.
+            # field whose key prefix matches the control mode's family before
+            # declaring the shape ambiguous. Every ABSOLUTE_CONTROL_MODES
+            # member today is eef_* or joint_*; a future mode outside both
+            # families falls back to "joint" and, absent a joint_* field,
+            # still reaches the ambiguity error below.
             family = "eef" if mode.startswith("eef") else "joint"
             preferred = [key for key in matching if key.startswith(family)]
             if len(preferred) == 1:
