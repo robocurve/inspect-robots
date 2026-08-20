@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin (0.26.0):** absolute-target control no longer fails when an
+  embodiment exposes several state fields of the action's shape (e.g. a 14-D
+  `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers
+  the field whose canonical key family (`joint_*`/`eef_*`) matches the
+  declared control mode, and only raises when that preference is still
+  ambiguous. Unlocks full 6-DoF EEF layouts in inspect-robots-yam.
 - **Core:** the shared chat wire behind task generation, the `vlm` grader,
   and summarize now retries once with `max_completion_tokens` when a 400
   response names that parameter, so OpenAI reasoning models that reject
