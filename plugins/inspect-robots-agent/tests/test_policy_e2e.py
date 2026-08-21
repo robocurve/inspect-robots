@@ -2791,3 +2791,38 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     )
 
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
+
+
+@pytest.mark.parametrize(
+    "param, val",
+    [
+        ("model", 42),
+        ("model", 0),
+        ("base_url", True),
+        ("base_url", False),
+        ("api_key_env", True),
+        ("api_key_env", False),
+        ("speed", False),
+    ],
+)
+def test_non_string_params_rejected(param: str, val: Any) -> None:
+    kwargs: dict[str, Any] = {
+        "model": "test-model",
+        "base_url": "http://localhost:8000",
+        "api_key_env": "TEST_KEY",
+        "effort": "low",
+        "speed": None,
+        "wire": "chat",
+    }
+    kwargs[param] = val
+
+    # speed requires wire='anthropic'
+    if param == "speed":
+        kwargs["wire"] = "anthropic"
+
+    with pytest.raises(ConfigError) as exc_info:
+        LLMAgentPolicy(**kwargs)
+
+    assert f"{param} must be a string, got {val!r}." in str(exc_info.value)
+    expected_fix = f"fix: the -P parser coerces unquoted values; pass -P '{param}=\"value\"'"
+    assert expected_fix in str(exc_info.value)
