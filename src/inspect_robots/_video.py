@@ -113,10 +113,12 @@ def count_frames(root: Path) -> int:
 def default_fps(embodiment_info: Mapping[str, Any]) -> tuple[float, str]:
     """The playback rate a log implies, with its source for display.
 
-    Uses the embodiment's nominal ``control_hz`` (frames are stored once per
-    rollout step, so it is the best proxy the log offers). The guards mirror
-    ``_print_step_limit_notice`` — numeric, not bool, > 0 — plus finite:
-    plain ``json.load`` accepts the ``Infinity`` literal, and a hand-edited
+    Frame storage writes one reset frame and one post-action frame per completed
+    step. Adjacent frames therefore span one control interval, so the
+    embodiment's nominal ``control_hz`` is the best playback-rate proxy the log
+    offers. The guards mirror ``_print_step_limit_notice``: numeric, not bool,
+    greater than zero, and finite. Plain ``json.load`` accepts the ``Infinity``
+    literal, and a hand-edited
     ``control_hz`` must fall back rather than become ``-r inf``.
     """
     rate = embodiment_info.get("control_hz")
