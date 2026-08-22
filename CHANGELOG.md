@@ -9,6 +9,25 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Agent plugin (0.26.0):** absolute-target control no longer fails when an
+  embodiment exposes several state fields of the action's shape (e.g. a 14-D
+  `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers
+  the field whose canonical key family (`joint_*`/`eef_*`) matches the
+  declared control mode, and only raises when that preference is still
+  ambiguous. Unlocks full 6-DoF EEF layouts in inspect-robots-yam.
+- **Core:** the shared chat wire behind task generation, the `vlm` grader,
+  and summarize now retries once with `max_completion_tokens` when a 400
+  response names that parameter, so OpenAI reasoning models that reject
+  `max_tokens` work without rerouting through a proxy
+  ([plan 0073](plans/0073-chatwire-max-completion-tokens.md),
+  [#390](https://github.com/robocurve/inspect-robots/issues/390)).
+
+- **Core:** the operator footer now echoes typing on a background cadence, so
+  feedback is visible while an agent policy is blocked in inference instead of
+  appearing only when the robot moves
+  ([plan 0066](plans/0066-footer-echo-pump.md),
+  [#367](https://github.com/robocurve/inspect-robots/issues/367)).
+
 - **Voice plugin (0.5.1):** operator-ended trials now cut `--speak` narration
   instead of draining it at eval end
   ([plan 0061](plans/0061-speak-operator-end-cut.md),
@@ -50,6 +69,22 @@ All notable changes to this project are documented here. The format is based on
   [#333](https://github.com/robocurve/inspect-robots/issues/333)).
 
 ### Added
+
+- **Core:** task generation and the `vlm` grader accept an `effort` key
+  (`-A effort=` / `-G effort=`, or the `[taskgen.args]`/`[grader.args]`
+  config sections) that is sent to the endpoint as `reasoning_effort`.
+  Leaving it unset omits the field so the provider default applies, and
+  `effort=none` requests the minimum, matching `-P effort=`
+  ([plan 0075](plans/0075-taskgen-grader-effort.md),
+  [#394](https://github.com/robocurve/inspect-robots/issues/394)).
+
+- **Core:** every delivered trial now writes a default-on, durable JSONL action
+  log with the complete post-approval control-step sequence. Pass
+  `store_actions=False` to `eval()` or `eval_set()` to opt out. Because the
+  side-car is eval-owned, callers that supply custom `sinks=` now also write
+  `actions/` beneath `log_dir` (which defaults to `logs`) unless they opt out
+  explicitly ([plan 0067](plans/0067-durable-action-log.md),
+  [#369](https://github.com/robocurve/inspect-robots/issues/369)).
 
 - **Core:** composite-video HTML reports now restore the transcript rail
   pioneered in [#272](https://github.com/robocurve/inspect-robots/pull/272),

@@ -258,14 +258,16 @@ def operator_scorer() -> Scorer:
 class VLMScorer:
     """Reserved interface (R10): score from a VLM classifier over final frames.
 
-    Implemented in a later milestone; instantiating and calling it raises so the
-    contract is visible but no half-baked behavior ships.
+    VLM judging shipped as a grader instead (R6: scorers must stay pure
+    readers of the record); instantiating and calling this raises so the
+    reserved contract stays visible without half-baked behavior.
     """
 
     name = "vlm"
 
     def __call__(self, record: TrialRecord, target: Target | None) -> Score:
-        """Fail explicitly because VLM scoring is reserved but not implemented."""
+        """Fail explicitly because VLM judging ships as the 'vlm' grader instead."""
         raise NotImplementedError(
-            "VLMScorer is a reserved interface; not implemented in this release"
+            "VLM judging ships as the 'vlm' grader (--grader vlm) with the "
+            "'operator' scorer reading its judgement"
         )

@@ -8,7 +8,8 @@ guarantee enforced by golden tests in a later step).
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
 dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
-``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``)
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``, and
+``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
 ``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
 are arbitrary mutable JSON values. Treat a log as read-only; nothing
@@ -18,9 +19,22 @@ deep-freezes it.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
+
+
+def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Deep-copy each JSON-encodable value and omit values encoding rejects."""
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        try:
+            safe[key] = json.loads(json.dumps(value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return safe
+
 
 SCHEMA_VERSION = 1
 
@@ -62,7 +76,7 @@ class EvalStats:
 
 @dataclass(frozen=True)
 class SceneResult:
-    """Per-scene result: the reduced score(s) plus the raw per-epoch scores."""
+    """Persist one scene's metadata, reduced scores, and raw per-epoch records."""
 
     scene_id: str
     status: str  # "success" | "error" | "cancelled"
@@ -71,6 +85,9 @@ class SceneResult:
     error: str | None = None
     # What the scene asked the policy to do — makes a log self-describing.
     instruction: str | None = None
+    # JSON-safe scene metadata, copied per key so one adapter-owned object does
+    # not prevent the rest of the scene contract from being persisted.
+    scene_metadata: dict[str, Any] = field(default_factory=dict)
     # Strictly parallel to ``epochs``: the operator's verdict per recorded
     # trial, ``None`` when the trial errored or no judgement was captured.
     # Defaults keep logs written before these fields existed readable.

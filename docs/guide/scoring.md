@@ -64,9 +64,11 @@ Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a regist
 component (`inspect_robots.graders` entry point, `grader` decorator) whose
 `grade(record, scene)` runs once per scored trial, after the rollout and
 before the scorers, and writes the judgement onto the record. The builtin
-`operator` grader prompts the terminal operator; a VLM autograder over final
-frames belongs on the same seam (the reserved
-[`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface predates it).
+`operator` grader prompts the terminal operator, and the builtin `vlm`
+grader is the autograder on the same seam: a vision model judges the trial's
+first and last frames against a rubric (the reserved
+[`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface predates it
+and stays a stub, because R6 requires scorers to be pure readers).
 
 Every attended CLI run is graded by default, registered tasks included, so
 judgement-reading scorers (the `operator` scorer, or task scorers that fall

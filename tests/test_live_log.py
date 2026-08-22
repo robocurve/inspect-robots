@@ -166,6 +166,47 @@ def test_lifecycle_throttle_parallel_epochs_replacement_and_reuse(tmp_path: Path
     sink.on_eval_end(_final_log())
 
 
+def test_bound_scene_identity_populates_snapshots_with_unknown_fallback(
+    tmp_path: Path,
+) -> None:
+    """Copy safe bound identity into snapshots and preserve unbound defaults."""
+    sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    sink.bind_scenes(
+        [
+            Scene(
+                id="scene-a",
+                instruction="pick up the cube",
+                metadata={"rubric": "lift cleanly", "adapter_object": object()},
+            ),
+            Scene(id="scene-b", instruction="place the cube"),
+        ]
+    )
+    sink.on_eval_start(_spec())
+
+    sink.on_trial_start("scene-a", 0)
+    assert sink.path is not None
+    first = read_eval_log(str(sink.path)).samples[0]
+    assert first.instruction == "pick up the cube"
+    assert first.scene_metadata == {"rubric": "lift cleanly"}
+
+    mutable_snapshot = sink._samples("first")[0]
+    mutable_snapshot.scene_metadata["rubric"] = "mutated"
+    assert sink._samples("second")[0].scene_metadata == {"rubric": "lift cleanly"}
+
+    sink.on_trial_end(_record())
+    sink.on_trial_start("scene-b", 0)
+    by_id = {sample.scene_id: sample for sample in read_eval_log(str(sink.path)).samples}
+    assert by_id["scene-b"].instruction == "place the cube"
+    assert by_id["scene-b"].scene_metadata == {}
+
+    sink.on_trial_end(_record())
+    sink.on_trial_start("unknown", 0)
+    by_id = {sample.scene_id: sample for sample in read_eval_log(str(sink.path)).samples}
+    assert by_id["unknown"].instruction is None
+    assert by_id["unknown"].scene_metadata == {}
+    sink.on_eval_end(_final_log())
+
+
 class _BadInt:
     """Fail conversion so the log-step hook's isolation path executes."""
 
@@ -358,7 +399,47 @@ def test_eval_integration_probe_observes_valid_mid_run_snapshots(
     assert all(log.stats.frames_dir == expected for log in snapshots)
     assert probe.trial_logs[0].results.total_trials == 1
     assert probe.trial_logs[0].samples[0].policy_transcripts[0]
+    assert probe.message_logs[0].samples[0].instruction == "reach"
     assert probe.removed_on_end
+
+
+def test_sequential_evals_replace_bound_scene_identity(tmp_path: Path) -> None:
+    """Replace colliding scene identity when one live sink serves another run."""
+    live_sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    probe = _ProbeSink(live_sink)
+    tasks = [
+        Task(
+            name=f"run-{index}",
+            scenes=[
+                Scene(
+                    id="shared-scene",
+                    instruction=instruction,
+                    metadata={"rubric": rubric},
+                )
+            ],
+            scorer=success_at_end(),
+            max_steps=1,
+        )
+        for index, (instruction, rubric) in enumerate(
+            [
+                ("first instruction", "first rubric"),
+                ("second instruction", "second rubric"),
+            ]
+        )
+    ]
+
+    for task in tasks:
+        eval(
+            task,
+            _DeltaPolicy(),
+            CubePickEmbodiment(),
+            sinks=[live_sink, probe],
+            log_dir=str(tmp_path),
+        )
+
+    second_run_sample = probe.trial_logs[-1].samples[0]
+    assert second_run_sample.instruction == "second instruction"
+    assert second_run_sample.scene_metadata == {"rubric": "second rubric"}
 
 
 def test_eval_set_threads_and_reuses_caller_supplied_live_sink(tmp_path: Path) -> None:

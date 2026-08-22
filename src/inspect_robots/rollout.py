@@ -90,6 +90,9 @@ class TrialRecord:
     epoch: int
     seed: int | None
     steps: list[StepRecord] = field(default_factory=list)
+    # In-memory only: EvalLog embeds SceneResult aggregates and never TrialRecord,
+    # so no asdict path reaches the numpy images and the log schema is untouched.
+    parked_observation: Observation | None = None
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None

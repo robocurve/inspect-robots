@@ -41,6 +41,49 @@ analog):
   records it in the log, so even "unseeded" runs are reproducible after the
   fact, and distinct from `seed=0`.)
 
+## Automatic task generation
+
+[`generate_scene`](/api/#inspect_robots.taskgen.generate_scene) can ask a
+vision-capable model to design one task from an embodiment's initial camera
+frames. The result has two consumers: `scene.instruction` is handed to the
+policy, while `scene.metadata["rubric"]` is handed to the grader. The scene
+metadata, including the generated rubric and generation provenance, is copied
+into the per-scene eval-log result.
+
+By default, the model is told to inspect the visible tabletop, choose one
+concrete manipulation task that a single arm could plausibly attempt, use only
+visible items, and write observable success conditions that are meaningful,
+fair, and achievable. Pass `instructions="..."` to replace those design
+instructions, or `instructions_file="prompt.txt"` to read them from a UTF-8
+file. The required `TASK:` and `RUBRIC:` reply format is always appended and
+cannot be overridden.
+
+Generation performs a peek reset before evaluation. Pass the same integer
+`seed` to `generate_scene()` and `eval()` so a seedable simulator presents the
+same epoch-zero layout to the task designer and the policy:
+
+```python
+from inspect_robots import Task, eval, generate_scene
+from inspect_robots.scorer import operator_scorer
+
+seed = 0
+scene = generate_scene(
+    embodiment,
+    model="claude-sonnet-4-5",
+    seed=seed,
+)
+task = Task(
+    name="generated-tabletop-task",
+    scenes=[scene],
+    scorer=operator_scorer(),
+    max_steps=300,
+)
+logs = eval(task, policy, embodiment, seed=seed)
+```
+
+The caller owns the embodiment throughout this sequence. Generation leaves it
+open for the subsequent evaluation.
+
 ## Epochs and reducers
 
 Repeat each scene `epochs` times to measure stochastic policies. The

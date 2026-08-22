@@ -8,6 +8,7 @@ import pytest
 from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scorer import (
     Score,
+    VLMScorer,
     episode_length,
     get_reducer,
     min_distance_to_goal,
@@ -96,3 +97,8 @@ def test_pass_at_k() -> None:
 def test_unknown_reducer_raises() -> None:
     with pytest.raises(ValueError, match="unknown epoch reducer"):
         get_reducer("nope")
+
+
+def test_vlm_scorer_stub_points_at_the_vlm_grader() -> None:
+    with pytest.raises(NotImplementedError, match=r"'vlm' grader \(--grader vlm\)"):
+        VLMScorer()(_record([], success=False), None)

@@ -3,6 +3,8 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -139,6 +141,41 @@ class _CountingScorer:
         return Score(value=1.0)
 
 
+class _CaptureGrader:
+    """Record every trial presented to the pre-scoring grader seam.
+
+    ``parked_at_grade`` snapshots ``parked_observation`` at call time, so a
+    regression that populated the field only after ``before_scoring`` returned
+    cannot slip past assertions made on the shared mutable record.
+    """
+
+    name = "capture"
+
+    def __init__(self) -> None:
+        self.records: list[TrialRecord] = []
+        self.parked_at_grade: list[object] = []
+
+    def grade(self, record: TrialRecord, scene: Scene) -> None:
+        del scene
+        self.records.append(record)
+        self.parked_at_grade.append(record.parked_observation)
+
+
+class _ParkedEmbodiment(CubePickEmbodiment):
+    """Return or raise one configured result from the optional park hook."""
+
+    def __init__(self, park_result: object) -> None:
+        super().__init__()
+        self.park_result = park_result
+        self.park_calls = 0
+
+    def observe_parked(self) -> object:
+        self.park_calls += 1
+        if isinstance(self.park_result, BaseException):
+            raise self.park_result
+        return self.park_result
+
+
 class _ScriptedOperatorInput:
     """Expose per-trial polls and model input typed between trial boundaries."""
 
@@ -249,6 +286,7 @@ def test_cancelled_policy_reset_records_t_minus_one_and_zero_steps(tmp_path: Pat
             _task(),
             _ResetInterruptPolicy(),
             CubePickEmbodiment(),
+            log_dir=str(tmp_path),
             sinks=[records, json_sink],
         )
 
@@ -295,6 +333,7 @@ def test_cancelled_trial_is_never_scored() -> None:
             _InterruptingPolicy(KeyboardInterrupt(), interrupt_on_call=1),
             CubePickEmbodiment(),
             sinks=[NullSink()],
+            store_actions=False,
         )
 
     assert scorer.calls == 0
@@ -335,6 +374,7 @@ def test_errored_then_cancelled_epochs_preserve_both_records(tmp_path: Path) -> 
             _task(epochs=2),
             _ErrorThenCancelPolicy(),
             CubePickEmbodiment(),
+            log_dir=str(tmp_path),
             sinks=[records, json_sink],
         )
 
@@ -444,7 +484,13 @@ def test_policy_error_partial_record_reaches_sinks() -> None:
             return ActionChunk(actions=[Action(data=np.zeros(2)) for _ in range(4)])
 
     sink = _RecordingSink()
-    (log,) = eval(_task(), _BoomLaterPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(),
+        _BoomLaterPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        store_actions=False,
+    )
     assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
     assert record.status == "error"
@@ -473,7 +519,11 @@ def test_halt_without_attached_record_still_produces_error_log(
 def test_halt_delivers_partial_record_and_counts_trial() -> None:
     sink = _RecordingSink()
     (log,) = eval(
-        _task(), ScriptedPolicy(), _FaultAfterEpochsEmbodiment(good_epochs=0), sinks=[sink]
+        _task(),
+        ScriptedPolicy(),
+        _FaultAfterEpochsEmbodiment(good_epochs=0),
+        sinks=[sink],
+        store_actions=False,
     )
     assert log.status == "error"
     assert log.results.total_trials == 1  # the aborted trial is counted...
@@ -540,18 +590,24 @@ def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     assert logs[0].status == "success"
 
 
-def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
+def test_eval_binds_spaces_frames_and_scenes_to_duck_typed_sinks_before_start(
     tmp_path: Path,
 ) -> None:
+    """Offer optional sink bindings in order and skip absent or non-callable hooks."""
+
     class _SpaceAware(NullSink):
         def __init__(self) -> None:
-            self.calls: list[tuple[str, object, object] | tuple[str, str | None] | tuple[str]] = []
+            self.calls: list[tuple[object, ...]] = []
 
         def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
             self.calls.append(("bind_spaces", action_space, observation_space))
 
         def bind_frames_dir(self, frames_dir: str | None) -> None:
             self.calls.append(("bind_frames_dir", frames_dir))
+
+        def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+            """Record the offered scenes for ordering assertions."""
+            self.calls.append(("bind_scenes", scenes))
 
         def on_eval_start(self, spec: EvalSpec) -> None:
             del spec
@@ -560,14 +616,16 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
     class _OddAttr(NullSink):
         bind_spaces = "not a hook"
         bind_frames_dir = "not a hook"
+        bind_scenes = "not a hook"
 
     embodiment = CubePickEmbodiment()
     aware = _SpaceAware()
     no_hook = NullSink()
     odd = _OddAttr()
 
+    task = _task(max_steps=1)
     (log,) = eval(
-        _task(max_steps=1),
+        task,
         ScriptedPolicy(),
         embodiment,
         sinks=[aware, no_hook, odd],
@@ -582,12 +640,15 @@ def test_eval_binds_spaces_and_frames_to_duck_typed_sinks_before_start(
             embodiment.info.observation_space,
         ),
         ("bind_frames_dir", None),
+        ("bind_scenes", task.scenes),
         ("on_eval_start",),
     ]
     assert getattr(no_hook, "bind_spaces", None) is None
     assert odd.bind_spaces == "not a hook"
     assert getattr(no_hook, "bind_frames_dir", None) is None
     assert odd.bind_frames_dir == "not a hook"
+    assert getattr(no_hook, "bind_scenes", None) is None
+    assert odd.bind_scenes == "not a hook"
 
 
 def test_eval_binds_the_exact_stored_frames_directory(tmp_path: Path) -> None:
@@ -846,6 +907,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         _task(),
         ScriptedPolicy(),
         CubePickEmbodiment(),
+        log_dir=str(tmp_path),
         sinks=[sink],
         controller=_EagerErrorController(),
     )
@@ -964,6 +1026,168 @@ def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
     assert success
     assert logs[0].samples[0].operator_judgements == ("pass",)
     assert logs[0].results.metrics["operator"] == 1.0
+
+
+def test_eval_observes_parked_once_before_grading(tmp_path: Path) -> None:
+    parked = Observation(images={"parked": np.zeros((2, 2, 3), dtype=np.uint8)})
+    embodiment = _ParkedEmbodiment(parked)
+    grader = _CaptureGrader()
+
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 1
+    assert len(grader.records) == 1
+    assert grader.parked_at_grade[0] is parked
+
+
+def test_eval_does_not_observe_parked_without_a_grader(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+
+    (log,) = eval(_task(max_steps=1), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+
+    assert log.status == "success"
+    assert embodiment.park_calls == 0
+
+
+def test_eval_does_not_observe_parked_after_operator_judgement(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    grader = _CaptureGrader()
+    operator_input = _ScriptedOperatorInput([[ConsolePoll(end=EndRequest(verdict="y"))]])
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        operator_input=operator_input,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].operator_judgement == "y"
+
+
+def test_eval_does_not_observe_parked_after_definitive_termination(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(Observation())
+    embodiment.goal_radius = 2.0
+    grader = _CaptureGrader()
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=grader,
+        log_dir=str(tmp_path),
+    )
+
+    assert embodiment.park_calls == 0
+    assert grader.records[0].termination_reason == "success"
+
+
+def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(RuntimeError("park jammed"))
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"observe_parked\(\) failed with RuntimeError: park jammed",
+    ):
+        (log,) = eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+    assert log.samples[0].epochs[0] == {"success_at_end": 0.0}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("park unsafe"), EmbodimentFault("park faulted")],
+)
+def test_eval_halts_when_observe_parked_raises_a_halt_error(
+    error: Exception, tmp_path: Path
+) -> None:
+    embodiment = _ParkedEmbodiment(error)
+
+    with pytest.raises(type(error), match=str(error)):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=_CaptureGrader(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment(None)
+    grader = _CaptureGrader()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_rejects_non_observation_parked_result(tmp_path: Path) -> None:
+    embodiment = _ParkedEmbodiment("not an observation")
+    grader = _CaptureGrader()
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=(
+            "observe_parked\\(\\) returned str; expected Observation or None; "
+            "grading from last-step frames"
+        ),
+    ):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+
+
+def test_eval_ignores_non_callable_observe_parked(tmp_path: Path) -> None:
+    class _OddAttr(CubePickEmbodiment):
+        observe_parked = "not a hook"
+
+    grader = _CaptureGrader()
+    embodiment = _OddAttr()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            embodiment,
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+
+    assert grader.records[0].parked_observation is None
+    assert _OddAttr.observe_parked == "not a hook"
 
 
 # --------------------------------------------------------------------------- #
@@ -1179,9 +1403,12 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
 
     scene = log.samples[0]
     # The first epoch succeeded so its metadata is retained.
-    # The second epoch failed in the hook, so its metadata contains
-    # whatever was populated before the crash (empty).
-    assert scene.trial_metadata == ({"test_key": "test_val"}, {})
+    # The second epoch failed in the hook, so only framework metadata follows
+    # it into the log; both delivered trials receive action side-car pointers.
+    first_metadata, second_metadata = scene.trial_metadata
+    assert first_metadata["test_key"] == "test_val"
+    assert set(first_metadata) == {"test_key", "actions"}
+    assert set(second_metadata) == {"actions"}
     assert len(seen_ids) == 2
     assert seen_ids[0] == seen_ids[1]
 

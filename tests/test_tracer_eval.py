@@ -104,6 +104,7 @@ def test_sink_receives_lifecycle(tmp_path: Path) -> None:
         _cubepick_task(),
         ScriptedPolicy(),
         CubePickEmbodiment(),
+        log_dir=str(tmp_path),
         sinks=[RecordingSink(str(tmp_path))],
     )
     assert events[0] == "eval_start"

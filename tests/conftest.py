@@ -1,9 +1,31 @@
 """Suite-wide fixtures keeping tests hermetic against the developer's machine."""
 
+import shutil
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_LOGS_DIR = _REPO_ROOT / "logs"
+_REPO_LOGS_EXISTED_AT_SESSION_START = False
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Snapshot normal developer logs before tests can create checkout litter."""
+    del session
+    global _REPO_LOGS_EXISTED_AT_SESSION_START
+    _REPO_LOGS_EXISTED_AT_SESSION_START = _REPO_LOGS_DIR.exists()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Fail and clean up only when the suite created the repo-root logs directory."""
+    del exitstatus
+    if not _REPO_LOGS_EXISTED_AT_SESSION_START and _REPO_LOGS_DIR.exists():
+        print(f"test suite created repo-root log litter: {_REPO_LOGS_DIR}")
+        session.exitstatus = 1
+        shutil.rmtree(_REPO_LOGS_DIR)
 
 
 @pytest.fixture(autouse=True)

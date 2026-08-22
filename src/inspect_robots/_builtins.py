@@ -6,7 +6,7 @@ lookup, so importing ``inspect_robots`` stays cheap and free of import cycles.
 
 from __future__ import annotations
 
-from inspect_robots.grader import operator_grader
+from inspect_robots.grader import operator_grader, vlm_grader
 from inspect_robots.logging import JsonLogSink, LiveLogSink, RerunSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
 from inspect_robots.registry import embodiment, grader, policy, scorer, sink, task
@@ -37,6 +37,7 @@ scorer("operator")(operator_scorer)
 
 # Graders
 grader("operator")(operator_grader)
+grader("vlm")(vlm_grader)
 
 # Sinks
 sink("json")(JsonLogSink)
