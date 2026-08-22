@@ -1120,14 +1120,16 @@ def test_eval_halts_when_observe_parked_raises_a_halt_error(
 ) -> None:
     embodiment = _ParkedEmbodiment(error)
 
-    with pytest.raises(type(error), match=str(error)):
-        eval(
-            _task(max_steps=1),
-            ScriptedPolicy(),
-            embodiment,
-            grader=_CaptureGrader(),
-            log_dir=str(tmp_path),
-        )
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=_CaptureGrader(),
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error == f"{type(error).__name__}: {error}"
 
 
 def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
