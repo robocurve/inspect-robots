@@ -573,7 +573,8 @@ def _run_eval(
                             # will read — an operator verdict on a crashed trial
                             # would be dead data (errored trials are never scored).
                             if record.operator_judgement is None and not (
-                                record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                                record.terminated
+                                and record.termination_reason in _DEFINITIVE_REASONS
                             ):
                                 observe_parked = getattr(embodiment, "observe_parked", None)
                                 if callable(observe_parked):
@@ -596,7 +597,8 @@ def _run_eval(
                                             warnings.warn(
                                                 "embodiment.observe_parked() returned "
                                                 f"{type(parked_observation).__name__}; expected "
-                                                "Observation or None; grading from last-step frames",
+                                                "Observation or None; grading from "
+                                                "last-step frames",
                                                 RuntimeWarning,
                                                 stacklevel=2,
                                             )
@@ -613,7 +615,7 @@ def _run_eval(
                         # Commit the scores only after all scorers succeed without error
                         for name, score in epoch_scores.items():
                             per_scorer_scores[name].append(score)
-                            
+
                         epoch_dicts.append(epoch_values)
 
                         # Captured at the same instant as the judgement, on purpose:
@@ -630,11 +632,11 @@ def _run_eval(
                         scene_status = "error"
                         scene_error = error
                         halted = True
-                        
+
                         record.status = "error"
                         record.error = scene_error
                         errored_trials += 1
-                        
+
                         # Discard the partial scores and record an errored, unscored trial
                         epoch_dicts.append({})
                         judgements.append(None)
