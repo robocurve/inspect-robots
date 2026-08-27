@@ -2813,7 +2813,10 @@ def test_bind_task_adds_step_budget_to_prompt_and_observation() -> None:
     )
     # act will build observation content with step budget
     policy.act(obs)
-    user_msg = policy.transcript()[2]["content"]
+    after_act = policy.transcript()
+    assert after_act is not None
+    user_msg = after_act[2]["content"]
+    assert isinstance(user_msg, list)
     assert any(
         "Step budget: step 10/200 (190 env steps remaining)" in part.get("text", "")
         for part in user_msg
@@ -2837,7 +2840,7 @@ def test_toolset_bounds_text_and_pinned_labels_and_give_up_description() -> None
         high=np.array([0.0, 1.0]),
         semantics=ActionSemantics(control_mode="joint_pos", dim_labels=("fixed_j", "movable_j")),
     )
-    obs_space = ObservationSpace(state=StateSpec(fields=[StateField(key="joint_pos", shape=(2,))]))
+    obs_space = ObservationSpace(state=StateSpec(fields=(StateField(key="joint_pos", shape=(2,)),)))
     toolset = build_toolset(action_space, obs_space, control_hz=10.0)
     assert "Per-dimension bounds: fixed_j: [0, 0], movable_j: [-1, 1]" in toolset.bounds_text
     assert toolset.pinned_labels == ("fixed_j",)
