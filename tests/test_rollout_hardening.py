@@ -867,3 +867,21 @@ def test_perturber_raising_generic_exception_wrapped_as_embodiment_fault() -> No
         _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_FaultyPerturber())
     assert excinfo.value.record is not None
     assert excinfo.value.record.status == "error"
+
+
+def test_perturber_raising_during_step_loop_propagates() -> None:
+    class _StepFailPerturber:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def perturb(self, observation: Observation, store: dict[str, object]) -> Observation:
+            self.calls += 1
+            if self.calls > 1:
+                raise SafetyAbort("perturber failed on step")
+            return observation
+
+    with pytest.raises(SafetyAbort, match="perturber failed on step") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_StepFailPerturber())
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.status == "error"
+
