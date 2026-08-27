@@ -244,6 +244,9 @@ def eval(
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -334,6 +337,9 @@ def eval(
             store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
+            environment_id=environment_id,
+            environment_revision=environment_revision,
+            policy_checkpoint=policy_checkpoint,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -358,6 +364,9 @@ def _run_eval(
     store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -383,6 +392,11 @@ def _run_eval(
     bind_task = getattr(embodiment, "bind_task", None)
     if callable(bind_task):
         bind_task(task_envelope)
+
+    # Horizon-aware policies (e.g. LLM agent policies): optional bind_task() hook
+    policy_bind_task = getattr(policy, "bind_task", None)
+    if callable(policy_bind_task):
+        policy_bind_task(task_envelope)
 
     epoch_spec = task.epoch_spec
     scorers = task.scorers
@@ -427,6 +441,10 @@ def _run_eval(
         seed=seed,
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
+        environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
+        environment_revision=environment_revision
+        or getattr(embodiment.info, "environment_revision", None),
+        policy_checkpoint=policy_checkpoint or getattr(policy.info, "checkpoint", None),
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)

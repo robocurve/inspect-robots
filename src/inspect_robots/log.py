@@ -32,6 +32,14 @@ class EvalSpec:
     ``max_steps`` is always the resolved integer budget used by the rollout.
     ``max_seconds`` preserves a benchmark's declared physical-time budget when
     that integer was derived from the embodiment's control rate.
+
+    The three optional provenance fields record what simulator build, asset
+    revision, and policy checkpoint were used, so a published number can be
+    re-derived months later even if the sim, scene assets, or policy have moved:
+
+    - ``environment_id``: simulator or hardware-rig identifier (e.g. ``"isaacsim-2026.1.0"``).
+    - ``environment_revision``: hash or tag of the scene/asset bundle (e.g. a git SHA).
+    - ``policy_checkpoint``: hash, path, or Hugging Face revision of the model checkpoint.
     """
 
     task: str
@@ -45,6 +53,10 @@ class EvalSpec:
     seed: int | None = None
     max_steps: int | None = None
     max_seconds: float | None = None
+    # Environment and checkpoint provenance (plan 0053).
+    environment_id: str | None = None
+    environment_revision: str | None = None
+    policy_checkpoint: str | None = None
 
 
 @dataclass(frozen=True)
