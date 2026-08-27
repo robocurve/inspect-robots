@@ -884,4 +884,3 @@ def test_perturber_raising_during_step_loop_propagates() -> None:
         _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_StepFailPerturber())
     assert excinfo.value.record is not None
     assert excinfo.value.record.status == "error"
-
