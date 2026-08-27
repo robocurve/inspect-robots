@@ -2791,3 +2791,29 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     )
 
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
+
+
+def test_toolset_bounds_text_and_pinned_labels_and_give_up_description() -> None:
+    from inspect_robots.spaces import (
+        ActionSemantics,
+        Box,
+        ObservationSpace,
+        StateField,
+        StateSpec,
+    )
+    from inspect_robots_agent._tools import build_toolset
+
+    action_space = Box(
+        shape=(2,),
+        low=np.array([0.0, -1.0]),
+        high=np.array([0.0, 1.0]),
+        semantics=ActionSemantics(control_mode="joint_pos", dim_labels=("fixed_j", "movable_j")),
+    )
+    obs_space = ObservationSpace(state=StateSpec(fields=(StateField(key="joint_pos", shape=(2,)),)))
+    toolset = build_toolset(action_space, obs_space, control_hz=10.0)
+    assert "Per-dimension bounds: fixed_j: [0, 0], movable_j: [-1, 1]" in toolset.bounds_text
+    assert toolset.pinned_labels == ("fixed_j",)
+
+    schemas = toolset.schemas()
+    give_up_schema = next(s for s in schemas if s["function"]["name"] == "give_up")
+    assert "adjust workspace limits or settings" in give_up_schema["function"]["description"]

@@ -133,6 +133,20 @@ class Toolset:
         """Return the state field and per-element labels selected at build time."""
         return self._state_labels
 
+    @property
+    def bounds_text(self) -> str:
+        """Formatted per-dimension bounds text."""
+        return self._bounds_text
+
+    @property
+    def pinned_labels(self) -> tuple[str, ...]:
+        """Dimensions fixed/pinned where low == high."""
+        return tuple(
+            label
+            for label, lo, hi in zip(self._labels, self._low, self._high, strict=False)
+            if lo == hi
+        )
+
     def schemas(self) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for this embodiment."""
         if self._absolute and self._pose:
@@ -219,7 +233,11 @@ class Toolset:
             "type": "function",
             "function": {
                 "name": "give_up",
-                "description": "Stop trying; the task cannot be completed. The trial ends.",
+                "description": (
+                    "Stop trying; the task cannot be completed. The trial ends. "
+                    "(Note: human operators can adjust workspace limits or "
+                    "settings between trials if the workspace is constrained.)"
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {

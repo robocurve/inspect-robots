@@ -1156,10 +1156,13 @@ class LLMAgentPolicy(PolicyBase):
             residual = toolset.residual(pending.target, observation)
             if residual is not None:
                 label, magnitude = residual
-                narration += (
-                    " Largest remaining offset from the requested target is "
-                    f"{magnitude:.4g} on {label}."
-                )
+                if magnitude > 1e-4:
+                    narration += (
+                        " Largest remaining offset from the requested target is "
+                        f"{magnitude:.4g} on {label}."
+                    )
+                else:
+                    narration += " Target reached."
         if missing:
             narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
