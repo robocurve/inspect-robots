@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from inspect_robots import __version__
-from inspect_robots.approver import Approver, AutoApprover
+from inspect_robots.approver import Approver, AutoApprover, Perturber
 from inspect_robots.compat import assert_compatible
 from inspect_robots.controller import Controller, DefaultController
 from inspect_robots.embodiment import Embodiment
@@ -244,6 +244,7 @@ def eval(
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
+    perturber: Perturber | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -334,6 +335,7 @@ def eval(
             store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
+            perturber=perturber,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -358,6 +360,7 @@ def _run_eval(
     store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    perturber: Perturber | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -383,6 +386,11 @@ def _run_eval(
     bind_task = getattr(embodiment, "bind_task", None)
     if callable(bind_task):
         bind_task(task_envelope)
+
+    # Horizon-aware policies (e.g. LLM agent policies): optional bind_task() hook
+    policy_bind_task = getattr(policy, "bind_task", None)
+    if callable(policy_bind_task):
+        policy_bind_task(task_envelope)
 
     epoch_spec = task.epoch_spec
     scorers = task.scorers
@@ -498,6 +506,7 @@ def _run_eval(
                         sink=bus,
                         frame_store=frame_store,
                         operator_input=operator_input,
+                        perturber=perturber,
                     )
                 except _CancelledTrial as exc:
                     status = "cancelled"
