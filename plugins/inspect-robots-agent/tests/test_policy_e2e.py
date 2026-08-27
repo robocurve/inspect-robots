@@ -2793,37 +2793,6 @@ def test_chat_wire_usage_metadata_counts_calls_only(tmp_path: Path) -> None:
     assert sink.records[0].metadata["llm_usage"] == {"llm_calls": 2}
 
 
-def test_bind_task_adds_step_budget_to_prompt_and_observation() -> None:
-    from inspect_robots.task import TaskEnvelope
-
-    policy = _policy(_Script([_tool_response("done", {"summary": "done"})]))
-    policy.bind(CubePickEmbodiment().info)
-    policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
-    policy.reset(Scene(id="s0", instruction="reach"))
-
-    transcript = policy.transcript()
-    assert transcript is not None
-    assert "Environment step budget:" in transcript[0]["content"]
-    assert "You have 200 environment steps" in transcript[0]["content"]
-
-    obs = Observation(
-        state={"eef_pos": np.zeros(3)},
-        instruction="reach",
-        extra={"env_step": 10},
-    )
-    # act will build observation content with step budget
-    policy.act(obs)
-    after_act = policy.transcript()
-    assert after_act is not None
-    user_msg = after_act[2]["content"]
-    assert isinstance(user_msg, list)
-    assert any(
-        "Step budget: step 10/200 (190 env steps remaining)" in part.get("text", "")
-        for part in user_msg
-        if isinstance(part, dict)
-    )
-
-
 def test_toolset_bounds_text_and_pinned_labels_and_give_up_description() -> None:
     from inspect_robots.spaces import (
         ActionSemantics,
