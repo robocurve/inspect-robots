@@ -1504,3 +1504,26 @@ def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
 
     (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.samples[0].policy_transcripts == (None, None)
+
+
+def test_policy_bind_task_hook_receives_task_envelope(tmp_path: Path) -> None:
+    class _TaskAwarePolicy:
+        def __init__(self) -> None:
+            self._delegate = ScriptedPolicy()
+            self.info = self._delegate.info
+            self.config = self._delegate.config
+            self.bound_envelope: object = None
+
+        def bind_task(self, envelope: object) -> None:
+            self.bound_envelope = envelope
+
+        def reset(self, scene: Scene) -> None:
+            self._delegate.reset(scene)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return self._delegate.act(observation)
+
+    pol = _TaskAwarePolicy()
+    eval(_task(max_steps=42), pol, CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert pol.bound_envelope is not None
+    assert getattr(pol.bound_envelope, "max_steps", None) == 42
