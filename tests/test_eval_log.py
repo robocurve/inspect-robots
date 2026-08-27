@@ -338,3 +338,44 @@ def test_evalspec_provenance_fields_absent_in_older_log_read_as_none(tmp_path: P
     assert restored.eval.environment_id is None
     assert restored.eval.environment_revision is None
     assert restored.eval.policy_checkpoint is None
+
+
+def test_eval_populates_provenance_from_kwargs_and_info(tmp_path: Path) -> None:
+    """eval() forwards explicit provenance kwargs or derives from embodiment/policy info."""
+    from dataclasses import replace
+
+    from inspect_robots import eval
+    from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+    from inspect_robots.scorer import success_at_end
+
+    task = Task(
+        name="prov_task",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=2,
+    )
+
+    # 1. From explicit kwargs
+    logs = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path / "run1"),
+        environment_id="sim-env-1",
+        environment_revision="git-sha-1",
+        policy_checkpoint="hf://org/model@v1",
+    )
+    assert logs[0].eval.environment_id == "sim-env-1"
+    assert logs[0].eval.environment_revision == "git-sha-1"
+    assert logs[0].eval.policy_checkpoint == "hf://org/model@v1"
+
+    # 2. Derived from info objects when kwargs are None
+    emb = CubePickEmbodiment()
+    emb.info = replace(emb.info, environment_id="emb-env", environment_revision="emb-rev")
+    pol = ScriptedPolicy()
+    pol.info = replace(pol.info, checkpoint="pol-ckpt")
+
+    logs2 = eval(task, pol, emb, log_dir=str(tmp_path / "run2"))
+    assert logs2[0].eval.environment_id == "emb-env"
+    assert logs2[0].eval.environment_revision == "emb-rev"
+    assert logs2[0].eval.policy_checkpoint == "pol-ckpt"
