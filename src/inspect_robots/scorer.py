@@ -236,6 +236,19 @@ def reached_goal_state(threshold: float = 0.05) -> Scorer:
 _OPERATOR_SUCCESS = frozenset({"success", "pass", "yes", "y", "1", "true"})
 
 
+def is_affirmative_verdict(verdict: str | None) -> bool:
+    """Whether a recorded operator judgement reads as "the trial succeeded".
+
+    The single public definition of that contract: the recognized affirmative
+    vocabulary *and* the comparison rules around it (surrounding whitespace is
+    ignored, matching is case-insensitive, and ``None`` — no judgement recorded
+    — is not affirmative). Benchmarks that grade real-world runs from operator
+    verdicts should call this rather than restate any part of it, so a change
+    here reaches every consumer at once.
+    """
+    return verdict is not None and verdict.strip().lower() in _OPERATOR_SUCCESS
+
+
 @dataclass(frozen=True)
 class _OperatorScorer:
     name: str = "operator"
@@ -246,8 +259,10 @@ class _OperatorScorer:
         verdict = record.operator_judgement
         if verdict is None:
             return Score(value=False, explanation="no operator judgement recorded")
-        success = verdict.strip().lower() in _OPERATOR_SUCCESS
-        return Score(value=success, explanation=f"operator verdict: {verdict!r}")
+        return Score(
+            value=is_affirmative_verdict(verdict),
+            explanation=f"operator verdict: {verdict!r}",
+        )
 
 
 def operator_scorer() -> Scorer:

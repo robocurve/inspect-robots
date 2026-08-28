@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Core:** `is_affirmative_verdict()` is public API. It owns the whole
+  operator-verdict contract (the recognized affirmative vocabulary plus the
+  case-insensitive, whitespace-tolerant comparison and the "no judgement
+  recorded" case), so benchmarks grading real-world runs can share it instead
+  of copying the vocabulary and importing the private `scorer._OPERATOR_SUCCESS`.
+
 ### Fixed
 
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
