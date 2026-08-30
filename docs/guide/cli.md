@@ -278,7 +278,8 @@ legacy path prints it for an accepting policy.
 
 The interactive first-run wizard: it prompts for each `[defaults]` key with
 a suggested value (Enter accepts, typing overrides), warns when a chosen
-policy or embodiment is not registered in the current environment, and then
+policy or embodiment is not registered in the current environment, offers
+the `agent` policy's on-demand camera mode (`images = on_demand`), and then
 helps assign camera devices. It lists every color-capable camera that udev
 names under `/dev/v4l`, preferring
 `/dev/v4l/by-id` names and falling back to port-stable `/dev/v4l/by-path`

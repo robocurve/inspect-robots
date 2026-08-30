@@ -648,6 +648,10 @@ class RerunSink:
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Initialize recording, disabling this noncritical sink after startup failure."""
+        # A crash path can skip on_eval_end; stop the previous eval's worker before
+        # resetting blueprint state so its writes can't land after the reset.
+        if self._worker is not None and self._worker.is_alive():
+            self._shutdown()
         self.resolved_recording_path = None
         self._blueprint_prefix = None
         self._blueprint_warned = False
