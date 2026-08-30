@@ -43,6 +43,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Core:** when `FrameStore` is active, both the pre-action and post-action
+  observations recorded in each `StepRecord` now omit inline camera arrays.
+  Consumers that previously read terminal images from
+  `step.result.observation.images` must load `step.result_image_refs` instead;
+  `step.image_refs` remains the pre-action mapping. A trial with `n` completed
+  steps stores the reset frame at index `0` and each post-action frame at
+  `t + 1`; a camera present throughout therefore produces `n + 1` files
+  ([#209](https://github.com/robocurve/inspect-robots/pull/209)).
+
 - **Core:** the `--epochs` below-1 guard in `run` and `eval-set` now lives in
   one shared helper, and its error reads `--epochs must be >= 1, got 0`
   (naming the offending task in `eval-set`) instead of doubling the wording
@@ -237,11 +246,6 @@ All notable changes to this project are documented here. The format is based on
   `messages`); construction guards now diagnose explicit wire conflicts,
   Messages endpoint routing mistakes, and possible silent tool drops on an
   explicit Chat Completions endpoint (plan 0044, #278).
-
-- `FrameStore` now persists each post-action observation once and exposes it
-  through `StepRecord.result_image_refs`. Stored records strip camera arrays
-  from both pre-action and post-action observations, and the terminal visual
-  state is recoverable for offline scoring.
 
 - The Rerun sink now sends a per-trial blueprint that groups labeled action
   dimensions by arm, overlays aligned measured state, and lays out cameras,
