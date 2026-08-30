@@ -925,3 +925,31 @@ fix below).
 [0.3.0]: https://github.com/robocurve/inspect-robots/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/robocurve/inspect-robots/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/robocurve/inspect-robots/releases/tag/v0.1.0
+
+## [Unreleased]
+
+### Fixed
+
+- **Core:** `_parse_value` docstring now reflects the post-0.23.0
+  `effort` contract used repo-wide: quoted `none` is forwarded as the
+  literal wire token, bare `effort=none` parses to Python `None` and is
+  normalized by downstream components to the minimum reasoning level,
+  and only key omission skips the field (#396).
+
+### Changed
+
+- **Frames:** `FrameStore` docstring now spells out the pre/post
+  side-car contract that has been in place since #209:
+  - reset frame written at step `0` (separate from any `StepRecord`);
+    a first-decision failure still leaves reset frames on disk for
+    forensics,
+  - pre-action frames surfaced via `step.observation.image_refs`
+    (formerly `step.observation.images`),
+  - post-action frames surfaced via `step.result_image_refs`
+    (migration target of the former `step.result.observation.images`),
+  - an `n`-step trial produces `n + 1` files per continuous camera
+    (one reset, `n` pre-action, plus the trailing post-action capture
+    at `t + 1`),
+  - `default_fps` assumes adjacent stored frames span one control
+    interval; the extra reset frame must be included in playback
+    duration calculations (#405).

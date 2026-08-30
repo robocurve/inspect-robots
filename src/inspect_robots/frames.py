@@ -47,7 +47,29 @@ class FrameRef:
 
 
 class FrameStore:
-    """Persist frames as ``.npy`` files under ``root`` and hand back refs."""
+    """Persist frames as ``.npy`` files under ``root`` and hand back refs.
+
+    Pre/post side-car contract — implemented since #209:
+
+    - A **reset frame** is written at step index ``0`` before any action
+      is taken; reset writes do not require a ``StepRecord``, so a
+      first-decision failure may still leave reset frames on disk for
+      forensics.
+    - **Pre-action frames** correspond to the observation the agent saw
+      and are surfaced through ``step.observation.image_refs``
+      (formerly ``step.observation.images``).
+    - **Post-action frames** are the camera reading taken after the
+      action but before the next step and are surfaced through
+      ``step.result_image_refs`` (the migration target of the former
+      ``step.result.observation.images``).
+    - A camera present throughout an ``n``-step trial produces
+      ``n + 1`` files on disk (one reset, ``n`` pre-action captures,
+      and the trailing post-action capture at ``t + 1``).
+    - ``default_fps`` assumes adjacent stored frames span one control
+      interval; the sequence contains an extra reset frame, so a
+      caller computing playback duration from
+      ``len(frames) / default_fps`` must include the reset in its count.
+    """
 
     def __init__(self, root: str):
         self.root = Path(root)

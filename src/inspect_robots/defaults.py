@@ -57,9 +57,12 @@ def _parse_value(text: str) -> Any:
     """Best-effort scalar parse for ``k=v`` args (bool/int/float/None/str).
 
     A value wrapped in matching single or double quotes is returned as the
-    literal inner string with no coercion — the escape hatch for strings the
-    heuristics would otherwise claim (``-P effort="'none'"`` sends the wire
-    string ``none`` instead of omitting the parameter).
+    literal inner string with no coercion -- the escape hatch for forcing a
+    wire-level token through unchanged (``-P effort="'none'"`` sends the
+    literal string ``none``). Bare ``effort=none``, by contrast, is parsed
+    as Python ``None`` and is normalized downstream by effort-taking
+    components to the minimum reasoning level; only key omission skips
+    the field entirely.
     """
     if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
         return text[1:-1]
