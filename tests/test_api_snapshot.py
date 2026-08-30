@@ -35,6 +35,7 @@ EXPECTED = {
     "reached_goal_state",
     "operator_scorer",
     "operator_input",
+    "is_affirmative_verdict",
     # judgement capture (plans 0049 and 0069)
     "Grader",
     "operator_grader",
