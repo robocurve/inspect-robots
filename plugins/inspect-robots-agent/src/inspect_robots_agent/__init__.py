@@ -4,7 +4,8 @@ An LLM behind a supported API (OpenRouter, OpenAI, local vLLM/Ollama,
 Anthropic, Tinker, or compatible gateways) drives whatever embodiment it is
 paired with: each tool call becomes one smooth, approver-checked action
 chunk. ``-P wire=messages`` selects the Messages API; the permanent
-``anthropic`` alias remains accepted. Registered as the policy ``agent``::
+``anthropic`` alias remains accepted. ``-P wire=interactions`` selects
+Google's stateful Interactions HTTP API. Registered as the policy ``agent``::
 
     inspect-robots "pick up the cube" --policy agent \
         -P model=anthropic/claude-fable-5 --embodiment cubepick
@@ -26,6 +27,7 @@ from importlib.metadata import version
 
 from inspect_robots_agent._anthropic import AnthropicClient
 from inspect_robots_agent._gemini_live import GeminiLiveClient
+from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import (
     ENV_MODEL,
     AssistantMessage,
@@ -44,6 +46,7 @@ __all__ = [
     "AssistantMessage",
     "ChatClient",
     "GeminiLiveClient",
+    "InteractionsClient",
     "LLMAgentPolicy",
     "Provider",
     "ResponsesClient",

@@ -194,6 +194,31 @@ def test_absolute_mode_requires_exactly_one_aligned_state_field() -> None:
         build_toolset(space, two_match, control_hz=10.0)
 
 
+def test_same_shaped_state_fields_disambiguate_by_control_mode_family() -> None:
+    # A 14-D Cartesian embodiment (x, y, z, yaw, pitch, roll, gripper per arm)
+    # legitimately exposes joint_pos and eef_state at the same shape; the
+    # canonical key family of the control mode picks the aligned field.
+    both = ObservationSpace(
+        state=StateSpec(
+            fields=(
+                StateField(key="joint_pos", shape=(14,)),
+                StateField(key="eef_state", shape=(14,)),
+            )
+        )
+    )
+    joint = build_toolset(_bimanual_space(), both, control_hz=10.0)
+    assert joint.state_labels()[0] == "joint_pos"
+
+    eef_space = Box(
+        shape=(14,),
+        low=np.array([-1.0] * 14),
+        high=np.array([1.0] * 14),
+        semantics=ActionSemantics("eef_abs_pose", dim_labels=_ARM_LABELS),
+    )
+    eef = build_toolset(eef_space, both, control_hz=10.0)
+    assert eef.state_labels()[0] == "eef_state"
+
+
 def test_absolute_mode_labels_its_reference_even_when_the_key_is_noncanonical() -> None:
     canonical = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
     assert canonical.state_labels() == ("joint_pos", _ARM_LABELS)

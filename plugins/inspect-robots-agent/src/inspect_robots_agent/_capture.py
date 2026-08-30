@@ -11,7 +11,7 @@ that parses as a JSON object is stored as that object at any HTTP status;
 non-object or invalid JSON is stored as its first 2000 text characters, and a
 missing response is stored as null.
 
-Inline PNG payloads in supported chat, Responses, Anthropic, and Gemini Live
+Inline PNG payloads in supported chat, Responses, Anthropic, Gemini Live, and Interactions
 image parts are replaced in a deep copy of the request by
 ``$blob:<sha256>``. Data-URL prefixes and all other part keys remain intact.
 Readers find references by scanning string values for the unanchored pattern
@@ -208,6 +208,10 @@ class WireCapture:
                     payload = source.get("data")
                     if isinstance(payload, str):
                         source["data"] = self._store_blob(payload)
+                elif "source" not in value:
+                    payload = value.get("data")
+                    if isinstance(payload, str):
+                        value["data"] = self._store_blob(payload)
             for child in value.values():
                 self._replace_blobs(child)
         elif isinstance(value, list):

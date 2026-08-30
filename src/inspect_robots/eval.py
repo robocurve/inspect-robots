@@ -9,16 +9,20 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
 
 from inspect_robots import __version__
 from inspect_robots.approver import Approver, AutoApprover
@@ -32,9 +36,16 @@ from inspect_robots.errors import (
     SafetyAbort,
     _CancelledTrial,
 )
-from inspect_robots.frames import FrameStore
+from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
-from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from inspect_robots.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    _json_safe_scene_metadata,
+)
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
@@ -77,6 +88,61 @@ def _grading_hook(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _write_action_log(
+    record: TrialRecord,
+    log_dir: str,
+    run_stamp: str,
+    action_space: Box,
+) -> str | None:
+    """Atomically persist one trial's executed actions, degrading on write failure."""
+    trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
+    relative_path = Path("actions") / run_stamp / f"{trial_id}.jsonl"
+    path = Path(log_dir) / relative_path
+    semantics = action_space.semantics
+    labels = semantics.dim_labels if semantics is not None else None
+    try:
+        lines = [
+            json.dumps(
+                {
+                    "kind": "header",
+                    "run_id": run_stamp,
+                    "scene_id": record.scene_id,
+                    "epoch": record.epoch,
+                    "action_dim": action_space.dim,
+                    "labels": labels,
+                },
+                allow_nan=False,
+            )
+        ]
+        lines.extend(
+            json.dumps(
+                {
+                    "t": step.t,
+                    "action": [float(value) for value in np.asarray(step.action.data).ravel()],
+                },
+                allow_nan=False,
+            )
+            for step in record.steps
+        )
+        payload = "\n".join(lines) + "\n"
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except (OSError, ValueError) as exc:
+        warnings.warn(
+            f"Action log disabled for this trial after {type(exc).__name__}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    return relative_path.as_posix()
 
 
 def _git_commit() -> str | None:
@@ -145,6 +211,13 @@ class _Broadcast:
             if callable(hook):
                 hook(frames_dir)
 
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        """Offer the run's scenes to sinks that declare the optional hook."""
+        for sink in self._sinks:
+            hook = getattr(sink, "bind_scenes", None)
+            if callable(hook):
+                hook(scenes)
+
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
             s.on_eval_start(spec)
@@ -181,6 +254,7 @@ def eval(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    store_actions: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -220,7 +294,19 @@ def eval(
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
 
+    ``store_actions`` defaults to ``True`` and writes each trial's complete
+    executed action sequence to ``<log_dir>/actions`` as an atomic JSONL
+    side-car. The ``actions`` trial-metadata key is framework-reserved. Set
+    ``store_actions`` to ``False`` to disable these files.
+
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
+
+    Before a grader runs, an embodiment's optional duck-typed
+    ``observe_parked()`` hook may move the robot to its parked/rest pose so the
+    cameras see the scene unobstructed and return one fresh ``Observation``.
+    Returning ``None`` declines. Other failures degrade with a
+    ``RuntimeWarning`` and grading uses the last-step frames, except
+    ``SafetyAbort`` and ``EmbodimentFault``, which halt the eval.
 
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
@@ -266,6 +352,7 @@ def eval(
             approver=approver,
             remap=remap,
             store_frames=store_frames,
+            store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
         )
@@ -289,11 +376,14 @@ def _run_eval(
     approver: Approver | None,
     remap: dict[str, str] | None,
     store_frames: bool,
+    store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
+    from inspect_robots.session import _DEFINITIVE_REASONS
+    from inspect_robots.types import Observation
 
     # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
     # runs before the compatibility check so the policy can adopt the
@@ -363,6 +453,7 @@ def _run_eval(
     )
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
+    bus.bind_scenes(task.scenes)
     bus.on_eval_start(spec)
 
     started = time.perf_counter()
@@ -393,6 +484,7 @@ def _run_eval(
         termination_reasons: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
+        scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
 
@@ -479,6 +571,34 @@ def _run_eval(
                         # The only trials the hook sees are the ones scorers
                         # will read — an operator verdict on a crashed trial
                         # would be dead data (errored trials are never scored).
+                        if record.operator_judgement is None and not (
+                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                        ):
+                            observe_parked = getattr(embodiment, "observe_parked", None)
+                            if callable(observe_parked):
+                                try:
+                                    parked_observation = observe_parked()
+                                except (SafetyAbort, EmbodimentFault):
+                                    raise
+                                except Exception as exc:
+                                    warnings.warn(
+                                        "embodiment.observe_parked() failed with "
+                                        f"{type(exc).__name__}: {exc}; grading from "
+                                        "last-step frames",
+                                        RuntimeWarning,
+                                        stacklevel=2,
+                                    )
+                                else:
+                                    if isinstance(parked_observation, Observation):
+                                        record.parked_observation = parked_observation
+                                    elif parked_observation is not None:
+                                        warnings.warn(
+                                            "embodiment.observe_parked() returned "
+                                            f"{type(parked_observation).__name__}; expected "
+                                            "Observation or None; grading from last-step frames",
+                                            RuntimeWarning,
+                                            stacklevel=2,
+                                        )
                         before_scoring(record, scene)
                     epoch_values: dict[str, float] = {}
                     for scorer in scorers:
@@ -511,6 +631,16 @@ def _run_eval(
                             if status == "success":
                                 status = "error"
                                 error = detail
+
+                if store_actions:
+                    actions_path = _write_action_log(
+                        record,
+                        log_dir,
+                        run_stamp,
+                        embodiment.info.action_space,
+                    )
+                    if actions_path is not None:
+                        record.metadata["actions"] = actions_path
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
@@ -566,6 +696,7 @@ def _run_eval(
                 epochs=tuple(epoch_dicts),
                 error=scene_error,
                 instruction=scene.instruction,
+                scene_metadata=scene_metadata,
                 operator_judgements=tuple(judgements),
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
@@ -646,6 +777,7 @@ def eval_set(
     approver: Approver | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
+    store_actions: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -654,6 +786,8 @@ def eval_set(
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
     ``success`` is ``True`` iff every task's log has ``status == "success"``.
+
+    ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
     hook, not both) and are resolved once here, so every task shares the same
@@ -684,6 +818,7 @@ def eval_set(
                 approver=approver,
                 remap=remap,
                 store_frames=store_frames,
+                store_actions=store_actions,
                 operator_input=operator_input,
                 before_scoring=before_scoring,
             )

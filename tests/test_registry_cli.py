@@ -4165,6 +4165,18 @@ def test_inspect_surfaces_step_limit_note_hint_and_scene_marker(
     assert "[success] s0: (1/2 trials hit max_steps)" in out
 
 
+def test_inspect_treats_auto_task_step_limit_as_adhoc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(task="auto"), tmp_path, "auto.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "hint: raise it with --max-steps N" in out
+    assert "task 'auto' defines its own max_steps" not in out
+
+
 def test_inspect_tolerates_non_numeric_max_steps_in_hand_edited_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -4391,6 +4403,281 @@ def test_run_requires_exactly_one_of_task_or_instruction() -> None:
         main(["run", "--task", "cubepick-reach", "--instruction", "reach it"])
     with pytest.raises(SystemExit, match="--task name or an --instruction"):
         main(["run", "--policy", "scripted", "--embodiment", "cubepick"])
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        ["--task", "cubepick-reach", "--auto-task"],
+        ["--instruction", "reach it", "--auto-task"],
+    ],
+)
+def test_auto_task_is_mutually_exclusive_with_other_task_modes(modes: list[str]) -> None:
+    with pytest.raises(SystemExit, match="exactly one"):
+        main(["run", *modes])
+
+
+def test_auto_task_specific_args_require_auto_mode() -> None:
+    with pytest.raises(SystemExit, match="-A requires --auto-task"):
+        main(["run", "--instruction", "reach it", "-A", "model=vision"])
+
+
+def test_task_constructor_args_are_invalid_with_auto_task() -> None:
+    with pytest.raises(SystemExit, match=r"-T.*--auto-task"):
+        main(["run", "--auto-task", "-T", "num_scenes=1"])
+
+
+def test_auto_task_full_run_prints_contract_forwards_args_and_persists_rubric(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    calls: list[tuple[object, int | None, dict[str, Any]]] = []
+
+    def fake_generate_scene(embodiment: object, *, seed: int | None = 0, **kwargs: Any) -> Scene:
+        calls.append((embodiment, seed, kwargs))
+        return Scene(
+            id="auto-0",
+            instruction="Reach the cube.",
+            metadata={"rubric": "Touch the green cube.\nDo not move it off the table."},
+        )
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+    log_dir = tmp_path / "logs"
+
+    result = main(
+        [
+            "run",
+            "--auto-task",
+            "-A",
+            "model=vision-model",
+            "-A",
+            "max_cameras=2",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--seed",
+            "17",
+            "--epochs",
+            "2",
+            "--max-steps",
+            "60",
+            "--scorer",
+            "success_at_end",
+            "--no-prompt",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+
+    assert result == 0
+    assert len(calls) == 1
+    assert calls[0][1:] == (17, {"model": "vision-model", "max_cameras": 2})
+    out = capsys.readouterr().out
+    assert "auto task: Reach the cube.\n" in out
+    assert "rubric:\n  Touch the green cube.\n  Do not move it off the table.\n" in out
+    log = _read_only_log(log_dir)
+    assert log.eval.task == "auto"
+    assert log.eval.max_steps == 60
+    assert log.results.total_trials == 2
+    assert log.results.metrics["success_at_end"] == 1.0
+    assert log.samples[0].instruction == "Reach the cube."
+    assert log.samples[0].scene_metadata == {
+        "rubric": "Touch the green cube.\nDo not move it off the table."
+    }
+
+
+def test_auto_task_uses_adhoc_scorer_and_step_fallbacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    monkeypatch.setattr(
+        inspect_robots.taskgen,
+        "generate_scene",
+        lambda embodiment, **kwargs: Scene(
+            id="auto-0",
+            instruction="Reach the cube.",
+            metadata={"rubric": "Touch the cube."},
+        ),
+    )
+    log_dir = tmp_path / "logs"
+
+    assert (
+        main(
+            [
+                "run",
+                "--auto-task",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+        == 0
+    )
+
+    log = _read_only_log(log_dir)
+    assert log.eval.max_steps == 300
+    assert set(log.results.metrics) == {"operator"}
+
+
+@pytest.mark.parametrize("failure", ["unknown", "config"])
+def test_auto_task_generation_errors_exit_with_guidance(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+
+    def fake_generate_scene(
+        embodiment: object, *, seed: int | None = 0, model: str | None = None
+    ) -> Scene:
+        del embodiment, seed, model
+        if failure == "config":
+            raise ConfigError("injected generation failure\nfix: injected remedy")
+        return Scene(id="unused", instruction="unused")
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+    extra = ["-A", "unknown_key=value"] if failure == "unknown" else []
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "run",
+                "--auto-task",
+                *extra,
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+            ]
+        )
+
+    message = str(exc_info.value)
+    if failure == "unknown":
+        # TypeError earns the CLI's guided wrapper naming both knobs.
+        assert "invalid arguments for automatic task generation:" in message
+        assert "unexpected keyword argument 'unknown_key'" in message
+        assert "check [taskgen.args] and -A k=v" in message
+    else:
+        # ConfigError already carries its own fix: hint and exits verbatim,
+        # mirroring _resolve_or_exit: no second, vaguer hint on top.
+        assert "injected generation failure" in message
+        assert "fix: injected remedy" in message
+        assert "-A k=v" not in message
+
+
+def _capture_generate_scene(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """Route auto-task generation to a canned scene, recording the kwargs it got."""
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    def fake_generate_scene(embodiment: object, *, seed: int | None = 0, **kwargs: Any) -> Scene:
+        del embodiment, seed
+        captured.append(kwargs)
+        return Scene(id="auto-0", instruction="Reach.", metadata={"rubric": "Touch it."})
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+
+
+def _run_auto_task(tmp_path: Path, extra: list[str]) -> int:
+    return main(
+        [
+            "run",
+            "--auto-task",
+            *extra,
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--no-prompt",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+
+
+def test_taskgen_config_args_reach_generation_on_bare_auto_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """[taskgen.args] alone configures --auto-task: no -A flags needed."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, []) == 0
+    assert captured == [{"model": "cfg-model", "max_cameras": 3}]
+
+
+def test_explicit_auto_task_args_override_config_per_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """-A wins per key; unrelated [taskgen.args] keys still apply."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, ["-A", "model=cli-model"]) == 0
+    assert captured == [{"model": "cli-model", "max_cameras": 3}]
+
+
+def test_persisted_taskgen_seed_key_exits_with_guided_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """A [taskgen.args] seed key collides with the explicit kwarg and fails loudly (plan 0071)."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nseed = 5\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_auto_task(tmp_path, [])
+    message = str(exc_info.value)
+    assert "invalid arguments for automatic task generation:" in message
+    assert "check [taskgen.args] and -A k=v" in message
+    assert captured == []
+
+
+def test_task_run_ignores_taskgen_args_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """The section is inert outside --auto-task: a registered task run never reads it."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\n")
+    import inspect_robots.taskgen
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("generate_scene must not run for a registered task")
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", explode)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
 
 
 def test_adhoc_only_flags_rejected_with_task() -> None:
@@ -7669,3 +7956,112 @@ def test_explicit_custom_config_grader_is_honored_unattended(
 def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "graders"]) == 0
     assert "operator" in capsys.readouterr().out
+
+
+# --- -G grader args and [grader.args] (plan 0069) ------------------------------
+
+
+def _run_adhoc_args(log_dir: Path) -> list[str]:
+    return [
+        "reach the cube",
+        "--scorer",
+        "episode_length",
+        "--max-steps",
+        "3",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(log_dir),
+    ]
+
+
+def _register_argcap_grader(captured: list[dict[str, object]]) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    class _ArgcapGrader:
+        name = "argcap"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            record.operator_judgement = "y"
+
+    def factory(**kwargs: object) -> _ArgcapGrader:
+        captured.append(dict(kwargs))
+        return _ArgcapGrader()
+
+    reg.grader("argcap-test")(factory)
+
+
+def test_grader_args_merge_config_then_cli_flags(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\ngrader = argcap-test\n[grader.args]\nfoo = 1\nbar = base\n",
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        assert main([*_run_adhoc_args(tmp_path / "logs"), "-G", "bar=cli"]) == 0
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert captured == [{"foo": 1, "bar": "cli"}]
+
+
+def test_grader_config_args_are_dropped_for_a_different_grader(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(_hermetic_defaults, "[grader.args]\nfoo = 1\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        rc = main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "argcap-test", "-G", "x=2"])
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert rc == 0
+    assert captured == [{"x": 2}]
+    assert "ignoring [grader.args]" in capsys.readouterr().err
+
+
+def test_grader_args_on_operator_grader_exit_with_guidance(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"invalid arguments for grader 'operator'.*-G"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "operator", "-G", "model=x"])
+
+
+def test_dangling_grader_args_exit_loudly(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"-G requires a grader"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "-G", "model=x"])
+
+
+def test_vlm_grader_without_api_key_exits_before_any_rollout(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    log_dir = tmp_path / "logs"
+    with pytest.raises(SystemExit, match=r"no API key found in \$ANTHROPIC_API_KEY"):
+        main([*_run_adhoc_args(log_dir), "--grader", "vlm", "-G", "model=judge"])
+    assert not log_dir.exists()
+
+
+def test_config_show_displays_the_grader_default(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = vlm\n")
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "grader" in out
+    assert "vlm" in out

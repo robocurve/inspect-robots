@@ -13,14 +13,13 @@ from pathlib import Path
 
 import pytest
 
-import inspect_robots._summarize as summarize_module
+import inspect_robots._chatwire as chatwire_module
+from inspect_robots._chatwire import _urllib_post, chat_completion
 from inspect_robots._summarize import (
     _TRANSCRIPT_CHAR_BUDGET,
     TrialTranscript,
-    _urllib_post,
     build_digest,
     build_messages,
-    chat_completion,
     load_transcripts,
     summarize,
 )
@@ -382,7 +381,7 @@ def test_chat_completion_uses_default_transport(monkeypatch: pytest.MonkeyPatch)
     def fake_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
         return 200, b'{"choices":[{"message":{"content":"default transport"}}]}'
 
-    monkeypatch.setattr(summarize_module, "_urllib_post", fake_post)
+    monkeypatch.setattr(chatwire_module, "_urllib_post", fake_post)
 
     assert (
         chat_completion("https://example.test", "key", "model", [], http_post=None)
@@ -545,7 +544,7 @@ def test_cli_llm_reply_lands_verbatim_in_explicit_output(
     def fake_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
         return 200, b'{"choices":[{"message":{"content":"verbatim reply"}}]}'
 
-    monkeypatch.setattr(summarize_module, "_urllib_post", fake_post)
+    monkeypatch.setattr(chatwire_module, "_urllib_post", fake_post)
     out_path = tmp_path / "nested" / "custom.md"
 
     assert (

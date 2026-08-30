@@ -66,6 +66,22 @@ cannot be evicted by the client. Live usage counts include the empty resumed
 generation and the observation-triggered generation on a normal step, so
 input token totals cover two generations per step.
 
+### Gemini Interactions API
+
+Use Google's stateful HTTP API for GA Gemini models that do not support the
+Live wire, including `gemini-3.7-flash`:
+
+```bash
+inspect-robots "pick up the cube" --policy agent \
+    -P model=google/gemini-3.7-flash -P wire=interactions \
+    -P effort=low --embodiment cubepick
+```
+
+The Interactions wire sends only each new observation and tool result while
+Google retains the conversation history behind an interaction id. Leave
+`image_horizon` unset because frames already absorbed by that server-side
+history cannot be evicted client-side.
+
 The wire format defaults to Chat Completions for broad OpenAI-compatible
 endpoint support:
 
@@ -75,6 +91,7 @@ endpoint support:
 | `responses` | `/responses` | A direct OpenAI or compatible endpoint requires the Responses API |
 | `messages` (`anthropic` alias) | `/messages` | Anthropic, Tinker, or a compatible Messages endpoint |
 | `gemini-live` | `BidiGenerateContent` (WSS) | Google's Live API: required for the `-streaming-` robotics model ids |
+| `interactions` | `/interactions` | Google's stateful HTTP API: server-side history for GA Gemini models, e.g. `gemini-3.7-flash` |
 
 ## How it works
 
@@ -96,8 +113,9 @@ user reads these notes live and in the saved transcript to follow what the
 agent sees and decides.
 
 Camera images are attached to every observation by default
-(`-P images=always`). Set `-P images=on_demand` to send state without image
-payloads and give the model a `take_pic` tool instead:
+(`-P images=always`), though `inspect-robots setup` suggests `on_demand`. Set
+`-P images=on_demand` to send state without image payloads and give the model a
+`take_pic` tool instead:
 
 ```bash
 inspect-robots "pick up the cube" --policy agent \
@@ -257,7 +275,7 @@ be distinguishable, encode it in a named factory's qualname, for example
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
-(default `always`; use `on_demand` for model-requested frames),
+(default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
 renders), and `prior_learnings`.
 `speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
@@ -267,9 +285,11 @@ on Anthropic's API; Tinker accepts and silently ignores it.
 | Image option | Default | Behavior |
 |---|---|---|
 | `-P images=` | `always` | Attach every observation's frames; use `on_demand` for model-requested frames |
-| `-P image_horizon=` | `2` on HTTP wires | Keep frames from the newest two image-bearing messages in each outgoing request; unset on `gemini-live` |
+| `-P image_horizon=` | `2` on the stateless HTTP wires; unset on `gemini-live` and `interactions` | Keep frames from the newest two image-bearing messages in each outgoing request; unset on `gemini-live` and `interactions` |
 
-On the HTTP wires, set `-P image_horizon=none` to send the full image history.
+On the stateless HTTP wires, set `-P image_horizon=none` to send the full image
+history. `image_horizon` is unset and rejects an explicit value on
+`gemini-live` and `interactions`.
 Do not use a bare `-P image_horizon=`: the CLI parses it as an empty string,
 which the policy rejects. Full history grows request bodies by about 420 KB
 per observation with three cameras and can reach a 413 response around 85
@@ -311,13 +331,17 @@ currently record `llm_calls` only. Trials with no LLM calls omit the key.
 Like `temperature`, reasoning effort is omitted when `-P effort=` is unset, so
 the provider's own default applies. Explicit named levels (`minimal`, `low`,
 `medium`, `high`, `xhigh`, and `max`) pass through unchanged. A bare
-`-P effort=none` now requests the true minimum on every HTTP wire:
+`-P effort=none` now requests the true minimum on the stateless HTTP wires:
 
 | Wire | Request field |
 | --- | --- |
 | `chat` | `reasoning_effort: "none"` |
 | `responses` | `reasoning: {"effort": "none"}` |
 | `messages` | `thinking: {"type": "disabled"}` (no `output_config`) |
+
+On `wire=interactions`, `minimal`, `low`, `medium`, and `high` map to
+`generation_config.thinking_level`. Other named levels, `none`, and fractional
+effort are rejected because the accepted thinking levels are model-specific.
 
 The older quoted spelling, `-P effort="'none'"`, remains valid but is no longer
 needed. In Python, both `effort=None` and `effort="none"` request the `none`

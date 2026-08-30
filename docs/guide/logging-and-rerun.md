@@ -76,8 +76,10 @@ when the eval ends. The queue is drained at every trial boundary (bounded by
 `flush_timeout`), so an eval that aborts mid-run loses at most the current
 trial's queued tail. A live viewer and its teed `.rrd` receive the same worker
 stream, so viewer-paced shedding reaches the file too. The `.rrd` records what
-the viewer received, not a guaranteed-complete record. The JSON eval log is
-synchronous and never affected.
+the viewer received, not a guaranteed-complete record. For commanded motion,
+the `.rrd` is what the viewer saw; the actions JSONL is what the robot was told.
+The JSON eval log and action side-cars are written outside the Rerun worker and
+are never affected by its shedding.
 
 Camera frames are JPEG-compressed by default (`jpeg_quality=75`), which cuts
 viewer bandwidth by an order of magnitude. Pass `jpeg_quality=None` for
@@ -139,6 +141,27 @@ and SDK versions must match for live connections. For a replayable file without
 a live connection, use `--rerun-save`. Hosts driving two rigs give each config
 its own `rerun_port` so each run spawns its own viewer window.
 
+## Action side-cars
+
+Every delivered trial writes its executed action sequence to an atomic JSONL
+side-car by default:
+
+```
+actions/<run_id>/<sanitized_scene_id>-e<epoch>.jsonl
+```
+
+The first row identifies the run, raw scene id, epoch, action dimension, and
+optional dimension labels. Each remaining row records one control step and its
+post-approval action vector in order. This is the complete commanded trajectory,
+including the prefix of an errored or cancelled trial. A zero-step trial writes
+the header alone. The trial metadata stores the relative path in `actions`, so
+consumers should follow that pointer instead of reconstructing filenames.
+
+Action side-cars are owned by `eval()`, not a sink. They are therefore still
+written when `sinks=` replaces `JsonLogSink`. Pass `store_actions=False` to
+disable them. A non-finite action or filesystem failure emits a warning, leaves
+no final file or metadata pointer, and does not change the eval status.
+
 ## Frame side-cars
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
@@ -148,6 +171,22 @@ a per-run subdirectory of `<log_dir>/frames` through a
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's
 `stats.frames_dir` rather than globbing `<log_dir>/frames` directly.
+
+The frame sequence includes both sides of every action. The reset observation
+is stored at index `0`; the result of step `t` is stored at `t + 1`. A camera
+present throughout a trial with `n` completed steps therefore produces `n + 1`
+files, including the terminal post-action state. In each
+[`StepRecord`](/api/#inspect_robots.rollout.StepRecord),
+`image_refs` points to the pre-action frames and `result_image_refs` points to
+the post-action frames. Both corresponding `Observation.images` mappings are
+empty while a frame store is active. Consumers must load the appropriate
+`FrameRef` instead of reading inline arrays. Without a frame store, observations
+remain inline and both ref mappings are `None`.
+
+Frame storage starts immediately after reset, before the first policy action.
+If the policy fails during its first decision, reset frames can remain on disk
+even though no `StepRecord` exists. This is intentional: the initial sensor
+state is still available for failure forensics.
 
 ```python
 eval(task, policy, embodiment, log_dir="logs", store_frames=True)
@@ -183,10 +222,11 @@ the placeholder in place.
 
 `FrameStore` sanitizes trial and camera names before building
 `{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
-`StepRecord.image_refs` and `FrameRef.path` as the authoritative mapping instead
-of assembling the path from the transcript label. That remains the right advice
-for programmatic consumers. The `view` command performs this join internally
-with the same sanitizer and an exact-match-or-degrade contract.
+`StepRecord.image_refs` for the pre-action observation,
+`StepRecord.result_image_refs` for the post-action observation, and
+`FrameRef.path` as the authoritative file mapping instead of assembling paths
+from transcript labels or step indices. The `view` command performs its join
+internally with the same sanitizer and an exact-match-or-degrade contract.
 
 ## Wire capture
 

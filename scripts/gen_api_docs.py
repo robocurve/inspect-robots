@@ -19,7 +19,10 @@ _SECTIONS = (
         ("inspect_robots.policy", "inspect_robots.embodiment"),
     ),
     ("User configuration", ("inspect_robots.defaults",)),
-    ("Tasks & scenes", ("inspect_robots.scene", "inspect_robots.task")),
+    (
+        "Tasks & scenes",
+        ("inspect_robots.scene", "inspect_robots.task", "inspect_robots.taskgen"),
+    ),
     ("Scoring", ("inspect_robots.scorer", "inspect_robots.grader")),
     (
         "Rollout, controllers & safety",

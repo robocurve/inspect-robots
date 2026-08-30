@@ -388,7 +388,9 @@ dd { margin: 2px 0 0; overflow-wrap: anywhere; }
   border: 1px solid var(--line); border-radius: 9px;
 }
 .scene-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.instruction, .error { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.instruction, .error, .rubric-text {
+  margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .error { color: var(--red); }
 .score-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0 0; }
 .score-chip {
@@ -1469,6 +1471,13 @@ def _scene_section(
         if scene.instruction is None
         else f'<p class="instruction">{_escape(scene.instruction)}</p>'
     )
+    rubric_value = scene.scene_metadata.get("rubric")
+    rubric = (
+        f'<details class="rubric"><summary>Rubric</summary>'
+        f'<p class="rubric-text">{_escape(rubric_value)}</p></details>'
+        if isinstance(rubric_value, str) and rubric_value.strip()
+        else ""
+    )
     error = "" if scene.error is None else f'<p class="error">{_escape(scene.error)}</p>'
 
     reduced = _score_chips(scene.reduced)
@@ -1570,7 +1579,8 @@ def _scene_section(
     return (
         '<section class="scene">'
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
-        f"{_status_badge(scene_status)}</div>{instruction}{error}{reduced_block}{epoch_block}"
+        f"{_status_badge(scene_status)}</div>{instruction}{rubric}{error}"
+        f"{reduced_block}{epoch_block}"
         f"{reasons_block}{judgements_block}{notes_block}{transcripts}{feedback_block}"
         f"{wires}</section>"
     )

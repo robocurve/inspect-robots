@@ -92,10 +92,10 @@ uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms r
 inspect-robots setup
 ```
 
-The wizard picks your defaults and finds your cameras, then writes
-`~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
-instead and type its component names at the prompts; to write the config file
-by hand, see [the CLI guide](cli.md).
+The wizard picks your defaults (suggesting on-demand camera mode for `agent`),
+finds your cameras, then writes `~/.config/inspect-robots/config.ini`. On a
+different rig, install its plugin instead and type its component names at the
+prompts; to write the config file by hand, see [the CLI guide](cli.md).
 
 The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
 server is listening, and the server does not start itself or survive a reboot
