@@ -60,6 +60,12 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 Real robots have no privileged success oracle. The dominant method is a human
 verdict, captured *once* per trial and read back by
 [`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
+Benchmarks that read `operator_judgement` directly, instead of delegating to
+`operator_scorer`, should call
+[`is_affirmative_verdict`](/api/#inspect_robots.scorer.is_affirmative_verdict)
+rather than restate the vocabulary. It owns the recognized affirmative words
+together with the case-folding and whitespace handling around them, so a change
+reaches every consumer at once.
 Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a registered
 component (`inspect_robots.graders` entry point, `grader` decorator) whose
 `grade(record, scene)` runs once per scored trial, after the rollout and
