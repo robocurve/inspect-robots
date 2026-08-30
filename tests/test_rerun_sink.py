@@ -1880,6 +1880,7 @@ def test_real_rerun_accepts_the_blueprint(tmp_path: Path) -> None:
 def test_real_rerun_process_exits_when_tcp_peer_never_reads() -> None:
     """The real SDK atexit path is bounded after a connected peer stops reading."""
     rr = pytest.importorskip("rerun")
+
     if not hasattr(rr, "connect_grpc"):
         pytest.skip("pre-gRPC rerun-sdk cannot run the connect-mode wedge scenario")
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -340,6 +340,21 @@ class LLMAgentPolicy(PolicyBase):
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
     ) -> None:
+        # Reject non-strings with a guided ConfigError to prevent unquoted CLI
+        # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
+        for name, val in [
+            ("model", model),
+            ("base_url", base_url),
+            ("api_key_env", api_key_env),
+            ("speed", speed),
+        ]:
+            if val is not None and not isinstance(val, str):
+                raise ConfigError(
+                    f"{name} must be a string, got {val!r}.\n"
+                    f"fix: the -P parser coerces unquoted values; pass "
+                    f"-P '{name}=\"value\"'"
+                )
+
         prior_learnings_path: str | None = None
         prior_learnings_text: str | None = None
         prior_learnings_sha256: str | None = None
