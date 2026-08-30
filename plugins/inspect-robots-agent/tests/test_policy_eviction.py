@@ -309,3 +309,275 @@ def test_eviction_boundary_and_already_stubbed_prefix_are_byte_stable() -> None:
             if message_index in stub_indices(body)
         }
         assert len(stable_forms) == 1
+
+
+def test_on_demand_allows_re_reveal_after_eviction() -> None:
+    responses = [
+        # Call 1: take_pic top
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["top"], "note": "Check top"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 2: take_pic front
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["front"], "note": "Check front"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 3: take_pic left
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_3",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["left"], "note": "Check left"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 4: take_pic top again (was evicted since image_horizon=2)
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_4",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["top"], "note": "Check top again"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 5: take_pic left again (still visible; should be refused)
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_5",
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": ["left"], "note": "Check left again"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        # Call 6: move_by
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_6",
+                                "type": "function",
+                                "function": {
+                                    "name": "move_by",
+                                    "arguments": json.dumps(
+                                        {"deltas": {"dx": 0.01}, "note": "Move"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    ]
+
+    response_iter = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(response_iter))
+
+    embodiment = CubePickEmbodiment()
+    policy = _policy(
+        images="on_demand",
+        image_horizon=2,
+        transport=httpx.MockTransport(handler),
+    )
+    policy.bind(embodiment.info)
+    scene = Scene(id="s0", instruction="reach")
+    policy.reset(scene)
+
+    import numpy as np
+
+    from inspect_robots.types import Observation
+
+    images = {
+        name: np.full((2, 2, 3), i, dtype=np.uint8)
+        for i, name in enumerate(["top", "front", "left"], start=1)
+    }
+    observation = Observation(state={"q": np.array([0.0])}, images=images, extra={"env_step": 0})
+
+    chunk = policy.act(observation)
+    assert chunk is not None
+
+    tool_results = [
+        message["content"] for message in policy._messages if message.get("role") == "tool"
+    ]
+    assert tool_results[:4] == [
+        "captured 1 frame(s): 'top'",
+        "captured 1 frame(s): 'front'",
+        "captured 1 frame(s): 'left'",
+        "captured 1 frame(s): 'top'",
+    ]
+    assert tool_results[4].startswith("already shown for this observation: 'left'")
+
+
+def test_on_demand_dedups_a_camera_whose_name_contains_an_apostrophe() -> None:
+    # The revealed-camera set is recovered by parsing the rendered "camera
+    # {name!r}:" label, and repr() switches to double quotes for a name holding
+    # an apostrophe. That made the label unparseable, emptied the revealed set,
+    # and let the same frame be captured twice in one observation (#294).
+    camera = "robot's wrist"
+
+    def _take_pic(call_id: str) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "take_pic",
+                                    "arguments": json.dumps(
+                                        {"cameras": [camera], "note": "Check wrist"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+    responses = [
+        _take_pic("call_1"),
+        _take_pic("call_2"),
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_3",
+                                "type": "function",
+                                "function": {
+                                    "name": "move_by",
+                                    "arguments": json.dumps(
+                                        {"deltas": {"dx": 0.01}, "note": "Move"}
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    ]
+    response_iter = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(response_iter))
+
+    import numpy as np
+
+    from inspect_robots.types import Observation
+
+    embodiment = CubePickEmbodiment()
+    policy = _policy(
+        images="on_demand",
+        image_horizon=1,
+        transport=httpx.MockTransport(handler),
+    )
+    policy.bind(embodiment.info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    observation = Observation(
+        state={"q": np.array([0.0])},
+        images={camera: np.full((2, 2, 3), 1, dtype=np.uint8)},
+        extra={"env_step": 0},
+    )
+    assert policy.act(observation) is not None
+
+    tool_results = [
+        message["content"] for message in policy._messages if message.get("role") == "tool"
+    ]
+    assert tool_results[0] == f'captured 1 frame(s): "{camera}"'
+    # The second request for an unchanged view must be refused, not re-sent.
+    assert tool_results[1].startswith("already shown for this observation:")

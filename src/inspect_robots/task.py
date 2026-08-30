@@ -75,7 +75,7 @@ class Task:
             raise ConfigError(
                 f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
             )
-        if self.max_steps is not None and self.max_steps < 1:
+        if self.max_steps is not None and (isinstance(self.max_steps, bool) or self.max_steps < 1):
             raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps}")
         if self.max_seconds is not None and (
             isinstance(self.max_seconds, bool)
@@ -85,6 +85,14 @@ class Task:
             raise ConfigError(
                 f"Task {self.name!r}: max_seconds must be finite and > 0, got {self.max_seconds!r}"
             )
+        # Scene ids become per-trial identity downstream (the rollout builds
+        # "{scene.id}-e{epoch}", which FrameStore turns into a filename), so a
+        # duplicate would silently overwrite another trial's frames.
+        seen: set[str] = set()
+        for scene in self.scenes:
+            if scene.id in seen:
+                raise ConfigError(f"Task {self.name!r}: duplicate scene id {scene.id!r}")
+            seen.add(scene.id)
         _ = self.epoch_spec  # validates an int epochs count via Epochs
 
     @property

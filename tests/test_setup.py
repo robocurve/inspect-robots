@@ -17,19 +17,28 @@ from inspect_robots._setup import (
     _VIDIOC_ENUM_FMT,
     _VIDIOC_QUERYCAP,
     SUGGESTED,
+    _ambiguous_identities,
+    _camera_inventory,
+    _camera_rows,
+    _CameraNode,
+    _can_kernels,
     _can_serial,
     _identify_by_replug,
+    _identify_camera_by_replug,
+    _prefer_plain_alias,
+    _preferred_name,
     _prompt_device_slot,
     _read_raw_config,
+    _reconcile_missing_current,
     _render_config,
-    _scan_cameras,
     _scan_can,
     _scan_serial,
     _suggest_can_pinning,
+    _usb_device_dir,
     _v4l2_color_capture,
     run_setup,
 )
-from inspect_robots.conformance import DeviceSlot
+from inspect_robots.conformance import DeviceSlot, OptionSlot
 
 
 def _scripted_input(
@@ -69,10 +78,10 @@ def _prompt_current_device(
         current,
         {},
         False,
+        [],
         input_fn=input_fn,
         out=out,
-        rescan_by_id=lambda: by_id_devices,
-        rescan_by_path=lambda: by_path_devices,
+        identify=lambda _prefer_by_id: None,
     )
     return selected, prompts, out.getvalue()
 
@@ -91,6 +100,193 @@ def _make_devices(directory: Path, count: int = 3) -> list[str]:
     return devices
 
 
+def _rig(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """A fake /dev + /sys tree reproducing the #261 D435 rig.
+
+    dev/video10 is the D435's only color node; its by-id link is MISSING
+    (lost udev's name race) while by-id index0/index1 point at the depth
+    node (video0, no color) and metadata node (video11). by-path has the
+    plain usb- name AND a usbv3- alias for video10. dev/video8 is a D405
+    with a healthy by-id link. Returns (by_id, by_path, sysfs_video, dev).
+    """
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node in ("video0", "video8", "video10", "video11"):
+        (dev / node).touch()
+    _symlink(by_id / "usb-D435_310323023943-video-index0", dev / "video0")
+    _symlink(by_id / "usb-D435_310323023943-video-index1", dev / "video11")
+    _symlink(by_id / "usb-D405_429423070256-video-index4", dev / "video8")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0", dev / "video10")
+    _symlink(by_path / "pci-0000:80:14.0-usbv3-0:9:1.3-video-index0", dev / "video10")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:9:1.0-video-index0", dev / "video0")
+    _symlink(by_path / "pci-0000:80:14.0-usb-0:1.4:1.0-video-index4", dev / "video8")
+    _usb_device(
+        devices,
+        "4-9",
+        "310323023943",
+        sysfs_video,
+        {"video0": "1.0", "video10": "1.3", "video11": "1.3"},
+    )
+    _usb_device(devices, "1-4", "429423070256", sysfs_video, {"video8": "1.0"})
+    return by_id, by_path, sysfs_video, dev
+
+
+def _shared_serial_rig(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Build two color cameras on distinct USB devices with one serial."""
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node, port in (("video13", "3-2"), ("video15", "3-4")):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(devices, port, "SN0001", sysfs_video, {node: "1.0"})
+    _symlink(by_id / "usb-Innomaker_SN0001-video-index0", dev / "video15")
+    return by_id, by_path, sysfs_video, dev
+
+
+def _serialless_same_model_rig(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Build two same-model cameras with empty serials and one shared by-id name."""
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node, port in (("video13", "3-2"), ("video15", "3-4")):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(devices, port, "", sysfs_video, {node: "1.0"})
+    _symlink(by_id / "usb-Intel_RealSense_405_405-video-index0", dev / "video15")
+    return by_id, by_path, sysfs_video, dev
+
+
+def _healthy_camera_rig(tmp_path: Path) -> tuple[Path, Path, Path, list[str]]:
+    """Build three color cameras with unique by-id, by-path, and sysfs names."""
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    by_id_names: list[str] = []
+    for index in range(1, 4):
+        node = dev / f"video{index}"
+        node.touch()
+        by_id_name = by_id / f"usb-Camera_SERIAL{index}-video-index0"
+        _symlink(by_id_name, node)
+        _symlink(by_path / f"pci-usb-{index}-video-index0", node)
+        _usb_device(
+            devices,
+            f"2-{index}",
+            f"SERIAL{index}",
+            sysfs_video,
+            {node.name: "1.0"},
+        )
+        by_id_names.append(str(by_id_name))
+    return by_id, by_path, sysfs_video, by_id_names
+
+
+def _symlink(link: Path, target: Path) -> None:
+    """A symlink helper that skips where symlinks are unavailable (Windows)."""
+    try:
+        link.symlink_to(target)
+    except OSError:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip("symlinks unavailable")
+
+
+def _mkdir_or_skip(path: Path, *, parents: bool = False) -> None:
+    """A mkdir helper that skips where the filesystem rejects the name (Windows)."""
+    try:
+        path.mkdir(parents=parents)
+    except OSError:  # pragma: no cover - Windows rejects colon-named dirs
+        pytest.skip("filesystem rejects the fixture name")
+
+
+def _usb_device(
+    devices: Path,
+    port: str,
+    serial: str,
+    sysfs_video: Path,
+    nodes: dict[str, str],
+    *,
+    vendor: str = "8086",
+    product: str = "0b5b",
+) -> None:
+    """One fake sysfs USB device mirroring real sysfs shape.
+
+    ``nodes`` maps video-node name to USB interface suffix ("video10": "1.3");
+    each node's ``device`` link points at the interface directory itself
+    (``<port>/<port>:1.3``), exactly like real sysfs, and the USB device dir
+    above it holds ``idVendor``, ``idProduct``, and ``serial``.
+    """
+    usb_dir = devices / port
+    usb_dir.mkdir(parents=True, exist_ok=True)
+    (usb_dir / "idVendor").write_text(vendor, encoding="utf-8")
+    (usb_dir / "idProduct").write_text(product, encoding="utf-8")
+    (usb_dir / "serial").write_text(serial + "\n", encoding="utf-8")
+    for node, suffix in nodes.items():
+        interface = usb_dir / f"{port}:{suffix}"
+        try:
+            interface.mkdir(exist_ok=True)
+        except OSError:  # pragma: no cover - Windows rejects ':' in paths
+            pytest.skip("sysfs-style interface names unavailable")
+        entry = sysfs_video / node
+        entry.mkdir()
+        _symlink(entry / "device", interface)
+
+
+def _color_by_node(monkeypatch: pytest.MonkeyPatch, color: set[str]) -> None:
+    """Fake _v4l2_color_capture: True iff the path's basename is in ``color``."""
+    monkeypatch.setattr(
+        "inspect_robots._setup._v4l2_color_capture",
+        lambda path: Path(path).name in color,
+    )
+
+
+def _unplug_camera_node(
+    node: Path, by_id: Path, by_path: Path, sysfs_video: Path
+) -> tuple[list[tuple[Path, Path]], Path]:
+    """Remove one fake camera's color node, names, and sysfs class entry."""
+    links: list[tuple[Path, Path]] = []
+    for directory in (by_id, by_path):
+        for entry in directory.iterdir():
+            if entry.resolve(strict=False) == node:
+                links.append((entry, entry.readlink()))
+                entry.unlink()
+    device_link = sysfs_video / node.name / "device"
+    device_target = device_link.resolve(strict=True)
+    device_link.unlink()
+    device_link.parent.rmdir()
+    node.unlink()
+    return links, device_target
+
+
+def _replug_camera_node(
+    node: Path,
+    links: list[tuple[Path, Path]],
+    device_target: Path,
+    sysfs_video: Path,
+) -> None:
+    """Restore one fake camera color node after `_unplug_camera_node`."""
+    node.touch()
+    entry = sysfs_video / node.name
+    entry.mkdir()
+    _symlink(entry / "device", device_target)
+    for link, target in links:
+        _symlink(link, target)
+
+
 def _make_can_interfaces(sysfs_net: Path, *names: str) -> None:
     for name in names:
         interface = sysfs_net / name
@@ -105,14 +301,15 @@ def _attach_can_adapter(
     serial: str | None,
     *,
     usb: bool = True,
+    device_leaf: str = "net-device",
 ) -> None:
     # "usb1" matches the numbered bus segments real sysfs uses (never bare "usb").
     root = tmp_path / ("usb1" if usb else "platform") / ifname / "adapter"
     root.mkdir(parents=True)
     if serial is not None:
         (root / "serial").write_text(serial + "\n", encoding="utf-8")
-    device = root / "net-device"
-    device.mkdir()
+    device = root / device_leaf
+    _mkdir_or_skip(device)
     try:
         (sysfs_net / ifname / "device").symlink_to(device, target_is_directory=True)
     except OSError as exc:
@@ -133,8 +330,28 @@ def _register_device_slots(
     )
 
 
+def _register_option_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    options: tuple[OptionSlot, ...],
+    name: str = "option-body",
+) -> None:
+    class _Factory:
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = options
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {name: _Factory} if kind == "embodiment" else {},
+    )
+
+
 def _slot_defaults(name: str = "slot-body") -> list[str]:
     return ["", name, "", "", "", ""]
+
+
+AUTO_START = OptionSlot(
+    arg="auto_start",
+    label="Skip the operator start prompts (auto_start)",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -142,70 +359,721 @@ def _empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("inspect_robots.registry.registered", lambda _kind: {})
 
 
-def test_scan_cameras_prefers_color_capture_entries(
+def test_camera_inventory_groups_names_by_resolved_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    v4l_dir = tmp_path / "by-id"
-    v4l_dir.mkdir()
-    # RealSense-style layout: index0 is the depth node, index2 the IR pair,
-    # index4 the color stream — the name says nothing about capturability.
-    verdicts = {
-        "usb-realsense-video-index0": False,
-        "usb-realsense-video-index2": False,
-        "usb-realsense-video-index4": True,
-        "usb-webcam-video-index0": True,
-        "usb-webcam-video-index1": None,
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_node = {Path(record.node).name: record for record in inventory}
+    assert set(by_node) == {"video10", "video8"}
+    d435 = by_node["video10"]
+    assert isinstance(d435, _CameraNode)
+    assert d435.by_id is None
+    assert d435.by_path is not None and "-usbv" not in Path(d435.by_path).name
+    assert d435.serial == "310323023943"
+    assert d435.camera is not None and d435.camera.endswith("4-9")
+    d405 = by_node["video8"]
+    assert d405.by_id is not None and Path(d405.by_id).name.startswith("usb-D405")
+
+
+def test_camera_inventory_reads_usb_model_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video8", "video10"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert {record.model for record in inventory} == {"8086:0b5b"}
+
+
+def test_camera_inventory_model_is_none_without_resolvable_sysfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    dev.mkdir()
+    by_path.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, tmp_path / "missing-sysfs")
+
+    assert len(inventory) == 1
+    assert inventory[0].camera is None
+    assert inventory[0].model is None
+
+
+def test_camera_inventory_unreadable_product_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    product = devices / "2-1" / "idProduct"
+    product.unlink()
+    product.mkdir()
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].model is None
+
+
+@pytest.mark.parametrize("usb_id", ["idVendor", "idProduct"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_camera_inventory_missing_or_empty_usb_id_has_no_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    usb_id: str,
+    *,
+    missing: bool,
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    identity_file = devices / "2-1" / usb_id
+    if missing:
+        identity_file.unlink()
+    else:
+        identity_file.write_text("", encoding="utf-8")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].model is None
+
+
+def test_camera_inventory_probes_each_target_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    calls: dict[str, int] = {}
+
+    def probe(path: Path) -> bool:
+        name = path.name
+        calls[name] = calls.get(name, 0) + 1
+        return name in {"video8", "video10"}
+
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", probe)
+    _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert calls == {"video0": 1, "video10": 1, "video11": 1, "video8": 1}
+
+
+def test_usb_device_dir_walks_to_idvendor_and_survives_missing_sysfs(
+    tmp_path: Path,
+) -> None:
+    _by_id, _by_path, sysfs_video, _dev = _rig(tmp_path)
+    assert _usb_device_dir("video10", sysfs_video) is not None
+    assert _usb_device_dir("video10", tmp_path / "absent") is None
+    assert _usb_device_dir("nonexistent-node", sysfs_video) is None
+
+
+def test_usb_device_dir_exhausted_walk_returns_none(tmp_path: Path) -> None:
+    sysfs_video = tmp_path / "sys-video"
+    platform = tmp_path / "sys-devices" / "platform" / "csi0"
+    platform.mkdir(parents=True)
+    entry = sysfs_video / "video99"
+    entry.mkdir(parents=True)
+    _symlink(entry / "device", platform)
+    assert _usb_device_dir("video99", sysfs_video) is None
+
+
+def test_prefer_plain_alias_picks_usb_over_usbv_variants() -> None:
+    plain = Path("pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    v2 = Path("pci-0000:80:14.0-usbv2-0:9:1.3-video-index0")
+    v3 = Path("pci-0000:80:14.0-usbv3-0:9:1.3-video-index0")
+    assert _prefer_plain_alias([v3, plain, v2]) == plain
+    assert _prefer_plain_alias([v3, v2]) == v2
+
+
+def test_camera_inventory_missing_directories_and_serial_are_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    for node in ("video20", "video21"):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{node}", dev / node)
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    (devices / "2-1" / "serial").unlink()
+    _color_by_node(monkeypatch, {"video20", "video21"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+    by_node = {Path(record.node).name: record for record in inventory}
+
+    assert set(by_node) == {"video20", "video21"}
+    assert by_node["video20"].by_id is None
+    assert by_node["video20"].camera is not None
+    assert by_node["video20"].serial is None
+    assert by_node["video21"].camera is None
+    assert by_node["video21"].serial is None
+
+
+def test_camera_inventory_undecodable_serial_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_path, sysfs_video):
+        directory.mkdir()
+    (dev / "video20").touch()
+    _symlink(by_path / "pci-usb-video20", dev / "video20")
+    _usb_device(devices, "2-1", "TEMP", sysfs_video, {"video20": "1.0"})
+    (devices / "2-1" / "serial").write_bytes(b"\xff\xfe garbage")
+    _color_by_node(monkeypatch, {"video20"})
+
+    inventory = _camera_inventory(tmp_path / "missing-by-id", by_path, sysfs_video)
+
+    assert len(inventory) == 1
+    assert inventory[0].camera is not None
+    assert inventory[0].serial is None
+
+
+def test_camera_rows_by_id_falls_back_to_by_path_for_race_losers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    rows = _camera_rows(inventory, by_id, by_id=True)
+    names = [Path(row).name for row in rows]
+    assert "pci-0000:80:14.0-usb-0:9:1.3-video-index0" in names
+    assert "usb-D405_429423070256-video-index4" in names
+    assert len(rows) == 2
+
+
+def test_camera_rows_by_path_view_dedupes_usbv_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    rows = _camera_rows(inventory, by_path, by_id=False)
+    names = [Path(row).name for row in rows]
+
+    assert names == [
+        "pci-0000:80:14.0-usb-0:1.4:1.0-video-index4",
+        "pci-0000:80:14.0-usb-0:9:1.3-video-index0",
+    ]
+    assert all("-usbv" not in name for name in names)
+
+
+def test_camera_rows_shared_serial_distrusts_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    for node, port in (("video13", "3-2"), ("video15", "3-4")):
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(devices, port, "SN0001", sysfs_video, {node: "1.0"})
+    _symlink(by_id / "usb-Innomaker_SN0001-video-index0", dev / "video15")
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    rows = _camera_rows(inventory, by_id, by_id=True)
+
+    assert _ambiguous_identities(inventory) == {("8086:0b5b", "SN0001")}
+    assert [Path(row).name for row in rows] == [
+        "pci-usb-3-2-video-index0",
+        "pci-usb-3-4-video-index0",
+    ]
+
+
+def test_camera_rows_same_model_empty_serials_use_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    rows = _camera_rows(inventory, by_id, by_id=True)
+
+    assert _ambiguous_identities(inventory) == {("8086:0b5b", None)}
+    assert [Path(row).name for row in rows] == [
+        "pci-usb-3-2-video-index0",
+        "pci-usb-3-4-video-index0",
+    ]
+
+
+def test_camera_rows_lone_empty_serial_keeps_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _serialless_same_model_rig(tmp_path)
+    _unplug_camera_node(dev / "video13", by_id, by_path, sysfs_video)
+    _color_by_node(monkeypatch, {"video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert _ambiguous_identities(inventory) == set()
+    assert _camera_rows(inventory, by_id, by_id=True) == [
+        str(by_id / "usb-Intel_RealSense_405_405-video-index0")
+    ]
+
+
+def test_camera_rows_different_models_with_empty_serials_keep_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    specifications = (
+        ("video13", "3-2", "8086", "0b5b"),
+        ("video15", "3-4", "1d6b", "0102"),
+    )
+    expected: list[str] = []
+    for node, port, vendor, product in specifications:
+        (dev / node).touch()
+        by_id_name = by_id / f"usb-Camera_{vendor}_{product}-video-index0"
+        _symlink(by_id_name, dev / node)
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(
+            devices,
+            port,
+            "",
+            sysfs_video,
+            {node: "1.0"},
+            vendor=vendor,
+            product=product,
+        )
+        expected.append(str(by_id_name))
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert _ambiguous_identities(inventory) == set()
+    assert _camera_rows(inventory, by_id, by_id=True) == sorted(expected)
+
+
+def test_camera_rows_shared_serial_across_models_use_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    sysfs_video = tmp_path / "sys-video"
+    devices = tmp_path / "sys-devices"
+    for directory in (dev, by_id, by_path, sysfs_video):
+        directory.mkdir()
+    specifications = (
+        ("video13", "3-2", "8086", "0b5b"),
+        ("video15", "3-4", "1d6b", "0102"),
+    )
+    for node, port, vendor, product in specifications:
+        (dev / node).touch()
+        _symlink(by_path / f"pci-usb-{port}-video-index0", dev / node)
+        _usb_device(
+            devices,
+            port,
+            "SN0001",
+            sysfs_video,
+            {node: "1.0"},
+            vendor=vendor,
+            product=product,
+        )
+    _symlink(by_id / "usb-Camera_SN0001-video-index0", dev / "video15")
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+
+    assert _ambiguous_identities(inventory) == {
+        ("1d6b:0102", "SN0001"),
+        ("8086:0b5b", "SN0001"),
     }
-    for name in verdicts:
-        (v4l_dir / name).touch()
-    monkeypatch.setattr(
-        "inspect_robots._setup._v4l2_color_capture",
-        lambda path: verdicts[Path(path).name],
+    assert [Path(row).name for row in _camera_rows(inventory, by_id, by_id=True)] == [
+        "pci-usb-3-2-video-index0",
+        "pci-usb-3-4-video-index0",
+    ]
+
+
+def test_camera_rows_unknown_identities_keep_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dev = tmp_path / "dev"
+    by_id = tmp_path / "by-id"
+    by_path = tmp_path / "by-path"
+    for directory in (dev, by_id, by_path):
+        directory.mkdir()
+    expected: list[str] = []
+    for node in ("video13", "video15"):
+        (dev / node).touch()
+        by_id_name = by_id / f"usb-Unknown_{node}-video-index0"
+        _symlink(by_id_name, dev / node)
+        _symlink(by_path / f"pci-usb-{node}-video-index0", dev / node)
+        expected.append(str(by_id_name))
+    _color_by_node(monkeypatch, {"video13", "video15"})
+
+    inventory = _camera_inventory(by_id, by_path, tmp_path / "missing-sysfs")
+
+    assert all(record.camera is None for record in inventory)
+    assert _ambiguous_identities(inventory) == set()
+    assert _camera_rows(inventory, by_id, by_id=True) == sorted(expected)
+
+
+def test_ambiguous_identities_deduplicates_nodes_per_camera() -> None:
+    records = [
+        _CameraNode("/dev/video1", "camera-a", None, "/i/a1", "/p/a1", "8086:0b5b"),
+        _CameraNode("/dev/video2", "camera-a", None, "/i/a2", "/p/a2", "8086:0b5b"),
+    ]
+
+    assert _ambiguous_identities(records) == set()
+
+
+def test_prompt_device_slot_refuses_typed_ambiguous_by_id_before_duplicate_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    ambiguous_name = str(by_id / "usb-Intel_RealSense_405_405-video-index0")
+    input_fn, prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "left camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        None,
+        {"top_cam_device": ("v4l2", "top", ambiguous_name)},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="left",
     )
 
-    devices = _scan_cameras(v4l_dir)
+    assert selected is None
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert "pci-usb-3-2-video-index0, pci-usb-3-4-video-index0" in out.getvalue()
+    assert all("Use " not in prompt or " for both " not in prompt for prompt in prompts)
+    assert sum(prompt.startswith("left camera") for prompt in prompts) == 2
 
-    assert devices == [
-        str(v4l_dir / "usb-realsense-video-index4"),
-        str(v4l_dir / "usb-webcam-video-index0"),
+
+def test_prompt_device_slot_refuses_enter_accepted_ambiguous_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    ambiguous_name = str(by_id / "usb-Intel_RealSense_405_405-video-index0")
+    input_fn, prompts = _scripted_input(["", "", "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        ambiguous_name,
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert "offers no color capture format" in out.getvalue()
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert "pci-usb-3-2-video-index0, pci-usb-3-4-video-index0" in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 3
+
+
+def test_prompt_device_slot_refuses_enter_accepted_speed_qualified_by_id_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _serialless_same_model_rig(tmp_path)
+    speed_qualified = by_id / "usbv2-Intel_RealSense_405_405-video-index0"
+    _symlink(speed_qualified, dev / "video15")
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    input_fn, prompts = _scripted_input(["", "", "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        str(speed_qualified),
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert "cannot use ambiguous by-id camera name" in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 3
+
+
+def test_prompt_device_slot_accepts_ambiguous_camera_by_path_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    inventory = _camera_inventory(by_id, by_path, sysfs_video)
+    by_id_devices = _camera_rows(inventory, by_id, by_id=True)
+    by_path_devices = _camera_rows(inventory, by_path, by_id=False)
+    current = str(by_path / "pci-usb-3-4-video-index0")
+    input_fn, prompts = _scripted_input([""])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        by_id_devices,
+        by_path_devices,
+        True,
+        by_id,
+        by_path,
+        current,
+        {},
+        True,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected == current
+    assert "cannot use ambiguous by-id camera name" not in out.getvalue()
+    assert sum(prompt.startswith("top camera") for prompt in prompts) == 1
+
+
+def test_prompt_device_slot_refusal_lists_cross_model_serial_claimants(tmp_path: Path) -> None:
+    ambiguous_name = str(tmp_path / "by-id" / "usb-Camera_SN0001-video-index0")
+    inventory = [
+        _CameraNode(
+            "/dev/video13",
+            "camera-a",
+            "SN0001",
+            ambiguous_name,
+            "/dev/v4l/by-path/model-a",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video15",
+            "camera-b",
+            "SN0001",
+            None,
+            "/dev/v4l/by-path/model-b",
+            "1d6b:0102",
+        ),
     ]
-    assert all(Path(device).is_absolute() for device in devices)
+    input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        [],
+        [],
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert (
+        "claimant cameras by port: model-a, model-b; enter its number from the listing"
+        in out.getvalue()
+    )
 
 
-def test_scan_cameras_lists_all_entries_when_probe_is_inconclusive(tmp_path: Path) -> None:
-    v4l_dir = tmp_path / "by-id"
-    v4l_dir.mkdir()
-    for name in (
-        "usb-camera-b-video-index1",
-        "usb-camera-b-video-index0",
-        "usb-camera-a-video-index0",
-    ):
-        (v4l_dir / name).touch()
-
-    devices = _scan_cameras(v4l_dir)
-
-    assert devices == [
-        str(v4l_dir / "usb-camera-a-video-index0"),
-        str(v4l_dir / "usb-camera-b-video-index0"),
-        str(v4l_dir / "usb-camera-b-video-index1"),
+def test_prompt_device_slot_refusal_deduplicates_claimants_per_camera(tmp_path: Path) -> None:
+    ambiguous_name = str(tmp_path / "by-id" / "usb-Camera-video-index0")
+    inventory = [
+        _CameraNode(
+            "/dev/video13",
+            "camera-a",
+            None,
+            ambiguous_name,
+            "/dev/v4l/by-path/model-a-color",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video14",
+            "camera-a",
+            None,
+            None,
+            "/dev/v4l/by-path/model-a-depth",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video15",
+            "camera-b",
+            None,
+            None,
+            "/dev/v4l/by-path/model-b-color",
+            "8086:0b5b",
+        ),
+        _CameraNode(
+            "/dev/video16",
+            "camera-c",
+            "UNIQUE",
+            "/dev/v4l/by-id/unique-camera",
+            "/dev/v4l/by-path/model-c-color",
+            "1d6b:0102",
+        ),
     ]
+    input_fn, _prompts = _scripted_input([ambiguous_name, "s"])
+    out = io.StringIO()
+
+    selected, _active_is_by_id = _prompt_device_slot(
+        "top camera",
+        "v4l2",
+        [],
+        [],
+        True,
+        tmp_path / "by-id",
+        tmp_path / "by-path",
+        None,
+        {},
+        False,
+        inventory,
+        input_fn=input_fn,
+        out=out,
+        identify=lambda _prefer_by_id: None,
+        camera_role="top",
+    )
+
+    assert selected is None
+    assert out.getvalue().count("model-a-color") == 1
+    assert "model-a-depth" not in out.getvalue()
+    assert out.getvalue().count("model-b-color") == 1
+    assert "model-c-color" not in out.getvalue()
 
 
-def test_scan_cameras_falls_back_to_all_sorted_entries(tmp_path: Path) -> None:
-    v4l_dir = tmp_path / "by-path"
-    v4l_dir.mkdir()
-    for name in ("camera-z", "camera-a-video-index1", "camera-m"):
-        (v4l_dir / name).touch()
+def test_camera_rows_raw_fallback_when_no_color_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id = tmp_path / "by-id"
+    by_id.mkdir()
+    for name in ("camera-z", "camera-a", "camera-m"):
+        (by_id / name).touch()
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
 
-    assert _scan_cameras(v4l_dir) == [
-        str(v4l_dir / "camera-a-video-index1"),
-        str(v4l_dir / "camera-m"),
-        str(v4l_dir / "camera-z"),
+    inventory = _camera_inventory(by_id, tmp_path / "missing-by-path", tmp_path / "sys")
+
+    assert inventory == []
+    assert _camera_rows(inventory, by_id, by_id=True) == [
+        str(by_id / "camera-a"),
+        str(by_id / "camera-m"),
+        str(by_id / "camera-z"),
     ]
+    assert _camera_rows(inventory, tmp_path / "missing", by_id=False) == []
 
 
-def test_scan_cameras_missing_directory_returns_empty(tmp_path: Path) -> None:
-    assert _scan_cameras(tmp_path / "missing") == []
+def test_preferred_name_ladder() -> None:
+    trusted = _CameraNode(
+        node="/dev/video8",
+        camera="c1",
+        serial="A",
+        by_id="/i/a",
+        by_path="/p/a",
+    )
+    raceless = _CameraNode(
+        node="/dev/video10",
+        camera="c2",
+        serial="B",
+        by_id=None,
+        by_path="/p/b",
+    )
+    bare = _CameraNode(node="/dev/video3", camera=None, serial=None, by_id=None, by_path=None)
+    assert _preferred_name([trusted], set(), prefer_by_id=True) == "/i/a"
+    assert _preferred_name([trusted], {(None, "A")}, prefer_by_id=True) == "/p/a"
+    assert _preferred_name([trusted], set(), prefer_by_id=False) == "/p/a"
+    assert _preferred_name([raceless], set(), prefer_by_id=True) == "/p/b"
+    assert _preferred_name([bare], set(), prefer_by_id=True) == "/dev/video3"
+    assert _preferred_name([raceless, trusted], set(), prefer_by_id=True) == "/i/a"
+
+
+def test_reconcile_missing_current_matches_serial_from_by_id_name() -> None:
+    record = _CameraNode(
+        node="/dev/video10",
+        camera="/sys/devices/4-9",
+        serial="310323023943",
+        by_id=None,
+        by_path="/dev/v4l/by-path/pci-0000:80:14.0-usb-0:9:1.3-video-index0",
+    )
+    saved = "/dev/v4l/by-id/usb-Intel_..._435_310323023943-video-index0"
+    assert _reconcile_missing_current(saved, [record], prefer_by_id=True) == record.by_path
+    assert _reconcile_missing_current("/dev/video99", [record], prefer_by_id=True) is None
+    assert _reconcile_missing_current(saved, [], prefer_by_id=True) is None
+    twin = _CameraNode(
+        node="/dev/video12",
+        camera="/sys/devices/3-4",
+        serial="310323023943",
+        by_id=None,
+        by_path="/dev/v4l/by-path/pci-0000:80:14.0-usb-0:3.4:1.0-video-index0",
+    )
+    assert _reconcile_missing_current(saved, [record, twin], prefer_by_id=True) is None
 
 
 _V4L2_CAP_VIDEO_CAPTURE = 0x00000001
@@ -415,6 +1283,25 @@ def test_can_serial_missing_serial_returns_none(tmp_path: Path) -> None:
     assert _can_serial(tmp_path / "net", "can0") is None
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_can_kernels_reads_interface_kernel_name(tmp_path: Path) -> None:
+    sysfs_net = tmp_path / "net"
+    interface = sysfs_net / "can0"
+    interface.mkdir(parents=True)
+    device = tmp_path / "usb3" / "3-2" / "3-2:1.0"
+    _mkdir_or_skip(device, parents=True)
+    try:
+        (interface / "device").symlink_to(device, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    assert _can_kernels(sysfs_net, "can0") == "3-2:1.0"
+
+
+def test_can_kernels_missing_device_link_returns_none(tmp_path: Path) -> None:
+    assert _can_kernels(tmp_path / "net", "can0") is None
+
+
 def test_read_raw_config_preserves_percent_and_literal_tilde(tmp_path: Path) -> None:
     path = tmp_path / "config.ini"
     path.write_text(
@@ -583,12 +1470,297 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     assert 'Next: inspect-robots "place the fork on the plate"' in output
 
 
+def test_run_setup_writes_inspect_robots_config_override(tmp_path: Path) -> None:
+    xdg = tmp_path / "xdg"
+    decoy_path = _config_path(xdg)
+    decoy_path.parent.mkdir(parents=True)
+    decoy_bytes = b"[defaults]\npolicy = decoy\n"
+    decoy_path.write_bytes(decoy_bytes)
+    override_path = tmp_path / "rig-b" / "config.ini"
+    assert not override_path.parent.exists()
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {
+            "XDG_CONFIG_HOME": str(xdg),
+            "INSPECT_ROBOTS_CONFIG": str(override_path),
+            "DISPLAY": ":0",
+        },
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "missing-by-id",
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    assert result == 0
+    assert "[defaults]" in override_path.read_text(encoding="utf-8")
+    assert f"inspect-robots setup — writes {override_path}" in out.getvalue()
+    assert decoy_path.read_bytes() == decoy_bytes
+    assert not decoy_path.with_name("config.ini.bak").exists()
+    assert not override_path.with_name("config.ini.bak").exists()
+
+
+def test_run_setup_lists_race_loser_camera_and_selects_it_by_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "2", "1", "1", "y"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    race_loser = str(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    d405 = str(by_id / "usb-D405_429423070256-video-index4")
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {race_loser}" in text
+    assert f"left_cam_device = {d405}" in text
+    assert f"right_cam_device = {d405}" in text
+    assert "Found 2 camera device(s)" in out.getvalue()
+    assert "no usable by-id entry" in out.getvalue()
+    assert any("top camera" in prompt and "'p'" in prompt for prompt in prompts)
+
+
+def test_run_setup_unplug_identifies_race_loser_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    pending = ["", "", "", "", "", "", "", "u", "", "", "1", "1", "y"]
+    prompts: list[str] = []
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def input_fn(prompt: str) -> str:
+        nonlocal detached
+        prompts.append(prompt)
+        if prompt.startswith("Unplug the top camera"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug it back in"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return pending.pop(0)
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    race_loser = str(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {race_loser}" in text
+    assert "Unplug the top camera now, then press Enter..." in prompts
+
+
+def test_run_setup_shared_serial_cameras_both_listed_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _shared_serial_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "1", "2", "/remote/right"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"top_cam_device = {by_path / 'pci-usb-3-2-video-index0'}" in text
+    assert f"left_cam_device = {by_path / 'pci-usb-3-4-video-index0'}" in text
+    assert "right_cam_device = /remote/right" in text
+    assert "already assigned" not in out.getvalue()
+    assert out.getvalue().count("pci-usb-3-") >= 2
+
+
+def test_run_setup_same_model_empty_serial_hint_counts_both_cameras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "s", "s", "s"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    assert result == 0
+    assert "2 camera node(s) have no usable by-id entry" in out.getvalue()
+    assert "pci-usb-3-2-video-index0, pci-usb-3-4-video-index0" in out.getvalue()
+    assert any("top camera" in prompt and "'p'" in prompt for prompt in prompts)
+
+
+def test_run_setup_all_race_losers_starts_in_port_view_hint_without_p(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10"})
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "s", "s", "s"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    assert result == 0
+    assert f"Found 1 camera device(s) under {by_path}:" in out.getvalue()
+    assert "no usable by-id entry" in out.getvalue()
+    assert "press 'p'" not in out.getvalue()
+    assert any(prompt.startswith("top camera") for prompt in prompts)
+    assert "_cam_device" not in _config_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_run_setup_healthy_rig_prompts_and_config_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, devices = _healthy_camera_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video1", "video2", "video3"})
+    input_fn, prompts = _scripted_input(["", "", "", "", "", "", "", "1", "2", "3"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    assert result == 0
+    assert _config_path(tmp_path).read_text(encoding="utf-8") == _render_config(
+        dict(SUGGESTED),
+        {
+            "top_cam_device": devices[0],
+            "left_cam_device": devices[1],
+            "right_cam_device": devices[2],
+        },
+        {},
+    )
+    assert "no usable by-id entry" not in out.getvalue()
+    assert all("'p'" not in prompt for prompt in prompts if "camera" in prompt)
+
+
+def test_run_setup_device_slot_camera_uses_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("inspection_camera", "v4l2", "inspection camera"),),
+    )
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    pending = [*_slot_defaults(), "", "u", "", ""]
+    prompts: list[str] = []
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def input_fn(prompt: str) -> str:
+        nonlocal detached
+        prompts.append(prompt)
+        if prompt.startswith("Unplug the inspection camera"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug it back in"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return pending.pop(0)
+
+    out = io.StringIO()
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    race_loser = str(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    assert result == 0
+    assert f"inspection_camera = {race_loser}" in _config_path(tmp_path).read_text(encoding="utf-8")
+    assert "no usable by-id entry" in out.getvalue()
+    assert "Unplug the inspection camera now, then press Enter..." in prompts
+
+
+def test_run_setup_missing_current_prints_reconciliation_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    saved = "/dev/v4l/by-id/usb-Intel_RealSense_435_310323023943-video-index0"
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        f"[embodiment.args]\ntop_cam_device = {saved}\n",
+        encoding="utf-8",
+    )
+    input_fn, _prompts = _scripted_input(["", "", "", "", "", "", "", "", "2", "1", "1", "y"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+        sysfs_video=sysfs_video,
+    )
+
+    replacement = str(by_path / "pci-0000:80:14.0-usb-0:9:1.3-video-index0")
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert f"warning: {saved} does not exist here" in out.getvalue()
+    assert (
+        f"a camera with that serial is connected; its stable path is now {replacement}"
+        in out.getvalue()
+    )
+    assert f"top_cam_device = {replacement}" in text
+
+
 def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:
     scripted_input, prompts = _scripted_input([""] * 7)
     out = io.StringIO()
     note = (
         "no display detected (SSH?): the rerun viewer cannot open here; "
         "use --rerun-connect to stream to a viewer on another machine; "
+        "use --rerun-save to keep a replayable .rrd without a local viewer; "
         "frames still record with store_frames"
     )
 
@@ -1266,10 +2438,358 @@ def test_run_setup_yes_no_prompts_reprompt_invalid_answers(tmp_path: Path) -> No
     assert "please answer yes or no" in out.getvalue()
 
 
+def test_identify_camera_finds_by_id_invisible_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Find the #261 D435 despite its absent by-id color-node name."""
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+    prompts: list[str] = []
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        prompts.append(prompt)
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-0000:80:14.0-usb-0:9:1.3-video-index0"
+    assert prompts == [
+        "Unplug the top camera now, then press Enter...",
+        "Plug it back in, then press Enter...",
+    ]
+
+
+def test_identify_camera_alias_pair_counts_as_one_camera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=False,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert "-usbv" not in Path(selected).name
+    assert "2 camera" not in out.getvalue()
+
+
+def test_identify_camera_shared_serial_twin_returns_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unplugging one SN0001 twin identifies it alone and distrusts its by-id name."""
+    by_id, by_path, sysfs_video, dev = _shared_serial_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video15", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video15", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "left",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-usb-3-4-video-index0"
+    assert "cameras disappeared" not in out.getvalue()
+
+
+def test_identify_camera_same_model_empty_serial_owner_returns_by_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _serialless_same_model_rig(tmp_path)
+    _color_by_node(monkeypatch, {"video13", "video15"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video15", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video15", *detached, sysfs_video)
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "left",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-usb-3-4-video-index0"
+
+
+def test_identify_camera_rederives_name_after_replug_reroll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+    fresh_name = by_id / "usb-D435_310323023943-video-index0"
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+            fresh_name.unlink()
+            _symlink(fresh_name, dev / "video10")
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected == str(fresh_name)
+
+
+def test_identify_camera_two_cameras_unplugged_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+            _unplug_camera_node(dev / "video8", by_id, by_path, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is None
+    assert "2 cameras disappeared; unplug only one" in out.getvalue()
+
+
+def test_identify_camera_nothing_unplugged_reports_and_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    out = io.StringIO()
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=lambda _prompt: "",
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is None
+    assert "no camera disappeared" in out.getvalue()
+
+
+def test_identify_camera_not_reappearing_warns_and_keeps_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert Path(selected).name == "pci-0000:80:14.0-usb-0:9:1.3-video-index0"
+    assert "was still not detected; keeping the assignment" in out.getvalue()
+
+
+def test_identify_camera_reappears_on_retry_rescan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached
+        if prompt.startswith("Unplug"):
+            detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif "was not detected" in prompt:
+            assert detached is not None
+            _replug_camera_node(dev / "video10", *detached, sysfs_video)
+        return ""
+
+    out = io.StringIO()
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert selected is not None
+    assert "was still not detected" not in out.getvalue()
+
+
+def test_identify_camera_late_arrival_is_detectable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    by_id, by_path, sysfs_video, dev = _rig(tmp_path)
+    _color_by_node(monkeypatch, {"video10", "video8"})
+    detached = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+    earlier = _camera_inventory(by_id, by_path, sysfs_video)
+    _replug_camera_node(dev / "video10", *detached, sysfs_video)
+
+    detached_again: tuple[list[tuple[Path, Path]], Path] | None = None
+
+    def script(prompt: str) -> str:
+        nonlocal detached_again
+        if prompt.startswith("Unplug"):
+            detached_again = _unplug_camera_node(dev / "video10", by_id, by_path, sysfs_video)
+        elif prompt.startswith("Plug"):
+            assert detached_again is not None
+            _replug_camera_node(dev / "video10", *detached_again, sysfs_video)
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=True,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+
+    assert all(Path(record.node).name != "video10" for record in earlier)
+    assert selected is not None and Path(selected).name.endswith("video-index0")
+
+
+@pytest.mark.parametrize("prefer_by_id", [True, False])
+def test_identify_camera_empty_inventory_delegates_to_legacy_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefer_by_id: bool
+) -> None:
+    by_id, by_path, sysfs_video, _dev = _rig(tmp_path)
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+    directory = by_id if prefer_by_id else by_path
+    selected_entry = next(iter(sorted(directory.iterdir())))
+    target = selected_entry.readlink()
+
+    def script(prompt: str) -> str:
+        if prompt.startswith("Unplug"):
+            selected_entry.unlink()
+        elif prompt.startswith("Plug"):
+            _symlink(selected_entry, target)
+        return ""
+
+    selected = _identify_camera_by_replug(
+        "top",
+        input_fn=script,
+        out=io.StringIO(),
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=prefer_by_id,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+    assert selected == str(selected_entry)
+
+    out = io.StringIO()
+    no_op = _identify_camera_by_replug(
+        "top",
+        input_fn=lambda _prompt: "",
+        out=out,
+        rescan=lambda: _camera_inventory(by_id, by_path, sysfs_video),
+        prefer_by_id=prefer_by_id,
+        by_id_dir=by_id,
+        by_path_dir=by_path,
+    )
+    assert no_op is None
+    assert "no camera device disappeared" in out.getvalue()
+
+
 def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
     devices = ["/dev/camera-top", "/dev/camera-left", "/dev/camera-right"]
     scans = iter(
         [
+            devices,
             [devices[0], devices[2]],
             devices,
         ]
@@ -1279,7 +2799,6 @@ def test_identify_by_replug_finds_disappeared_then_restored_device() -> None:
 
     identified = _identify_by_replug(
         "left",
-        devices,
         input_fn=input_fn,
         out=out,
         rescan=lambda: next(scans),
@@ -1311,7 +2830,6 @@ def test_identify_by_replug_parameterizes_non_camera_nouns(
 
     identified = _identify_by_replug(
         label,
-        ["device0"],
         input_fn=input_fn,
         out=out,
         rescan=lambda: ["device0"],
@@ -1333,6 +2851,7 @@ def test_identify_by_replug_retries_replug_scan_once(
     without_top = [devices[1]]
     scans = iter(
         [
+            devices,
             without_top,
             without_top,
             devices if detected_on_retry else without_top,
@@ -1343,7 +2862,6 @@ def test_identify_by_replug_retries_replug_scan_once(
 
     identified = _identify_by_replug(
         "top",
-        devices,
         input_fn=input_fn,
         out=out,
         rescan=lambda: next(scans),
@@ -2173,6 +3691,271 @@ def test_run_setup_falls_back_to_cameras_without_registered_slots(
     assert not any(prompt.startswith("Configure devices?") for prompt in prompts)
 
 
+def test_run_setup_writes_declared_option_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert AUTO_START.label in prompts[7]
+    assert "auto_start = true" in text
+
+
+def test_run_setup_writes_declared_option_default_no(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert "auto_start = false" in text
+
+
+def test_run_setup_option_suggestion_comes_from_carried_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = true\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [Y/n] "
+    assert "auto_start = true" in text
+
+
+def test_run_setup_option_carried_garbage_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = banana\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert "auto_start = false" in text
+    assert "banana" not in text
+
+
+def test_run_setup_option_answer_overrides_carried_value_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nauto_start = true\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input([*_slot_defaults("option-body"), "n", "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert text.count("auto_start") == 1
+    assert "auto_start = false" in text
+
+
+def test_run_setup_abort_during_options_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,))
+    input_fn, _ = _scripted_input([*_slot_defaults("option-body"), "n", EOFError()])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 1
+    assert "setup aborted; nothing written" in out.getvalue()
+    assert not _config_path(tmp_path).exists()
+
+
+def test_run_setup_interviews_options_alongside_device_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot("left_channel", "can", "left CAN channel"),
+        )
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (AUTO_START,)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"option-body": _Factory} if kind == "embodiment" else {},
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nleft_channel = can9\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert "Configure devices? [Y/n] " in prompts
+    assert AUTO_START.label in prompts[7]
+    assert text.count("left_channel = can9") == 1
+    assert text.count("auto_start = true") == 1
+
+
+def test_run_setup_option_colliding_with_managed_key_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    colliding = OptionSlot(arg="top_cam_device", label="Replace the top camera")
+    _register_option_slots(monkeypatch, (colliding, AUTO_START))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n"
+        "[embodiment.args]\ntop_cam_device = /dev/old-top\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", "y"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert not any(colliding.label in prompt for prompt in prompts)
+    assert sum(AUTO_START.label in prompt for prompt in prompts) == 1
+    assert text.count("top_cam_device = /dev/old-top") == 1
+    assert text.count("auto_start = true") == 1
+
+
+def test_run_setup_duplicate_option_arg_uses_first_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duplicate = OptionSlot(arg="auto_start", label="Duplicate auto start", default=True)
+    _register_option_slots(monkeypatch, (AUTO_START, duplicate))
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert sum(AUTO_START.label in prompt for prompt in prompts) == 1
+    assert not any(duplicate.label in prompt for prompt in prompts)
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert text.count("auto_start = false") == 1
+
+
+def test_run_setup_no_declared_options_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Factory:
+        pass
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"option-body": _Factory} if kind == "embodiment" else {},
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert len(prompts) == 7
+    assert prompts[6] == "Configure cameras? [y/N] "
+    assert not any(AUTO_START.label in prompt for prompt in prompts)
+
+
 def test_run_setup_device_gate_defaults_no_without_probe_or_existing_arg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2546,6 +4329,123 @@ def test_suggest_can_pinning_prints_exact_rules_for_distinct_usb_serials(
         "then replug or reboot), and re-run setup to record the pinned names:\n"
         '  SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="3B004B", NAME="can_left"\n'
         '  SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="3B004C", NAME="can_right"\n'
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_shared_serials_fall_back_to_port_rules(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", "SN0001", device_leaf="3-2:1.0")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "SN0001", device_leaf="3-4:1.0")
+    slots = (
+        DeviceSlot("can_left_channel", "can", "left CAN channel"),
+        DeviceSlot("right_bus", "can", "right CAN bus"),
+    )
+    out = io.StringIO()
+
+    _suggest_can_pinning(
+        sysfs_net,
+        slots,
+        {"can_left_channel": "can0", "right_bus": "can1"},
+        out=out,
+    )
+
+    assert out.getvalue() == (
+        "these CAN interfaces have order-dependent names; a replug can swap them.\n"
+        "adapter serials are missing or shared, so pin them by USB port instead\n"
+        "(paste into /etc/udev/rules.d/70-can-names.rules, then replug or reboot),\n"
+        "and re-run setup to record the pinned names; a port-pinned name follows the\n"
+        "physical USB port, so keep each adapter plugged into the same port:\n"
+        '  SUBSYSTEM=="net", ACTION=="add", KERNELS=="3-2:1.0", NAME="can_left"\n'
+        '  SUBSYSTEM=="net", ACTION=="add", KERNELS=="3-4:1.0", NAME="can_right"\n'
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_missing_serials_fall_back_to_port_rules(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can0", None, device_leaf="3-2:1.0")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", None, device_leaf="3-4:1.0")
+    slots = (
+        DeviceSlot("can_left_channel", "can", "left CAN channel"),
+        DeviceSlot("right_bus", "can", "right CAN bus"),
+    )
+    out = io.StringIO()
+
+    _suggest_can_pinning(
+        sysfs_net,
+        slots,
+        {"can_left_channel": "can0", "right_bus": "can1"},
+        out=out,
+    )
+
+    text = out.getvalue()
+    assert 'SUBSYSTEM=="net", ACTION=="add", KERNELS=="3-2:1.0", NAME="can_left"' in text
+    assert 'SUBSYSTEM=="net", ACTION=="add", KERNELS=="3-4:1.0", NAME="can_right"' in text
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_dual_channel_adapter_stays_bare_warning(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    adapter = tmp_path / "usb1" / "3-2"
+    adapter.mkdir(parents=True)
+    (adapter / "serial").write_text("SN0001\n", encoding="utf-8")
+    device = adapter / "3-2:1.0"
+    _mkdir_or_skip(device)
+    try:
+        for ifname in ("can0", "can1"):
+            (sysfs_net / ifname / "device").symlink_to(device, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    slots = (
+        DeviceSlot("can_left_channel", "can", "left CAN channel"),
+        DeviceSlot("right_bus", "can", "right CAN bus"),
+    )
+    out = io.StringIO()
+
+    _suggest_can_pinning(
+        sysfs_net,
+        slots,
+        {"can_left_channel": "can0", "right_bus": "can1"},
+        out=out,
+    )
+
+    assert out.getvalue() == (
+        "these CAN interfaces have order-dependent names; a replug can swap them.\n"
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks are unavailable")
+def test_suggest_can_pinning_unresolvable_kernels_stays_bare_warning(
+    tmp_path: Path,
+) -> None:
+    sysfs_net = tmp_path / "net"
+    _make_can_interfaces(sysfs_net, "can0", "can1")
+    _attach_can_adapter(tmp_path, sysfs_net, "can1", "SN0001", device_leaf="3-4:1.0")
+    slots = (
+        DeviceSlot("can_left_channel", "can", "left CAN channel"),
+        DeviceSlot("right_bus", "can", "right CAN bus"),
+    )
+    out = io.StringIO()
+
+    _suggest_can_pinning(
+        sysfs_net,
+        slots,
+        {"can_left_channel": "can0", "right_bus": "can1"},
+        out=out,
+    )
+
+    assert out.getvalue() == (
+        "these CAN interfaces have order-dependent names; a replug can swap them.\n"
     )
 
 

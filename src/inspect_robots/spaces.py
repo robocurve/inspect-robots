@@ -14,6 +14,7 @@ layered on in a later step without changing these signatures.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -39,6 +40,9 @@ RotationRepr = Literal[
 GripperKind = Literal["none", "continuous", "binary"]
 Frame = Literal["base", "world", "camera"]
 
+#: Control modes whose actions name absolute targets rather than per-step changes.
+ABSOLUTE_CONTROL_MODES = frozenset({"joint_pos", "eef_abs_pose"})
+
 
 @dataclass(frozen=True)
 class ActionSemantics:
@@ -49,6 +53,12 @@ class ActionSemantics:
     LLM agent policies, logging, visualization — can address dimensions by
     name. Length is validated against the owning box in ``Box.__post_init__``
     (the semantics/shape pairing is only visible there).
+
+    ``max_step`` optionally declares the safe per-control-step change for each
+    absolute-target dimension in the action space's native units. A ``None``
+    entry leaves that dimension to range-based defaults. Displacement and rate
+    boxes already declare per-step limits through their bounds, so declarations
+    are rejected for those modes.
     """
 
     control_mode: ControlMode
@@ -56,6 +66,21 @@ class ActionSemantics:
     gripper: GripperKind = "none"
     frame: Frame = "base"
     dim_labels: tuple[str, ...] | None = None
+    max_step: tuple[float | None, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_step is None:
+            return
+        for entry in self.max_step:
+            if entry is not None and (not math.isfinite(entry) or entry <= 0):
+                raise ValueError("ActionSemantics.max_step entries must be finite and > 0 or None")
+        if self.control_mode not in ABSOLUTE_CONTROL_MODES and any(
+            entry is not None for entry in self.max_step
+        ):
+            raise ValueError(
+                "ActionSemantics.max_step is only valid for absolute control modes; "
+                "displacement boxes already declare per-step limits via low/high"
+            )
 
 
 @dataclass(frozen=True, eq=False)
@@ -82,6 +107,22 @@ class Box:
                 f"ActionSemantics.dim_labels has {len(labels)} entries but the box "
                 f"has {self.dim} dimensions"
             )
+        max_step = self.semantics.max_step if self.semantics is not None else None
+        if max_step is not None:
+            if len(max_step) != self.dim:
+                raise ValueError(
+                    f"ActionSemantics.max_step has {len(max_step)} entries but the box "
+                    f"has {self.dim} dimensions"
+                )
+            if self.low is not None and self.high is not None:
+                pinned = np.asarray(self.low == self.high).reshape(-1)
+                if any(
+                    step is not None and bool(pinned[index]) for index, step in enumerate(max_step)
+                ):
+                    raise ValueError(
+                        "ActionSemantics.max_step cannot be declared for a pinned "
+                        "dimension whose low == high"
+                    )
 
     @property
     def dim(self) -> int:

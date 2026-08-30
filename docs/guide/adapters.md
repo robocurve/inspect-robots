@@ -76,11 +76,45 @@ DEVICE_SLOTS = (
 )
 ```
 
+These declarations also feed a run-time advisory device claim. If two evals
+name the same device, the second fails at startup instead of double-driving the
+hardware. The claim is `flock`-based and vanishes with the process. Claims are
+per-user, so they do not guard against two different users driving one rig.
+Camera and serial paths count as the same device after resolving symlinks,
+while CAN interface names are compared verbatim, so `can0` in one config and a
+udev-pinned alias for the same adapter in another do not collide. On hosts
+without `XDG_RUNTIME_DIR`, the fallback lock directory lives under the
+world-writable temporary directory, and the guard refuses lock directories it
+does not own. The guard is a safety net against your own concurrent evals, not
+a security boundary.
+
 The recognized kinds are `v4l2` for stable camera paths, `can` for SocketCAN
 interface names, and `serial` for absolute `/dev/serial/by-id` paths. The setup
 wizard probes and interviews slots in declaration order, then writes each
 selection to its `arg` key under `[embodiment.args]`. Slots with the same
 non-`None` `group` are all-or-none. Ungrouped slots remain independent.
+
+## Declare option slots
+
+Declare boolean behavior toggles on the registered embodiment factory. Import
+[`OptionSlot`](/api/#inspect_robots.conformance.OptionSlot) from the
+`inspect_robots.conformance` submodule:
+
+```python
+from inspect_robots.conformance import OptionSlot
+
+OPTION_SLOTS = (
+    OptionSlot(
+        arg="auto_start",
+        label="Skip the operator start prompts (auto_start)",
+    ),
+)
+```
+
+Each slot is one yes/no question in the setup wizard. Its `arg` is the
+`[embodiment.args]` key written as `true` or `false`. On re-runs, the carried
+config value is the suggested answer. A declaration is skipped when its `arg`
+collides with a device slot, a camera key, or an earlier option declaration.
 
 ## The conformance kit
 

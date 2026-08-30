@@ -4,23 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
+from inspect_robots._chatwire import HttpPost, chat_completion
 from inspect_robots._html import _agent_notes, _chat_content, _display_status
 from inspect_robots._pointers import resolve_log_pointer
 from inspect_robots.cli import _OUTCOME_PHRASES
 from inspect_robots.errors import ConfigError
 from inspect_robots.log import EvalLog, SceneResult, read_eval_log
 
-HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
-
 _TRANSCRIPT_CHAR_BUDGET = 24_000
-_RESPONSE_EXCERPT_LIMIT = 500
 _TRUNCATION_MARKER = "[... beginning omitted; showing transcript tail ...]\n"
 
 _SYSTEM_PROMPT = """Distill this robot evaluation into concise markdown.
@@ -182,6 +177,9 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
             note = _parallel_value(scene.operator_notes, epoch)
             if note is not None:
                 fields.append(f"operator notes: {_one_line(note)}")
+            if epoch < len(scene.operator_messages):
+                for message in scene.operator_messages[epoch]:
+                    fields.append(f"operator feedback: {_one_line(message['text'])}")
             if not scores and scene.status == "error" and scene.error:
                 fields.append(f"error: {_one_line(scene.error)}")
             lines.append(f"- `{scene.scene_id}` epoch {epoch}: {'; '.join(fields)}")
@@ -237,64 +235,6 @@ def build_messages(digest: str, transcripts: list[TrialTranscript]) -> list[dict
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
-
-
-def _response_excerpt(body: bytes) -> str:
-    text = body.decode("utf-8", errors="replace").strip()
-    return (text or "(empty response body)")[:_RESPONSE_EXCERPT_LIMIT]
-
-
-def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
-    """Send one blocking HTTP POST and preserve HTTP error bodies for guided failures."""
-    request = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=120.0) as response:
-            return int(response.status), response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-    except urllib.error.URLError as exc:
-        raise ConfigError(
-            f"summary request failed: {exc.reason}.\n"
-            "fix: check --base-url and network connectivity, then retry"
-        ) from exc
-
-
-def chat_completion(
-    base_url: str,
-    api_key: str,
-    model: str,
-    messages: list[dict[str, Any]],
-    *,
-    http_post: HttpPost | None = None,
-) -> str:
-    """Return one OpenAI-compatible chat completion or raise a guided configuration error."""
-    url = base_url.rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = json.dumps({"model": model, "messages": messages, "max_tokens": 8192}).encode("utf-8")
-    post = _urllib_post if http_post is None else http_post
-    status, response_body = post(url, headers, body)
-    if not 200 <= status < 300:
-        raise ConfigError(
-            f"summary request failed with HTTP {status}: {_response_excerpt(response_body)}\n"
-            "fix: check --base-url, --model, and the configured API key"
-        )
-
-    try:
-        payload = cast(dict[str, Any], json.loads(response_body))
-        choices = cast(list[Any], payload["choices"])
-        message = cast(dict[str, Any], choices[0]["message"])
-        content = message["content"]
-        if not isinstance(content, str):
-            raise TypeError
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError, TypeError):
-        raise ConfigError(
-            f"summary endpoint returned a malformed reply: {_response_excerpt(response_body)}\n"
-            "fix: use an OpenAI-compatible /chat/completions endpoint"
-        ) from None
-    return content
 
 
 def summarize(

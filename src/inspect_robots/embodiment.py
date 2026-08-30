@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from inspect_robots.approver import GuardrailContribution
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.types import Action, Observation, StepResult
@@ -80,6 +81,52 @@ class Embodiment(Protocol):
     fires once per ``eval()``, which can be several times over an embodiment's
     lifetime; each call replaces the previous envelope. ``EmbodimentBase``
     ships a no-op default.
+
+    Embodiments may additionally offer an optional
+    ``connect_operator_session(session)`` hook. Accepting the session is a
+    stand-down promise for that run: the embodiment must never read stdin or
+    print its own status output after the call. The session provides
+    ``status(line)`` for an in-place status line, ``write_line(text)`` for
+    scrollback that safely repaints that status, and ``gate(prompt, hint=...)``
+    for blocking readiness confirmation. A gate flushes stale fd input first
+    and raises [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault] when
+    stdin is unavailable, with remedies and the embodiment's optional hint.
+    The hook is optional input, not a guarantee. It never fires under
+    ``--no-prompt``, without a TTY, on Windows, from direct ``rollout()`` or
+    ``eval()`` calls, or on older cores. An embodiment must keep a graceful
+    fallback and a working end-of-episode path whenever the hook does not fire.
+    The hook stays outside this Protocol so older embodiments remain
+    conformant.
+
+    Embodiments may additionally offer an optional ``observe_parked()`` hook:
+    when a scored trial is about to be graded, ``eval()`` calls it so the
+    embodiment can move itself to its parked/rest pose and return one fresh
+    [`Observation`][inspect_robots.types.Observation] whose cameras see the
+    scene unobstructed; the vlm grader then judges those final frames instead
+    of the last step's. Returning ``None`` declines (right when parking would
+    alter the state being graded, e.g. a held object). Raising
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort] or
+    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault] halts the eval;
+    any other failure degrades to last-step frames with a ``RuntimeWarning``.
+    The hook is optional input, not a guarantee: it never fires on direct
+    ``rollout()`` calls, without a grading hook, or on older cores, and it
+    stays outside this Protocol so older embodiments remain conformant.
+
+    The optional ``defer_operator_end()`` hook is superseded by
+    ``connect_operator_session`` but remains supported. An embodiment that
+    polls stdin for the end-of-episode keypress must stop doing so when called;
+    the framework console owns stdin for that run. Offering this legacy hook
+    is also how a real-hardware embodiment declares itself console-safe to
+    cores and adapters that have not adopted the session hook.
+
+    Embodiments may also define an **optional**
+    ``contribute_guardrails(self, action_space: Box) -> GuardrailContribution``
+    hook, likewise omitted from this Protocol so existing implementations
+    remain runtime-conformant. The CLI calls it with the resolved action space
+    and appends its contribution after the generic clamp and delta limiter.
+    Direct ``rollout()`` and programmatic ``eval()`` callers compose their own
+    approvers, so the hook is CLI input rather than a universal callback.
+    ``EmbodimentBase`` returns an empty contribution by default.
     """
 
     info: EmbodimentInfo
@@ -118,6 +165,10 @@ class EmbodimentBase(ABC):
 
     def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
         """Default: embodiments with nothing to display or pre-allocate ignore it."""
+
+    def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+        """Default: embodiments without specialized safety gates contribute nothing."""
+        return GuardrailContribution()
 
     def close(self) -> None:  # noqa: B027 - intentional no-op default
         """Default: nothing to release."""

@@ -36,15 +36,20 @@ from inspect_robots.transcript import (
     approval_event,
     error_event,
     inference_event,
+    operator_event,
+    operator_message_event,
     reset_event,
     step_event,
 )
-from inspect_robots.types import Action, Observation, StepResult
+from inspect_robots.types import OPERATOR_END, Action, Observation, StepResult
 
 if TYPE_CHECKING:
+    from inspect_robots.console import OperatorInput
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
+_APPROVALS_KEY = "_rollout_approvals"
+_OPERATOR_MSGS_KEY = "_rollout_operator_messages"
 
 
 def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> int:
@@ -63,8 +68,10 @@ def derive_seed(eval_seed: int | None, scene_seed: int | None, epoch: int) -> in
 class StepRecord:
     """One step of a recorded trajectory.
 
-    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, ``observation`` has its
-    images stripped and ``image_refs`` holds on-disk handles instead (R5).
+    When a [`FrameStore`][inspect_robots.frames.FrameStore] is used, both
+    ``observation`` and ``result.observation`` have their images stripped.
+    ``image_refs`` and ``result_image_refs`` hold the corresponding on-disk
+    handles instead (R5).
     """
 
     t: int
@@ -72,6 +79,7 @@ class StepRecord:
     action: Action
     result: StepResult
     image_refs: Mapping[str, FrameRef] | None = None
+    result_image_refs: Mapping[str, FrameRef] | None = None
 
 
 @dataclass
@@ -82,6 +90,9 @@ class TrialRecord:
     epoch: int
     seed: int | None
     steps: list[StepRecord] = field(default_factory=list)
+    # In-memory only: EvalLog embeds SceneResult aggregates and never TrialRecord,
+    # so no asdict path reaches the numpy images and the log schema is untouched.
+    parked_observation: Observation | None = None
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
@@ -144,6 +155,56 @@ def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> Ins
     return exc
 
 
+def _connection_failure(exc: Exception) -> bool:
+    """Return whether an exception chain contains a connection failure."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConnectionError) or type(current).__name__ in {
+            "ConnectionError",
+            "NewConnectionError",
+            "ConnectError",
+        }:
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return False
+
+
+def _policy_error(policy: Policy, exc: Exception) -> PolicyError:
+    """Wrap a generic policy exception, appending a hint on connection failures."""
+    message = str(exc)
+    if _connection_failure(exc):
+        try:
+            url = getattr(policy, "server_url", None)
+            remedy = getattr(policy, "remedy", None)
+            name = policy.info.name
+            if url:
+                # "up and healthy", not "running": builtin ConnectionError
+                # matches also cover reset/broken-pipe, where the server
+                # answered and then dropped the connection.
+                message += (
+                    f"\nhint: policy {name!r} could not hold a connection to its "
+                    f"action server at {url} — is the server up and healthy? "
+                    "Start (or restart) it, then rerun."
+                )
+            else:
+                message += (
+                    f"\nhint: policy {name!r} hit a connection failure — "
+                    "a backend it depends on may be down or unreachable."
+                )
+            if remedy:
+                message += f"\nhint: {remedy}"
+        except Exception:
+            pass  # a raising server_url/remedy property must not mask the trial error
+    return PolicyError(message)
+
+
 def _store_frames(
     frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
@@ -152,6 +213,23 @@ def _store_frames(
         return obs, None
     refs = {cam: frame_store.put(trial_id, t, cam, image) for cam, image in obs.images.items()}
     return replace(obs, images={}), refs
+
+
+def _end_operator_trial(operator_input: OperatorInput | None) -> None:
+    """Best-effort call the optional operator-input trial teardown hook."""
+    if operator_input is not None:
+        try:
+            end_trial = getattr(operator_input, "end_trial", None)
+            if callable(end_trial):
+                end_trial()
+        except Exception as exc:
+            # stacklevel=3 skips this helper so the warning points at rollout's
+            # caller, like the disable-site warnings issued from rollout() itself.
+            warnings.warn(
+                f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
 
 def rollout(
@@ -166,6 +244,7 @@ def rollout(
     approver: Approver,
     sink: LogSink,
     frame_store: FrameStore | None = None,
+    operator_input: OperatorInput | None = None,
 ) -> TrialRecord:
     """Run a single trial and return its record.
 
@@ -194,6 +273,7 @@ def rollout(
     delta_hook: Any = getattr(policy, "transcript_delta", None)
     messages_hook: Any = getattr(sink, "log_policy_messages", None)
     stream_ok = callable(delta_hook) and callable(messages_hook)
+    console_ok = operator_input is not None
 
     try:
         t = -1
@@ -204,7 +284,7 @@ def rollout(
             _record_failure(record, exc, -1)
             raise
         except Exception as exc:
-            raise _record_failure(record, PolicyError(str(exc)), -1) from exc
+            raise _record_failure(record, _policy_error(policy, exc), -1) from exc
         try:
             obs = embodiment.reset(scene, seed=seed)
         except InspectRobotsError as exc:
@@ -213,21 +293,88 @@ def rollout(
         except Exception as exc:
             raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
 
+        if operator_input is not None:
+            try:
+                operator_input.begin_trial()
+            except Exception as exc:
+                console_ok = False
+                _end_operator_trial(operator_input)
+                warnings.warn(
+                    f"Operator console disabled for this trial after {type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
         t = 0
         while t < max_steps:
+            poll = None
+            if operator_input is not None and console_ok:
+                try:
+                    poll = operator_input.poll()
+                except Exception as exc:
+                    console_ok = False
+                    _end_operator_trial(operator_input)
+                    warnings.warn(
+                        "Operator console disabled for this trial after "
+                        f"{type(exc).__name__}: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            if poll is not None:
+                for i, text in enumerate(poll.messages):
+                    source = poll.sources[i] if i < len(poll.sources) else "console"
+                    store.setdefault(_OPERATOR_MSGS_KEY, []).append(
+                        {"t": t, "text": text, "source": source}
+                    )
+                    record.events.append(operator_message_event(t, text, source))
+
             prev_inferences = len(store.get(_INFER_KEY, []))
+            all_approvals = store.get(_APPROVALS_KEY, [])
+            last_approvals_idx = store.get("_rollout_last_approvals_idx", 0)
+            tail_approvals = [dict(a) for a in all_approvals[last_approvals_idx:]]
+            all_operator_msgs = store.get(_OPERATOR_MSGS_KEY, [])
+            last_operator_msgs_idx = store.get("_rollout_last_operator_msgs_idx", 0)
+            tail_operator_msgs = [
+                dict(message) for message in all_operator_msgs[last_operator_msgs_idx:]
+            ]
+
+            if poll is not None and poll.end is not None:
+                record.terminated = True
+                record.termination_reason = OPERATOR_END
+                if poll.end.verdict is not None:
+                    record.operator_judgement = poll.end.verdict
+                    record.operator_note = poll.end.note
+                    record.events.append(
+                        operator_event(
+                            t=t,
+                            verdict=poll.end.verdict,
+                            source="console",
+                            note=poll.end.note,
+                        )
+                    )
+                break
+
             try:
-                action = controller.next_action(
-                    policy, replace(obs, extra={**obs.extra, "env_step": t}), t, store
+                policy_extra = {**obs.extra, "env_step": t, "approvals": tail_approvals}
+                if operator_input is not None:
+                    policy_extra["operator_messages"] = tail_operator_msgs
+                obs_with_extra = replace(
+                    obs,
+                    extra=policy_extra,
                 )
+                action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
             except Exception as exc:
-                raise _record_failure(record, PolicyError(str(exc)), t) from exc
+                raise _record_failure(record, _policy_error(policy, exc), t) from exc
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:
+                store["_rollout_last_approvals_idx"] = len(all_approvals)
+                if operator_input is not None:
+                    store["_rollout_last_operator_msgs_idx"] = len(all_operator_msgs)
                 latency, chunk_len = inferences[-1]
                 record.events.append(inference_event(t, latency, chunk_len))
                 if stream_ok:
@@ -277,6 +424,7 @@ def rollout(
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
+                store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
             try:
@@ -288,9 +436,23 @@ def rollout(
                 raise _record_failure(record, EmbodimentFault(str(exc)), t) from exc
 
             sink.log_step(t, obs, action, result)
-            obs_rec, refs = _store_frames(frame_store, trial_id, t, obs)
+            result_obs_rec, result_refs = _store_frames(
+                frame_store, trial_id, t + 1, result.observation
+            )
+            result_rec = (
+                result
+                if result_obs_rec is result.observation
+                else replace(result, observation=result_obs_rec)
+            )
             record.steps.append(
-                StepRecord(t=t, observation=obs_rec, action=action, result=result, image_refs=refs)
+                StepRecord(
+                    t=t,
+                    observation=obs_rec,
+                    action=action,
+                    result=result_rec,
+                    image_refs=refs,
+                    result_image_refs=result_refs,
+                )
             )
             record.events.append(
                 step_event(t, result.terminated, result.truncated, result.termination_reason)
@@ -313,6 +475,8 @@ def rollout(
                 record.termination_reason = stop_reason
                 break
             obs = result.observation
+            obs_rec = result_obs_rec
+            refs = result_refs
         else:
             record.truncated = True
             record.termination_reason = "max_steps"
@@ -322,6 +486,7 @@ def rollout(
         record.events.append(error_event(t, "KeyboardInterrupt", "cancelled by user"))
         raise _CancelledTrial(record.error, record) from exc
     finally:
+        _end_operator_trial(operator_input)
         # Preserve measured latencies even when the trial ends in an error.
         record.inference_latencies = [
             lat for lat, _ in store.get(_INFER_KEY, []) if lat is not None

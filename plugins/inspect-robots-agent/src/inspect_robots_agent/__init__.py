@@ -1,11 +1,11 @@
-"""inspect-robots-agent — frontier LLMs as first-class Inspect Robots policies.
+"""inspect-robots-agent: frontier LLMs as first-class Inspect Robots policies.
 
-An LLM behind any OpenAI-compatible API (OpenRouter, OpenAI, local
-vLLM/Ollama, Anthropic's compat endpoint) drives whatever embodiment it is
+An LLM behind a supported API (OpenRouter, OpenAI, local vLLM/Ollama,
+Anthropic, Tinker, or compatible gateways) drives whatever embodiment it is
 paired with: each tool call becomes one smooth, approver-checked action
-chunk. ``-P wire=anthropic`` swaps the OpenAI-compat shim for Anthropic's
-native Messages API, which is what fast mode needs. Registered as the policy
-``agent``::
+chunk. ``-P wire=messages`` selects the Messages API; the permanent
+``anthropic`` alias remains accepted. ``-P wire=interactions`` selects
+Google's stateful Interactions HTTP API. Registered as the policy ``agent``::
 
     inspect-robots "pick up the cube" --policy agent \
         -P model=anthropic/claude-fable-5 --embodiment cubepick
@@ -26,6 +26,8 @@ from __future__ import annotations
 from importlib.metadata import version
 
 from inspect_robots_agent._anthropic import AnthropicClient
+from inspect_robots_agent._gemini_live import GeminiLiveClient
+from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import (
     ENV_MODEL,
     AssistantMessage,
@@ -43,6 +45,8 @@ __all__ = [
     "AnthropicClient",
     "AssistantMessage",
     "ChatClient",
+    "GeminiLiveClient",
+    "InteractionsClient",
     "LLMAgentPolicy",
     "Provider",
     "ResponsesClient",

@@ -13,6 +13,7 @@ EXPECTED = {
     # evaluation + logs
     "eval",
     "eval_set",
+    "generate_scene",
     "read_eval_log",
     "EvalLog",
     "EvalResults",
@@ -33,6 +34,11 @@ EXPECTED = {
     "min_distance_to_goal",
     "reached_goal_state",
     "operator_scorer",
+    "operator_input",
+    # judgement capture (plans 0049 and 0069)
+    "Grader",
+    "operator_grader",
+    "vlm_grader",
     # the two swappable inputs
     "Policy",
     "PolicyBase",
@@ -41,7 +47,14 @@ EXPECTED = {
     "Embodiment",
     "EmbodimentBase",
     "EmbodimentInfo",
+    # attended operator input
+    "OperatorInput",
+    "OperatorConsole",
+    "OperatorSession",
+    "ConsolePoll",
+    "EndRequest",
     # types & spaces
+    "ABSOLUTE_CONTROL_MODES",
     "Observation",
     "Action",
     "ActionChunk",
@@ -58,6 +71,7 @@ EXPECTED = {
     "policy",
     "embodiment",
     "scorer",
+    "grader",
     "sink",
     "registered",
     "resolve",

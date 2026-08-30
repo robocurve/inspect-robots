@@ -50,7 +50,7 @@ class ResponsesClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         temperature: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
     ) -> AssistantMessage:
         """Return one assistant turn for the translated chat-format history."""
         history_call_ids = _history_call_ids(messages)

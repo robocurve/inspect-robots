@@ -15,17 +15,17 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ![Status: alpha](https://img.shields.io/badge/status-alpha-blue)
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
-[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://inspectrobots.org/)
+[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://docs.inspectrobots.org/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
-[**Documentation**](https://inspectrobots.org/) ·
-[Quickstart](https://inspectrobots.org/guide/quickstart/) ·
-[Concepts](https://inspectrobots.org/guide/concepts/) ·
-[For LLMs](https://inspectrobots.org/llms.txt)
+[**Documentation**](https://docs.inspectrobots.org/) ·
+[Quickstart](https://docs.inspectrobots.org/guide/quickstart/) ·
+[Concepts](https://docs.inspectrobots.org/guide/concepts/) ·
+[For LLMs](https://docs.inspectrobots.org/llms.txt)
 
 </div>
 
@@ -64,10 +64,11 @@ uv pip install inspect-robots-yam   # provides the molmoact2 policy + yam_arms r
 inspect-robots setup
 ```
 
-The wizard picks your defaults and finds your cameras, then writes
-`~/.config/inspect-robots/config.ini`. On a different rig, install its plugin
-instead and type its component names at the prompts; to write the config file
-by hand, see [the CLI guide](https://inspectrobots.org/guide/cli/).
+The wizard picks your defaults, finds your cameras, and asks about behavior
+toggles declared by the embodiment plugin, such as yam's `auto_start`, then
+writes `~/.config/inspect-robots/config.ini`. On a different rig, install its
+plugin instead and type its component names at the prompts; to write the config
+file by hand, see [the CLI guide](https://docs.inspectrobots.org/guide/cli/).
 
 The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
 server is listening, and the server does not start itself or survive a
@@ -91,8 +92,9 @@ inspect-robots "place the fork on the plate"
 
 Every run opens a live Rerun viewer streaming the cameras, proprioception,
 and actions straight from the eval pipeline, so you watch exactly what the
-policy sees while the robot moves. CLI flags override any default
-(`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
+policy sees while the robot moves, and saves that stream as a replayable `.rrd`
+beside the eval log. CLI flags override any default (`--no-rerun-save`,
+`--no-rerun`, `--no-store-frames`, `--max-steps 300`, ...).
 
 ### Drive the robot with an LLM
 
@@ -124,7 +126,42 @@ inspect-robots "place the fork on the plate" --policy agent \
 Read the recorded agent conversation with
 `inspect-robots inspect LOG.json --transcript`, or open the HTML report with
 `inspect-robots view LOG.json`. For `--store-frames` runs it includes the
-camera frames the model saw.
+camera frames the model saw. Once a few runs have accumulated,
+`inspect-robots view logs/` renders them all and builds a browsable index.
+
+### Fast Opus 5 streamed to a remote Rerun viewer
+
+The same agent policy can run Claude Opus 5 in
+[fast mode](plugins/inspect-robots-agent/README.md#fast-mode-on-claude) at
+high thinking effort, streaming the rollout live to a Rerun viewer on your
+laptop (`rerun` locally, then `ssh -R 9876:localhost:9876 <robot>` for the
+tunnel). The explicit `run --instruction` form keeps the instruction on the
+last line, so the operator only ever edits the end of the command:
+
+```bash
+inspect-robots run --policy agent --rerun-connect \
+    -P model=anthropic/claude-opus-5 -P wire=messages -P speed=fast \
+    -P effort=high \
+    --instruction "place the fork on the plate"
+```
+
+### Talk to the policy while it runs
+
+With the [voice plugin](plugins/inspect-robots-voice/) installed, `--voice`
+keeps the microphone open for the whole run and delivers each spoken remark to
+the policy at its next inference, transcribed locally (no keys, no network).
+Silence sends nothing, and voice is feedback-only: ending an episode and
+recording verdicts stay on the keyboard.
+
+```bash
+pip install inspect-robots-voice
+inspect-robots run --policy agent -P model=anthropic/claude-opus-5 \
+    --voice \
+    --instruction "place the fork on the plate"
+```
+
+Typed console feedback keeps working alongside; both land in the transcript
+and the eval log with their source recorded.
 
 ### Retry with learning
 
@@ -167,6 +204,41 @@ real robot:
 inspect-robots "place the fork on the plate" --sim
 ```
 
+### Browse your runs
+
+Every run writes an eval log; pass the whole directory to `view` and each log
+is rendered into `logs/html/` behind a filterable `index.html` — when,
+instruction, policy/model, status, metrics, termination, and error for each
+run, newest first, with rows linking to the per-log HTML reports:
+
+```bash
+inspect-robots view logs/
+```
+
+Re-runs are incremental (only new or changed logs are re-rendered; `--force`
+re-renders everything, e.g. after changing `--no-frames` or
+`--frames-budget`). Open the statically rendered index directly with `--open`.
+
+To render, serve, and open the index locally, leave this running:
+
+```bash
+inspect-robots view logs/ --serve --open
+```
+
+New runs appear automatically while the index is served. On a headless robot
+host, bind to the network and open the printed URL from your laptop:
+
+```bash
+inspect-robots view logs/ --serve --host 0.0.0.0
+```
+
+`--host 0.0.0.0` exposes the viewer to anyone who can reach the machine; they
+can view the logs, including embedded camera frames. The served index
+auto-refreshes as new runs arrive.
+
+Agent runs update their HTML report turn by turn while the run is active.
+Scores appear when the canonical final log replaces the running snapshot.
+
 ### More CLI commands
 
 The full command line resolves any registered task/policy/embodiment
@@ -200,10 +272,12 @@ model, it sends the digest and bounded transcript tails to an OpenAI-compatible
 chat endpoint. Output defaults to `logs/learnings/<log-stem>.md`; use `-o FILE`
 to choose a path or `-o -` for stdout.
 
-Render a saved eval log as a self-contained HTML report:
+Render a saved eval log as a self-contained HTML report, or a whole logs
+directory as a browsable index (see [Browse your runs](#browse-your-runs)):
 
 ```bash
 inspect-robots view logs/cubepick-reach_*.json
+inspect-robots view logs/
 ```
 
 Render a `--store-frames` run's camera frames to MP4 videos (needs the
@@ -261,7 +335,7 @@ Trossen discontinued the WidowX 250S in July 2025. That adapter supports
 existing 250S rigs; the successor WidowX AI uses a different stack.
 
 New robot integrations are welcome. If your rig is not listed,
-[Authoring an embodiment adapter](https://inspectrobots.org/guide/adapters/)
+[Authoring an embodiment adapter](https://docs.inspectrobots.org/guide/adapters/)
 walks through both halves of the pair, and opening an issue with the robot and
 its SDK is a good first step.
 
@@ -311,8 +385,8 @@ the compatibility check before anything moves, not mid-rollout.
 
 ## First-party plugins
 
-Both halves of an eval (the "body" and the "brain") have a ready-made
-adapter shipped from this repo as separate packages:
+Policies, embodiments, and attended operator input have ready-made plugins
+shipped from this repo as separate packages:
 
 - **[inspect-robots-ros](plugins/inspect-robots-ros/)**: run evals on ROS 1 or
   ROS 2 arms through rosbridge, with no ROS installation on the eval machine
@@ -334,6 +408,11 @@ adapter shipped from this repo as separate packages:
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
   then queues approver-checked joint targets behind `--policy capx`.
+- **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
+  microphone speech into operator feedback during attended runs with
+  `--voice`, or narrate streamed policy notes and terminal summaries with
+  `run --speak`. Spoken input is feedback-only, so trial end and verdicts stay
+  on the keyboard.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:
@@ -371,8 +450,9 @@ camera configuration, and reset behavior are documented in the
 [ROS plugin README](plugins/inspect-robots-ros/).
 
 Safety guardrails (a bounds clamp plus a per-step delta limit derived from
-the embodiment's action space) are wired into every CLI run by default, for
-every policy. Turning them off requires an explicit `--disable-guardrails`.
+the embodiment's action space, followed by any specialized guardrails the
+embodiment contributes) are wired into every CLI run by default, for every
+policy. Turning them off requires an explicit `--disable-guardrails`.
 Persist your usual setup once with `inspect-robots config set embodiment NAME`
 and `inspect-robots config set policy NAME`, then a bare
 `inspect-robots "wipe the table"` does the rest.
@@ -397,9 +477,9 @@ and backend adapters live in separate plugin packages.
 ## Documentation
 
 Full guides and an auto-generated API reference live at
-**[inspectrobots.org](https://inspectrobots.org/)**.
-LLM-friendly versions: [`llms.txt`](https://inspectrobots.org/llms.txt)
-and [`llms-full.txt`](https://inspectrobots.org/llms-full.txt).
+**[docs.inspectrobots.org](https://docs.inspectrobots.org/)**.
+LLM-friendly versions: [`llms.txt`](https://docs.inspectrobots.org/llms.txt)
+and [`llms-full.txt`](https://docs.inspectrobots.org/llms-full.txt).
 
 ## Development
 

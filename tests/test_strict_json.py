@@ -113,6 +113,26 @@ def test_nan_action_halts_as_safety_abort_and_log_reaches_disk(tmp_path: Path) -
     _read_strict(path)  # strict parseable even for a halted run
 
 
+def test_long_task_name_still_writes_its_log(tmp_path: Path) -> None:
+    # The filename is derived from the task name, so an unbounded name pushed the
+    # path past the 255-byte limit and on_eval_end raised OSError *after* every
+    # trial had run, leaving log_dir empty and the run unrecoverable (#292).
+    name = "a" * 300
+    task = Task(
+        name=name,
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=3,
+    )
+    (log,) = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    (path,) = tmp_path.glob("*.json")
+    assert len(path.name.encode()) <= 255
+    # The full name is preserved in the log body; only the filename is capped.
+    assert log.eval.task == name
+    assert read_eval_log(str(path)).eval.task == name
+
+
 def test_json_dump_backstop_rejects_unsanitized_non_finite(tmp_path: Path) -> None:
     # The allow_nan=False regression backstop: if a non-finite value ever
     # slipped past _sanitize, the write would fail loudly.

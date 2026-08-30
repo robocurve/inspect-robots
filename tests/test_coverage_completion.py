@@ -35,7 +35,7 @@ from inspect_robots.scene import ListSceneDataset, Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end, value_to_float
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
 from inspect_robots.task import Task
-from inspect_robots.transcript import approval_event, operator_event
+from inspect_robots.transcript import approval_event, operator_event, operator_message_event
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 _SCENE = Scene(id="s", instruction="reach", init_seed=0)
@@ -307,6 +307,14 @@ def test_list_scene_dataset() -> None:
 def test_transcript_event_helpers() -> None:
     assert approval_event(1, modified=True, detail="clamped").kind == "approval"
     assert operator_event(2, "success").data["verdict"] == "success"
+    assert operator_message_event(3, "typed feedback").data == {
+        "text": "typed feedback",
+        "source": "console",
+    }
+    assert operator_message_event(4, "spoken feedback", "voice").data == {
+        "text": "spoken feedback",
+        "source": "voice",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -498,7 +506,13 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
     assert sink.available is True  # imports the fake backend
     assert sink.available is True  # cached self._rr path
 
-    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(max_steps=40),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
     assert log.status == "success"
     assert "init" in calls and "save" in calls and "time" in calls
     # Entities are namespaced per trial so trials never overwrite each other.
@@ -528,7 +542,13 @@ def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> Non
     from inspect_robots.logging.rerun_sink import RerunSink
 
     sink = RerunSink(jpeg_quality=None)
-    (log,) = eval(_task(max_steps=40), ScriptedPolicy(), CubePickEmbodiment(), sinks=[sink])
+    (log,) = eval(
+        _task(max_steps=40),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[sink],
+        store_actions=False,
+    )
     assert log.status == "success"
     assert "time" in calls  # rr.set_time (>=0.23) was used
     assert paths and all(p.startswith("trial/s/e0/") for p in paths)

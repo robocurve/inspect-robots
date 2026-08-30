@@ -58,15 +58,24 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 ## Operator and VLM scoring (real world)
 
 Real robots have no privileged success oracle. The dominant method is a human
-verdict, captured *once* during the rollout (as a transcript event) and read
-back by [`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
-A [`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface is reserved for scoring final
-frames with a vision-language classifier.
+verdict, captured *once* per trial and read back by
+[`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
+Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a registered
+component (`inspect_robots.graders` entry point, `grader` decorator) whose
+`grade(record, scene)` runs once per scored trial, after the rollout and
+before the scorers, and writes the judgement onto the record. The builtin
+`operator` grader prompts the terminal operator, and the builtin `vlm`
+grader is the autograder on the same seam: a vision model judges the trial's
+first and last frames against a rubric (the reserved
+[`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface predates it
+and stays a stub, because R6 requires scorers to be pure readers).
 
-Trials that end with `termination_reason="operator_end"` are prompted on any
-attended run — registered tasks included — so judgement-reading scorers (the
-`operator` scorer, or task scorers that fall back to `operator_judgement`)
-work with operator-in-the-loop embodiments. `success_at_end` reads only
-embodiment-detected `"success"` terminations and scores operator-graded trials
-as failures; pair attended operator-graded runs with a judgement-reading
-scorer instead.
+Every attended CLI run is graded by default, registered tasks included, so
+judgement-reading scorers (the `operator` scorer, or task scorers that fall
+back to `operator_judgement`) work with operator-in-the-loop embodiments and
+with policies that end their own trials (`done()`/`give_up()`).
+`success_at_end` reads only embodiment-detected `"success"` terminations and
+scores operator-graded trials as failures; pair attended operator-graded runs
+with a judgement-reading scorer instead. From the Python API, pass
+`eval(..., grader="operator")` (or any `Grader` object); unattended runs and
+`eval()` without a grader stay prompt-free.

@@ -16,10 +16,12 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 import numpy as np
@@ -36,12 +38,16 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
+from inspect_robots_agent._gemini_live import GeminiLiveClient
+from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
     ENV_MODEL,
     ChatClient,
+    Provider,
     ToolCall,
+    _direct_claim,
     _has_openrouter_variant,
     resolve_provider,
 )
@@ -52,20 +58,56 @@ from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 from ._capture import WireCapture
 
 _MAX_CONSECUTIVE_FAILURES = 3
+# Shared by the camera label writer and the reader that recovers revealed
+# camera names from it, so the two cannot drift apart again.
+_CAMERA_LABEL_PREFIX = "camera "
 
-#: The only endpoint that serves /v1/messages without an explicit base_url.
+#: Anthropic's base URL, allowlisted by the Messages-endpoint guard below.
 _ANTHROPIC_BASE = _DIRECT_PROVIDERS["anthropic"].base_url
+
+#: The HTTP endpoint resolution must land on before it can be upgraded to Live.
+_GOOGLE_BASE = _DIRECT_PROVIDERS["google"].base_url
+
+#: Key-free endpoint recorded in policy configuration and capture rows.
+_GEMINI_LIVE_BASE = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+)
+
+#: Google's native stateful HTTP endpoint, after direct-provider resolution.
+_INTERACTIONS_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 # reasoning_effort values accepted across OpenAI-compatible endpoints
 # (Anthropic compat maps these to thinking effort; OpenRouter forwards them).
-# The native wire reuses the set as output_config.effort, where "none" and
-# "minimal" are rejected and xhigh/max need a cap this client cannot stream;
-# both surface as a guided 400 rather than a per-wire allowlist (plan 0026).
+# The Messages wire reuses the set: "none" becomes thinking-disabled client-side
+# and the rest go out as output_config.effort, of which Anthropic rejects
+# "minimal", and its endpoint requires streaming for the cap xhigh/max
+# need; Tinker accepts xhigh/max without streaming. Rejections get guided errors.
 _EFFORT_LEVELS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
-_WIRE_FORMATS = frozenset({"chat", "responses", "anthropic"})
+# Some servers also take a continuous effort alongside the named levels: Tinker's
+# OpenAI-compatible endpoint accepts a fraction (probed 2026-08-06 — 0.0 through
+# 0.99 return 200, 0.995 and above 422). A fraction is passed through untouched
+# rather than quantized into a level, so a sweep keeps the resolution the server
+# offers. The range is half-open by construction: 1.0 means "past max effort",
+# and servers that cap lower reject it with a guided 4xx.
+_EFFORT_FRACTION_LIMIT = 1.0
+_WIRE_FORMATS = frozenset({"chat", "responses", "messages", "gemini-live", "interactions"})
+_WIRE_ALIASES = {"anthropic": "messages"}
+_AGENT_NATIVE_WIRES = frozenset({"chat", "messages"})
+_MESSAGES_CAPABLE_PREFIXES = frozenset(
+    {"anthropic"}
+    | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
+)
 _SPEEDS = frozenset({"fast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
+
+
+class _Unset:
+    """Marker type for constructor defaults resolved per wire."""
+
+
+_UNSET: Final = _Unset()
 
 # Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
 _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
@@ -79,8 +121,12 @@ you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \
 for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
+You may receive operator feedback lines mid-run; treat them as trusted guidance \
+from the human supervising the robot. \
 Respond with exactly one tool call per turn. When the goal is achieved call \
-done; if it cannot be achieved call give_up. You have a budget of \
+done; if it cannot be achieved call give_up. Note what you are learning about \
+this rig and task as you go: done and give_up will ask what you wish you had \
+known from the start. You have a budget of \
 {budget} LLM calls for the whole trial."""
 
 _ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
@@ -94,12 +140,16 @@ you observe in the current observation and why you chose this motion. The user \
 is watching these notes to see what you see and what you decide, so write them \
 for a human reader. \
 Safety approvers clamp out-of-bounds and too-fast actions below you. \
+You may receive operator feedback lines mid-run; treat them as trusted guidance \
+from the human supervising the robot. \
 Respond with exactly one motion tool call per turn; `take_pic` may be chained \
 in the same turn. Placed after a motion, its frames arrive with the next \
 observation, after the controller has played the motion; the narration reports \
 how much actually played. Placed alone, it looks before you decide what motion \
 to make. When the goal is achieved call done; if it cannot be achieved call \
-give_up. You have a budget of {budget} LLM calls for the whole trial."""
+give_up. Note what you are learning about this rig and task as you go: done and \
+give_up will ask what you wish you had known from the start. You have a budget \
+of {budget} LLM calls for the whole trial."""
 
 _PRE_CHECK_PROMPT_CLAUSE = (
     " A motion pre-check may reject a move with a stated reason. Adjust the target "
@@ -109,6 +159,33 @@ _PRE_CHECK_PROMPT_CLAUSE = (
 _ON_DEMAND_NUDGE = (
     "Respond with one motion tool call, one motion followed by take_pic, or take_pic alone."
 )
+
+
+def _validated_effort(effort: object) -> str | float:
+    """Return the wire value for an accepted effort, else raise ``ConfigError``.
+
+    Accepts a named level verbatim, or a number in ``[0.0, 1.0)`` normalized to
+    ``float`` for the servers that read effort as a fraction. ``bool`` is not a
+    number here: ``-P effort=false`` parses to ``False``, which would otherwise
+    silently mean zero effort instead of failing as the typo it is.
+    """
+    if isinstance(effort, str):
+        if effort in _EFFORT_LEVELS:
+            return effort
+    # The range check rejects nan and inf too: every nan comparison is False, and
+    # inf fails the upper bound.
+    elif (
+        isinstance(effort, int | float)
+        and not isinstance(effort, bool)
+        and 0.0 <= effort < _EFFORT_FRACTION_LIMIT
+    ):
+        return float(effort)
+    raise ConfigError(
+        f"effort must be one of {sorted(_EFFORT_LEVELS)}, or a number in "
+        f"[0.0, {_EFFORT_FRACTION_LIMIT}) on servers that take a fractional "
+        f"effort, got {effort!r}.\n"
+        "fix: omit -P effort= to use the provider default"
+    )
 
 
 def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -190,14 +267,18 @@ class AgentPolicyConfig(PolicyConfig):
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
+    #: Canonical wire name; constructor input ``anthropic`` aliases ``messages``.
     wire: str = "chat"
     wire_capture: bool = True
     speed: str | None = None
-    #: Effective per-response cap on ``wire=anthropic``; ``None`` on the other
+    #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
     max_llm_calls: int = 100
-    effort: str | None = "low"
+    #: Resolved effort level; ``None`` means the field is omitted and the
+    #: provider default applies. A number is a fractional effort, recorded as
+    #: sent rather than snapped to a level.
+    effort: str | float | None = None
     max_speed_frac: float = 0.1
     transcript_echo: bool = False
     images: str = "always"
@@ -234,23 +315,26 @@ class LLMAgentPolicy(PolicyBase):
     and appends its text to every trial's system prompt.
     """
 
+    #: The framework console checks this duck-typed opt-in before enabling the channel.
+    accepts_operator_messages: bool = True
+
     def __init__(
         self,
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str | None = None,
-        wire: str = "chat",
+        wire: str | _Unset = _UNSET,
         wire_capture: bool = True,
         speed: str | None = None,
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
-        effort: str | None = "low",
+        effort: str | float | None | _Unset = _UNSET,
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
         depth: str = "render",
-        image_horizon: int | None = 2,
+        image_horizon: int | None | _Unset = _UNSET,
         prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
@@ -315,18 +399,45 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
             raise ConfigError("max_llm_calls must be >= 1")
-        if effort is not None and effort not in _EFFORT_LEVELS:
-            raise ConfigError(
-                f"effort must be one of {sorted(_EFFORT_LEVELS)}, or None to omit "
-                f"the field, got {effort!r}"
-            )
+        environ = dict(os.environ) if env is None else env
+        requested_model = model or environ.get(ENV_MODEL)
+        direct_claim = (
+            _direct_claim(requested_model, environ, native_wires=_AGENT_NATIVE_WIRES)
+            if not base_url
+            else None
+        )
         # Order matters from here down (plan 0026): wire is validated before
         # the params that are only legal on one wire, the api_key_env default
         # is applied before resolution, and the OpenRouter check after it.
         # Every construction check raises ConfigError so the CLI renders a
         # guided message instead of a traceback (#168).
-        if wire not in _WIRE_FORMATS:
-            raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        wire_was_explicit = not isinstance(wire, _Unset)
+        if isinstance(wire, _Unset):
+            wire = direct_claim[1].wire if direct_claim is not None else "chat"
+        else:
+            wire = _WIRE_ALIASES.get(wire, wire)
+            if wire not in _WIRE_FORMATS:
+                raise ConfigError(f"wire must be one of {sorted(_WIRE_FORMATS)}, got {wire!r}")
+        resolved_effort: str | float | None = None
+        if not isinstance(effort, _Unset):
+            resolved_effort = _validated_effort("none" if effort is None else effort)
+        if wire == "gemini-live" and effort is not _UNSET:
+            raise ConfigError(
+                "effort is not supported on wire='gemini-live'.\nfix: drop -P effort="
+            )
+        if wire == "interactions" and resolved_effort not in {
+            None,
+            "minimal",
+            "low",
+            "medium",
+            "high",
+        }:
+            raise ConfigError(
+                "effort on wire='interactions' must be minimal, low, medium, or high, "
+                f"got {resolved_effort!r}.\n"
+                "fix: pass -P effort=minimal|low|medium|high (maps to thinking_level), "
+                "or drop -P effort="
+            )
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if images not in _IMAGE_MODES:
@@ -339,19 +450,19 @@ class LLMAgentPolicy(PolicyBase):
                 f"depth must be one of {sorted(_DEPTH_MODES)}, got {depth!r}.\n"
                 "fix: pass -P depth=render or -P depth=off"
             )
-        if wire != "anthropic":
-            # A dropped speed would bill at standard rates while the user
-            # believes fast mode is on; a dropped cap is a limit that never
-            # applied. Both fail loudly rather than silently.
+        if wire != "messages":
+            # Claude fast mode and the Messages output cap cannot apply on
+            # other wires, so reject those mismatches during construction.
+            # A Messages server may still ignore speed itself, as Tinker does.
             if speed is not None:
                 raise ConfigError(
-                    f"speed is only supported on wire='anthropic', got wire={wire!r}.\n"
-                    "fix: pass -P wire=anthropic, or drop -P speed="
+                    f"speed is only supported on wire='messages', got wire={wire!r}.\n"
+                    "fix: pass -P wire=messages, or drop -P speed="
                 )
             if max_output_tokens is not None:
                 raise ConfigError(
-                    "max_output_tokens is only supported on wire='anthropic', got "
-                    f"wire={wire!r}.\nfix: pass -P wire=anthropic, or drop "
+                    "max_output_tokens is only supported on wire='messages', got "
+                    f"wire={wire!r}.\nfix: pass -P wire=messages, or drop "
                     "-P max_output_tokens="
                 )
         if max_output_tokens is not None and (
@@ -360,17 +471,50 @@ class LLMAgentPolicy(PolicyBase):
             or max_output_tokens < 1
         ):
             raise ConfigError("max_output_tokens must be an int >= 1")
-        if image_horizon is not None and (
-            isinstance(image_horizon, bool)
-            or not isinstance(image_horizon, int)
-            or image_horizon < 1
+        if (
+            image_horizon is not _UNSET
+            and image_horizon is not None
+            and (
+                isinstance(image_horizon, bool)
+                or not isinstance(image_horizon, int)
+                or image_horizon < 1
+            )
         ):
             raise ConfigError(
                 "image_horizon must be an int >= 1, or None to send full image history.\n"
                 "fix: pass -P image_horizon=N or -P image_horizon=none"
             )
+        resolved_image_horizon: int | None = None if wire in {"gemini-live", "interactions"} else 2
+        if not isinstance(image_horizon, _Unset):
+            resolved_image_horizon = image_horizon
+        if wire == "gemini-live" and image_horizon is not _UNSET and image_horizon is not None:
+            raise ConfigError(
+                "image_horizon is not supported on wire='gemini-live'.\n"
+                "fix: drop -P image_horizon=; the Live API's own context-window "
+                "compression is the equivalent mechanism because already-streamed "
+                "frames cannot be evicted"
+            )
+        if wire == "interactions" and image_horizon is not _UNSET and image_horizon is not None:
+            raise ConfigError(
+                "image_horizon is not supported on wire='interactions'.\n"
+                "fix: drop -P image_horizon=; the Interactions API's server-side history "
+                "is the equivalent mechanism because frames already absorbed by the chain "
+                "cannot be evicted client-side"
+            )
 
-        environ = dict(os.environ) if env is None else env
+        if wire == "gemini-live" and base_url and not base_url.startswith(("ws://", "wss://")):
+            raise ConfigError(
+                "wire='gemini-live' requires a ws:// or wss:// base_url, got "
+                f"{base_url!r}.\nfix: drop -P base_url= to use Google's Live API, "
+                "or pass a websocket endpoint"
+            )
+        if wire == "interactions" and base_url and not base_url.startswith(("http://", "https://")):
+            raise ConfigError(
+                "wire='interactions' requires an http:// or https:// base_url, got "
+                f"{base_url!r}.\nfix: wire='interactions' is HTTP; drop -P base_url= "
+                "or pass the Live wire a websocket endpoint via -P wire=gemini-live"
+            )
+
         # resolve_provider reads api_key_env only when base_url is set, where
         # it otherwise defaults to OPENROUTER_API_KEY and would send an
         # OpenRouter key as x-api-key to a third-party gateway.
@@ -381,20 +525,58 @@ class LLMAgentPolicy(PolicyBase):
         # consistency only, since resolve_provider ignores api_key_env when
         # base_url is falsy; it is load-bearing in the guard below.
         effective_key_env = api_key_env
-        if wire == "anthropic" and base_url and not api_key_env:
+        if wire == "messages" and base_url and not api_key_env:
             effective_key_env = "ANTHROPIC_API_KEY"
-        requested_model = model or environ.get(ENV_MODEL)
-        provider = resolve_provider(
-            model=requested_model,
-            base_url=base_url,
-            api_key_env=effective_key_env,
-            env=environ,
-        )
-        if wire == "anthropic" and not base_url and provider.base_url != _ANTHROPIC_BASE:
-            # Only Anthropic's own endpoint serves /v1/messages. Resolution can
-            # land elsewhere two ways: the OpenRouter fallback, or another
-            # direct provider whose key happens to be set (openai/* with
-            # $OPENAI_API_KEY). An explicit -P base_url= is the user's call.
+        if wire == "gemini-live" and base_url and not api_key_env:
+            effective_key_env = "GEMINI_API_KEY"
+        if wire == "interactions" and base_url and not api_key_env:
+            effective_key_env = "GEMINI_API_KEY"
+        try:
+            provider = resolve_provider(
+                model=requested_model,
+                base_url=base_url,
+                api_key_env=effective_key_env,
+                env=environ,
+                native_wires=_AGENT_NATIVE_WIRES,
+            )
+        except ConfigError as exc:
+            if wire not in {"gemini-live", "interactions"} or base_url:
+                raise
+            if wire == "interactions":
+                raise ConfigError(
+                    "wire='interactions' needs Google's direct provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                ) from exc
+            raise ConfigError(
+                "wire='gemini-live' needs Google's direct Live API provider.\n"
+                "fix: use -P model=google/... and set $GEMINI_API_KEY"
+            ) from exc
+        if (
+            direct_claim is not None
+            and direct_claim[1].wire != "chat"
+            and wire_was_explicit
+            and wire != direct_claim[1].wire
+        ):
+            prefix, direct = direct_claim
+            fix = f"fix: drop -P wire= ({prefix}/* defaults to wire={direct.wire})"
+            if wire in {"chat", "responses"}:
+                fix += (
+                    ", or pass -P base_url=... (+ -P api_key_env=NAME) to route this wire "
+                    "through a gateway such as OpenRouter deliberately"
+                )
+            raise ConfigError(
+                f"wire={wire!r} cannot drive {prefix}/* — the provider's direct "
+                "endpoint serves only the Messages API.\n"
+                f"{fix}"
+            )
+        if (
+            wire == "messages"
+            and not base_url
+            and provider.wire != "messages"
+            and provider.base_url != _ANTHROPIC_BASE
+        ):
+            # Resolution can land elsewhere through OpenRouter or another
+            # direct provider. An explicit -P base_url= is the user's call.
             # Branch on the requested id, not provider.model: a direct
             # provider strips its own prefix, so the resolved id would read
             # as bare and draw a nonsense 'anthropic/gpt-5.6' suggestion.
@@ -403,17 +585,24 @@ class LLMAgentPolicy(PolicyBase):
             # through to OpenRouter even when $ANTHROPIC_API_KEY is set.
             asked = requested_model or ""
             stripped = asked.rpartition(":")[0] if _has_openrouter_variant(asked) else asked
-            if not stripped.removeprefix("anthropic/"):
+            prefix, separator, body = stripped.partition("/")
+            domestic = prefix in _MESSAGES_CAPABLE_PREFIXES
+            stripped_body = body if domestic and separator else stripped
+            example = (
+                "thinkingmachines/Inkling"
+                if prefix == "thinkingmachines"
+                else "anthropic/claude-opus-5"
+            )
+            if not stripped_body:
                 # ':free', 'anthropic/', 'anthropic/:free': nothing usable is
                 # left once the suffix comes off, so echoing the remainder
                 # would name an empty id. Give a whole command instead.
-                fix = "fix: pass a full model id (-P model=anthropic/claude-opus-5)"
-            elif "/" in stripped and not stripped.startswith("anthropic/"):
-                # A foreign prefix can never resolve to the Messages API, so
-                # this is terminal whatever the suffix says. Decided before
-                # the variant branch, which would otherwise spend a refusal
-                # removing a suffix that was never the real problem.
-                fix = "fix: use an anthropic/ model id"
+                fix = f"fix: pass a full model id (-P model={example})"
+            elif "/" in stripped and not domestic:
+                # A foreign prefix cannot resolve to a Messages endpoint.
+                # Decide this before the variant branch, which would otherwise
+                # remove a suffix that was never the real problem.
+                fix = "fix: use an anthropic/ or thinkingmachines/ model id"
             elif stripped != asked:
                 # A :variant id routes here whatever keys are set, so naming
                 # the key would send the user to fix something already right.
@@ -421,32 +610,67 @@ class LLMAgentPolicy(PolicyBase):
                 # advice that earns a second refusal is worse than none.
                 fix = f"fix: drop the OpenRouter variant suffix (-P model={stripped})"
                 if "/" not in stripped:
+                    # A bare provider prefix must not be prefixed again:
+                    # 'anthropic/thinkingmachines' would name no model.
                     fix = (
-                        f"fix: use -P model=anthropic/{stripped} "
-                        "(the :variant suffix routes to OpenRouter)"
+                        f"fix: pass a full model id (-P model={example})"
+                        if stripped in _MESSAGES_CAPABLE_PREFIXES
+                        else (
+                            f"fix: use -P model=anthropic/{stripped} "
+                            "(the :variant suffix routes to OpenRouter)"
+                        )
                     )
             elif "/" not in asked:
-                fix = f"fix: prefix the model id (-P model=anthropic/{asked})"
+                fix = (
+                    f"fix: pass a full model id (-P model={example})"
+                    if asked in _MESSAGES_CAPABLE_PREFIXES
+                    else f"fix: prefix the model id (-P model=anthropic/{asked})"
+                )
             else:
-                # Anthropic-prefixed with a usable body: only the key is left.
-                # Unreachable with the key set, since such an id resolves to
-                # Anthropic's own endpoint and never reaches this guard.
-                fix = "fix: set $ANTHROPIC_API_KEY"
+                # A Messages-capable prefix with a usable body has only its
+                # direct-provider key left to fix. Reaching here implies
+                # `domestic` (a foreign prefix took the branch above), so the
+                # prefix is always a table entry.
+                fix = f"fix: set ${_DIRECT_PROVIDERS[prefix].key_env}"
             where = "OpenRouter" if provider.base_url == _OPENROUTER_BASE else provider.base_url
             raise ConfigError(
-                "wire='anthropic' needs a Messages API endpoint, but the model "
+                "wire='messages' needs a Messages API endpoint, but the model "
                 f"{asked!r} resolved to {where}, which does not serve one.\n"
                 f"{fix}, or pass -P base_url=... for a gateway that serves /v1/messages"
+            )
+        if wire == "gemini-live" and not base_url:
+            if provider.base_url != _GOOGLE_BASE:
+                raise ConfigError(
+                    "wire='gemini-live' needs Google's direct Live API provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                )
+            provider = Provider(
+                base_url=_GEMINI_LIVE_BASE,
+                api_key=provider.api_key,
+                model=provider.model,
+            )
+        if wire == "interactions" and not base_url:
+            if provider.base_url != _GOOGLE_BASE:
+                raise ConfigError(
+                    "wire='interactions' needs Google's direct provider.\n"
+                    "fix: use -P model=google/... and set $GEMINI_API_KEY"
+                )
+            provider = Provider(
+                base_url=_INTERACTIONS_BASE,
+                api_key=provider.api_key,
+                model=provider.model,
             )
 
         resolved_max_output_tokens = (
             (max_output_tokens if max_output_tokens is not None else _DEFAULT_MAX_OUTPUT_TOKENS)
-            if wire == "anthropic"
+            if wire == "messages"
             else None
         )
         self._capture = WireCapture() if wire_capture else None
-        self._client: ChatClient | ResponsesClient | AnthropicClient
-        if wire == "anthropic":
+        self._client: (
+            ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient | InteractionsClient
+        )
+        if wire == "messages":
             assert resolved_max_output_tokens is not None
             self._client = AnthropicClient(
                 provider,
@@ -457,21 +681,26 @@ class LLMAgentPolicy(PolicyBase):
             )
         elif wire == "responses":
             self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
+        elif wire == "gemini-live":
+            self._client = GeminiLiveClient(provider, capture=self._capture)
+        elif wire == "interactions":
+            self._client = InteractionsClient(provider, transport=transport, capture=self._capture)
         else:
             self._client = ChatClient(provider, transport=transport, capture=self._capture)
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
-        # Robot control is latency-sensitive: default to low reasoning effort
-        # (the arm stands still while the model thinks; safety guardrails sit
-        # below the model, so effort trades thinking time, not safety).
-        self._effort = effort
+        # Preserve the operator's requested effort exactly; when it is unset,
+        # omit the field so the provider's own default applies.
+        self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
         self._images = images
         self._depth = depth
-        self._image_horizon = image_horizon
+        self._image_horizon = resolved_image_horizon
         self._prior_learnings_text = prior_learnings_text
         self._pre_check = pre_check
+        self._explicit_base_url = bool(base_url)
+        self._wire = wire
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -482,12 +711,12 @@ class LLMAgentPolicy(PolicyBase):
             speed=speed,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
-            effort=effort,
+            effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
             images=images,
             depth=depth,
-            image_horizon=image_horizon,
+            image_horizon=resolved_image_horizon,
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
@@ -498,6 +727,7 @@ class LLMAgentPolicy(PolicyBase):
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
+        self._hindsight: str | None = None
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
@@ -530,6 +760,7 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        self._hindsight = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
@@ -564,12 +795,21 @@ class LLMAgentPolicy(PolicyBase):
             self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
-        """Persist wire capture and the transcript at the end of the trial."""
+        """Persist wire capture, hindsight, usage, and the transcript at trial end."""
+        if isinstance(self._client, GeminiLiveClient):
+            # Trial finalization must stay successful even if a half-dead Live
+            # transport violates close()'s own best-effort contract.
+            with suppress(Exception):
+                self._client.close()
         if self._capture is not None:
             capture_path = self._capture.end_trial()
             if capture_path is not None:
                 record.metadata["wire_capture"] = capture_path
             self._capture.warn_if_never_began()
+
+        hindsight = self._hindsight.strip() if isinstance(self._hindsight, str) else ""
+        if hindsight:
+            record.metadata["hindsight"] = hindsight
 
         messages = self.transcript()
         if not messages:
@@ -699,7 +939,15 @@ class LLMAgentPolicy(PolicyBase):
             if not message.tool_calls:
                 failures += 1
                 if failures >= _MAX_CONSECUTIVE_FAILURES:
-                    raise RuntimeError(f"LLM produced no tool call in {failures} consecutive turns")
+                    error = f"LLM produced no tool call in {failures} consecutive turns"
+                    if self._wire == "chat" and self._explicit_base_url:
+                        error += (
+                            "\nnote: some OpenAI-compatible endpoints accept `tools` but "
+                            "silently ignore them (Tinker's OpenAI-compatible API is one). "
+                            "If the provider serves the Messages API, retry with "
+                            "-P wire=messages and its Messages base_url."
+                        )
+                    raise RuntimeError(error)
                 self._messages.append(
                     {
                         "role": "user",
@@ -745,6 +993,33 @@ class LLMAgentPolicy(PolicyBase):
                                 if result.capture is None
                                 else _unique_names(result.capture)
                             )
+                            # Exclude cameras from self._revealed if their image-bearing message
+                            # was evicted by image_horizon
+                            if self._image_horizon is not None:
+                                active_camera_names: set[str] = set()
+                                for msg in outgoing:
+                                    content_list = msg.get("content")
+                                    if isinstance(content_list, list):
+                                        for part in content_list:
+                                            if (
+                                                isinstance(part, dict)
+                                                and part.get("type") == "text"
+                                            ):
+                                                text = part.get("text", "")
+                                                # The label is written with !r, and
+                                                # repr() uses double quotes for a
+                                                # name holding an apostrophe, so
+                                                # accept whichever quote it chose.
+                                                start = len(_CAMERA_LABEL_PREFIX) + 1
+                                                quote = text[start - 1 : start]
+                                                if (
+                                                    text.startswith(_CAMERA_LABEL_PREFIX)
+                                                    and quote in ("'", '"')
+                                                    and (end := text.find(quote, start)) != -1
+                                                ):
+                                                    active_camera_names.add(text[start:end])
+                                self._revealed.intersection_update(active_camera_names)
+
                             skipped = tuple(name for name in requested if name in self._revealed)
                             immediate_frames = tuple(
                                 name for name in requested if name not in self._revealed
@@ -783,6 +1058,8 @@ class LLMAgentPolicy(PolicyBase):
                                 chunk = result.chunk
                                 target = result.target
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                if stopped:
+                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture
@@ -919,6 +1196,42 @@ def _step_label(observation: Observation) -> str:
     return f"step {step}" if isinstance(step, int) else ""
 
 
+def _approvals_line(observation: Observation) -> str | None:
+    approvals = observation.extra.get("approvals")
+    if not isinstance(approvals, list) or not approvals:
+        return None
+    total = len(approvals)
+    details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
+    if not details:
+        return f"approver: {total} step(s) modified."
+    counts = Counter(details)
+    formatted: list[str] = []
+    for flag, count in counts.items():
+        if count > 1:
+            formatted.append(f"{flag} \u00d7{count}")
+        else:
+            formatted.append(flag)
+    detail_str = f" ({', '.join(formatted)})"
+    return f"approver: {total} step(s) modified{detail_str}."
+
+
+def _operator_lines(observation: Observation) -> list[str]:
+    """Render only well-formed feedback entries from the framework-reserved channel."""
+    messages = observation.extra.get("operator_messages")
+    if not isinstance(messages, list):
+        return []
+    lines: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        step = message.get("t")
+        text = message.get("text")
+        if not isinstance(step, int) or not isinstance(text, str):
+            continue
+        lines.append(f"operator feedback (step {step}): {text}")
+    return lines
+
+
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
@@ -932,6 +1245,10 @@ def _observation_content(
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
     lines.extend(_state_lines(observation, state_labels))
+    app_line = _approvals_line(observation)
+    if app_line is not None:
+        lines.append(app_line)
+    lines.extend(_operator_lines(observation))
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
@@ -954,7 +1271,7 @@ def _image_parts(
         image = observation.images.get(name)
         if image is None:
             continue
-        parts.append({"type": "text", "text": f"camera {name!r}{suffix}:"})
+        parts.append({"type": "text", "text": f"{_CAMERA_LABEL_PREFIX}{name!r}{suffix}:"})
         parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
         if depth is not None and name in depth:
             parts.extend(depth_parts(name, depth[name], step_label))

@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
 import sys
+import threading
+import urllib.request
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
 import inspect_robots.cli as cli
 import inspect_robots.registry as reg
+from inspect_robots._claims import claim_devices
 from inspect_robots.cli import main
+from inspect_robots.conformance import DeviceSlot
+from inspect_robots.console import USAGE, USAGE_END_ONLY, ConsolePoll
 from inspect_robots.defaults import (
     _ENV_EMBODIMENT as ENV_EMBODIMENT,
 )
@@ -25,6 +35,14 @@ from inspect_robots.defaults import (
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 from inspect_robots.mock import ScriptedPolicy
 from inspect_robots.registry import registered, resolve
+from inspect_robots.session import OperatorSession
+from inspect_robots.types import ActionChunk, Observation
+
+
+class _ConsolePolicy(ScriptedPolicy):
+    """Opt into the framework's attended operator-message channel."""
+
+    accepts_operator_messages = True
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +54,7 @@ def _hermetic_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.delenv(ENV_POLICY, raising=False)
     monkeypatch.delenv(ENV_EMBODIMENT, raising=False)
     monkeypatch.delenv(ENV_SIM_EMBODIMENT, raising=False)
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
     return config_home
 
 
@@ -51,6 +70,7 @@ def test_builtins_are_registered() -> None:
     assert "scripted" in registered("policy")
     assert "success_at_end" in registered("scorer")
     assert "cubepick-reach" in registered("task")
+    assert "live-json" in registered("sink")
 
 
 def test_resolve_constructs_with_args() -> None:
@@ -80,10 +100,75 @@ def test_entrypoint_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "plugin_policy" in registered("policy")
 
 
+def test_entrypoint_discovery_retries_after_a_failed_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising entry-point scan must not mark discovery done (#255)."""
+    calls: list[str] = []
+
+    def exploding_entry_points(*, group: str) -> list[object]:
+        calls.append(group)
+        raise RuntimeError("simulated broken entry-point scan")
+
+    monkeypatch.setattr(reg, "entry_points", exploding_entry_points)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", False)
+
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    # The flag stays clear, so the next call retries instead of silently
+    # serving a registry that is missing every plugin.
+    assert reg._loaded_entrypoints is False
+    with pytest.raises(RuntimeError, match="simulated broken entry-point scan"):
+        reg._ensure_loaded()
+    assert len(calls) == 2
+
+
+def test_builtin_loading_retries_after_a_failed_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising builtins import must not mark builtins loaded (#255)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def exploding_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "inspect_robots._builtins":
+            raise RuntimeError("simulated broken builtins import")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "inspect_robots._builtins", raising=False)
+    monkeypatch.setattr(builtins, "__import__", exploding_import)
+    monkeypatch.setattr(reg, "_loaded_builtins", False)
+    monkeypatch.setattr(reg, "_loaded_entrypoints", True)
+
+    with pytest.raises(RuntimeError, match="simulated broken builtins import"):
+        reg._ensure_loaded()
+    assert reg._loaded_builtins is False
+
+
 def test_cli_list_runs(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["list", "policies"]) == 0
     out = capsys.readouterr().out
     assert "scripted" in out
+
+
+def test_cli_list_operator_inputs_renders_registered_factories(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    name = "operator-input-for-list-test"
+
+    @reg.operator_input(name)
+    def factory() -> object:
+        return object()
+
+    try:
+        assert main(["list", "operator_inputs"]) == 0
+    finally:
+        reg._FACTORIES["operator_input"].pop(name)
+
+    out = capsys.readouterr().out
+    assert "operator_inputs:" in out
+    assert name in out
 
 
 def test_cli_list_all(capsys: pytest.CaptureFixture[str]) -> None:
@@ -118,7 +203,252 @@ def test_cli_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # A clean run teaches both terminal and browser read-back commands.
     assert f"hint: inspect it with: inspect-robots inspect {written}" in out
     assert f"hint: HTML viewer: inspect-robots view {written}" in out
-    assert out.count("hint:") == 2
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert out.count("hint:") == 3
+    assert out.rstrip().endswith(f"hint: browse all logs: inspect-robots view {tmp_path}")
+    # The live-view tip is reserved for agent runs; a scripted policy is silent.
+    assert "live: watch this run" not in out
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+@pytest.mark.parametrize("no_live", [False, True])
+def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
+    command: str,
+    no_live: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.logging import JsonLogSink, LiveLogSink
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], "agent", ScriptedPolicy)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    log_dir = tmp_path / "log dir"
+    observed: list[list[object]] = []
+    live_paths: list[Path] = []
+    log = _step_limit_log(task="cubepick-reach", reasons=("success",))
+
+    def inspect_sinks(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        observed.append(sinks)
+        assert isinstance(sinks[0], JsonLogSink)
+        sinks[0].on_eval_end(log)
+        if no_live:
+            assert len(sinks) == 1
+        else:
+            assert len(sinks) == 2
+            assert isinstance(sinks[1], LiveLogSink)
+            sinks[1].on_eval_start(log.eval)
+            assert sinks[1].path is not None
+            live_paths.append(sinks[1].path)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        inspect_sinks(kwargs)
+        return [log]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        inspect_sinks(kwargs)
+        return True, [log]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "agent", "--embodiment", "cubepick", "--log-dir", str(log_dir)])
+    if no_live:
+        argv.append("--no-live-log")
+
+    assert main(argv) == 0
+
+    assert len(observed) == 1
+    assert all(not path.exists() for path in live_paths)
+    out = capsys.readouterr().out
+    command_text = f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open"
+    if no_live:
+        assert "live: watch this run" not in out
+    else:
+        assert f"live: watch this run in your browser →  {command_text}" in out
+        assert "each agent turn, notes, and operator/voice input, updating live" in out
+
+
+@pytest.mark.parametrize(
+    ("env", "platform", "expected"),
+    [
+        ({"SSH_CONNECTION": "client 1 server 2"}, "linux", True),
+        ({"DISPLAY": ":0"}, "linux", False),
+        ({"WAYLAND_DISPLAY": "wayland-0"}, "linux", False),
+        ({"SSH_CONNECTION": "client 1 server 2", "DISPLAY": ":0"}, "linux", True),
+        ({}, "linux", True),
+        ({}, "darwin", False),
+        ({}, "win32", False),
+    ],
+)
+def test_headless_session_matrix(env: dict[str, str], platform: str, expected: bool) -> None:
+    assert cli._headless_session(env, platform) is expected
+
+
+def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_dir = tmp_path / "rig logs' current"
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--task",
+            "cubepick-reach",
+            "--policy",
+            "agent",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+    resolved = cli._ResolvedComponents(
+        None,
+        "agent",
+        "cli",
+        None,
+        "arm",
+        "cli",
+        None,  # type: ignore[arg-type]
+    )
+
+    cli._announce_live_view(args, resolved, {"DISPLAY": ":0"})
+    local = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open" in local
+    assert "; open http://" not in local
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+    )
+    remote = capsys.readouterr().out
+    assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
+    assert "open http://[2001:db8::10]:8300/" in remote
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
+    assert "open http://robot-host:8300/" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_finally_unlinks_live_snapshot_after_prompt_interrupt(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+    from inspect_robots.logging import LiveLogSink
+
+    leaked: list[Path] = []
+
+    def interrupt(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        live_sink = next(sink for sink in sinks if isinstance(sink, LiveLogSink))
+        live_sink.on_eval_start(_step_limit_log().eval)
+        live_sink.on_trial_start("scene-0", 0)
+        assert live_sink.path is not None and live_sink.path.exists()
+        leaked.append(live_sink.path)
+        raise KeyboardInterrupt
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "scripted", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 130
+    assert len(leaked) == 1
+    assert not leaked[0].exists()
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_failing_live_unlink_still_closes_embodiment(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only-disk unlink failure must not skip close() or mask the interrupt."""
+    import inspect_robots
+    from inspect_robots.logging import LiveLogSink
+    from inspect_robots.mock import CubePickEmbodiment
+
+    closes: list[str] = []
+
+    class _RecordingEmbodiment(CubePickEmbodiment):
+        """Record close() so the test can prove the release chain still ran."""
+
+        def close(self) -> None:
+            """Mark the close and defer to the real teardown."""
+            closes.append("closed")
+            super().close()
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "cubepick", _RecordingEmbodiment)
+
+    leaked: list[Path] = []
+
+    def interrupt(kwargs: dict[str, object]) -> None:
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        live_sink = next(sink for sink in sinks if isinstance(sink, LiveLogSink))
+        live_sink.on_eval_start(_step_limit_log().eval)
+        assert live_sink.path is not None and live_sink.path.exists()
+        leaked.append(live_sink.path)
+        raise KeyboardInterrupt
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        interrupt(kwargs)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".live.json"):
+            raise PermissionError("read-only filesystem")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(["--policy", "scripted", "--embodiment", "cubepick", "--log-dir", str(tmp_path)])
+
+    assert main(argv) == 130
+    assert closes == ["closed"]
+    assert len(leaked) == 1
+    assert leaked[0].exists()  # the unlink failed; the file stays, nothing raised
 
 
 @pytest.mark.parametrize(
@@ -179,7 +509,6 @@ def test_cli_run_embodiment_fault_prints_error_scene_and_inspect_hint(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondScene(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -404,9 +733,10 @@ def test_cli_run_zero_epochs_exits_with_guided_error(epochs_value: str) -> None:
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Epochs' internal wording, so a regression to "--epochs: Epochs
+    # count must be >= 1" fails here instead of passing a substring check.
+    assert str(excinfo.value) == f"--epochs must be >= 1, got {epochs_value}"
 
 
 @pytest.mark.parametrize("epochs_value", ["0", "-1"])
@@ -425,10 +755,10 @@ def test_cli_eval_set_zero_epochs_exits_with_guided_error(epochs_value: str) -> 
                 epochs_value,
             ]
         )
-    message = str(excinfo.value)
-    assert "--epochs" in message
-    assert epochs_value in message
-    assert "cubepick-reach" in message  # the failing task name is named
+    # eval-set runs several tasks, so the message must name which one rejected
+    # the flag — pinned exactly for the same reason as the run case above.
+    expected = f"--epochs (task 'cubepick-reach') must be >= 1, got {epochs_value}"
+    assert str(excinfo.value) == expected
 
 
 def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> None:
@@ -445,6 +775,157 @@ def _register_task(name: str, *, num_scenes: int = 1, max_steps: int = 20) -> No
             scorer=success_at_end(),
             max_steps=max_steps,
         )
+
+
+_DEVICE_CLAIM_SLOTS = (DeviceSlot(arg="channel", kind="can", label="bus"),)
+_DEVICE_CLAIM_EMBODIMENT = "device-claim-test-embodiment"
+
+
+def _register_device_claim_embodiment(monkeypatch: pytest.MonkeyPatch) -> str:
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeviceClaimEmbodiment(CubePickEmbodiment):
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            super().__init__()
+            self.channel = channel
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _DeviceClaimEmbodiment
+    )
+    return _DEVICE_CLAIM_EMBODIMENT
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_claims_and_releases_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    args = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+    existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            main(args)
+        assert "can9" in str(exc_info.value)
+        assert "already claimed" in str(exc_info.value)
+    finally:
+        existing.release()
+
+    assert main(args) == 0
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_run_without_device_slots_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
+    assert not (tmp_path / "inspect-robots" / "locks").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_claim_released_when_embodiment_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _BrokenDeviceClaimEmbodiment:
+        DEVICE_SLOTS = _DEVICE_CLAIM_SLOTS
+
+        def __init__(self, channel: str) -> None:
+            raise TypeError(f"construction exploded for {channel}")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], _DEVICE_CLAIM_EMBODIMENT, _BrokenDeviceClaimEmbodiment
+    )
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    with pytest.raises(SystemExit, match="construction exploded"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                _DEVICE_CLAIM_EMBODIMENT,
+                "-E",
+                "channel=can9",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+
+    after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+    after.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only")
+def test_eval_set_claims_once_for_the_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _register_device_claim_embodiment(monkeypatch)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    _register_task("claim/a")
+    _register_task("claim/b")
+    args = [
+        "eval-set",
+        "claim/a",
+        "claim/b",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        name,
+        "-E",
+        "channel=can9",
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+
+    try:
+        existing = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                main(args)
+            assert "can9" in str(exc_info.value)
+            assert "already claimed" in str(exc_info.value)
+        finally:
+            existing.release()
+
+        assert main(args) == 0
+        after = claim_devices(_DEVICE_CLAIM_SLOTS, {"channel": "can9"}, os.environ)
+        after.release()
+    finally:
+        reg._FACTORIES["task"].pop("claim/a", None)
+        reg._FACTORIES["task"].pop("claim/b", None)
 
 
 def test_cli_eval_set_runs_multiple_exact_tasks(
@@ -476,7 +957,8 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert "[completed] kb/a" in out
     assert "[completed] kb/b" in out
     assert out.count("log dir:") == 1  # one shared line, not one per task
-    assert "hint: HTML viewer: inspect-robots view" in out
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert "HTML viewer: inspect-robots view" not in out
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
@@ -823,7 +1305,6 @@ def test_cli_eval_set_one_task_fails_aggregate_status_is_error(
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.registry import embodiment as embodiment_decorator
     from inspect_robots.scene import Scene
-    from inspect_robots.types import Observation
 
     class _FaultOnSecondTask(CubePickEmbodiment):
         def __init__(self) -> None:
@@ -980,7 +1461,8 @@ def test_cli_eval_set_ctrl_c_reports_partial_logs_and_exits_130(
     out = capsys.readouterr().out
     assert f"cancelled: partial logs are under {tmp_path}" in out
     assert "inspect-robots inspect" in out
-    assert "inspect-robots view" in out
+    assert f"hint: browse all logs: inspect-robots view {tmp_path}" in out
+    assert "HTML viewer: inspect-robots view" not in out
 
 
 def test_cli_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1203,9 +1685,41 @@ def _write_view_frame_fixture(tmp_path: Path) -> tuple[Path, Path]:
         frames_dir / "s0-e0_top_cam_000004.npy",
         np.zeros((3, 4, 3), dtype=np.uint8),
     )
-    recorded = str(tmp_path / "old-machine" / "run-stamp")
+    recorded = "old-machine/logs/frames/run-stamp"
     path = _write_log(_view_frame_log(recorded), log_dir, "run.json")
     return path, frames_dir
+
+
+def _directory_view_log(
+    *,
+    created: str,
+    instruction: str = "pick up the cube",
+    status: str = "success",
+    metrics: dict[str, float] | None = None,
+    errored_trials: int = 0,
+) -> EvalLog:
+    log = _step_limit_log(reasons=("success",))
+    scene = dataclasses.replace(
+        log.samples[0],
+        status=status,
+        instruction=instruction,
+        termination_reasons=("success",),
+    )
+    return dataclasses.replace(
+        log,
+        status=status,
+        eval=dataclasses.replace(
+            log.eval,
+            created=created,
+            policy_config={"model": "provider/models/claude-test"},
+        ),
+        results=dataclasses.replace(
+            log.results,
+            metrics={"success_at_end": 1.0} if metrics is None else metrics,
+            errored_trials=errored_trials,
+        ),
+        samples=(scene,),
+    )
 
 
 @pytest.mark.parametrize("name", ["run.json", "run"])
@@ -1245,17 +1759,108 @@ def test_view_stdout_contains_only_the_document(
     assert "wrote " not in out
 
 
-def test_view_embeds_frames_resolved_from_log_relative_fallback(
+def test_view_renders_null_metric_from_sanitized_non_finite_score(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a single-file `view` must render a sanitized
+    null metric as "n/a" instead of crashing on ``.4g`` formatting."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["view", str(path)]) == 0
+
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<div class="stat-value">n/a</div>' in document
+
+
+def test_view_embeds_frames_resolved_from_log_relative_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path, _frames_dir = _write_view_frame_fixture(tmp_path)
     output = tmp_path / "report.html"
+    elsewhere = tmp_path / "different-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
 
     assert main(["view", str(path), "-o", str(output)]) == 0
 
     document = output.read_text(encoding="utf-8")
     assert 'src="data:image/png;base64,' in document
-    assert "[image omitted: streamed camera frame]" not in document
+    assert document.count("[image omitted: streamed camera frame]") == 1
+    capsys.readouterr()
+
+
+def test_view_no_frames_precedes_the_served_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, _frames_dir = _write_view_frame_fixture(tmp_path)
+    from inspect_robots import read_eval_log
+
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    live_path = _write_log(live_log, path.parent, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(live_path.parent),
+                "--serve",
+                "--no-frames",
+                "--live-frames-budget",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+    document = (live_path.parent / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert '<img class="frame"' not in document
+    assert "[image omitted: streamed camera frame]" in document
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_view_started_pages_elide_wire_blobs_in_static_and_served_modes(
+    serve: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import hashlib
+
+    from inspect_robots import read_eval_log
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    png = b"wire image"
+    sha = hashlib.sha256(png).hexdigest()
+    row = {"call": 0, "request": {"messages": [{"content": f"$blob:{sha}"}]}}
+    path, blob_dir = _write_wire_log(logs, ([row],))
+    blob_dir.mkdir()
+    (blob_dir / f"{sha}.png").write_bytes(png)
+    live_log = dataclasses.replace(read_eval_log(str(path)), status="started")
+    path.unlink()
+    _write_log(live_log, logs, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(logs)]
+    if serve:
+        argv.append("--serve")
+
+    assert main(argv) == 0
+
+    document = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert "[blob elided: live page]" in document
+    assert "data:image/png;base64" not in document
     capsys.readouterr()
 
 
@@ -1302,8 +1907,22 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         log_path: Path,
         frames_dir: Path | None,
         frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
     ) -> str:
-        del log, title, frames_dir
+        del (
+            log,
+            title,
+            frames_dir,
+            live_frames_budget_bytes,
+            wire_media_elided,
+            refresh_seconds,
+            no_video,
+            serve_pass,
+        )
         assert log_path == path
         received.append(frames_budget_bytes)
         return "<html></html>"
@@ -1312,6 +1931,140 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
 
     assert main(["view", str(path), "--frames-budget", "1.25"]) == 0
     assert received == [1_250_000]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_live_budget", "expected_refresh"),
+    [
+        ("serve-directory", 8_000_000, 2),
+        ("static-directory", None, None),
+        ("single-file", None, None),
+    ],
+)
+def test_view_live_frames_budget_matrix(
+    mode: str,
+    expected_live_budget: int | None,
+    expected_refresh: int | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _directory_view_log(created="2026-08-07T12:00:00Z", status="started")
+    if mode == "single-file":
+        target = _write_log(log, tmp_path, "run.live.json")
+    else:
+        target = tmp_path / "logs"
+        target.mkdir()
+        _write_log(log, target, "run.live.json")
+    received: list[tuple[int | None, bool, int | None]] = []
+
+    def fake_render_html(
+        rendered_log: EvalLog,
+        *,
+        title: str,
+        log_path: Path,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None,
+        no_video: bool,
+        serve_pass: bool,
+    ) -> str:
+        del (
+            rendered_log,
+            title,
+            log_path,
+            frames_dir,
+            frames_budget_bytes,
+            no_video,
+            serve_pass,
+        )
+        received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+    argv = ["view", str(target)]
+    if mode == "serve-directory":
+        argv.append("--serve")
+
+    assert main(argv) == 0
+    assert received == [(expected_live_budget, True, expected_refresh)]
+    capsys.readouterr()
+
+
+def test_view_zero_live_frames_budget_is_forwarded_as_unlimited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[int | None] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        value = kwargs["live_frames_budget_bytes"]
+        assert value is None or isinstance(value, int)
+        received.append(value)
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve", "--live-frames-budget", "0"]) == 0
+    assert received == [0]
+    capsys.readouterr()
+
+
+def test_view_forwards_tighter_full_budget_with_larger_live_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-07T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    received: list[tuple[int, int | None]] = []
+
+    def fake_render_html(*args: object, **kwargs: object) -> str:
+        del args
+        full = kwargs["frames_budget_bytes"]
+        live = kwargs["live_frames_budget_bytes"]
+        assert isinstance(full, int)
+        assert live is None or isinstance(live, int)
+        received.append((full, live))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render_html)
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert (
+        main(
+            [
+                "view",
+                str(logs),
+                "--serve",
+                "--frames-budget",
+                "2",
+                "--live-frames-budget",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert received == [(2_000_000, 8_000_000)]
     capsys.readouterr()
 
 
@@ -1344,7 +2097,7 @@ def test_view_stdout_embeds_resolved_frames(
 
     out = capsys.readouterr().out
     assert 'src="data:image/png;base64,' in out
-    assert "[image omitted: streamed camera frame]" not in out
+    assert out.count("[image omitted: streamed camera frame]") == 1
     assert "wrote " not in out
 
 
@@ -1354,6 +2107,19 @@ def test_view_rejects_non_finite_or_negative_frames_budget(budget: str, tmp_path
 
     with pytest.raises(SystemExit, match="--frames-budget must be a non-negative finite number"):
         main(["view", str(path), "--frames-budget", budget])
+
+
+@pytest.mark.parametrize("budget", ["-0.1", "nan", "inf"])
+def test_view_rejects_non_finite_or_negative_live_frames_budget(
+    budget: str, tmp_path: Path
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(
+        SystemExit,
+        match="--live-frames-budget must be a non-negative finite number",
+    ):
+        main(["view", str(path), "--live-frames-budget", budget])
 
 
 def test_view_rejects_directory_output_with_guidance(tmp_path: Path) -> None:
@@ -1476,6 +2242,1212 @@ def test_view_exit_code_reports_artifact_production_not_eval_status(
     capsys.readouterr()
 
 
+def test_view_directory_end_to_end_and_unreadable_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "older.json",
+    )
+    _write_log(
+        _directory_view_log(
+            created="2026-07-30T12:00:00Z",
+            instruction="place the cube",
+        ),
+        logs,
+        "newer.json",
+    )
+    (logs / "foreign.json").write_text("{not json", encoding="utf-8")
+
+    assert main(["view", str(logs)]) == 0
+
+    out = capsys.readouterr()
+    html_dir = logs / "html"
+    assert (html_dir / "older.html").is_file()
+    assert (html_dir / "newer.html").is_file()
+    assert not (html_dir / "foreign.html").exists()
+    index = (html_dir / "index.html").read_text(encoding="utf-8")
+    assert index.index("newer.json") < index.index("older.json")
+    assert 'href="newer.html"' in index and 'href="older.html"' in index
+    assert "foreign.json" in index and "unreadable:" in index
+    assert out.out.startswith(f"index: {html_dir / 'index.html'} (3 logs, 2 pages, ")
+    assert "[1/3] rendering foreign.json" not in out.err
+    assert "warning: could not read or render foreign.json" in out.err
+    assert out.err.count(" rendering ") == 2
+
+
+def test_view_directory_includes_log_with_sanitized_null_metric(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: a log the sink itself wrote (null metric from a
+    non-finite score) reads fine and must appear in the directory index
+    rather than being dropped as "could not read or render"."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _directory_view_log(
+        created="2026-07-30T12:00:00Z",
+        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+    )
+    _write_log(log, logs, "null-metric.json")
+
+    assert main(["view", str(logs)]) == 0
+
+    out = capsys.readouterr()
+    assert "could not read or render" not in out.err
+    assert (logs / "html" / "null-metric.html").is_file()
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "null-metric.json" in index
+    assert "min_distance_to_goal=n/a" in index
+    assert out.out.startswith(f"index: {logs / 'html' / 'index.html'} (1 logs, 1 pages, ")
+
+
+def test_view_directory_multi_scene_metrics_empty_samples_and_errored_trials(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    base = _directory_view_log(
+        created="2026-07-30T12:00:00Z",
+        metrics={"mean_score": 0.333333},
+        errored_trials=1,
+    )
+    first = dataclasses.replace(
+        base.samples[0],
+        scene_id="first",
+        instruction="shared instruction",
+        termination_reasons=("success", None),
+    )
+    second = dataclasses.replace(
+        base.samples[0],
+        scene_id="second",
+        instruction="shared instruction",
+        termination_reasons=("max_steps", "success"),
+    )
+    multi = dataclasses.replace(
+        base,
+        results=dataclasses.replace(base.results, total_scenes=2, total_trials=4),
+        samples=(first, second),
+    )
+    empty = dataclasses.replace(
+        _directory_view_log(
+            created="2026-07-29T12:00:00Z",
+            status="cancelled",
+            metrics={},
+        ),
+        results=EvalResults(total_scenes=0, total_trials=0, metrics={}),
+        samples=(),
+    )
+    _write_log(multi, logs, "multi.json")
+    _write_log(empty, logs, "empty.json")
+
+    assert main(["view", str(logs)]) == 0
+
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "shared instruction" in index
+    assert "mean_score=0.3333" in index
+    assert "succeeded, hit step limit" in index
+    assert '<span class="badge status-completed">completed</span>' in index
+    assert '<span class="errored">(1 errored)</span>' in index
+    assert "0 scenes" in index
+    assert '<span class="badge status-cancelled">cancelled</span>' in index
+
+
+def test_view_directory_incremental_mtime_and_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    first = _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "a.json",
+    )
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "b.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+    capsys.readouterr()
+
+    assert main(["view", str(logs)]) == 0
+    second = capsys.readouterr()
+    assert " rendering " not in second.err
+    assert "(2 logs, 0 pages, " in second.out
+
+    from inspect_robots._html import render_html
+
+    calls: list[str] = []
+
+    def record_render(
+        log: EvalLog,
+        *,
+        title: str,
+        log_path: Path,
+        frames_dir: Path | None,
+        frames_budget_bytes: int,
+        live_frames_budget_bytes: int | None,
+        wire_media_elided: bool,
+        refresh_seconds: int | None = None,
+        no_video: bool = False,
+        serve_pass: bool = False,
+    ) -> str:
+        calls.append(log.eval.created)
+        return render_html(
+            log,
+            title=title,
+            log_path=log_path,
+            frames_dir=frames_dir,
+            frames_budget_bytes=frames_budget_bytes,
+            live_frames_budget_bytes=live_frames_budget_bytes,
+            wire_media_elided=wire_media_elided,
+            refresh_seconds=refresh_seconds,
+            no_video=no_video,
+            serve_pass=serve_pass,
+        )
+
+    monkeypatch.setattr(cli, "render_html", record_render)
+    page_mtime = (logs / "html" / "a.html").stat().st_mtime
+    os.utime(first, (page_mtime + 10, page_mtime + 10))
+
+    assert main(["view", str(logs)]) == 0
+    refreshed = capsys.readouterr()
+    assert calls == ["2026-07-29T12:00:00Z"]
+    assert refreshed.err.count(" rendering ") == 1
+    assert "rendering a.json" in refreshed.err
+
+    calls.clear()
+    assert main(["view", str(logs), "--force"]) == 0
+    forced = capsys.readouterr()
+    assert len(calls) == 2
+    assert forced.err.count(" rendering ") == 2
+    assert "(2 logs, 2 pages, " in forced.out
+
+
+def test_view_directory_index_log_uses_collision_free_page(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "index.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+
+    html_dir = logs / "html"
+    assert (html_dir / "index.html").is_file()
+    assert (html_dir / "index_log.html").is_file()
+    assert 'href="index_log.html"' in (html_dir / "index.html").read_text(encoding="utf-8")
+
+
+def test_view_directory_index_log_suffix_uses_run_targets_not_filesystem(
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        logs,
+        "index.json",
+    )
+    _write_log(
+        _directory_view_log(created="2026-07-29T12:00:00Z"),
+        logs,
+        "index_log.json",
+    )
+
+    assert main(["view", str(logs)]) == 0
+    assert (logs / "html" / "index_log_2.html").is_file()
+
+    assert main(["view", str(logs)]) == 0
+    assert not (logs / "html" / "index_log_3.html").exists()
+
+
+def test_view_directory_rejects_default_html_regular_file(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    (logs / "html").write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="exists and is not a directory; move it or pass -o DIR"):
+        main(["view", str(logs)])
+
+
+def test_view_directory_rejects_stdout_output(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit, match="cannot be used with a logs directory"):
+        main(["view", str(logs), "-o", "-"])
+
+
+def test_view_directory_rejects_existing_output_file(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    output = tmp_path / "reports"
+    output.write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="is not a directory; pass an output directory"):
+        main(["view", str(logs), "-o", str(output)])
+
+
+def test_view_directory_out_dir_replaces_html_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    output = tmp_path / "reports" / "nested"
+
+    assert main(["view", str(logs), "-o", str(output)]) == 0
+
+    assert (output / "run.html").is_file()
+    assert (output / "index.html").is_file()
+    assert not (logs / "html").exists()
+    assert capsys.readouterr().out.startswith(f"index: {output / 'index.html'} (1 logs, 1 pages, ")
+
+
+def test_unreadable_index_entry_tolerates_vanished_file(tmp_path: Path) -> None:
+    entry = cli._unreadable_index_entry(tmp_path / "gone.json", ValueError("boom"))
+
+    assert entry.created == ""
+    assert entry.error == "unreadable: boom"
+    assert entry.page is None
+
+
+def test_view_directory_empty_is_runtime_error(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    with pytest.raises(SystemExit, match=r"no top-level \*\.json") as excinfo:
+        main(["view", str(logs)])
+
+    assert excinfo.value.code
+    assert not (logs / "html" / "index.html").exists()
+
+
+def test_view_serve_initial_live_refresh_and_static_live_page_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    live = _directory_view_log(created="2026-08-06T12:00:00Z", status="started")
+    _write_log(live, logs, "run.live.json")
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    page = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert '<meta http-equiv="refresh" content="2">' in index
+    assert '<meta http-equiv="refresh" content="2">' in page
+    assert "RUNNING — refreshes every 2s" in page
+    assert '<span class="badge status-running">running</span>' in index
+
+    assert main(["view", str(logs), "--force"]) == 0
+    static_page = (logs / "html" / "run.live.html").read_text(encoding="utf-8")
+    assert 'http-equiv="refresh"' not in static_page
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_view_serve_empty_or_missing_directory_starts_with_no_logs_index(
+    missing: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    if not missing:
+        logs.mkdir()
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+
+    assert logs.is_dir()
+    index = (logs / "html" / "index.html").read_text(encoding="utf-8")
+    assert "no evaluation logs found" in index
+    assert '<meta http-equiv="refresh" content="60">' in index
+
+
+def test_orphan_live_page_redirect_is_filesystem_derived_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    orphan = html_dir / "old.live.html"
+    orphan.write_text("stale running page", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+    stub = orphan.read_text(encoding="utf-8")
+    assert stub.splitlines()[0] == "<!-- inspect-robots live redirect stub -->"
+    assert 'content="0; url=index.html"' in stub
+
+    monkeypatch.setattr(
+        cli,
+        "_write_live_redirect_stub",
+        lambda _path: (_ for _ in ()).throw(AssertionError("stub rewritten")),
+    )
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+
+
+def test_vanished_live_log_is_skipped_silently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-06T12:00:00Z", status="started"),
+        logs,
+        "gone.live.json",
+    )
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    monkeypatch.setattr(
+        inspect_robots,
+        "read_eval_log",
+        lambda _path: (_ for _ in ()).throw(FileNotFoundError("vanished")),
+    )
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+
+    assert "could not read or render" not in capsys.readouterr().err
+    assert "gone.live.json" not in (logs / "html" / "index.html").read_text(encoding="utf-8")
+
+
+def test_vanished_completed_log_and_orphan_redirect_failure_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-08-06T12:00:00Z"), logs, "gone.json")
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    (html_dir / "orphan.live.html").write_text("stale", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    monkeypatch.setattr(
+        inspect_robots,
+        "read_eval_log",
+        lambda _path: (_ for _ in ()).throw(FileNotFoundError("vanished")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_write_live_redirect_stub",
+        lambda _path: (_ for _ in ()).throw(OSError("read-only")),
+    )
+
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+
+    err = capsys.readouterr().err
+    assert "could not read or render gone.json" in err
+    assert "could not redirect orphan.live.html: read-only" in err
+
+
+def test_directory_atomic_live_stub_and_index_writes_and_quiet_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-08-06T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    (html_dir / "orphan.live.html").write_text("old", encoding="utf-8")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    replaced: list[Path] = []
+    real_replace = os.replace
+
+    def record_replace(source: str | Path, target: str | Path) -> None:
+        replaced.append(Path(target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", record_replace)
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+
+    assert set(replaced) == {
+        html_dir / "run.live.html",
+        html_dir / "orphan.live.html",
+        html_dir / "index.html",
+    }
+    assert " rendering " not in capsys.readouterr().err
+
+
+def test_completed_page_pins_source_nanosecond_mtime_and_live_always_renders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-06T12:00:00Z"), logs, "done.json")
+    args = cli.build_parser().parse_args(["view", str(logs)])
+    utimes: list[tuple[Path, tuple[int, int]]] = []
+
+    def record_utime(path: str | Path, *, ns: tuple[int, int]) -> None:
+        utimes.append((Path(path), ns))
+
+    source_stat = source.stat()
+    monkeypatch.setattr(os, "utime", record_utime)
+    cli._render_view_directory(
+        args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=None,
+    )
+    assert utimes == [
+        (
+            logs / "html" / "done.html",
+            (source_stat.st_atime_ns, source_stat.st_mtime_ns),
+        )
+    ]
+
+    live_source = _write_log(
+        _directory_view_log(created="2026-08-06T12:01:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    page = logs / "html" / "run.live.html"
+    page.write_text("newer", encoding="utf-8")
+    newer = live_source.stat().st_mtime_ns + 10_000_000_000
+    real_utime = os.utime
+    monkeypatch.setattr(os, "utime", real_utime)
+    os.utime(page, ns=(newer, newer))
+    rendered: list[str] = []
+
+    def record_render(log: EvalLog, log_path: Path, out_path: Path, **kwargs: Any) -> int:
+        del log, out_path, kwargs
+        rendered.append(log_path.name)
+        return 0
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    cli._render_view_directory(
+        cli.build_parser().parse_args(["view", str(logs), "--serve"]),
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=2,
+    )
+    # Plan 0058: started logs re-render every pass, even when the page looks
+    # newer than the log; the mtime gate is a completed-page contract only.
+    assert rendered == ["run.live.json"]
+
+
+def test_view_directory_two_level_video_stamp_skips_then_upgrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-07T12:00:00Z"), logs, "done.json")
+    source_ns = 2_000_000_000
+    os.utime(source, ns=(source_ns, source_ns))
+    monkeypatch.setattr(cli, "_serve_view_directory", lambda *_args: 0)
+
+    assert main(["view", str(logs), "--serve"]) == 0
+    page = logs / "html" / "done.html"
+    # source_ns and the delta are both multiples of 100 ns, so the expected
+    # stamp survives NTFS's 100 ns timestamp tick exactly.
+    suppressed_ns = source_ns - cli._SUPPRESSED_STAMP_DELTA_NS
+    assert page.stat().st_mtime_ns == suppressed_ns
+    capsys.readouterr()
+
+    calls: list[bool] = []
+    render_page = cli._render_log_page
+
+    def record_render(*args: Any, **kwargs: Any) -> int:
+        calls.append(bool(kwargs["serve_pass"]))
+        return render_page(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    serve_args = cli.build_parser().parse_args(["view", str(logs), "--serve"])
+    cli._render_view_directory(
+        serve_args,
+        logs,
+        force=False,
+        quiet=True,
+        refresh_seconds=60,
+    )
+    assert calls == []
+    assert page.stat().st_mtime_ns == suppressed_ns
+
+    assert main(["view", str(logs)]) == 0
+    assert calls == [False]
+    assert page.stat().st_mtime_ns == source_ns
+
+
+def test_view_no_video_is_parsed_and_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[tuple[bool, bool]] = []
+
+    def fake_render(*args: object, **kwargs: object) -> str:
+        del args
+        received.append((bool(kwargs["no_video"]), bool(kwargs["serve_pass"])))
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render)
+
+    assert main(["view", str(path), "--no-video"]) == 0
+    assert received == [(True, False)]
+    capsys.readouterr()
+
+
+def test_view_renderer_popen_oserror_degrades_and_exits_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import numpy as np
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for step in (0, 1):
+        np.save(frames / f"s0-e0_top_cam_{step:06d}.npy", np.zeros((2, 2, 3), dtype=np.uint8))
+    log = _view_frame_log(str(frames))
+    transcript = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"camera 'top_cam' (step {step}):"},
+                {"type": "text", "text": "[image omitted: streamed camera frame]"},
+            ],
+        }
+        for step in (0, 1)
+    ]
+    scene = dataclasses.replace(log.samples[0], policy_transcripts=(transcript,))
+    path = _write_log(dataclasses.replace(log, samples=(scene,)), tmp_path, "run.json")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/fake/ffmpeg")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bad shebang")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+
+    assert main(["view", str(path)]) == 0
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert 'class="flipbook-player"' in document
+    assert "data:video/mp4" not in document
+    assert "warning: report video unavailable" in capsys.readouterr().err
+
+
+def test_view_directory_open_targets_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    assert main(["view", str(logs), "--open"]) == 0
+
+    assert opened == [(logs / "html" / "index.html").resolve().as_uri()]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--port", "8300"),
+        ("--host", "127.0.0.1"),
+    ],
+)
+def test_view_serve_options_require_serve(
+    flag: str,
+    value: str,
+    tmp_path: Path,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit, match=rf"{flag} requires --serve"):
+        main(["view", str(logs), flag, value])
+
+
+@pytest.mark.parametrize("port", ["-1", "65536", "99999"])
+def test_view_serve_rejects_out_of_range_port(port: str, tmp_path: Path) -> None:
+    """An out-of-range --port must exit cleanly, not raise OverflowError (#249)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["view", str(logs), "--serve", "--port", port])
+
+    # Pin the whole message: the flag states its own range instead of letting
+    # socket's "bind(): port must be 0-65535" surface as a traceback.
+    assert str(excinfo.value) == f"--port must be between 0 and 65535, got {port}"
+
+
+def test_view_serve_requires_logs_directory(tmp_path: Path) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+
+    with pytest.raises(SystemExit, match="--serve requires a logs directory"):
+        main(["view", str(path), "--serve"])
+
+
+def test_view_serve_end_to_end_uses_bound_port_and_refreshes_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    response_status: list[int] = []
+    response_bodies: list[str] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def probe_server(seconds: float) -> None:
+        assert seconds == cli._SERVE_LIVE_RERENDER_SECONDS
+        url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+        with urllib.request.urlopen(url, timeout=2) as response:
+            response_status.append(response.status)
+            response_bodies.append(response.read().decode())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_serve_sleep", probe_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert response_status == [200]
+    assert '<meta http-equiv="refresh" content="60">' in response_bodies[0]
+    assert bound_ports[0] != 0
+    assert f"serving logs at: http://127.0.0.1:{bound_ports[0]}/" in out.out
+    assert "serving to this machine only; pass --host 0.0.0.0" in out.out
+    assert out.out.index("index: ") < out.out.index("serving logs at: ")
+
+
+class _FakeHTTPServer:
+    """Provide the server lifecycle without opening a sandboxed socket."""
+
+    server_address = ("127.0.0.1", 18300)
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        self.shutdown_calls = 0
+        self.close_calls = 0
+
+    def serve_forever(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def server_close(self) -> None:
+        self.close_calls += 1
+
+
+def test_serve_helpers_wildcard_open_and_prethread_interrupt_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = object.__new__(cli._QuietHTTPRequestHandler)
+    handler.log_message("ignored %s", "request")
+    with pytest.raises(KeyboardInterrupt):
+        cli._raise_keyboard_interrupt(15, None)
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(
+        ["view", str(logs), "--serve", "--host", "0.0.0.0", "--port", "0", "--open"]
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(
+        cli, "_serve_sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    monkeypatch.setattr(
+        cli,
+        "_open_browser",
+        lambda uri, _display: opened.append(uri),
+    )
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert opened == ["http://127.0.0.1:18300/"]
+
+    class _InterruptedThread:
+        """Interrupt before serve_forever starts to exercise safe shutdown."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def start(self) -> None:
+            raise KeyboardInterrupt
+
+    args.host = "127.0.0.1"
+    args.open = False
+    monkeypatch.setattr(threading, "Thread", _InterruptedThread)
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+
+
+def test_serve_rerender_warning_path_without_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "run.live.json").write_text("live", encoding="utf-8")
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    ticks = 0
+
+    def tick(_seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(
+        cli,
+        "_render_view_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("changing")),
+    )
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert "warning: re-render failed: changing" in capsys.readouterr().err
+
+
+def test_view_serve_fast_live_and_disappearance_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    passes: list[int | None] = []
+    ticks = 0
+    live_path = logs / "turns.live.json"
+
+    def tick(seconds: float) -> None:
+        nonlocal ticks
+        assert seconds == 2
+        ticks += 1
+        if ticks == 1:
+            live_path.write_text("live", encoding="utf-8")
+        elif ticks == 2:
+            live_path.unlink()
+        else:
+            raise KeyboardInterrupt
+
+    def record_pass(
+        _args: Any,
+        _log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        assert not force and quiet
+        passes.append(refresh_seconds)
+        return render_result
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(cli, "_render_view_directory", record_pass)
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert passes == [2, 60]
+
+
+def test_view_serve_preserves_sixty_second_idle_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    html_dir = logs / "html"
+    html_dir.mkdir()
+    render_result = cli._DirectoryRenderResult(html_dir, html_dir / "index.html")
+    args = cli.build_parser().parse_args(["view", str(logs), "--serve", "--port", "0"])
+    args.host = "127.0.0.1"
+    ticks = 0
+    passes: list[int | None] = []
+
+    def tick(seconds: float) -> None:
+        nonlocal ticks
+        assert seconds == 2
+        ticks += 1
+        if ticks == 31:
+            raise KeyboardInterrupt
+
+    def record_pass(
+        _args: Any,
+        _log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        del force, quiet
+        passes.append(refresh_seconds)
+        return render_result
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", _FakeHTTPServer)
+    monkeypatch.setattr(cli, "_serve_sleep", tick)
+    monkeypatch.setattr(cli, "_render_view_directory", record_pass)
+
+    assert cli._serve_view_directory(args, logs, render_result) == 0
+    assert ticks == 31
+    assert passes == [60]
+
+
+@pytest.mark.parametrize(
+    "rerender_error",
+    [
+        RuntimeError("directory changing"),
+        SystemExit("no logs left"),
+    ],
+)
+def test_view_serve_rerender_failure_warns_and_continues(
+    rerender_error: BaseException,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    bound_ports: list[int] = []
+    sleep_calls = 0
+    quiet_calls = 0
+    pass_force_values: list[bool] = []
+    render_directory = cli._render_view_directory
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    def flaky_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        nonlocal quiet_calls
+        pass_force_values.append(force)
+        if quiet:
+            quiet_calls += 1
+            if quiet_calls == 1:
+                raise rerender_error
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    def advance_loop(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            url = f"http://127.0.0.1:{bound_ports[0]}/index.html"
+            with urllib.request.urlopen(url, timeout=2) as response:
+                assert response.status == 200
+        elif sleep_calls == 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+    monkeypatch.setattr(cli, "_render_view_directory", flaky_render)
+    monkeypatch.setattr(cli, "_serve_sleep", advance_loop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--force"]) == 0
+
+    out = capsys.readouterr()
+    assert f"warning: re-render failed: {rerender_error}" in out.err
+    assert quiet_calls == 2
+    assert pass_force_values == [True, False, False]
+    assert out.out.count("index: ") == 1
+
+
+def test_view_serve_keyboard_interrupt_mid_render_exits_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z", status="started"),
+        logs,
+        "run.live.json",
+    )
+    render_directory = cli._render_view_directory
+
+    def interrupted_render(
+        args: Any,
+        log_dir: Path,
+        *,
+        force: bool,
+        quiet: bool,
+        refresh_seconds: int | None,
+    ) -> cli._DirectoryRenderResult:
+        if quiet:
+            raise KeyboardInterrupt
+        return render_directory(
+            args,
+            log_dir,
+            force=force,
+            quiet=quiet,
+            refresh_seconds=refresh_seconds,
+        )
+
+    monkeypatch.setattr(cli, "_render_view_directory", interrupted_render)
+    monkeypatch.setattr(cli, "_serve_sleep", lambda _seconds: None)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    out = capsys.readouterr()
+    assert "re-render failed" not in out.err
+
+
+def test_view_serve_interrupt_before_thread_start_skips_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    class InterruptedThread:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def start(self) -> None:
+            # Interrupt delivered before serve_forever ever runs: shutdown()
+            # must be skipped or this test hangs forever.
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading, "Thread", InterruptedThread)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+
+def test_view_serve_localhost_bind_prints_loopback_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", interrupt)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--host", "localhost"]) == 0
+
+    out = capsys.readouterr()
+    assert "serving to this machine only" in out.out
+    assert "serving to your network" not in out.out
+
+
+def test_view_serve_wildcard_prints_hostname_localhost_and_exposure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    bound_ports: list[int] = []
+    display_urls = cli._serve_display_urls
+
+    def record_display_urls(bind_host: str, port: int) -> tuple[str, ...]:
+        bound_ports.append(port)
+        return display_urls(bind_host, port)
+
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    monkeypatch.setattr(cli, "_serve_display_urls", record_display_urls)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    result = main(["view", str(logs), "--serve", "--host", "0.0.0.0", "--port", "0"])
+
+    assert result == 0
+
+    out = capsys.readouterr().out
+    assert f"serving logs at: http://robot-host:{bound_ports[0]}/" in out
+    assert f"http://localhost:{bound_ports[0]}/" in out
+    assert "serving to your network: anyone who can reach this machine can view these logs" in out
+
+
+def test_view_serve_url_helpers_follow_bind_address_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert cli._serve_display_urls("127.0.0.1", 8300) == ("http://127.0.0.1:8300/",)
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+    assert cli._serve_display_urls("0.0.0.0", 8300) == (
+        "http://robot-host:8300/",
+        "http://localhost:8300/",
+    )
+    assert cli._serve_open_url("127.0.0.1", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("0.0.0.0", 8300) == "http://127.0.0.1:8300/"
+    assert cli._serve_open_url("192.0.2.10", 8300) == "http://192.0.2.10:8300/"
+
+
+def test_view_serve_sigterm_handler_is_scoped_to_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    original_handler = signal.getsignal(signal.SIGTERM)
+    serving_handlers: list[object] = []
+
+    def record_handler_and_stop(_seconds: float) -> None:
+        serving_handlers.append(signal.getsignal(signal.SIGTERM))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", record_handler_and_stop)
+
+    assert main(["view", str(logs), "--serve", "--port", "0"]) == 0
+
+    assert serving_handlers == [cli._raise_keyboard_interrupt]
+    assert signal.getsignal(signal.SIGTERM) == original_handler
+    with pytest.raises(KeyboardInterrupt):
+        cli._raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+def test_view_serve_bind_failure_is_clean_system_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+
+    def fail_to_bind(_address: tuple[str, int], _handler: object) -> None:
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(cli, "ThreadingHTTPServer", fail_to_bind)
+
+    with pytest.raises(SystemExit, match="address already in use"):
+        main(["view", str(logs), "--serve"])
+
+
+def test_view_serve_open_url_rules_and_loopback_browser_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_directory_view_log(created="2026-07-30T12:00:00Z"), logs, "run.json")
+    opened: list[str] = []
+
+    def open_browser(uri: str) -> bool:
+        opened.append(uri)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", open_browser)
+
+    def stop_server(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_serve_sleep", stop_server)
+
+    assert main(["view", str(logs), "--serve", "--port", "0", "--open"]) == 0
+
+    assert len(opened) == 1
+    assert opened[0].startswith("http://127.0.0.1:")
+    assert opened[0].endswith("/")
+
+
 def test_run_outcome_shows_timeout_without_a_count(
     _hermetic_defaults: Path,
     tmp_path: Path,
@@ -1523,6 +3495,23 @@ def test_run_outcome_breaks_count_ties_alphabetically_by_phrase(
     assert _run_with_synthesized_log(log, monkeypatch, tmp_path) == 0
 
     assert "outcome: 1 hit step limit, 1 succeeded" in capsys.readouterr().out
+
+
+def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for #253: json_log.py writes inf/nan metrics as JSON null
+    so the log stays RFC 8259 valid; `inspect` must tolerate that null."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+    )
+    path = _write_log(log, tmp_path, "null-metric.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    assert "min_distance_to_goal: n/a" in capsys.readouterr().out
 
 
 def test_inspect_outcome_maps_give_up_reason(
@@ -1618,7 +3607,7 @@ def test_inspect_started_status_uses_raw_fallback(
 
     assert main(["inspect", str(path)]) == 1
 
-    assert "run status:  started" in capsys.readouterr().out
+    assert "run status:  running" in capsys.readouterr().out
 
 
 def test_inspect_outcome_coerces_non_string_hand_edited_reasons(
@@ -2176,6 +4165,18 @@ def test_inspect_surfaces_step_limit_note_hint_and_scene_marker(
     assert "[success] s0: (1/2 trials hit max_steps)" in out
 
 
+def test_inspect_treats_auto_task_step_limit_as_adhoc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(task="auto"), tmp_path, "auto.json")
+
+    assert main(["inspect", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "hint: raise it with --max-steps N" in out
+    assert "task 'auto' defines its own max_steps" not in out
+
+
 def test_inspect_tolerates_non_numeric_max_steps_in_hand_edited_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2404,12 +4405,311 @@ def test_run_requires_exactly_one_of_task_or_instruction() -> None:
         main(["run", "--policy", "scripted", "--embodiment", "cubepick"])
 
 
+@pytest.mark.parametrize(
+    "modes",
+    [
+        ["--task", "cubepick-reach", "--auto-task"],
+        ["--instruction", "reach it", "--auto-task"],
+    ],
+)
+def test_auto_task_is_mutually_exclusive_with_other_task_modes(modes: list[str]) -> None:
+    with pytest.raises(SystemExit, match="exactly one"):
+        main(["run", *modes])
+
+
+def test_auto_task_specific_args_require_auto_mode() -> None:
+    with pytest.raises(SystemExit, match="-A requires --auto-task"):
+        main(["run", "--instruction", "reach it", "-A", "model=vision"])
+
+
+def test_task_constructor_args_are_invalid_with_auto_task() -> None:
+    with pytest.raises(SystemExit, match=r"-T.*--auto-task"):
+        main(["run", "--auto-task", "-T", "num_scenes=1"])
+
+
+def test_auto_task_full_run_prints_contract_forwards_args_and_persists_rubric(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    calls: list[tuple[object, int | None, dict[str, Any]]] = []
+
+    def fake_generate_scene(embodiment: object, *, seed: int | None = 0, **kwargs: Any) -> Scene:
+        calls.append((embodiment, seed, kwargs))
+        return Scene(
+            id="auto-0",
+            instruction="Reach the cube.",
+            metadata={"rubric": "Touch the green cube.\nDo not move it off the table."},
+        )
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+    log_dir = tmp_path / "logs"
+
+    result = main(
+        [
+            "run",
+            "--auto-task",
+            "-A",
+            "model=vision-model",
+            "-A",
+            "max_cameras=2",
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--seed",
+            "17",
+            "--epochs",
+            "2",
+            "--max-steps",
+            "60",
+            "--scorer",
+            "success_at_end",
+            "--no-prompt",
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+
+    assert result == 0
+    assert len(calls) == 1
+    assert calls[0][1:] == (17, {"model": "vision-model", "max_cameras": 2})
+    out = capsys.readouterr().out
+    assert "auto task: Reach the cube.\n" in out
+    assert "rubric:\n  Touch the green cube.\n  Do not move it off the table.\n" in out
+    log = _read_only_log(log_dir)
+    assert log.eval.task == "auto"
+    assert log.eval.max_steps == 60
+    assert log.results.total_trials == 2
+    assert log.results.metrics["success_at_end"] == 1.0
+    assert log.samples[0].instruction == "Reach the cube."
+    assert log.samples[0].scene_metadata == {
+        "rubric": "Touch the green cube.\nDo not move it off the table."
+    }
+
+
+def test_auto_task_uses_adhoc_scorer_and_step_fallbacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    monkeypatch.setattr(
+        inspect_robots.taskgen,
+        "generate_scene",
+        lambda embodiment, **kwargs: Scene(
+            id="auto-0",
+            instruction="Reach the cube.",
+            metadata={"rubric": "Touch the cube."},
+        ),
+    )
+    log_dir = tmp_path / "logs"
+
+    assert (
+        main(
+            [
+                "run",
+                "--auto-task",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+        == 0
+    )
+
+    log = _read_only_log(log_dir)
+    assert log.eval.max_steps == 300
+    assert set(log.results.metrics) == {"operator"}
+
+
+@pytest.mark.parametrize("failure", ["unknown", "config"])
+def test_auto_task_generation_errors_exit_with_guidance(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import inspect_robots.taskgen
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+
+    def fake_generate_scene(
+        embodiment: object, *, seed: int | None = 0, model: str | None = None
+    ) -> Scene:
+        del embodiment, seed, model
+        if failure == "config":
+            raise ConfigError("injected generation failure\nfix: injected remedy")
+        return Scene(id="unused", instruction="unused")
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+    extra = ["-A", "unknown_key=value"] if failure == "unknown" else []
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "run",
+                "--auto-task",
+                *extra,
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+            ]
+        )
+
+    message = str(exc_info.value)
+    if failure == "unknown":
+        # TypeError earns the CLI's guided wrapper naming both knobs.
+        assert "invalid arguments for automatic task generation:" in message
+        assert "unexpected keyword argument 'unknown_key'" in message
+        assert "check [taskgen.args] and -A k=v" in message
+    else:
+        # ConfigError already carries its own fix: hint and exits verbatim,
+        # mirroring _resolve_or_exit: no second, vaguer hint on top.
+        assert "injected generation failure" in message
+        assert "fix: injected remedy" in message
+        assert "-A k=v" not in message
+
+
+def _capture_generate_scene(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """Route auto-task generation to a canned scene, recording the kwargs it got."""
+    import inspect_robots.taskgen
+    from inspect_robots.scene import Scene
+
+    def fake_generate_scene(embodiment: object, *, seed: int | None = 0, **kwargs: Any) -> Scene:
+        del embodiment, seed
+        captured.append(kwargs)
+        return Scene(id="auto-0", instruction="Reach.", metadata={"rubric": "Touch it."})
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", fake_generate_scene)
+
+
+def _run_auto_task(tmp_path: Path, extra: list[str]) -> int:
+    return main(
+        [
+            "run",
+            "--auto-task",
+            *extra,
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--no-prompt",
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+
+
+def test_taskgen_config_args_reach_generation_on_bare_auto_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """[taskgen.args] alone configures --auto-task: no -A flags needed."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, []) == 0
+    assert captured == [{"model": "cfg-model", "max_cameras": 3}]
+
+
+def test_explicit_auto_task_args_override_config_per_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """-A wins per key; unrelated [taskgen.args] keys still apply."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nmax_cameras = 3\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    assert _run_auto_task(tmp_path, ["-A", "model=cli-model"]) == 0
+    assert captured == [{"model": "cli-model", "max_cameras": 3}]
+
+
+def test_persisted_taskgen_seed_key_exits_with_guided_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """A [taskgen.args] seed key collides with the explicit kwarg and fails loudly (plan 0071)."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\nseed = 5\n")
+    captured: list[dict[str, Any]] = []
+    _capture_generate_scene(monkeypatch, captured)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_auto_task(tmp_path, [])
+    message = str(exc_info.value)
+    assert "invalid arguments for automatic task generation:" in message
+    assert "check [taskgen.args] and -A k=v" in message
+    assert captured == []
+
+
+def test_task_run_ignores_taskgen_args_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _hermetic_defaults: Path
+) -> None:
+    """The section is inert outside --auto-task: a registered task run never reads it."""
+    _write_config(_hermetic_defaults, "[taskgen.args]\nmodel = cfg-model\n")
+    import inspect_robots.taskgen
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("generate_scene must not run for a registered task")
+
+    monkeypatch.setattr(inspect_robots.taskgen, "generate_scene", explode)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--no-prompt",
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 0
+    )
+
+
 def test_adhoc_only_flags_rejected_with_task() -> None:
     base = ["run", "--task", "cubepick-reach", "--policy", "scripted", "--embodiment", "cubepick"]
     with pytest.raises(SystemExit, match="--max-steps only applies"):
         main([*base, "--max-steps", "10"])
     with pytest.raises(SystemExit, match="--scorer only applies"):
         main([*base, "--scorer", "operator"])
+
+
+@pytest.mark.parametrize("max_steps_value", ["0", "-5"])
+def test_cli_run_zero_max_steps_exits_with_guided_error(max_steps_value: str) -> None:
+    """--max-steps 0 / negative must produce a guided SystemExit, not a raw traceback (#248)."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "run",
+                "--instruction",
+                "wipe the table",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--max-steps",
+                max_steps_value,
+                "--no-prompt",
+            ]
+        )
+    # Pin the whole message: the flag speaks in its own terms rather than
+    # echoing Task's internal wording, so a regression to
+    # "--max-steps: Task 'adhoc': max_steps must be >= 1" fails here.
+    assert str(excinfo.value) == f"--max-steps must be >= 1, got {max_steps_value}"
 
 
 def test_task_args_rejected_with_instruction() -> None:
@@ -2464,6 +4764,1172 @@ def test_adhoc_flags_override_config(
 
 def _tty_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
+def _voice_cli_argv(
+    command: str,
+    tmp_path: Path,
+    *,
+    policy: str,
+    voice: bool = True,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    if command == "run":
+        argv = ["run", "--task", "cubepick-reach"]
+    else:
+        argv = ["eval-set", "cubepick-reach"]
+    argv.extend(
+        [
+            "--policy",
+            policy,
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+        ]
+    )
+    if voice:
+        argv.append("--voice")
+    argv.extend(extra)
+    return argv
+
+
+def _speak_cli_argv(
+    tmp_path: Path,
+    *,
+    speak: bool = True,
+    extra: tuple[str, ...] = (),
+) -> list[str]:
+    argv = [
+        "run",
+        "--task",
+        "cubepick-reach",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(tmp_path),
+    ]
+    if speak:
+        argv.append("--speak")
+    argv.extend(extra)
+    return argv
+
+
+def test_speaker_args_require_speak_flag(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match=r"^-S requires --speak$"):
+        main(_speak_cli_argv(tmp_path, speak=False, extra=("-S", "voice=af_sarah")))
+
+
+def test_eval_set_rejects_speak_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "--speak"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: --speak" in capsys.readouterr().err
+
+
+def test_eval_set_rejects_speaker_kv_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["eval-set", "cubepick-reach", "-S", "voice=af_sarah"])
+
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments: -S" in capsys.readouterr().err
+
+
+def test_missing_speaker_plugin_exits_with_install_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force entry-point loading before deletion so resolve() cannot restore the
+    # real dev-installed plugin while this missing-plugin path is under test.
+    reg.registered("sink")
+    monkeypatch.delitem(reg._FACTORIES["sink"], "speaker", raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert "no sink named 'speaker'" in message
+    assert "pip install inspect-robots-voice" in message
+    assert "\n" not in message
+
+
+def test_speaker_factory_key_error_does_not_get_missing_plugin_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise KeyError("speaker factory exploded")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", broken_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    message = str(exc_info.value)
+    assert message == "speaker factory exploded"
+    assert "pip install inspect-robots-voice" not in message
+
+
+def test_bad_speaker_argument_is_reported_against_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def rejecting_factory(**kwargs: Any) -> object:
+        del kwargs
+        raise TypeError("unexpected speaker argument")
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", rejecting_factory)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path, extra=("-S", "typoed_key=1")))
+
+    message = str(exc_info.value)
+    assert "invalid arguments for sink 'speaker'" in message
+    assert "-S k=v" in message
+    assert "pip install inspect-robots-voice" not in message
+
+
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_speaker_lifecycle_coerced_args_and_sink_wiring(
+    eval_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+
+    order: list[str] = []
+    instances: list[FakeSpeaker] = []
+
+    class FakeSpeaker:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            self.kwargs = kwargs
+            self.start_calls = 0
+            self.close_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+            order.append("start")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            order.append("close")
+
+    def speaker_factory(**kwargs: Any) -> FakeSpeaker:
+        speaker = FakeSpeaker(kwargs)
+        instances.append(speaker)
+        return speaker
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        order.append("eval")
+        assert order[:2] == ["start", "eval"]
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert instances[0] in sinks
+        if eval_fails:
+            raise RuntimeError("evaluation failed")
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", speaker_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    argv = _speak_cli_argv(
+        tmp_path,
+        extra=(
+            "-S",
+            "device=4",
+            "-S",
+            "enabled=true",
+            "-S",
+            "optional=none",
+            "-S",
+            "ratio=1.5",
+            "-S",
+            "voice=af_sarah",
+        ),
+    )
+
+    if eval_fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            main(argv)
+    else:
+        assert main(argv) == 0
+
+    assert len(instances) == 1
+    assert instances[0].kwargs == {
+        "device": 4,
+        "enabled": True,
+        "optional": None,
+        "ratio": 1.5,
+        "voice": "af_sarah",
+    }
+    assert instances[0].start_calls == 1
+    assert instances[0].close_calls == 1
+    assert order == ["start", "eval", "close"]
+
+
+def test_run_without_speak_keeps_default_sink_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    def unexpected_factory(**kwargs: Any) -> object:
+        del kwargs
+        pytest.fail("speaker factory called without --speak")
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        # The default list is the JSON log plus the live snapshot sink — no
+        # speaker without --speak.
+        assert [type(sink).__name__ for sink in sinks] == ["JsonLogSink", "LiveLogSink"]
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", unexpected_factory)
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path, speak=False)) == 0
+
+
+def test_speaker_startup_error_exits_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def start(self) -> None:
+            raise RuntimeError("audio output unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = FailingSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(_speak_cli_argv(tmp_path))
+
+    assert str(exc_info.value) == "audio output unavailable"
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_start_is_still_wired_and_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class StartlessSpeaker:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    speaker = StartlessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        sinks = kwargs["sinks"]
+        assert isinstance(sinks, list)
+        assert speaker in sinks
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.close_calls == 1
+
+
+def test_speaker_without_callable_close_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_robots
+
+    class CloselessSpeaker:
+        def __init__(self) -> None:
+            self.start_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    speaker = CloselessSpeaker()
+    monkeypatch.setitem(reg._FACTORIES["sink"], "speaker", lambda: speaker)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+
+    assert main(_speak_cli_argv(tmp_path)) == 0
+    assert speaker.start_calls == 1
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_voice_args_require_voice_flag(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv = _voice_cli_argv(
+        command,
+        tmp_path,
+        policy="scripted",
+        voice=False,
+        extra=("-V", "model=small"),
+    )
+
+    with pytest.raises(SystemExit, match=r"^-V requires --voice$"):
+        main(argv)
+
+
+@pytest.mark.parametrize("attendance", ["no-tty", "no-prompt"])
+def test_voice_requires_attended_mode(
+    attendance: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-attendance-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    if attendance == "no-tty":
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        extra: tuple[str, ...] = ()
+    else:
+        _tty_stdin(monkeypatch)
+        extra = ("--no-prompt",)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name, extra=extra))
+
+    assert str(excinfo.value) == "--voice requires attended mode (a TTY without --no-prompt)"
+    assert "\n" not in str(excinfo.value)
+
+
+def test_voice_requires_live_operator_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _tty_stdin(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy="scripted"))
+
+    assert str(excinfo.value) == "--voice requires a live operator input channel"
+    assert "\n" not in str(excinfo.value)
+
+
+def test_missing_voice_plugin_exits_with_install_hint_only_on_key_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-missing-plugin-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    # Force entry-point loading NOW: resolve() lazily loads entry points, and in a
+    # workspace dev env that would re-register the real voice plugin after the
+    # delitem below, opening an actual microphone instead of exiting.
+    reg.registered("operator_input")
+    monkeypatch.delitem(reg._FACTORIES["operator_input"], "voice", raising=False)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name))
+
+    message = str(excinfo.value)
+    assert "no operator_input named 'voice'" in message
+    assert "pip install inspect-robots-voice" in message
+    assert "\n" not in message
+
+
+def test_bad_voice_argument_is_reported_against_v_not_as_missing_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "voice-bad-arg-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: object())
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            _voice_cli_argv(
+                "run",
+                tmp_path,
+                policy=policy_name,
+                extra=("-V", "typoed_key=1"),
+            )
+        )
+
+    message = str(excinfo.value)
+    assert "invalid arguments for operator_input 'voice'" in message
+    assert "-V k=v" in message
+    assert "pip install inspect-robots-voice" not in message
+    assert "\n" not in message
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_voice_lifecycle_and_coerced_args_for_both_eval_commands(
+    command: str,
+    eval_fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = f"voice-lifecycle-policy-{command}-{eval_fails}"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+    instances: list[VoiceInput] = []
+
+    class VoiceInput:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            self.kwargs = kwargs
+            self.start_calls = 0
+            self.close_calls = 0
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> str:
+            self.start_calls += 1
+            return "listening on test microphone"
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    def voice_factory(**kwargs: Any) -> VoiceInput:
+        instance = VoiceInput(kwargs)
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", voice_factory)
+
+    def assert_attached(kwargs: dict[str, object]) -> None:
+        session = kwargs["operator_input"]
+        assert isinstance(session, OperatorSession)
+        assert session._attached_inputs == [(instances[0], "voice")]
+        if eval_fails:
+            raise RuntimeError("evaluation failed")
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        assert_attached(kwargs)
+        return [_step_limit_log(reasons=("success",))]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        assert_attached(kwargs)
+        return True, [_step_limit_log(task="cubepick-reach", reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+    argv = _voice_cli_argv(
+        command,
+        tmp_path,
+        policy=policy_name,
+        extra=(
+            "-V",
+            "device=4",
+            "-V",
+            "enabled=true",
+            "-V",
+            "optional=none",
+            "-V",
+            "ratio=1.5",
+            "-V",
+            "model=small",
+        ),
+    )
+
+    if eval_fails:
+        with pytest.raises(RuntimeError, match="evaluation failed"):
+            main(argv)
+    else:
+        assert main(argv) == 0
+
+    assert len(instances) == 1
+    assert instances[0].kwargs == {
+        "device": 4,
+        "enabled": True,
+        "optional": None,
+        "ratio": 1.5,
+        "model": "small",
+    }
+    assert instances[0].start_calls == 1
+    assert instances[0].close_calls == 1
+    assert "listening on test microphone" in capsys.readouterr().out
+
+
+def test_hookless_voice_input_still_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = "hookless-voice-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+
+    class HooklessVoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+    voice = HooklessVoiceInput()
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: voice)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    assert main(_voice_cli_argv("run", tmp_path, policy=policy_name)) == 0
+    assert capsys.readouterr().out.count("operator console:") == 1
+
+
+def test_voice_start_announces_model_before_startup_hook() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+
+    class ModelVoiceInput:
+        model = "parakeet-tdt-0.6b-v3"
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> str:
+            output.append("start-hook ran")
+            return "listening on test microphone"
+
+    voice = ModelVoiceInput()
+    policy = type("VoicePolicy", (), {"accepts_operator_messages": True})()
+
+    cli._start_voice_input(voice, session, policy)
+
+    assert output == [
+        "voice: loading speech-to-text model parakeet-tdt-0.6b-v3 (a first run downloads it)\n",
+        "start-hook ran",
+        "listening on test microphone\n",
+    ]
+
+
+def test_non_string_voice_start_result_is_not_printed() -> None:
+    output: list[str] = []
+    session = OperatorSession(write=output.append)
+
+    class SilentVoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+    voice = SilentVoiceInput()
+    policy = type("VoicePolicy", (), {"accepts_operator_messages": True})()
+
+    cli._start_voice_input(voice, session, policy)
+
+    assert output == []
+    assert session._attached_inputs == [(voice, "voice")]
+
+
+def test_voice_startup_error_exits_with_original_message_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_name = "failing-start-voice-policy"
+    monkeypatch.setitem(reg._FACTORIES["policy"], policy_name, _ConsolePolicy)
+
+    class FailingVoiceInput:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("microphone unavailable")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    voice = FailingVoiceInput()
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", lambda: voice)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(_voice_cli_argv("run", tmp_path, policy=policy_name))
+
+    assert str(excinfo.value) == "microphone unavailable"
+    assert voice.close_calls == 1
+
+
+def test_end_only_voice_mode_prints_log_only_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class EndOnlyEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            self.session = session
+
+    class VoiceInput:
+        def poll(self) -> ConsolePoll:
+            return ConsolePoll()
+
+        def begin_trial(self) -> None:
+            return None
+
+    embodiment_name = "end-only-voice-embodiment"
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], embodiment_name, EndOnlyEmbodiment)
+    monkeypatch.setitem(reg._FACTORIES["operator_input"], "voice", VoiceInput)
+    monkeypatch.setattr(
+        inspect_robots,
+        "eval",
+        lambda *args, **kwargs: [_step_limit_log(reasons=("success",))],
+    )
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 has no live console channel
+    argv = _voice_cli_argv("run", tmp_path, policy="scripted")
+    embodiment_index = argv.index("cubepick")
+    argv[embodiment_index] = embodiment_name
+
+    assert main(argv) == 0
+
+    out = capsys.readouterr().out
+    assert USAGE_END_ONLY in out
+    assert "voice notes go to the log only; the policy does not receive them" in out
+
+
+@pytest.mark.parametrize(
+    (
+        "embodiment_kind",
+        "accepts_messages",
+        "platform",
+        "console_on",
+        "expected_output",
+        "expected_connect_calls",
+        "expected_defer_calls",
+        "expected_footer_label",
+    ),
+    [
+        ("new", True, "linux", True, f"{USAGE}\n", 1, 0, "sent"),
+        ("new", False, "linux", True, f"{USAGE_END_ONLY}\n", 1, 0, "noted"),
+        (
+            "new",
+            True,
+            "win32",
+            False,
+            "operator console unavailable: select cannot watch stdin on Windows; "
+            "feedback typing stays off\n",
+            0,
+            0,
+            None,
+        ),
+        (
+            "new",
+            False,
+            "win32",
+            False,
+            "operator console unavailable: select cannot watch stdin on Windows; "
+            "feedback typing stays off\n",
+            0,
+            0,
+            None,
+        ),
+        ("defer", True, "linux", True, f"{USAGE}\n", 0, 1, "sent"),
+        ("defer", False, "win32", False, "", 0, 0, None),
+        ("simulated", True, "linux", True, f"{USAGE}\n", 0, 0, "sent"),
+        ("simulated", False, "linux", False, "", 0, 0, None),
+        (
+            "bare",
+            True,
+            "linux",
+            False,
+            "operator console unavailable: this embodiment predates the operator console "
+            "and still owns the end-of-episode keypress; feedback typing stays off\n",
+            0,
+            0,
+            None,
+        ),
+        ("bare", False, "win32", False, "", 0, 0, None),
+    ],
+)
+def test_build_operator_session_enablement_matrix(
+    embodiment_kind: str,
+    accepts_messages: bool,
+    platform: str,
+    console_on: bool,
+    expected_output: str,
+    expected_connect_calls: int,
+    expected_defer_calls: int,
+    expected_footer_label: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class NewHookEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_calls = 0
+            self.connected_session: OperatorSession | None = None
+
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            self.connect_calls += 1
+            self.connected_session = session
+
+    class DeferredEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+            self.defer_calls = 0
+
+        def defer_operator_end(self) -> None:
+            self.defer_calls += 1
+
+    class BareEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+    policy = type("PolicyStub", (), {"accepts_operator_messages": accepts_messages})()
+    embodiment: CubePickEmbodiment
+    if embodiment_kind == "new":
+        embodiment = NewHookEmbodiment()
+    elif embodiment_kind == "defer":
+        embodiment = DeferredEmbodiment()
+    elif embodiment_kind == "simulated":
+        embodiment = CubePickEmbodiment()
+    else:
+        embodiment = BareEmbodiment()
+    monkeypatch.setattr(sys, "platform", platform)
+    footer_labels: list[str] = []
+    original_enable_footer = OperatorSession.enable_footer
+
+    def record_enable_footer(
+        self: OperatorSession, *, label: str, echo_interval_s: float | None = None
+    ) -> None:
+        footer_labels.append(label)
+        original_enable_footer(self, label=label, echo_interval_s=echo_interval_s)
+
+    monkeypatch.setattr(OperatorSession, "enable_footer", record_enable_footer)
+
+    session, operator_input = cli._build_operator_session(policy, embodiment)
+
+    assert isinstance(session, OperatorSession)
+    assert (operator_input is session) is console_on
+    assert getattr(embodiment, "connect_calls", 0) == expected_connect_calls
+    assert getattr(embodiment, "defer_calls", 0) == expected_defer_calls
+    if expected_connect_calls:
+        assert getattr(embodiment, "connected_session", None) is session
+    assert footer_labels == ([] if expected_footer_label is None else [expected_footer_label])
+    assert capsys.readouterr().out == expected_output
+    # The bare-Enter usage reminder must match the mode: end-only sessions remind
+    # with USAGE_END_ONLY, not the type-a-message text.
+    assert session._console._usage == (USAGE if accepts_messages else USAGE_END_ONLY)
+
+
+def test_build_operator_session_enables_echo_pump(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Attended CLI sessions get the background echo pump at the module's default cadence."""
+    from inspect_robots import session as session_module
+    from inspect_robots.mock import CubePickEmbodiment
+
+    monkeypatch.setattr(sys, "platform", "linux")  # win32 returns before enable_footer
+    policy = type("PolicyStub", (), {"accepts_operator_messages": True})()
+
+    session, operator_input = cli._build_operator_session(policy, CubePickEmbodiment())
+
+    assert operator_input is session
+    assert session._echo_interval_s == session_module.ECHO_INTERVAL_S
+
+    class HookEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            del session
+
+    hook_session, hook_input = cli._build_operator_session(policy, HookEmbodiment())
+
+    assert hook_input is hook_session
+    assert hook_session._echo_interval_s == session_module.ECHO_INTERVAL_S
+    capsys.readouterr()
+
+
+def test_new_session_hook_runs_before_eval_and_owns_prompt_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    order: list[str] = []
+    connected: list[OperatorSession] = []
+
+    class SessionAwareEmbodiment(CubePickEmbodiment):
+        def connect_operator_session(self, session: OperatorSession) -> None:
+            order.append("connect")
+            connected.append(session)
+
+    embodiment_name = "session-aware-for-order-test"
+    reg.embodiment(embodiment_name)(SessionAwareEmbodiment)
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        order.append("eval")
+        operator_input = kwargs.get("operator_input")
+        grader = kwargs.get("grader")
+        assert operator_input is connected[0]
+        assert getattr(grader, "name", None) == "operator"
+        assert getattr(grader, "_session", None) is operator_input
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                embodiment_name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert rc == 0
+    assert order == ["connect", "eval"]
+    assert capsys.readouterr().out.count(USAGE_END_ONLY) == 1
+
+
+def test_attended_opted_in_run_builds_console_calls_defer_and_prints_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-run-test"
+    embodiment_name = "deferred-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                embodiment_name,
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorSession)
+    assert _DeferredHardware.hook_calls == 1
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_opted_in_eval_set_uses_simulated_console_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = "console-policy-for-eval-set-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return True, [_step_limit_log(task="cubepick-reach", reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _tty_stdin(monkeypatch)
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "cubepick-reach",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert rc == 0
+    assert len(operator_inputs) == 1
+    assert isinstance(operator_inputs[0], OperatorSession)
+    assert capsys.readouterr().out.count(USAGE) == 1
+
+
+def test_attended_console_stays_off_for_legacy_real_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _LegacyHardware(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+    policy_name = "console-policy-for-legacy-hardware-test"
+    embodiment_name = "legacy-hardware-for-console-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_LegacyHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert out.count("predates the operator console") == 1
+    assert "still owns the end-of-episode keypress" in out
+    assert "feedback typing stays off" in out
+    assert USAGE not in out
+
+
+def test_attended_console_stays_off_on_windows_before_calling_defer_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _DeferredHardware(CubePickEmbodiment):
+        hook_calls: ClassVar[int] = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = dataclasses.replace(self.info, is_simulated=False)
+
+        def defer_operator_end(self) -> None:
+            type(self).hook_calls += 1
+
+    policy_name = "console-policy-for-windows-test"
+    embodiment_name = "deferred-hardware-for-windows-test"
+    reg.policy(policy_name)(_ConsolePolicy)
+    reg.embodiment(embodiment_name)(_DeferredHardware)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    embodiment_name,
+                    "--log-dir",
+                    str(tmp_path),
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["embodiment"].pop(embodiment_name, None)
+
+    assert operator_inputs == [None]
+    assert _DeferredHardware.hook_calls == 0
+    out = capsys.readouterr().out
+    assert out.count("select cannot watch stdin on Windows") == 1
+    assert USAGE not in out
+
+
+@pytest.mark.parametrize(("tty", "extra_args"), [(False, ()), (True, ("--no-prompt",))])
+def test_operator_console_requires_attendance(
+    tty: bool,
+    extra_args: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    policy_name = f"console-policy-unattended-{tty}"
+    reg.policy(policy_name)(_ConsolePolicy)
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: tty)
+    try:
+        assert (
+            main(
+                [
+                    "run",
+                    "--task",
+                    "cubepick-reach",
+                    "--policy",
+                    policy_name,
+                    "--embodiment",
+                    "cubepick",
+                    "--log-dir",
+                    str(tmp_path),
+                    *extra_args,
+                ]
+            )
+            == 0
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+
+    assert operator_inputs == [None]
+    assert USAGE not in capsys.readouterr().out
+
+
+def test_policy_without_opt_in_skips_console_silently_before_platform_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import inspect_robots
+
+    operator_inputs: list[object] = []
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        operator_inputs.append(kwargs.get("operator_input"))
+        return [_step_limit_log(reasons=("success",))]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(sys, "platform", "win32")
+    _tty_stdin(monkeypatch)
+
+    assert (
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+
+    assert operator_inputs == [None]
+    out = capsys.readouterr().out
+    assert "operator console" not in out
+    assert USAGE not in out
 
 
 def test_operator_prompt_records_verdict_and_reprompts_on_typos(
@@ -2552,7 +6018,7 @@ def test_operator_prompt_suppressed_without_tty_or_with_no_prompt(
     capsys.readouterr()
 
 
-def test_registered_task_stays_silent_unless_operator_ends_episode(
+def test_registered_task_attended_adopts_definitive_verdict_without_prompting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from inspect_robots.registry import task as task_decorator
@@ -2572,7 +6038,7 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
     _tty_stdin(monkeypatch)
     monkeypatch.setattr(
         "builtins.input",
-        lambda _prompt: pytest.fail("R6: --task runs prompt only for operator_end trials"),
+        lambda _prompt: pytest.fail("a definitive embodiment verdict must be adopted, not asked"),
     )
     log_dir = tmp_path / "logs"
     try:
@@ -2593,8 +6059,10 @@ def test_registered_task_stays_silent_unless_operator_ends_episode(
         # Don't leak the ad-hoc registration into later tests' registry views.
         reg._FACTORIES["task"].pop("operator-task-for-test", None)
     assert rc == 0
-    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
-    capsys.readouterr()
+    # Plan 0049: attended registered tasks are graded by default; the scripted
+    # policy self-confirms success, so the verdict is adopted, never prompted.
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+    assert "operator verdict adopted from embodiment: success" in capsys.readouterr().out
 
 
 def test_registered_task_prompts_when_operator_ends_episode(
@@ -2696,344 +6164,6 @@ def test_registered_task_operator_end_suppressed_without_tty_or_with_no_prompt(
     assert rc == 0
     assert _read_only_log(tmp_path / "logs").samples[0].operator_judgements == (None,)
     capsys.readouterr()
-
-
-@pytest.mark.parametrize(
-    ("termination_reason", "expected_verdict"),
-    [("success", "y"), ("failure", "n")],
-)
-def test_prompt_operator_adopts_definitive_embodiment_verdict(
-    termination_reason: str,
-    expected_verdict: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason=termination_reason,
-    )
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
-    )
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == expected_verdict
-    assert record.operator_note is None
-    (event,) = record.events
-    assert event.kind == "operator"
-    assert event.t == 0
-    assert event.data == {
-        "verdict": expected_verdict,
-        "source": "embodiment",
-        "note": None,
-    }
-
-
-@pytest.mark.parametrize(
-    ("terminated", "termination_reason"),
-    [
-        (False, None),
-        (False, "max_steps"),
-        (False, "policy_stop"),
-        (True, None),
-    ],
-)
-def test_prompt_operator_still_prompts_without_definitive_verdict(
-    terminated: bool,
-    termination_reason: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=terminated,
-        termination_reason=termination_reason,
-    )
-    prompts: list[str] = []
-    answers = iter(["y", ""])
-
-    def _answer(prompt: str) -> str:
-        prompts.append(prompt)
-        return next(answers)
-
-    monkeypatch.setattr("builtins.input", _answer)
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert prompts == [_PROMPT, _NOTES_PROMPT]
-    assert record.operator_judgement == "y"
-    (event,) = record.events
-    assert event.data == {"verdict": "y", "source": "prompt", "note": None}
-
-
-def test_prompt_operator_prompts_for_truncated_success_reason(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=False,
-        truncated=True,
-        termination_reason="success",
-    )
-    answers = iter(["n", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == "n"
-    (event,) = record.events
-    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
-
-
-def test_prompt_operator_warns_before_judging_step_limited_trial(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        truncated=True,
-        termination_reason="max_steps",
-    )
-    answers = iter(["n", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert "trial hit the step limit before terminating" in capsys.readouterr().out
-    assert record.operator_judgement == "n"
-
-
-@pytest.mark.parametrize(
-    ("termination_reason", "expected_score"),
-    [("success", True), ("failure", False)],
-)
-def test_operator_scorer_reads_adopted_embodiment_verdict(
-    termination_reason: str,
-    expected_score: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-    from inspect_robots.scorer import operator_scorer
-
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason=termination_reason,
-    )
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("operator prompt must not fire")
-    )
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert operator_scorer()(record, None).value is expected_score
-
-
-def test_prompt_operator_unit_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
-    from inspect_robots.cli import _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    scene = Scene(id="s0", instruction="reach")
-
-    def _record() -> TrialRecord:
-        record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-        record.steps = [None, None, None]  # type: ignore[list-item]
-        return record
-
-    # A verdict is recorded verbatim with an operator event at the final step.
-    record = _record()
-    answers = iter(["Partial", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    _prompt_operator(record, scene)
-    assert record.operator_judgement == "partial"
-    (event,) = record.events
-    assert event.kind == "operator"
-    assert event.t == 3
-    assert event.data["verdict"] == "partial"
-
-    # skip: no judgement, no event.
-    record = _record()
-    answers = iter(["skip", ""])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    _prompt_operator(record, scene)
-    assert record.operator_judgement is None
-    assert record.events == []
-
-    # EOF (operator hit Ctrl-D): treated as skip.
-    prompts: list[str] = []
-
-    def _eof(prompt: str) -> str:
-        prompts.append(prompt)
-        raise EOFError
-
-    record = _record()
-    monkeypatch.setattr("builtins.input", _eof)
-    _prompt_operator(record, scene)
-    assert record.operator_judgement is None
-    assert record.operator_note is None
-    assert record.events == []
-    assert prompts == [_PROMPT]
-
-
-@pytest.mark.parametrize(
-    (
-        "verdict",
-        "note_input",
-        "expected_judgement",
-        "expected_note",
-        "expected_event",
-    ),
-    [
-        (
-            "y",
-            "gripper closed early",
-            "y",
-            "gripper closed early",
-            {"verdict": "y", "source": "prompt", "note": "gripper closed early"},
-        ),
-        ("y", "", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
-        ("y", " \t ", "y", None, {"verdict": "y", "source": "prompt", "note": None}),
-        (
-            "y",
-            "  Mixed CASE  ",
-            "y",
-            "Mixed CASE",
-            {"verdict": "y", "source": "prompt", "note": "Mixed CASE"},
-        ),
-        (
-            "skip",
-            "  camera unplugged  ",
-            None,
-            "camera unplugged",
-            {"verdict": "skip", "source": "prompt", "note": "camera unplugged"},
-        ),
-        ("skip", "", None, None, None),
-    ],
-)
-def test_prompt_operator_records_optional_grader_notes(
-    verdict: str,
-    note_input: str,
-    expected_judgement: str | None,
-    expected_note: str | None,
-    expected_event: dict[str, str | None] | None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    answers = iter([verdict, note_input])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert record.operator_judgement == expected_judgement
-    assert record.operator_note == expected_note
-    if expected_event is None:
-        assert record.events == []
-    else:
-        (event,) = record.events
-        assert event.data == expected_event
-
-
-def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _NOTES_PROMPT, _PROMPT, _prompt_operator
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    prompts: list[str] = []
-
-    def _answer(prompt: str) -> str:
-        prompts.append(prompt)
-        if prompt == _PROMPT:
-            return "n"
-        raise EOFError
-
-    monkeypatch.setattr("builtins.input", _answer)
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
-
-    _prompt_operator(record, Scene(id="s0", instruction="reach"))
-
-    assert prompts == [_PROMPT, _NOTES_PROMPT]
-    assert record.operator_judgement == "n"
-    assert record.operator_note is None
-    (event,) = record.events
-    assert event.data == {"verdict": "n", "source": "prompt", "note": None}
-
-
-def test_prompt_on_operator_end_prompts_and_records_note(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from inspect_robots.cli import _prompt_operator_on_operator_end
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    answers = iter(["partial", "left gripper slipped"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
-    record = TrialRecord(
-        scene_id="s0",
-        epoch=0,
-        seed=0,
-        terminated=True,
-        termination_reason="operator_end",
-    )
-    _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
-    assert record.operator_judgement == "partial"
-    assert record.operator_note == "left gripper slipped"
-    capsys.readouterr()
-
-
-def test_prompt_on_operator_end_ignores_other_reasons(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from inspect_robots.cli import _prompt_operator_on_operator_end
-    from inspect_robots.rollout import TrialRecord
-    from inspect_robots.scene import Scene
-
-    monkeypatch.setattr(
-        "builtins.input", lambda _prompt: pytest.fail("must not prompt: not operator_end")
-    )
-    for reason, truncated in [("max_steps", True), ("success", False), (None, False)]:
-        record = TrialRecord(
-            scene_id="s0",
-            epoch=0,
-            seed=0,
-            terminated=True,
-            truncated=truncated,
-            termination_reason=reason,
-        )
-        _prompt_operator_on_operator_end(record, Scene(id="s0", instruction="reach"))
-        assert record.operator_judgement is None
 
 
 def test_outcome_phrase_maps_operator_end() -> None:
@@ -3275,16 +6405,23 @@ class _FakeRerunSink:
     """Stands in for RerunSink: records construction and step traffic."""
 
     instances: ClassVar[list[_FakeRerunSink]] = []
+    next_resolved_recording_path: ClassVar[Path | None] = None
 
     def __init__(
         self,
         recording_path: str | None = None,
         *,
+        recording_dir: str | None = None,
         spawn: bool = False,
+        spawn_port: int = 9876,
         connect_url: str | None = None,
     ) -> None:
+        self.recording_path = recording_path
+        self.recording_dir = recording_dir
         self.spawn = spawn
+        self.spawn_port = spawn_port
         self.connect_url = connect_url
+        self.resolved_recording_path = self.next_resolved_recording_path
         self.steps = 0
         _FakeRerunSink.instances.append(self)
 
@@ -3305,6 +6442,7 @@ def _fake_rerun(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRerunSink]:
     import inspect_robots.logging.rerun_sink as rrs
 
     _FakeRerunSink.instances = []
+    _FakeRerunSink.next_resolved_recording_path = None
     monkeypatch.setattr(rrs, "RerunSink", _FakeRerunSink)
     return _FakeRerunSink
 
@@ -3324,6 +6462,8 @@ def test_config_rerun_attaches_live_viewer_sink(
     assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
     (sink,) = _fake_rerun.instances  # constructed exactly once
     assert sink.spawn is True  # live viewer, not just a recording
+    assert sink.spawn_port == 9876
+    assert sink.recording_dir == str(tmp_path / "logs")
     assert sink.steps > 0  # actually received rollout traffic
 
 
@@ -3343,7 +6483,18 @@ def test_rerun_flag_enables_without_config(
     )
     rc = main(["reach the cube", "--log-dir", str(tmp_path / "logs"), "--rerun"])
     assert rc == 0
-    assert len(_fake_rerun.instances) == 1
+    (sink,) = _fake_rerun.instances
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_spawn_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves live spawn without a file target."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun-save") == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
 
 
 def test_bare_rerun_connect_uses_default_url(
@@ -3354,6 +6505,7 @@ def test_bare_rerun_connect_uses_default_url(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+    assert sink.recording_dir == str(tmp_path / "logs")
 
 
 def test_rerun_connect_honors_explicit_url(
@@ -3366,6 +6518,24 @@ def test_rerun_connect_honors_explicit_url(
     assert sink.connect_url == url
 
 
+def test_connect_no_rerun_save_passes_no_recording_dir(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """The explicit save opt-out preserves a remote live stream without a file target."""
+    assert (
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-connect",
+            "--no-rerun-save",
+        )
+        == 0
+    )
+    (sink,) = _fake_rerun.instances
+    assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
+    assert sink.recording_dir is None
+
+
 def test_rerun_connect_takes_precedence_over_rerun(
     _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
 ) -> None:
@@ -3374,6 +6544,180 @@ def test_rerun_connect_takes_precedence_over_rerun(
     (sink,) = _fake_rerun.instances
     assert sink.connect_url == cli.DEFAULT_RERUN_CONNECT_URL
     assert sink.spawn is False
+
+
+def test_rerun_port_flag_spawns_viewer_on_that_port(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9877",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9877
+    assert sink.recording_dir == str(tmp_path / "logs")
+
+
+def test_explicit_rerun_save_builds_record_only_sink(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An explicit save request without a viewer constructs one viewer-less sink."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\nscorer = success_at_end\n",
+    )
+    log_dir = tmp_path / "logs"
+    assert main(["reach the cube", "--log-dir", str(log_dir), "--rerun-save"]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is False
+    assert sink.connect_url is None
+    assert sink.recording_dir == str(log_dir)
+    assert "rerun: recording .rrd" in capsys.readouterr().out
+
+
+def test_config_rerun_save_false_suppresses_default_tee(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A false config key keeps the configured live viewer but removes its file target."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_save = false\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.recording_dir is None
+
+
+def test_config_rerun_save_true_does_not_create_viewerless_sink(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    """A config default alone never changes a run that has no viewer."""
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_save = true\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_post_eval_reports_resolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary prints the file path only after the sink resolves one."""
+    target = tmp_path / "logs" / "demo_deadbeef.rrd"
+    _fake_rerun.next_resolved_recording_path = target
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert f"rrd: {target}" in capsys.readouterr().out
+
+
+def test_post_eval_suppresses_unresolved_rrd_path(
+    _hermetic_defaults: Path,
+    tmp_path: Path,
+    _fake_rerun: type[_FakeRerunSink],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The run summary omits the file line when startup attached no recording."""
+    assert _run_adhoc(_hermetic_defaults, tmp_path) == 0
+    assert "rrd:" not in capsys.readouterr().out
+
+
+def test_config_rerun_port_reaches_spawned_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun = true\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn is True
+    assert sink.spawn_port == 9878
+
+
+def test_rerun_port_flag_beats_config(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    rc = main(
+        [
+            "reach the cube",
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--rerun-port",
+            "9879",
+        ]
+    )
+    assert rc == 0
+    (sink,) = _fake_rerun.instances
+    assert sink.spawn_port == 9879
+
+
+def test_config_rerun_port_alone_does_not_enable_viewer(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = scripted\nembodiment = cubepick\n"
+        "scorer = success_at_end\nrerun_port = 9878\n",
+    )
+    assert main(["reach the cube", "--log-dir", str(tmp_path / "logs")]) == 0
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_rerun_connect(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--rerun-port.*--rerun-connect"):
+        _run_adhoc(
+            _hermetic_defaults,
+            tmp_path,
+            "--rerun-port",
+            "9877",
+            "--rerun-connect",
+        )
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_conflicts_with_no_rerun(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit, match=r"--no-rerun.*--rerun-port"):
+        _run_adhoc(_hermetic_defaults, tmp_path, "--no-rerun", "--rerun-port", "9877")
+    assert _fake_rerun.instances == []
+
+
+def test_rerun_port_rejects_out_of_range(
+    _hermetic_defaults: Path, tmp_path: Path, _fake_rerun: type[_FakeRerunSink]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_adhoc(_hermetic_defaults, tmp_path, "--rerun-port", "0")
+    assert excinfo.value.code == 2
+    assert _fake_rerun.instances == []
 
 
 def test_styled_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3421,6 +6765,282 @@ def test_build_guardrails_full_chain_on_bounded_displacement_space() -> None:
     assert warnings == []
     out = approver.review(Action(data=np.array([5.0, 5.0])), {})
     assert out.meta.get("clamped") is True  # box bounds enforced
+
+
+def test_contributed_guardrail_follows_delta_limit_and_has_exact_banner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    seen: list[float] = []
+
+    class _Observer:
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            seen.append(float(action.data[0]))
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(approvers=(("collision", _Observer()),))
+
+    embodiment = _ContributingEmbodiment()
+    args = argparse.Namespace(disable_guardrails=False, max_action_delta=0.05)
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is not None
+    approver.review(Action(data=np.array([0.08, 0.0])), {})
+
+    assert seen == [0.05]
+    assert capsys.readouterr().out == "guardrails: clamp + delta-limit + collision\n"
+
+
+def test_contributed_approvers_keep_declaration_order_and_warnings() -> None:
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    calls: list[str] = []
+
+    class _Recorder:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            calls.append(self._name)
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(
+                approvers=(
+                    ("first", _Recorder("first")),
+                    ("second", _Recorder("second")),
+                ),
+                warnings=("collision model is running without table geometry",),
+            )
+
+    embodiment = _ContributingEmbodiment()
+    approver, active, warnings = _build_guardrails(embodiment.info.action_space, None, embodiment)
+    approver.review(Action(data=np.array([0.01, 0.01])), {})
+
+    assert calls == ["first", "second"]
+    assert active == ["clamp", "delta-limit", "first", "second"]
+    assert warnings == ["collision model is running without table geometry"]
+
+
+def test_warnings_only_contribution_keeps_the_generic_chain(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    import numpy as np
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    class _WarningEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(warnings=("collision guardrail unavailable",))
+
+    embodiment = _WarningEmbodiment()
+    args = argparse.Namespace(disable_guardrails=False, max_action_delta=None)
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is not None
+    action = Action(data=np.array([0.01, 0.01]))
+
+    assert approver.review(action, {}) is action
+    captured = capsys.readouterr()
+    assert captured.out == "guardrails: clamp + delta-limit\n"
+    assert captured.err == "guardrails warning: collision guardrail unavailable\n"
+
+
+def test_non_callable_guardrail_hook_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = 7
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*int"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_none_guardrail_hook_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = None
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*NoneType"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_wrong_guardrail_contribution_type_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _BrokenEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> object:
+            return "not a contribution"
+
+    embodiment = _BrokenEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*str"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
+def test_contribution_is_the_only_gate_for_an_unbounded_space() -> None:
+    import numpy as np
+
+    from inspect_robots.approver import ChainApprover, GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+    from inspect_robots.types import Action
+
+    calls: list[Action] = []
+
+    class _OnlyGate:
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            calls.append(action)
+            return action
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution(approvers=(("only-gate", _OnlyGate()),))
+
+    embodiment = _ContributingEmbodiment()
+    space = Box(shape=(2,))
+    approver, active, warnings = _build_guardrails(space, None, embodiment)
+    action = Action(data=np.array([4.0, 5.0]))
+
+    assert isinstance(approver, ChainApprover)
+    assert approver.review(action, {}) is action
+    assert calls == [action]
+    assert active == ["only-gate"]
+    assert not any("no guardrails" in warning for warning in warnings)
+
+
+def test_disable_guardrails_does_not_invoke_contribution(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import argparse
+
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    calls: list[Box] = []
+
+    class _ContributingEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            calls.append(action_space)
+            return GuardrailContribution()
+
+    embodiment = _ContributingEmbodiment()
+    args = argparse.Namespace(disable_guardrails=True, max_action_delta=None)
+
+    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert approver is None
+    assert calls == []
+    assert "guardrails: disabled" in capsys.readouterr().out
+
+
+def test_embodiment_base_default_matches_an_absent_hook() -> None:
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.embodiment import EmbodimentBase
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.scene import Scene
+    from inspect_robots.types import Action, StepResult
+
+    class _BaseEmbodiment(EmbodimentBase):
+        def __init__(self) -> None:
+            self._delegate = CubePickEmbodiment()
+            self.info = self._delegate.info
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return self._delegate.reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            return self._delegate.step(action)
+
+    absent = CubePickEmbodiment()
+    base = _BaseEmbodiment()
+
+    _, absent_active, absent_warnings = _build_guardrails(absent.info.action_space, None, absent)
+    _, base_active, base_warnings = _build_guardrails(base.info.action_space, None, base)
+
+    assert base.contribute_guardrails(base.info.action_space) == GuardrailContribution()
+    assert (base_active, base_warnings) == (absent_active, absent_warnings)
+
+
+def test_guardrail_contribution_conformance_passes_absent_and_valid_hooks() -> None:
+    from inspect_robots.approver import GuardrailContribution
+    from inspect_robots.conformance import (
+        assert_guardrail_contribution_conformant,
+        check_guardrail_contribution,
+    )
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _ValidEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+            return GuardrailContribution()
+
+    absent = CubePickEmbodiment()
+    valid = _ValidEmbodiment()
+
+    assert check_guardrail_contribution(absent, absent.info.action_space).ok
+    assert check_guardrail_contribution(valid, valid.info.action_space).ok
+    assert_guardrail_contribution_conformant(valid, valid.info.action_space)
+
+
+def test_guardrail_contribution_conformance_reports_bad_hooks() -> None:
+    from inspect_robots.conformance import (
+        assert_guardrail_contribution_conformant,
+        check_guardrail_contribution,
+    )
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.spaces import Box
+
+    class _NonCallableEmbodiment(CubePickEmbodiment):
+        contribute_guardrails = 7
+
+    class _WrongTypeEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: Box) -> object:
+            return "not a contribution"
+
+    non_callable = _NonCallableEmbodiment()
+    wrong_type = _WrongTypeEmbodiment()
+
+    report = check_guardrail_contribution(non_callable, non_callable.info.action_space)
+    assert not report.ok
+    assert "int" in report.summary()
+
+    report = check_guardrail_contribution(wrong_type, wrong_type.info.action_space)
+    assert not report.ok
+    assert "str" in report.summary()
+    with pytest.raises(AssertionError, match="GuardrailContribution"):
+        assert_guardrail_contribution_conformant(wrong_type, wrong_type.info.action_space)
 
 
 def test_build_guardrails_threads_max_action_delta() -> None:
@@ -3563,6 +7183,39 @@ def test_cli_eval_set_rejects_invalid_max_action_delta(value: str) -> None:
         main(["eval-set", "cubepick-reach", "--max-action-delta", value])
 
 
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_run_rejects_invalid_fail_on_error(value: str, tmp_path: Path) -> None:
+    """An out-of-range --fail-on-error is rejected rather than silently reinterpreted.
+
+    A negative reaches ``errors >= fail_on_error`` and halts on the first error
+    like ``1``; a NaN fails every comparison and never halts. ``0`` stays valid —
+    it is the documented "never halt" value — so it is not in this list.
+    """
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+                "--fail-on-error",
+                value,
+            ]
+        )
+
+
+@pytest.mark.parametrize("value", ["-1", "-0.5", "inf", "nan"])
+def test_cli_eval_set_rejects_invalid_fail_on_error(value: str) -> None:
+    """Same guard as run, exercised through eval-set's shared conflict check."""
+    with pytest.raises(SystemExit, match="finite and >= 0"):
+        main(["eval-set", "cubepick-reach", "--fail-on-error", value])
+
+
 def test_cli_degraded_guardrails_warn_but_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3608,6 +7261,113 @@ def test_guided_error_mentions_config_set() -> None:
 # --- config set / show (plan 0008 §3e) ----------------------------------------
 
 
+def test_config_show_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    path.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", str(path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "policy: rig-b" in out
+    assert f"policy: rig-b  ({path})" in out
+
+
+def test_config_set_honors_config_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path = tmp_path / "rig-b.ini"
+    xdg = tmp_path / "decoy"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    assert main(["config", "set", "policy", "x", "--config", str(path)]) == 0
+
+    assert "policy = x" in path.read_text(encoding="utf-8")
+    assert not (xdg / "inspect-robots" / "config.ini").exists()
+
+
+def test_config_flag_beats_env_var(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    path_a = tmp_path / "rig-a.ini"
+    path_b = tmp_path / "rig-b.ini"
+    path_a.write_text("[defaults]\npolicy = rig-a\n", encoding="utf-8")
+    path_b.write_text("[defaults]\npolicy = rig-b\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", str(path_a))
+
+    assert main(["config", "show", "--config", str(path_b)]) == 0
+
+    out = capsys.readouterr().out
+    assert f"policy: rig-b  ({path_b})" in out
+    assert "rig-a" not in out
+
+
+def test_config_flag_expands_tilde(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = tilde-rig\n", encoding="utf-8")
+
+    assert main(["config", "show", "--config", "~/rig.ini"]) == 0
+
+    assert f"policy: tilde-rig  ({path})" in capsys.readouterr().out
+
+
+def test_config_flag_anchors_relative_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "rig.ini"
+    path.write_text("[defaults]\npolicy = relative-rig\n", encoding="utf-8")
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", "placeholder")
+
+    assert main(["config", "show", "--config", "rig.ini"]) == 0
+
+    assert "policy: relative-rig" in capsys.readouterr().out
+    assert os.environ["INSPECT_ROBOTS_CONFIG"] == str(path)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--config", "p"],
+        ["eval-set", "t", "--config", "p"],
+        ["doctor", "--config", "p"],
+        ["setup", "--config", "p"],
+        ["config", "set", "policy", "x", "--config", "p"],
+        ["config", "show", "--config", "p"],
+    ],
+)
+def test_config_flag_is_wired_to_every_config_reading_subcommand(argv: list[str]) -> None:
+    args = cli.build_parser().parse_args(argv)
+
+    assert args.config == "p"
+
+
+def test_no_config_flag_leaves_environ_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INSPECT_ROBOTS_CONFIG", raising=False)
+
+    assert main(["list"]) == 0
+
+    assert "INSPECT_ROBOTS_CONFIG" not in os.environ
+
+
 def test_cli_config_set_writes_and_show_reads(
     _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3621,6 +7381,7 @@ def test_cli_config_set_writes_and_show_reads(
     out = capsys.readouterr().out
     assert f"embodiment: cubepick  ({path})" in out
     assert "sim_embodiment: (unset)" in out
+    assert "rerun_save: True" in out
 
 
 def test_cli_config_set_preserves_unknown_sections(_hermetic_defaults: Path) -> None:
@@ -3646,10 +7407,25 @@ def test_cli_config_set_validates_values(_hermetic_defaults: Path) -> None:
     assert excinfo.value.code == 2
     with pytest.raises(SystemExit, match="rerun"):
         main(["config", "set", "rerun", "sometimes"])
+    with pytest.raises(SystemExit, match="rerun_save"):
+        main(["config", "set", "rerun_save", "sometimes"])
     # Valid values round-trip.
     assert main(["config", "set", "max_steps", "50"]) == 0
     assert main(["config", "set", "store_frames", "true"]) == 0
     assert main(["config", "set", "rerun", "true"]) == 0
+    assert main(["config", "set", "rerun_save", "false"]) == 0
+
+
+def test_cli_config_set_rejects_bad_rerun_port(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="rerun_port must be an integer in 1-65535"):
+        main(["config", "set", "rerun_port", "sometimes"])
+
+    assert main(["config", "set", "rerun_port", "9877"]) == 0
+    capsys.readouterr()
+    assert main(["config", "show"]) == 0
+    assert "rerun_port: 9877" in capsys.readouterr().out
 
 
 def test_component_config_error_exits_cleanly(tmp_path: Path) -> None:
@@ -3878,3 +7654,414 @@ def test_doctor_closes_the_embodiment_it_constructs() -> None:
     embodiment_decorator("closable-doctor-cubepick")(_ClosableCubePick)
     assert main(["doctor", "--embodiment", "closable-doctor-cubepick"]) == 0
     assert closed == ["closed"]
+
+
+# Plan 0049 / issue #320: a trial the policy ends via done()/give_up() must be
+# graded on every attended path, whatever the scorer.
+
+
+class _DoneStopperPolicy(ScriptedPolicy):
+    """Request a policy stop ('done') on the first inference, like agent done()."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        """Stamp the agent-style stop request onto the scripted action."""
+        chunk = super().act(observation)
+        return ActionChunk(
+            actions=[
+                dataclasses.replace(a, meta={**a.meta, "request_stop": True, "stop_reason": "done"})
+                for a in chunk.actions
+            ]
+        )
+
+
+def _register_stopper(name: str) -> None:
+    reg.policy(name)(_DoneStopperPolicy)
+
+
+def _single_scene_task_factory() -> Any:
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import episode_length
+    from inspect_robots.task import Task
+
+    return Task(
+        name="stopper-task-for-test",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=episode_length(),
+        max_steps=40,
+    )
+
+
+def test_agent_stop_prompts_on_adhoc_run_with_non_operator_scorer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-adhoc"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    answers = iter(["y", "stopped itself cleanly"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "note: this trial ended early ('done')" in capsys.readouterr().out
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("y",)
+    assert log.samples[0].operator_notes == ("stopped itself cleanly",)
+
+
+def test_agent_stop_prompts_on_registered_task_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-task"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["n", "gave up on contact"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "run",
+                "--task",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("n",)
+    assert log.samples[0].operator_notes == ("gave up on contact",)
+    capsys.readouterr()
+
+
+def test_agent_stop_prompts_on_eval_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-eval-set"
+    _register_stopper(policy_name)
+    reg.task("stopper-task-for-test")(_single_scene_task_factory)
+    _tty_stdin(monkeypatch)
+    answers = iter(["partial", "half the reach"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "stopper-task-for-test",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["task"].pop("stopper-task-for-test", None)
+    assert rc == 0
+    log = _read_only_log(log_dir)
+    assert log.samples[0].operator_judgements == ("partial",)
+    assert log.samples[0].operator_notes == ("half the reach",)
+    capsys.readouterr()
+
+
+def test_grader_none_suppresses_prompt_on_attended_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy_name = "done-stopper-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("--grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--grader",
+                "none",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("suppress", ["no_prompt_flag", "no_tty"])
+def test_config_operator_grader_downgrades_when_run_cannot_be_attended(
+    suppress: str,
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = operator\n")
+    policy_name = f"done-stopper-downgrade-{suppress}"
+    _register_stopper(policy_name)
+    extra: list[str] = []
+    if suppress == "no_prompt_flag":
+        _tty_stdin(monkeypatch)
+        extra = ["--no-prompt"]
+    else:
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("downgraded grader must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+                *extra,
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert "grading is off for this run" in capsys.readouterr().err
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_config_grader_none_disables_grading(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = none\n")
+    policy_name = "done-stopper-config-none"
+    _register_stopper(policy_name)
+    _tty_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: pytest.fail("config grader none must not prompt")
+    )
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--policy",
+                policy_name,
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+    assert rc == 0
+    assert _read_only_log(log_dir).samples[0].operator_judgements == (None,)
+
+
+def test_no_prompt_with_explicit_operator_grader_is_a_conflict() -> None:
+    with pytest.raises(SystemExit, match="drop one"):
+        main(
+            [
+                "run",
+                "--task",
+                "cubepick-reach",
+                "--no-prompt",
+                "--grader",
+                "operator",
+            ]
+        )
+
+
+def test_explicit_custom_config_grader_is_honored_unattended(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    graded: list[str] = []
+
+    class _MarkerGrader:
+        name = "marker"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            graded.append(record.scene_id)
+            record.operator_judgement = "y"
+
+    reg.grader("marker-for-test")(_MarkerGrader)
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = marker-for-test\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    log_dir = tmp_path / "logs"
+    try:
+        rc = main(
+            [
+                "reach the cube",
+                "--scorer",
+                "episode_length",
+                "--max-steps",
+                "3",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(log_dir),
+            ]
+        )
+    finally:
+        reg._FACTORIES["grader"].pop("marker-for-test", None)
+    assert rc == 0
+    assert graded == ["scene-0"]
+    assert _read_only_log(log_dir).samples[0].operator_judgements == ("y",)
+
+
+def test_list_includes_graders(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list", "graders"]) == 0
+    assert "operator" in capsys.readouterr().out
+
+
+# --- -G grader args and [grader.args] (plan 0069) ------------------------------
+
+
+def _run_adhoc_args(log_dir: Path) -> list[str]:
+    return [
+        "reach the cube",
+        "--scorer",
+        "episode_length",
+        "--max-steps",
+        "3",
+        "--policy",
+        "scripted",
+        "--embodiment",
+        "cubepick",
+        "--log-dir",
+        str(log_dir),
+    ]
+
+
+def _register_argcap_grader(captured: list[dict[str, object]]) -> None:
+    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.scene import Scene
+
+    class _ArgcapGrader:
+        name = "argcap"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            record.operator_judgement = "y"
+
+    def factory(**kwargs: object) -> _ArgcapGrader:
+        captured.append(dict(kwargs))
+        return _ArgcapGrader()
+
+    reg.grader("argcap-test")(factory)
+
+
+def test_grader_args_merge_config_then_cli_flags(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\ngrader = argcap-test\n[grader.args]\nfoo = 1\nbar = base\n",
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        assert main([*_run_adhoc_args(tmp_path / "logs"), "-G", "bar=cli"]) == 0
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert captured == [{"foo": 1, "bar": "cli"}]
+
+
+def test_grader_config_args_are_dropped_for_a_different_grader(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: list[dict[str, object]] = []
+    _register_argcap_grader(captured)
+    _write_config(_hermetic_defaults, "[grader.args]\nfoo = 1\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    try:
+        rc = main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "argcap-test", "-G", "x=2"])
+    finally:
+        reg._FACTORIES["grader"].pop("argcap-test", None)
+    assert rc == 0
+    assert captured == [{"x": 2}]
+    assert "ignoring [grader.args]" in capsys.readouterr().err
+
+
+def test_grader_args_on_operator_grader_exit_with_guidance(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"invalid arguments for grader 'operator'.*-G"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "--grader", "operator", "-G", "model=x"])
+
+
+def test_dangling_grader_args_exit_loudly(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    with pytest.raises(SystemExit, match=r"-G requires a grader"):
+        main([*_run_adhoc_args(tmp_path / "logs"), "-G", "model=x"])
+
+
+def test_vlm_grader_without_api_key_exits_before_any_rollout(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    log_dir = tmp_path / "logs"
+    with pytest.raises(SystemExit, match=r"no API key found in \$ANTHROPIC_API_KEY"):
+        main([*_run_adhoc_args(log_dir), "--grader", "vlm", "-G", "model=judge"])
+    assert not log_dir.exists()
+
+
+def test_config_show_displays_the_grader_default(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\ngrader = vlm\n")
+    assert main(["config", "show"]) == 0
+    out = capsys.readouterr().out
+    assert "grader" in out
+    assert "vlm" in out

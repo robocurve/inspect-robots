@@ -46,6 +46,23 @@ def _completion(content: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
 
+def _responses_completion(content: str) -> dict[str, Any]:
+    """Build a Responses-wire body carrying a single assistant text turn."""
+    return {
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": content, "annotations": []}],
+            }
+        ],
+    }
+
+
 class _ScriptedTransport:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
@@ -554,6 +571,84 @@ def test_end_to_end_joint_embodiment_rollout_carries_transcript(tmp_path: Path) 
     assert "FINISH" in serialized
     assert "data:image" not in serialized
     policy.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_wire", "expected_config"),
+    [
+        pytest.param({}, None, None, id="unset_omits"),
+        pytest.param({"effort": None}, "none", "none", id="none_sends_minimum"),
+        pytest.param({"effort": "none"}, "none", "none", id="quoted_none_escape_hatch"),
+        pytest.param({"effort": "high"}, "high", "high", id="named_level_unchanged"),
+    ],
+)
+def test_effort_passthrough_chat_wire(
+    kwargs: dict[str, Any],
+    expected_wire: str | None,
+    expected_config: str | None,
+) -> None:
+    script = _ScriptedTransport([_completion("FINISH")])
+    policy = _bound_policy(script, **kwargs)
+
+    policy.act(_observation())
+
+    body = script.llm_requests[0]
+    if expected_wire is None:
+        assert "reasoning_effort" not in body
+    else:
+        assert body["reasoning_effort"] == expected_wire
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.effort == expected_config
+    policy.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_reasoning", "expected_config"),
+    [
+        pytest.param({}, None, None, id="unset_omits"),
+        pytest.param({"effort": None}, {"effort": "none"}, "none", id="none_sends_minimum"),
+        pytest.param({"effort": "none"}, {"effort": "none"}, "none", id="quoted_none_escape_hatch"),
+        pytest.param({"effort": "high"}, {"effort": "high"}, "high", id="named_level_unchanged"),
+    ],
+)
+def test_effort_passthrough_responses_wire(
+    kwargs: dict[str, Any],
+    expected_reasoning: dict[str, str] | None,
+    expected_config: str | None,
+) -> None:
+    script = _ScriptedTransport([_responses_completion("FINISH")])
+    policy = _bound_policy(script, wire="responses", **kwargs)
+
+    policy.act(_observation())
+
+    body = script.llm_requests[0]
+    if expected_reasoning is None:
+        assert "reasoning" not in body
+    else:
+        assert body["reasoning"] == expected_reasoning
+    assert isinstance(policy.config, CapxPolicyConfig)
+    assert policy.config.effort == expected_config
+    policy.close()
+
+
+def test_invalid_effort_raises_guided_config_error() -> None:
+    with pytest.raises(ConfigError) as invalid:
+        _policy(_ScriptedTransport([]), effort="turbo")
+
+    message = str(invalid.value)
+    assert "or None to omit the field" not in message
+    assert "['high', 'low', 'max', 'medium', 'minimal', 'none', 'xhigh']" in message
+    assert "fix:" in message
+    assert "omit -P effort=" in message
+
+
+def test_effort_config_never_leaks_the_unset_sentinel() -> None:
+    for kwargs in ({}, {"effort": None}, {"effort": "high"}):
+        policy = _policy(_ScriptedTransport([]), **kwargs)
+        assert isinstance(policy.config, CapxPolicyConfig)
+        assert policy.config.effort is None or isinstance(policy.config.effort, str)
+        json.dumps(policy.config.effort)
+        policy.close()
 
 
 def test_registry_entry_point_resolves_and_factory_forwards_kwargs() -> None:
