@@ -45,6 +45,9 @@ eval(task, policy, embodiment, sinks=[JsonLogSink("logs"), RerunSink("run.rrd")]
 
 `eval_set(..., sinks=...)` reuses the same sink instances across its sequential
 task runs. Caller-supplied sinks must reset their run state in `on_eval_start`.
+A reused `LiveLogSink` removes the previous run's stale "running" snapshot at
+the next `on_eval_start`; through the Python API, the last task's orphan remains
+until that next start.
 
 ## Rerun visualization
 

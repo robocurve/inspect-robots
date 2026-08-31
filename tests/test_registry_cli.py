@@ -962,6 +962,53 @@ def test_cli_eval_set_runs_multiple_exact_tasks(
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
+def test_cli_eval_set_reports_failed_task_and_keeps_good_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Render an error row after a completed task and exit unsuccessfully."""
+    from inspect_robots.registry import task as task_decorator
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import success_at_end
+    from inspect_robots.task import Epochs, Task
+
+    _register_task("kb/good")
+
+    @task_decorator("kb/bad")
+    def _bad_task() -> Task:
+        return Task(
+            name="kb/bad",
+            scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+            scorer=success_at_end(),
+            max_steps=20,
+            epochs=Epochs(count=1, reducer="bogus"),
+        )
+
+    try:
+        rc = main(
+            [
+                "eval-set",
+                "kb/good",
+                "kb/bad",
+                "--policy",
+                "scripted",
+                "--embodiment",
+                "cubepick",
+                "--log-dir",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        reg._FACTORIES["task"].pop("kb/good", None)
+        reg._FACTORIES["task"].pop("kb/bad", None)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[completed] kb/good" in out
+    assert "[error] kb/bad" in out
+    assert "ConfigError: unknown epoch reducer 'bogus'" in out
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
 def test_cli_eval_set_glob_matches_by_prefix(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

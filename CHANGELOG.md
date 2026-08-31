@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** `eval_set()` now preserves completed task logs when a later task
+  raises, reports the failure as an in-memory error log, and continues with
+  the remaining tasks. Safety halts and interrupts still stop the set
+  ([plan 0079](plans/0079-eval-set-error-log.md),
+  [#298](https://github.com/robocurve/inspect-robots/issues/298)).
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
   embodiment exposes several state fields of the action's shape (e.g. a 14-D
   `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers

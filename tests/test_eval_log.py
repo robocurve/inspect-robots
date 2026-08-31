@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +13,7 @@ import pytest
 from inspect_robots import eval_set, read_eval_log
 from inspect_robots._html import render_html
 from inspect_robots._summarize import TrialTranscript, build_digest
+from inspect_robots.errors import EmbodimentFault, SafetyAbort
 from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
@@ -24,7 +26,7 @@ from inspect_robots.log import (
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
-from inspect_robots.task import Task
+from inspect_robots.task import Epochs, Task
 
 
 def _golden_log() -> EvalLog:
@@ -336,6 +338,89 @@ def test_eval_set_runs_multiple_tasks(tmp_path: Path) -> None:
     assert success is True
     assert len(logs) == 2
     assert {log.eval.task for log in logs} == {"a", "b"}
+
+
+def test_eval_set_reports_failed_task_and_keeps_completed_logs(tmp_path: Path) -> None:
+    """Return earlier logs plus an in-memory error row when a later task fails."""
+
+    def task(name: str, *, reducer: str = "mean") -> Task:
+        return Task(
+            name=name,
+            scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+            scorer=success_at_end(),
+            max_steps=60,
+            epochs=Epochs(count=1, reducer=reducer),
+        )
+
+    good = task("good")
+    bad = task("bad", reducer="bogus")
+    success, logs = eval_set(
+        [good, bad],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+
+    assert success is False
+    assert len(logs) == 2
+    assert logs[0].status == "success"
+    assert logs[0].eval.task == good.name
+    assert logs[1].status == "error"
+    assert logs[1].error is not None and "bogus" in logs[1].error
+    assert logs[1].eval.task == bad.name
+    assert logs[1].eval.policy == "scripted"
+    assert logs[1].eval.embodiment == "cubepick"
+    assert logs[1].eval.max_steps == bad.max_steps
+    assert logs[1].samples == ()
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_eval_set_error_log_preserves_string_component_names(tmp_path: Path) -> None:
+    """Keep registry strings in a synthetic spec when task resolution fails."""
+    success, logs = eval_set(
+        "missing-task",
+        "scripted",
+        "cubepick",
+        log_dir=str(tmp_path),
+        seed=17,
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].eval.task == "missing-task"
+    assert logs[0].eval.policy == "scripted"
+    assert logs[0].eval.embodiment == "cubepick"
+    assert logs[0].eval.seed == 17
+    assert logs[0].eval.max_steps is None
+    assert logs[0].eval.max_seconds is None
+    assert not list(tmp_path.glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("unsafe"), EmbodimentFault("faulted"), KeyboardInterrupt("stopped")],
+)
+def test_eval_set_propagates_halts_and_interrupts(
+    error: BaseException,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never contain safety halts, embodiment faults, or keyboard interrupts."""
+
+    def raising_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        raise error
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "eval", raising_eval)
+
+    with pytest.raises(type(error), match=str(error)):
+        eval_set(
+            "cubepick-reach",
+            "scripted",
+            "cubepick",
+            log_dir=str(tmp_path),
+        )
 
 
 def test_store_frames_runs_do_not_overwrite_each_other(tmp_path: Path) -> None:

@@ -68,6 +68,7 @@ class LiveLogSink:
         self.min_write_interval_s = min_write_interval_s
         self._clock = clock
         self.path: Path | None = None
+        self._finished = False
         self._disabled = False
         self._warned = False
         self._spec: EvalSpec | None = None
@@ -119,6 +120,10 @@ class LiveLogSink:
         """Reset all run state and publish the first ``started`` snapshot."""
         self._disabled = False
         self._warned = False
+        if self.path is not None and not self._finished:
+            with suppress(OSError):
+                self.path.unlink(missing_ok=True)
+        self._finished = False
         try:
             self._spec = spec
             self._scenes = {}
@@ -240,6 +245,7 @@ class LiveLogSink:
             del log
             if self.path is not None:
                 self.path.unlink(missing_ok=True)
+            self._finished = True
         except Exception as exc:
             self._disable(exc)
 

@@ -473,7 +473,9 @@ Rather than one full summary per task, the CLI prints the resolved
 policy/embodiment, one status line for the whole set, a compact `[status]
 task_name  metrics-or-error` row per task, and the shared log directory once
 (`eval_set` still writes one `EvalLog` per task inside it). The exit code is
-`0` iff every task's log has `status == "success"`.
+`0` iff every task's log has `status == "success"`. A task that raises before
+producing a log contributes an in-memory error row and the remaining tasks
+still run; safety halts and keyboard interrupts stop the set.
 
 `--retry-attempts` is accepted and threaded through to `eval_set()`, whose
 resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
