@@ -8,6 +8,7 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         'guide/quickstart',
+        'guide/examples',
         'guide/concepts',
         'guide/writing-a-benchmark',
         'guide/policies-and-embodiments',

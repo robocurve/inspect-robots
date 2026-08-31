@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Docs:** new guide page of example commands covering model selection,
+  reasoning-effort levels, VLA policies (MolmoAct 2, Pi 0/0.5 via XPolicyLab),
+  control interfaces, instruction sources, operator interfaces, and eval sets
+  ([docs/guide/examples.md](docs/guide/examples.md)).
+
 - **Core:** evaluation logs now record which path produced each operator
   judgement in `SceneResult.judgement_sources`
   ([plan 0080](plans/0080-judgement-sources.md),
