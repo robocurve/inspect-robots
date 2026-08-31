@@ -51,6 +51,7 @@ from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
 from inspect_robots.task import Task
+from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -479,6 +480,7 @@ def _run_eval(
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
         epoch_dicts: list[dict[str, float]] = []
         judgements: list[str | None] = []
+        judgement_sources: list[str | None] = []
         notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
@@ -565,6 +567,7 @@ def _run_eval(
                     if record.status == "error":
                         errored_trials += 1
                     judgements.append(None)
+                    judgement_sources.append(None)
                     notes.append(None)
                 else:
                     if before_scoring is not None:
@@ -607,10 +610,11 @@ def _run_eval(
                         epoch_values[scorer.name] = value_to_float(score.value)
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
-                    # the two are documented as strictly parallel, so a later
+                    # these fields are documented as strictly parallel, so a later
                     # mutation (e.g. from policy.on_trial_end) must not be able
-                    # to reach one of them and miss the other.
+                    # to reach one of them and miss the others.
                     judgements.append(record.operator_judgement)
+                    judgement_sources.append(judgement_source(record))
                     notes.append(record.operator_note)
 
                 # A never-reset trial must not persist the previous trial's
@@ -698,6 +702,7 @@ def _run_eval(
                 instruction=scene.instruction,
                 scene_metadata=scene_metadata,
                 operator_judgements=tuple(judgements),
+                judgement_sources=tuple(judgement_sources),
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),

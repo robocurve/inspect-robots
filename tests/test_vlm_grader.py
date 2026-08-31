@@ -9,13 +9,17 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from inspect_robots import eval as ir_eval
 from inspect_robots._pngenc import png_data_url
 from inspect_robots.errors import ConfigError
 from inspect_robots.frames import FrameStore
 from inspect_robots.grader import Grader, vlm_grader
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
 from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scene import Scene
+from inspect_robots.scorer import success_at_end
+from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -92,6 +96,35 @@ def test_trial_record_parked_observation_defaults_to_none() -> None:
     record = TrialRecord(scene_id="s", epoch=0, seed=0)
 
     assert record.parked_observation is None
+
+
+def test_eval_records_vlm_and_embodiment_judgement_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    post = _CapturePost()
+    task = Task(
+        name="vlm-source-test",
+        scenes=[Scene(id=f"s{seed}", instruction="reach", init_seed=seed) for seed in range(4)],
+        scorer=success_at_end(),
+        max_steps=8,
+    )
+
+    (log,) = ir_eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_vlm(post, monkeypatch),
+        log_dir=str(tmp_path),
+    )
+
+    reasons = tuple(sample.termination_reasons[0] for sample in log.samples)
+    sources = tuple(sample.judgement_sources[0] for sample in log.samples)
+    assert reasons == ("max_steps", "success", "success", "max_steps")
+    assert sources == ("vlm", "embodiment", "embodiment", "vlm")
+    assert all(
+        len(sample.judgement_sources) == len(sample.termination_reasons) for sample in log.samples
+    )
+    assert len(post.requests) == 2
 
 
 def test_vlm_grader_registry_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -62,6 +62,7 @@ def _golden_log() -> EvalLog:
                     "taskgen": {"model": "vision"},
                 },
                 operator_judgements=("yes",),
+                judgement_sources=("prompt",),
                 operator_notes=("gripper closed early",),
                 operator_messages=(({"t": 3, "text": "keep left <now>"},),),
                 trial_metadata=({"foo": "bar"},),
@@ -125,6 +126,7 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
         "taskgen": {"model": "vision"},
     }
     assert restored.samples[0].operator_judgements == ("yes",)
+    assert restored.samples[0].judgement_sources == ("prompt",)
     assert restored.samples[0].operator_notes == ("gripper closed early",)
     assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
     assert isinstance(restored.samples[0].operator_messages, tuple)
@@ -158,6 +160,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
         del sample["instruction"]
         del sample["scene_metadata"]
         del sample["operator_judgements"]
+        del sample["judgement_sources"]
         del sample["operator_notes"]
         del sample["operator_messages"]
         del sample["trial_metadata"]
@@ -170,6 +173,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].instruction is None
     assert restored.samples[0].scene_metadata == {}
     assert restored.samples[0].operator_judgements == ()
+    assert restored.samples[0].judgement_sources == ()
     assert restored.samples[0].operator_notes == ()
     assert restored.samples[0].operator_messages == ()
     assert restored.samples[0].trial_metadata == ()

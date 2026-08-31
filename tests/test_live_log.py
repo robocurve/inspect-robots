@@ -18,7 +18,7 @@ from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
-from inspect_robots.transcript import operator_message_event
+from inspect_robots.transcript import operator_event, operator_message_event
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
 
@@ -66,7 +66,10 @@ def _record(
         inference_latencies=[0.25],
         operator_judgement="y" if status == "success" else None,
         operator_note="steady" if status == "success" else None,
-        events=[operator_message_event(0, "slower", "voice")],
+        events=[
+            operator_message_event(0, "slower", "voice"),
+            operator_event(0, "y", source="console"),
+        ],
         metadata={"temperature": math.inf},
         policy_transcript=transcript,
     )
@@ -87,6 +90,7 @@ def _parallel_lengths(path: Path) -> set[int]:
     return {
         len(sample.epochs),
         len(sample.operator_judgements),
+        len(sample.judgement_sources),
         len(sample.operator_notes),
         len(sample.operator_messages),
         len(sample.trial_metadata),
@@ -142,6 +146,7 @@ def test_lifecycle_throttle_parallel_epochs_replacement_and_reuse(tmp_path: Path
     assert sample.operator_messages[0] == ({"t": 0, "text": "slower", "source": "voice"},)
     assert sample.trial_metadata[0]["temperature"] is None
     assert sample.operator_judgements == ("y",)
+    assert sample.judgement_sources == ("console",)
     assert sample.operator_notes == ("steady",)
     assert sample.termination_reasons == ("done",)
 
