@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # Leaves room for the filename's "_" + 8 hex chars + ".json.tmp" suffix inside a
-# 255-byte name, with headroom for filesystems that allow less.
-_SLUG_MAX = 200
+# 255-byte name, with headroom for Windows MAX_PATH limits.
+_SLUG_MAX = 100
 
 
 def _slug(name: str) -> str:
