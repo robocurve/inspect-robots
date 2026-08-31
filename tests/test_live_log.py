@@ -285,11 +285,21 @@ def test_write_and_unlink_failures_are_isolated(
     sink = LiveLogSink(str(tmp_path / "unlink"))
     sink.on_eval_start(_spec())
     assert sink.path is not None
+    stale_path = sink.path
     monkeypatch.setattr(
         Path, "unlink", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy"))
     )
     sink.on_eval_end(_final_log())
     assert "OSError: busy" in capsys.readouterr().err
+
+    sink.on_eval_start(_spec("replacement"))
+    assert sink.path is not None and sink.path != stale_path
+    assert sink.path.exists()
+    assert "live JSON logging disabled" not in capsys.readouterr().err
+
+    monkeypatch.undo()
+    stale_path.unlink()
+    sink.on_eval_end(_final_log())
 
 
 def test_cancelled_trial_prestart_write_guard_and_repeated_disable(tmp_path: Path) -> None:
@@ -474,6 +484,45 @@ def test_eval_set_threads_and_reuses_caller_supplied_live_sink(tmp_path: Path) -
     assert len(set(probe.start_paths)) == 2
     assert [log.stats.frames_dir for log in probe.start_logs] == [None, None]
     assert all(not path.exists() for path in probe.start_paths)
+
+
+def test_eval_set_reused_live_sink_removes_unfinished_snapshot(tmp_path: Path) -> None:
+    """Remove the first task's orphan before publishing the second live run."""
+    live_sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    probe = _ProbeSink(live_sink)
+    tasks = [
+        Task(
+            name=f"set-{index}",
+            scenes=[Scene(id=f"scene-{index}", instruction="reach")],
+            scorer=success_at_end(),
+            max_steps=1,
+        )
+        for index in range(2)
+    ]
+    grading_calls = 0
+
+    def fail_first_grading(record: TrialRecord, scene: Scene) -> None:
+        nonlocal grading_calls
+        del record, scene
+        grading_calls += 1
+        if grading_calls == 1:
+            raise RuntimeError("grader failed")
+
+    success, logs = eval_set(
+        tasks,
+        _DeltaPolicy(),
+        CubePickEmbodiment(),
+        sinks=[live_sink, probe],
+        log_dir=str(tmp_path),
+        before_scoring=fail_first_grading,
+    )
+
+    assert success is False
+    assert [log.status for log in logs] == ["error", "success"]
+    assert len(probe.start_paths) == 2
+    assert probe.start_paths[0] != probe.start_paths[1]
+    assert all(not path.exists() for path in probe.start_paths)
+    assert len(probe.trial_logs) == 1
 
 
 def test_bound_frames_directory_survives_the_run_state_reset(tmp_path: Path) -> None:

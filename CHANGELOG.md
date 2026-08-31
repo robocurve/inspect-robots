@@ -22,6 +22,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** `eval_set()` now preserves completed task logs when a later task
+  raises, reports the failure as an in-memory error log, and continues with
+  the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
+  `eval()` (raised outside a trial) and `KeyboardInterrupt` still propagate. A
+  halt inside a trial ends that task with an error log and, as before this
+  change, the set continues to the next task
+  ([plan 0079](plans/0079-eval-set-error-log.md),
+  [#298](https://github.com/robocurve/inspect-robots/issues/298)).
+
 - **Core:** rollout now rejects non-finite and non-numeric actions before they
   reach an embodiment. A NaN action on the default CLI chain now errors the
   trial as a `PolicyError` and continues under `fail_on_error=False`, instead
