@@ -91,6 +91,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _close_preserving_stop_signal(embodiment: Embodiment, stop: BaseException) -> None:
+    """Close an owned embodiment without replacing an escaping stop signal."""
+    try:
+        embodiment.close()
+    except Exception as exc:
+        # Warning filters owned by the caller must not turn this diagnostic into
+        # another exception that masks the safety or cancellation signal.
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.warn(
+                f"embodiment.close() raised {type(exc).__name__}: {exc} while handling "
+                f"{type(stop).__name__}; preserving {type(stop).__name__}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+
 def _write_action_log(
     record: TrialRecord,
     log_dir: str,
@@ -267,7 +284,11 @@ def eval(
     ergonomic that keeps logs and the CLI reproducible. An embodiment resolved
     from a registry name is owned by ``eval()`` and is closed when the run
     finishes (even on a halt); a caller-constructed embodiment object stays
-    open — the caller owns its lifecycle.
+    open — the caller owns its lifecycle. If owned cleanup fails while a
+    ``SafetyAbort``, ``EmbodimentFault``, or ``KeyboardInterrupt`` is escaping,
+    a ``RuntimeWarning`` reports the cleanup failure and the original stop
+    signal retains precedence. Cleanup failures after other outcomes retain
+    their existing propagation behavior.
 
     ``seed=None`` draws a fresh seed from the OS and records it in the log, so
     an "unseeded" run remains reproducible after the fact (and is distinct from
@@ -340,28 +361,36 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    stop_signal: BaseException | None = None
     try:
-        return _run_eval(
-            task,
-            policy,
-            embodiment,
-            log_dir=log_dir,
-            sinks=sinks,
-            seed=seed,
-            fail_on_error=fail_on_error,
-            controller=controller,
-            approver=approver,
-            remap=remap,
-            store_frames=store_frames,
-            store_actions=store_actions,
-            operator_input=operator_input,
-            before_scoring=before_scoring,
-        )
+        try:
+            return _run_eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=log_dir,
+                sinks=sinks,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+                store_actions=store_actions,
+                operator_input=operator_input,
+                before_scoring=before_scoring,
+            )
+        except (SafetyAbort, EmbodimentFault, KeyboardInterrupt) as exc:
+            stop_signal = exc
+            raise
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
         # when the run halts, so a real robot never leaks its connection.
         if owns_embodiment:
-            embodiment.close()
+            if stop_signal is None:
+                embodiment.close()
+            else:
+                _close_preserving_stop_signal(embodiment, stop_signal)
 
 
 def _run_eval(
@@ -848,7 +877,8 @@ def eval_set(
 
     With a string embodiment, a non-safety exception from ``close()`` can
     produce an error row even when that task's completed JSON log is already
-    on disk.
+    on disk. If cleanup also fails while an escaping safety or cancellation
+    signal is active, the stop signal retains precedence and still propagates.
 
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 

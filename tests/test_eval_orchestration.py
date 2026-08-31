@@ -880,6 +880,95 @@ def test_eval_closes_resolved_embodiment_even_on_failure(tmp_path: Path) -> None
     assert _CLOSED == ["closed"]  # released even though the run failed fast
 
 
+@pytest.mark.parametrize(
+    ("stop_type", "message"),
+    [
+        (SafetyAbort, "unsafe"),
+        (EmbodimentFault, "robot fault"),
+        (KeyboardInterrupt, "operator stop"),
+    ],
+)
+def test_eval_set_preserves_escaping_stop_when_owned_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stop_type: type[BaseException],
+    message: str,
+) -> None:
+    """An owned cleanup failure must not turn a set-stopping signal into a task error."""
+    import sys
+
+    stop = stop_type(message)
+
+    class _StopAndCloseFailEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bind_calls = 0
+            self.close_calls = 0
+
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            del envelope
+            self.bind_calls += 1
+            raise stop
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("disconnect failed")
+
+    owned = _StopAndCloseFailEmbodiment()
+
+    def resolve(kind: str, name: str, /, **kwargs: object) -> object:
+        del kwargs
+        assert (kind, name) == ("embodiment", "stop-and-close-fail")
+        return owned
+
+    monkeypatch.setattr(sys.modules["inspect_robots.registry"], "resolve", resolve)
+
+    with (
+        pytest.warns(RuntimeWarning, match=f"preserving {stop_type.__name__}"),
+        pytest.raises(stop_type, match=message) as exc_info,
+    ):
+        eval_set(
+            [_task(max_steps=1), _task(max_steps=1)],
+            ScriptedPolicy(),
+            "stop-and-close-fail",
+            log_dir=str(tmp_path),
+        )
+
+    assert owned.bind_calls == 1
+    assert owned.close_calls == 1
+    assert exc_info.value is stop
+
+
+def test_eval_keeps_cleanup_precedence_for_ordinary_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The narrow stop-signal rule must not change ordinary exception cleanup."""
+    import sys
+
+    class _ErrorAndCloseFailEmbodiment(CubePickEmbodiment):
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            del envelope
+            raise ConfigError("invalid task")
+
+        def close(self) -> None:
+            raise RuntimeError("disconnect failed")
+
+    def resolve(kind: str, name: str, /, **kwargs: object) -> object:
+        del kwargs
+        assert (kind, name) == ("embodiment", "error-and-close-fail")
+        return _ErrorAndCloseFailEmbodiment()
+
+    monkeypatch.setattr(sys.modules["inspect_robots.registry"], "resolve", resolve)
+
+    with pytest.raises(RuntimeError, match="disconnect failed"):
+        eval(
+            _task(max_steps=1),
+            ScriptedPolicy(),
+            "error-and-close-fail",
+            log_dir=str(tmp_path),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 6. seed=None draws recorded OS entropy; bad reducers fail fast.
 # --------------------------------------------------------------------------- #
