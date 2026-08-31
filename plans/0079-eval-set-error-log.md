@@ -147,3 +147,13 @@ Honoring `retry_attempts` / resumption (#136). Containing scorer or
 own partial log survives; that is a separate change to `eval()`'s contract
 and is noted on the issue as a follow-up (the live-log orphan fix above
 covers the on-disk side effect of that gap in the meantime).
+
+## Addendum (after diff review)
+
+The halt contract is narrower than the Design section's wording implies: only
+a `SafetyAbort`/`EmbodimentFault` that escapes `eval()` (raised outside a
+trial) propagates out of `eval_set`. A halt inside a trial is absorbed by
+`_run_eval` into that task's error log and the set continues to the next
+task, exactly as before this plan. Making `eval_set` stop after such a task
+is tracked in #423; the shipped prose (CHANGELOG, `docs/guide/cli.md`, the
+`eval_set` docstring) states the narrower truth.
