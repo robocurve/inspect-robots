@@ -834,8 +834,8 @@ def eval_set(
     ``status="error"`` log carrying the exception text, and the remaining
     tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
     ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
-    propagate. A halt inside a trial ends that task with an error log and, as
-    before this change, the set continues to the next task.
+    propagate. A halt inside a trial ends that task with an error log and the
+    set continues to the next task.
     ``CompatibilityError``, unknown policy or embodiment registry names, and
     task-factory ``ConfigError`` are therefore reported once per affected
     task. Only grading configuration errors raised before the task loop
