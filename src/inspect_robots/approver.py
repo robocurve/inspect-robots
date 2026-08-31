@@ -47,9 +47,9 @@ class GuardrailContribution:
     such as holding an earlier pose, it must call
     ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
     deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
-    other exceptions are bugs and propagate. It must validate its own input,
-    rejecting non-finite values with ``SafetyAbort`` rather than assuming an
-    upstream clamp exists, because it may be the only active gate.
+    other exceptions are bugs and propagate. The rollout enforces finiteness
+    before review and again on the returned action, so contributed approvers
+    need not duplicate that validation.
     """
 
     approvers: tuple[tuple[str, Approver], ...] = ()
@@ -80,12 +80,13 @@ class ClampApprover:
     when nothing clamps, the *same* action object is returned (the rollout
     detects modification by identity).
 
-    Non-finite values are the safety cases: ``NaN`` anywhere in the action
-    raises [`SafetyAbort`][inspect_robots.errors.SafetyAbort] — a NaN is a
-    poisonous value with no meaningful clamp, and it must never reach hardware.
-    ``±inf`` is *not* an abort: it clamps to the finite bound on that side like
-    any other out-of-range value (and passes through if that side is
-    unbounded).
+    Non-finite values are the safety cases for direct ``review()`` callers,
+    since rollout rejects non-finite policy actions before review: ``NaN``
+    anywhere in the action raises
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A NaN is a poisonous
+    value with no meaningful clamp, and it must never reach hardware. ``±inf``
+    is *not* an abort: it clamps to the finite bound on that side like any other
+    out-of-range value (and passes through if that side is unbounded).
     """
 
     def __init__(self, action_space: Box):

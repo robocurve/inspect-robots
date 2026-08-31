@@ -75,6 +75,8 @@ The error taxonomy resolves the "fail fast vs never-crash-overnight" tension:
 
 Failures inside a trial (including `reset`) are wrapped into the taxonomy; a
 crashing approver becomes a `SafetyAbort` (it can no longer vouch for safety).
+A non-finite action from the policy is a `PolicyError`. A non-finite action
+introduced by an approver is a `SafetyAbort`.
 Every error raised from inside a trial carries the partial
 [`TrialRecord`](/api/#inspect_robots.rollout.TrialRecord) on its `record` attribute, so the
 steps that did run are delivered to sinks. Errored trials are recorded but
