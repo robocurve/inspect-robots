@@ -49,6 +49,8 @@ class PolicyInfo:
     observation_space: ObservationSpace = field(default_factory=ObservationSpace)
     # Desired control rate (Hz), if the policy was trained for a specific one.
     control_hz: float | None = None
+    # Policy checkpoint hash, revision, or identifier.
+    checkpoint: str | None = None
 
 
 @runtime_checkable
