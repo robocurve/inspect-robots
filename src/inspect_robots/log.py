@@ -8,8 +8,8 @@ guarantee enforced by golden tests in a later step).
 Immutability is *shallow*: the dataclasses are frozen and sequence fields are
 tuples, so reassigning a field or mutating the sample list is impossible — but
 dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
-``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info``, and
-``SceneResult.scene_metadata``)
+``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info`` /
+``grader_config``, and ``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
 ``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
 are arbitrary mutable JSON values. Treat a log as read-only; nothing
@@ -56,6 +56,21 @@ class EvalSpec:
     git_commit: str | None = None
     policy_config: dict[str, Any] = field(default_factory=dict)
     embodiment_info: dict[str, Any] = field(default_factory=dict)
+    # The run's grader by registry name ("operator", "vlm", a plugin's own
+    # name), ``None`` when the run graded nothing. A log written before this
+    # field existed also reads back as ``None``.
+    grader: str | None = None
+    # What actually governed grading, as reported by the grader's optional
+    # ``config`` hook; ``{}`` for a grader that exposes none. Credentials are
+    # never recorded. For the builtin ``vlm`` grader these are resolved
+    # values, not the caller's inputs: the rubric has its default substituted
+    # and any ``rubric_file`` already read, and ``effort`` is the value that
+    # rides each request (``None`` omits ``reasoning_effort`` so the provider
+    # default applies, ``"none"`` asks for the minimum). Its ``rubric`` is the
+    # run-level fallback only — a scene carrying its own
+    # ``metadata["rubric"]`` overrides it for that scene, and that value is
+    # already persisted in ``SceneResult.scene_metadata``.
+    grader_config: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
     max_steps: int | None = None
     max_seconds: float | None = None

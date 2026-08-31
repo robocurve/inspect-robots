@@ -14,6 +14,14 @@ All notable changes to this project are documented here. The format is based on
   control interfaces, instruction sources, operator interfaces, and eval sets
   ([docs/guide/examples.md](docs/guide/examples.md)).
 
+- **Core:** evaluation logs now record what graded the run in `EvalSpec.grader`
+  (the grader's registry name) and `EvalSpec.grader_config` (its effective
+  configuration, read through an optional duck-typed `config()` hook). The
+  builtin `vlm` grader reports the resolved `model`, `base_url`, run-level
+  `rubric`, `max_cameras` and `effort` it actually applies; the API key is
+  never recorded ([plan 0081](plans/0081-grader-config.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
+
 - **Core:** evaluation logs now record which path produced each operator
   judgement in `SceneResult.judgement_sources`
   ([plan 0080](plans/0080-judgement-sources.md),
