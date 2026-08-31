@@ -38,6 +38,15 @@ All notable changes to this project are documented here. The format is based on
   `SafetyAbort` ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
   [#356](https://github.com/robocurve/inspect-robots/issues/356)).
 
+- **Core:** `_parse_value` docstring now describes the post-0.23.0 effort
+  contract: a quoted `'none'` literal is returned untouched by the parser,
+  bare `effort=none` parses to Python `None` — which effort-taking
+  components (model, agent, orchestrator) normalize to the minimum
+  reasoning level — and only key omission is a "this component doesn't
+  implement effort" signal, distinct from `effort=none` itself
+  ([#396](https://github.com/robocurve/inspect-robots/issues/396)).
+
+
 - **Core:** an escaped quote no longer terminates a quoted `.env` value, while
   backslashes stay literal; a quoted value ending in a lone backslash is now
   kept literally with its quotes
