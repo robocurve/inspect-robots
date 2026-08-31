@@ -47,9 +47,9 @@ class GuardrailContribution:
     such as holding an earlier pose, it must call
     ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
     deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
-    other exceptions are bugs and propagate. It must validate its own input,
-    rejecting non-finite values with ``SafetyAbort`` rather than assuming an
-    upstream clamp exists, because it may be the only active gate.
+    other exceptions are bugs and propagate. The rollout enforces finiteness
+    before review and again on the returned action, so contributed approvers
+    need not duplicate that validation.
     """
 
     approvers: tuple[tuple[str, Approver], ...] = ()

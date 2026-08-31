@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -419,6 +420,72 @@ def test_wrong_dim_action_attributed_to_policy() -> None:
         _run(_WrongDimPolicy(), CubePickEmbodiment())
     rec = excinfo.value.record
     assert rec is not None and rec.status == "error"
+
+
+class _NonFinitePolicy(_WrongDimPolicy):
+    def __init__(self, data: object) -> None:
+        super().__init__()
+        self.data = data
+
+    def act(self, observation: Observation) -> ActionChunk:
+        del observation
+        return ActionChunk(actions=[Action(data=self.data)])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_non_finite_action_attributed_to_policy(value: float) -> None:
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(PolicyError, match="non-finite") as excinfo,
+    ):
+        _run(_NonFinitePolicy(np.array([value, 0.0])), embodiment)
+
+    record = excinfo.value.record
+    assert record is not None and record.status == "error"
+    step.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        np.array([object(), 1.0], dtype=object),
+        np.array(["a", "b"]),
+    ],
+)
+def test_non_numeric_action_attributed_to_policy(data: object) -> None:
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(PolicyError, match="non-finite") as excinfo,
+    ):
+        _run(_NonFinitePolicy(data), embodiment)
+
+    record = excinfo.value.record
+    assert record is not None and record.status == "error"
+    step.assert_not_called()
+
+
+def test_approver_introduced_non_finite_action_is_a_safety_abort() -> None:
+    class _NonFiniteApprover:
+        def review(self, action: Action, store: dict[str, object]) -> Action:
+            del store
+            return replace(action, data=np.array([np.nan, 0.0]))
+
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(SafetyAbort, match="non-finite"),
+    ):
+        _run(ScriptedPolicy(), embodiment, approver=_NonFiniteApprover())
+
+    step.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #

@@ -17,6 +17,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** rollout now rejects non-finite and non-numeric actions before they
+  reach an embodiment. A NaN action on the default CLI chain now errors the
+  trial as a `PolicyError` and continues under `fail_on_error=False`, instead
+  of halting the eval. A non-finite action introduced by an approver is a
+  `SafetyAbort`
+  ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
+  [#356](https://github.com/robocurve/inspect-robots/issues/356)).
+
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
   embodiment exposes several state fields of the action's shape (e.g. a 14-D
   `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers
