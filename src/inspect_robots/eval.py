@@ -764,6 +764,14 @@ def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
     return errors >= fail_on_error
 
 
+def _component_name(component: Policy | Embodiment) -> str:
+    """Return a component's declared name without masking an earlier failure."""
+    try:
+        return component.info.name
+    except Exception:
+        return type(component).__name__
+
+
 def _error_log_for(
     task: Task | str,
     policy: Policy | str,
@@ -779,8 +787,8 @@ def _error_log_for(
         status="error",
         eval=EvalSpec(
             task=task if isinstance(task, str) else task.name,
-            policy=policy if isinstance(policy, str) else policy.info.name,
-            embodiment=(embodiment if isinstance(embodiment, str) else embodiment.info.name),
+            policy=policy if isinstance(policy, str) else _component_name(policy),
+            embodiment=(embodiment if isinstance(embodiment, str) else _component_name(embodiment)),
             created=now,
             inspect_robots_version=__version__,
             git_commit=_git_commit(),
@@ -824,11 +832,14 @@ def eval_set(
     ``success`` is ``True`` iff every returned log has ``status == "success"``.
     A task that raises before or without producing a log contributes one
     ``status="error"`` log carrying the exception text, and the remaining
-    tasks still run. ``SafetyAbort``, ``EmbodimentFault``, and
-    ``KeyboardInterrupt`` still propagate. ``CompatibilityError``, unknown
-    policy or embodiment registry names, and task-factory ``ConfigError`` are
-    therefore reported once per affected task. Only grading configuration
-    errors raised before the task loop propagate.
+    tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
+    ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
+    propagate. A halt inside a trial ends that task with an error log and, as
+    before this change, the set continues to the next task.
+    ``CompatibilityError``, unknown policy or embodiment registry names, and
+    task-factory ``ConfigError`` are therefore reported once per affected
+    task. Only grading configuration errors raised before the task loop
+    propagate.
 
     With a string embodiment, a non-safety exception from ``close()`` can
     produce an error row even when that task's completed JSON log is already

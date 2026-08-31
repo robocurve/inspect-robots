@@ -397,6 +397,39 @@ def test_eval_set_error_log_preserves_string_component_names(tmp_path: Path) -> 
     assert not list(tmp_path.glob("*.json"))
 
 
+def test_eval_set_error_log_falls_back_when_embodiment_info_raises(
+    tmp_path: Path,
+) -> None:
+    """A broken adapter descriptor must not mask the task's error log."""
+
+    class _RaisingInfoEmbodiment:
+        @property
+        def info(self) -> Any:
+            raise RuntimeError("broken embodiment info")
+
+    task = Task(
+        name="broken-info",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+    embodiment = _RaisingInfoEmbodiment()
+
+    success, logs = eval_set(
+        task,
+        ScriptedPolicy(),
+        cast(Any, embodiment),
+        log_dir=str(tmp_path),
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    log = logs[0]
+    assert log.status == "error"
+    assert log.eval.embodiment == type(embodiment).__name__
+    assert log.error is not None and "RuntimeError" in log.error
+
+
 @pytest.mark.parametrize(
     "error",
     [SafetyAbort("unsafe"), EmbodimentFault("faulted"), KeyboardInterrupt("stopped")],
