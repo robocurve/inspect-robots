@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** evaluation logs now record which path produced each operator
+  judgement in `SceneResult.judgement_sources`
+  ([plan 0080](plans/0080-judgement-sources.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
+
 - **Core:** `is_affirmative_verdict()` is public API. It owns the whole
   operator-verdict contract (the recognized affirmative vocabulary plus the
   case-insensitive, whitespace-tolerant comparison and the "no judgement

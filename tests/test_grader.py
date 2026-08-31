@@ -54,12 +54,12 @@ class _RecordingGrader:
         record.operator_judgement = "y"
 
 
-def _task(*, epochs: int = 1, scorer: Scorer | None = None) -> Task:
+def _task(*, epochs: int = 1, scorer: Scorer | None = None, max_steps: int = 60) -> Task:
     return Task(
         name="grader-test",
         scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
         scorer=scorer if scorer is not None else success_at_end(),
-        max_steps=60,
+        max_steps=max_steps,
         epochs=epochs,
     )
 
@@ -124,6 +124,37 @@ def test_eval_calls_grader_once_per_scored_trial(tmp_path: Path) -> None:
     )
     assert grader.calls == [("s0", 0), ("s0", 1)]
     assert logs[0].samples[0].operator_judgements == ("y", "y")
+    assert logs[0].samples[0].judgement_sources == (None, None)
+
+
+def test_eval_records_prompted_judgement_source(tmp_path: Path) -> None:
+    session, _output = _scripted_session(["partial", "slipped near the goal"])
+
+    (log,) = ir_eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        grader=operator_grader(session),
+    )
+
+    assert log.samples[0].operator_judgements == ("partial",)
+    assert log.samples[0].judgement_sources == ("prompt",)
+
+
+def test_eval_records_no_source_for_skipped_prompt(tmp_path: Path) -> None:
+    session, _output = _scripted_session(["skip", "a note"])
+
+    (log,) = ir_eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        grader=operator_grader(session),
+    )
+
+    assert log.samples[0].operator_judgements == (None,)
+    assert log.samples[0].judgement_sources == (None,)
 
 
 def test_eval_never_grades_errored_trials(tmp_path: Path) -> None:

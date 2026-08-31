@@ -18,6 +18,7 @@ from inspect_robots.rollout import TrialRecord, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.session import OperatorSession
 from inspect_robots.spaces import ActionSemantics, Box
+from inspect_robots.transcript import judgement_source, operator_event
 from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation, StepResult
 
 _SCENE = Scene(id="step-probe", instruction="hold still")
@@ -343,6 +344,8 @@ def test_verdict_console_end_records_judgement_note_and_operator_event() -> None
         "source": "console",
         "note": "clean pickup",
     }
+    record.events.insert(0, operator_event(-1, "n", source="stale"))
+    assert judgement_source(record) == "console"
 
 
 def test_messages_in_an_ending_poll_are_recorded_as_transcript_events() -> None:
