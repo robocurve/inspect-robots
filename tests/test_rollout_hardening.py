@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -422,7 +423,7 @@ def test_wrong_dim_action_attributed_to_policy() -> None:
     assert rec is not None and rec.status == "error"
 
 
-class _NonFinitePolicy(_WrongDimPolicy):
+class _BadDataPolicy(_WrongDimPolicy):
     def __init__(self, data: object) -> None:
         super().__init__()
         self.data = data
@@ -441,7 +442,7 @@ def test_non_finite_action_attributed_to_policy(value: float) -> None:
         patch.object(embodiment, "step", step),
         pytest.raises(PolicyError, match="non-finite") as excinfo,
     ):
-        _run(_NonFinitePolicy(np.array([value, 0.0])), embodiment)
+        _run(_BadDataPolicy(np.array([value, 0.0])), embodiment)
 
     record = excinfo.value.record
     assert record is not None and record.status == "error"
@@ -453,6 +454,7 @@ def test_non_finite_action_attributed_to_policy(value: float) -> None:
     [
         np.array([object(), 1.0], dtype=object),
         np.array(["a", "b"]),
+        np.array([10**400, 1.0], dtype=object),
     ],
 )
 def test_non_numeric_action_attributed_to_policy(data: object) -> None:
@@ -463,7 +465,7 @@ def test_non_numeric_action_attributed_to_policy(data: object) -> None:
         patch.object(embodiment, "step", step),
         pytest.raises(PolicyError, match="non-finite") as excinfo,
     ):
-        _run(_NonFinitePolicy(data), embodiment)
+        _run(_BadDataPolicy(data), embodiment)
 
     record = excinfo.value.record
     assert record is not None and record.status == "error"
@@ -556,6 +558,57 @@ def test_rollout_surfaces_approvals_in_observation_extra() -> None:
         third_approvals = policy.captured_extras[2]["approvals"]
         assert isinstance(third_approvals, list) and len(third_approvals) == 2
         assert third_approvals[0] == {"t": 2, "detail": "clamped"}
+
+
+def test_non_finite_policy_action_errors_one_scene_and_eval_continues(
+    tmp_path: Path,
+) -> None:
+    class _NaNOncePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.total_act_calls = 0
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.total_act_calls += 1
+            if self.total_act_calls == 1:
+                return ActionChunk(actions=[Action(data=np.array([np.nan, 0.0]))])
+            return super().act(observation)
+
+    class _ClampReviewSpy(ClampApprover):
+        def __init__(self, action_space: Box) -> None:
+            super().__init__(action_space)
+            self.finite_reviews: list[bool] = []
+
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            self.finite_reviews.append(bool(np.isfinite(action.data).all()))
+            return super().review(action, store)
+
+    task = Task(
+        name="two-scenes",
+        scenes=[Scene(id=f"s{i}", instruction="reach") for i in range(2)],
+        scorer=success_at_end(),
+        max_steps=20,
+    )
+    embodiment = CubePickEmbodiment()
+    approver = _ClampReviewSpy(embodiment.info.action_space)
+
+    (log,) = eval(
+        task,
+        _NaNOncePolicy(),
+        embodiment,
+        log_dir=str(tmp_path),
+        fail_on_error=False,
+        approver=approver,
+    )
+
+    assert log.status != "error"
+    assert len(log.samples) == 2
+    assert log.samples[0].status == "error"
+    assert log.samples[0].error is not None
+    assert "PolicyError" in log.samples[0].error
+    assert "non-finite" in log.samples[0].error
+    assert log.samples[1].status == "success"
+    assert approver.finite_reviews and all(approver.finite_reviews)
 
 
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:

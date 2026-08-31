@@ -209,7 +209,7 @@ def _non_finite_detail(data: object) -> str | None:
     """Describe why action data is not finite, or return ``None`` when it is."""
     try:
         array = np.asarray(data, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         return f"is not numeric: {exc}"
     if np.isfinite(array).all():
         return None
@@ -452,6 +452,7 @@ def rollout(
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
+            # Recheck because an approver may mutate the array in place and return it.
             non_finite_detail = _non_finite_detail(action.data)
             if non_finite_detail is not None:
                 raise _record_failure(
