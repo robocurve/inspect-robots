@@ -76,7 +76,12 @@ def operator_event(t: int, verdict: str, source: str = "prompt", note: str | Non
 
 
 def judgement_source(record: TrialRecord) -> str | None:
-    """Return the last operator-event source for a recorded judgement, if any."""
+    """Return which path produced the record's judgement.
+
+    ``None`` when the record has no ``operator_judgement``, or when the
+    judgement was set without an ``operator`` event; otherwise the ``source``
+    of the last ``operator`` event ("console", "prompt", "embodiment", "vlm").
+    """
     if record.operator_judgement is None:
         return None
     for event in reversed(record.events):
