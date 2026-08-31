@@ -22,6 +22,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** an escaped quote no longer terminates a quoted `.env` value, while
+  backslashes stay literal; a quoted value ending in a lone backslash is now
+  kept literally with its quotes
+  ([plan 0078](plans/0078-dotenv-escaped-quote.md),
+  [#291](https://github.com/robocurve/inspect-robots/issues/291)).
+
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
   embodiment exposes several state fields of the action's shape (e.g. a 14-D
   `joint_pos` next to a 14-D Cartesian `eef_state`): the toolset now prefers
