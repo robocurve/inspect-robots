@@ -39,9 +39,11 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib
 import json
 import math
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -58,7 +60,14 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NamedTuple,
+    NoReturn,
+    TextIO,
+    cast,
+)
 
 from inspect_robots import __version__
 from inspect_robots._claims import DeviceClaim, claim_devices
@@ -71,7 +80,11 @@ from inspect_robots._html import (
     render_html,
 )
 from inspect_robots._html_index import IndexEntry, render_index
-from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
+from inspect_robots._pointers import (
+    derive_blob_dir,
+    read_jsonl_prefix,
+    resolve_log_pointer,
+)
 from inspect_robots.conformance import device_slots
 from inspect_robots.console import USAGE, USAGE_END_ONLY
 from inspect_robots.defaults import (
@@ -155,6 +168,7 @@ _SUBCOMMANDS = (
     "config",
     "setup",
     "doctor",
+    "completion",
 )
 
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
@@ -574,6 +588,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
     _add_config_arg(p_doctor)
 
+    p_completion = sub.add_parser(
+        "completion",
+        help="emit a ready-to-source shell completion script for bash or zsh",
+        description=(
+            "Print a shell completion script on stdout that the caller can "
+            "eval to install Tab-completion of subcommand names and "
+            "per-subcommand options. Used as "
+            '`eval "$(inspect-robots completion bash)"` in bash or '
+            '`eval "$(inspect-robots completion zsh)"` in zsh.'
+        ),
+    )
+    p_completion.add_argument(
+        "shell",
+        choices=("bash", "zsh"),
+        help="target shell (only bash and zsh are supported)",
+    )
+
     p_setup = sub.add_parser(
         "setup",
         help="interactive first-run wizard: pick defaults and discover camera devices, "
@@ -856,7 +887,8 @@ def _build_operator_session(
         connect_hook(session)
         usage = USAGE if accepts_messages else USAGE_END_ONLY
         session.enable_footer(
-            label="sent" if accepts_messages else "noted", echo_interval_s=ECHO_INTERVAL_S
+            label="sent" if accepts_messages else "noted",
+            echo_interval_s=ECHO_INTERVAL_S,
         )
         label = "operator console:"
         session.write_line(f"{_styled(label, _CYAN)} {usage.removeprefix(label + ' ')}")
@@ -1466,10 +1498,16 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
         )
     else:
         embodiment_name, embodiment_source = _pick_component(
-            "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
+            "embodiment",
+            args.embodiment,
+            defaults.embodiment,
+            defaults.embodiment_source,
         )
         embodiment_defaults = _config_args(
-            "embodiment", embodiment_name, defaults.embodiment_args_owner, defaults.embodiment_args
+            "embodiment",
+            embodiment_name,
+            defaults.embodiment_args_owner,
+            defaults.embodiment_args,
         )
     # Config-file args apply only to the component they were configured
     # alongside (issue #44); explicit -P/-E flags override same-named keys.
@@ -1494,7 +1532,13 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
         claim.release()
         raise
     return _ResolvedComponents(
-        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source, claim
+        policy,
+        policy_name,
+        policy_source,
+        embodiment,
+        embodiment_name,
+        embodiment_source,
+        claim,
     )
 
 
@@ -1792,7 +1836,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
                 _print_degraded(f"cancelled: partial log written to {sink.path}")
-                print(_styled(f"hint: inspect it with: inspect-robots inspect {sink.path}", _DIM))
+                print(
+                    _styled(
+                        f"hint: inspect it with: inspect-robots inspect {sink.path}",
+                        _DIM,
+                    )
+                )
             else:
                 _print_degraded("cancelled: no log written")
             return 130
@@ -2329,10 +2378,16 @@ def _render_view_directory(
             if is_live_path:
                 continue
             exc = FileNotFoundError(log_path)
-            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            print(
+                f"warning: could not read or render {log_path.name}: {exc}",
+                file=sys.stderr,
+            )
             entries.append(_unreadable_index_entry(log_path, exc))
         except Exception as exc:
-            print(f"warning: could not read or render {log_path.name}: {exc}", file=sys.stderr)
+            print(
+                f"warning: could not read or render {log_path.name}: {exc}",
+                file=sys.stderr,
+            )
             entries.append(_unreadable_index_entry(log_path, exc))
 
     for live_page in out_dir.glob("*.live.html"):
@@ -2712,14 +2767,111 @@ def _cmd_video(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _BASH_COMPLETION_PARTS(subs: str) -> list[str]:
+    """Return the bash completion script body lines for the given subcommand list."""
+    return [
+        "# inspect-robots bash completion - generated; do not edit.",
+        '# Install: eval "$(inspect-robots completion bash)"',
+        "_inspect_robots() {",
+        "    local cur",
+        '    COMP_WORDS=( "${COMP_WORDS[@]}" )',
+        "    cur=${COMP_WORDS[COMP_CWORD]}",
+        "    if (( COMP_CWORD == 1 )); then",
+        '        COMPREPLY=( $(compgen -W "' + subs + '" -- "$cur") )',
+        "        return",
+        "    fi",
+        "    case ${COMP_WORDS[1]} in",
+        "        completion)",
+        '            COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )',
+        "            ;;",
+        "        *)",
+        '            COMPREPLY=( $(compgen -W "--config" -- "$cur") )',
+        "            ;;",
+        "    esac",
+        "}",
+        "complete -F _inspect_robots " + subs,
+    ]
+
+
+def _completion_bash() -> str:
+    """Render the bash completion script with the current subcommand list."""
+    subs = " ".join(_SUBCOMMANDS)
+    return "\n".join(_BASH_COMPLETION_PARTS(subs)) + "\n"
+
+
+def _completion_zsh() -> str:
+    """Render the zsh completion script with the current subcommand list."""
+    parts = [
+        "#compdef inspect-robots",
+        "# inspect-robots zsh completion - generated; do not edit.",
+        '# Install: eval "$(inspect-robots completion zsh)"',
+        r'_describe "command" \(',
+    ]
+    for sub in _SUBCOMMANDS:
+        parts.append("    '" + sub + ":" + sub + " subcommand'")
+    parts.append(r"\)")
+    return "\n".join(parts) + "\n"
+
+
+def _print_environment_diagnostics(file: TextIO) -> None:
+    """Write a host-environment diagnostics block to ``file``.
+
+    Surfaces Python version, OS, executable, prefix, and the optional
+    extras the repo advertises (numpy, pillow, rerun-sdk, pyfakefs).
+    Read from inside `_cmd_doctor` so the user can run a single
+    `inspect-robots doctor` to triage "why does this install fail".
+    """
+    print("", file=file)
+    print("Environment diagnostics:", file=file)
+    print(
+        f"  python:        {sys.version.split()[0]} ({platform.python_implementation()})",
+        file=file,
+    )
+    print(f"  executable:    {sys.executable}", file=file)
+    print(f"  prefix:        {sys.prefix}", file=file)
+    print(f"  platform:      {platform.platform()}", file=file)
+    print(f"  inspect-robots: {__version__}", file=file)
+    for module_name, label in (
+        ("numpy", "numpy"),
+        ("pillow", "pillow (optional)"),
+        ("rerun", "rerun-sdk (optional)"),
+        ("pyfakefs", "pyfakefs (test-only)"),
+    ):
+        try:
+            mod = importlib.import_module(module_name)
+            ver = getattr(mod, "__version__", "unknown")
+            print(f"  {label + ':':<14} {ver}", file=file)
+        except ImportError:
+            print(f"  {label + ':':<14} not installed", file=file)
+
+
+def _cmd_completion(args: argparse.Namespace) -> int:
+    """Emit a ready-to-source completion script for the chosen shell."""
+    if args.shell == "bash":
+        sys.stdout.write(_completion_bash())
+    elif args.shell == "zsh":
+        sys.stdout.write(_completion_zsh())
+    else:
+        # argparse's choices=("bash", "zsh") already rejects this, but stay
+        # explicit if `args.shell` comes from a programmatic caller.
+        print(f"unsupported shell: {args.shell!r}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Preflight runtime requirements and conformance for an installed adapter.
 
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.conformance import (
+        check_embodiment,
+        missing_runtime_requirements,
+    )
     from inspect_robots.registry import registered
+
+    _print_environment_diagnostics(sys.stdout)
 
     defaults = load_defaults(os.environ)
     name, source = _pick_component(
@@ -2835,6 +2987,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "completion":
+        return _cmd_completion(args)
     parser.print_help()
     return 0
 

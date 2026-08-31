@@ -20,6 +20,20 @@ All notable changes to this project are documented here. The format is based on
   recorded" case), so benchmarks grading real-world runs can share it instead
   of copying the vocabulary and importing the private `scorer._OPERATOR_SUCCESS`.
 
+- **CLI:** `inspect-robots completion {bash,zsh}` emits a
+  ready-to-source completion script (subcommand names at the
+  first argument position; top-level `--config` / `--help`
+  thereafter) so the user can `eval "$(inspect-robots
+  completion bash)"` in bash or
+  `eval "$(inspect-robots completion zsh)"` in zsh.
+  Hand-rolled — no new `argcomplete`/`shtab` dependency.
+  `inspect-robots doctor` now also prints an `Environment
+  diagnostics:` block (Python version, executable, prefix,
+  platform, inspect-robots version, plus optional extra
+  versions for `numpy`/`pillow`/`rerun-sdk`/`pyfakefs` when
+  installed) before the embodiment-space check.
+  ([#359](https://github.com/robocurve/inspect-robots/issues/359)).
+
 ### Fixed
 
 - **Core:** `eval_set()` now preserves completed task logs when a later task
