@@ -58,8 +58,17 @@ def _parse_value(text: str) -> Any:
 
     A value wrapped in matching single or double quotes is returned as the
     literal inner string with no coercion — the escape hatch for strings the
-    heuristics would otherwise claim (``-P effort="'none'"`` sends the wire
-    string ``none`` instead of omitting the parameter).
+    heuristics would otherwise claim:
+      * ``-P effort="'none'"`` returns the literal string ``none`` (not
+        coerced to Python ``None``); components that consume effort see
+        the wire-side string and map it however they wish.
+      * bare ``-P effort=none`` parses to Python ``None``; effort-taking
+        components (model, agent, orchestrator) normalize ``None`` to
+        the minimum reasoning level — matching the repo-wide contract
+        documented in #395.
+      * only key omission (``-P effort`` not present at all) is the
+        "this component doesn't implement effort" signal, distinct from
+        ``effort=none``.
     """
     if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
         return text[1:-1]
