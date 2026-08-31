@@ -92,6 +92,12 @@ class SceneResult:
     # trial, ``None`` when the trial errored or no judgement was captured.
     # Defaults keep logs written before these fields existed readable.
     operator_judgements: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: which path produced each recorded
+    # operator judgement ("console", "prompt", "embodiment", "vlm"), ``None``
+    # when the trial has no judgement (errored trials, no grader, a skipped
+    # prompt) or the grader recorded one without an operator event. The default
+    # keeps older logs readable.
+    judgement_sources: tuple[str | None, ...] = ()
     # Strictly parallel to ``epochs``: qualitative operator context per trial,
     # ``None`` when no note was captured. Read by nothing that scores.
     operator_notes: tuple[str | None, ...] = ()
@@ -156,6 +162,7 @@ class EvalLog:
             # written before ``operator_judgements`` existed (newer reads older).
             sample["epochs"] = tuple(sample.get("epochs", ()))
             sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
+            sample["judgement_sources"] = tuple(sample.get("judgement_sources", ()))
             sample["operator_notes"] = tuple(sample.get("operator_notes", ()))
             sample["operator_messages"] = tuple(
                 tuple(messages) for messages in sample.get("operator_messages", ())
