@@ -24,6 +24,7 @@ from inspect_robots.log import (
     _json_safe_scene_metadata,
 )
 from inspect_robots.logging.json_log import _sanitize, _slug
+from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
@@ -40,6 +41,7 @@ class _LiveScene:
     error: str | None = None
     epochs: list[dict[str, float]] = field(default_factory=list)
     operator_judgements: list[str | None] = field(default_factory=list)
+    judgement_sources: list[str | None] = field(default_factory=list)
     operator_notes: list[str | None] = field(default_factory=list)
     operator_messages: list[tuple[dict[str, Any], ...]] = field(default_factory=list)
     trial_metadata: list[dict[str, Any]] = field(default_factory=list)
@@ -149,6 +151,7 @@ class LiveLogSink:
             scene = self._scenes.setdefault(scene_id, _LiveScene(scene_id))
             scene.epochs.append({})
             scene.operator_judgements.append(None)
+            scene.judgement_sources.append(None)
             scene.operator_notes.append(None)
             scene.operator_messages.append(())
             scene.trial_metadata.append({})
@@ -199,6 +202,7 @@ class LiveLogSink:
             scene = self._current_scene
             index = self._current_index
             scene.operator_judgements[index] = record.operator_judgement
+            scene.judgement_sources[index] = judgement_source(record)
             scene.operator_notes[index] = record.operator_note
             scene.operator_messages[index] = tuple(
                 {
@@ -265,6 +269,7 @@ class LiveLogSink:
                     instruction=instruction,
                     scene_metadata=dict(scene_metadata),
                     operator_judgements=tuple(scene.operator_judgements),
+                    judgement_sources=tuple(scene.judgement_sources),
                     operator_notes=tuple(scene.operator_notes),
                     operator_messages=tuple(scene.operator_messages),
                     trial_metadata=tuple(metadata),

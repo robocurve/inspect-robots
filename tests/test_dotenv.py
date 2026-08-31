@@ -73,6 +73,30 @@ def test_read_dotenv_quoted_value_followed_by_comment(tmp_path: Path) -> None:
     }
 
 
+def test_read_dotenv_escaped_quote_does_not_close_value(tmp_path: Path) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        r"""A="a\"b"
+B='a\'b'
+C="{\"k\": 1}"
+D="a\"" # comment
+F="a\\"
+E="a\"
+""",
+        encoding="utf-8",
+    )
+
+    assert r'A="a\"b"' in path.read_text(encoding="utf-8")
+    assert read_dotenv(path) == {
+        "A": r"a\"b",
+        "B": r"a\'b",
+        "C": r"{\"k\": 1}",
+        "D": r"a\"",
+        "F": r"a\\",
+        "E": r'"a\"',
+    }
+
+
 def test_read_dotenv_strips_utf8_bom(tmp_path: Path) -> None:
     path = tmp_path / ".env"
     path.write_bytes(b"\xef\xbb\xbfANTHROPIC_API_KEY=abc\n")

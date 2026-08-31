@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core:** evaluation logs now record which path produced each operator
+  judgement in `SceneResult.judgement_sources`
+  ([plan 0080](plans/0080-judgement-sources.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
+
 - **Core:** `is_affirmative_verdict()` is public API. It owns the whole
   operator-verdict contract (the recognized affirmative vocabulary plus the
   case-insensitive, whitespace-tolerant comparison and the "no judgement
@@ -23,6 +28,12 @@ All notable changes to this project are documented here. The format is based on
   of halting the eval. A non-finite action introduced by an approver is a
   `SafetyAbort` ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
   [#356](https://github.com/robocurve/inspect-robots/issues/356)).
+
+- **Core:** an escaped quote no longer terminates a quoted `.env` value, while
+  backslashes stay literal; a quoted value ending in a lone backslash is now
+  kept literally with its quotes
+  ([plan 0078](plans/0078-dotenv-escaped-quote.md),
+  [#291](https://github.com/robocurve/inspect-robots/issues/291)).
 
 - **Agent plugin (0.26.0):** absolute-target control no longer fails when an
   embodiment exposes several state fields of the action's shape (e.g. a 14-D

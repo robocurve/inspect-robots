@@ -199,7 +199,8 @@ file) stop the run before the robot moves. After a rollout the grader never
 crashes the run: transport failures or an unparseable reply leave the trial
 ungraded with a stderr note. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
-the console, is adopted without spending a model call.
+the console, is adopted without spending a model call. The log records which
+path produced each verdict in `judgement_sources`.
 
 ### Live operator feedback
 
