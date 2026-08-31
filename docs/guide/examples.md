@@ -64,7 +64,7 @@ A cheap smoke run against a mock rig:
 ```bash
 inspect-robots "reach the cube" --policy agent \
     -P model=anthropic/claude-fable-5 -P effort=minimal \
-    --embodiment cubepick --sim
+    --embodiment cubepick
 ```
 
 A hard task at high effort:
@@ -176,7 +176,7 @@ Registered tasks carry their own instructions and scenes; pass constructor
 args with `-T`:
 
 ```bash
-inspect-robots run --task cubepick-reach -T init_seed=3
+inspect-robots run --task cubepick-reach -T num_scenes=2 -T max_steps=120
 ```
 
 Generate the instruction and rubric with a model instead of writing them:
