@@ -22,6 +22,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** rollout now rejects non-finite and non-numeric actions before they
+  reach an embodiment. A NaN action on the default CLI chain now errors the
+  trial as a `PolicyError` and continues under `fail_on_error=False`, instead
+  of halting the eval. A non-finite action introduced by an approver is a
+  `SafetyAbort` ([plan 0077](plans/0077-rollout-nonfinite-actions.md),
+  [#356](https://github.com/robocurve/inspect-robots/issues/356)).
+
 - **Core:** an escaped quote no longer terminates a quoted `.env` value, while
   backslashes stay literal; a quoted value ending in a lone backslash is now
   kept literally with its quotes

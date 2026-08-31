@@ -48,6 +48,7 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
   inference/replanning is controller-internal (so ensembling composes — R3).
 - Frames live in a rollout-owned `FrameStore`, never in a sink (R5).
 - Action *semantics* live on the action `Box`, not on every `Action` (R8).
+- The rollout rejects non-finite actions before review and before `step()`.
 - Generic policy/embodiment exceptions (incl. from `reset`) are wrapped into
   `PolicyError` / `EmbodimentFault`; a crashing approver becomes `SafetyAbort`;
   `SafetyAbort`/`EmbodimentFault` always halt the eval. Every error raised from

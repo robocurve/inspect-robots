@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -303,7 +305,7 @@ def test_action_log_labels_follow_action_semantics(
     assert header["labels"] == expected
 
 
-def test_non_finite_action_degrades_without_affecting_eval(tmp_path: Path) -> None:
+def test_non_finite_policy_action_errors_with_header_only_log(tmp_path: Path) -> None:
     class _NaNPolicy(ScriptedPolicy):
         def __init__(self) -> None:
             super().__init__(chunk_size=1)
@@ -312,29 +314,33 @@ def test_non_finite_action_degrades_without_affecting_eval(tmp_path: Path) -> No
             del observation
             return ActionChunk(actions=[Action(data=np.full(2, np.nan))])
 
-    class _NaNTolerantEmbodiment(CubePickEmbodiment):
-        def step(self, action: Action) -> StepResult:
-            del action
-            return StepResult(
-                observation=Observation(),
-                terminated=True,
-                termination_reason="success",
-                info={"success": True},
-            )
-
     sink = _RecordingSink()
-    with pytest.warns(RuntimeWarning, match="Action log disabled for this trial"):
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+    with (
+        patch.object(embodiment, "step", step),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
         (log,) = eval(
             _task(),
             _NaNPolicy(),
-            _NaNTolerantEmbodiment(),
+            embodiment,
             log_dir=str(tmp_path),
             sinks=[sink],
         )
 
-    assert log.status == "success"
-    assert "actions" not in sink.records[0].metadata
-    assert not list(tmp_path.rglob("*.jsonl"))
+    assert not [warning for warning in caught if issubclass(warning.category, RuntimeWarning)]
+    assert log.status == "error"
+    assert log.error == "all 1 trial(s) errored; nothing was scored"
+    sample = log.samples[0]
+    assert sample.error is not None and sample.error.startswith("PolicyError:")
+    assert "non-finite" in sample.error
+    (record,) = sink.records
+    assert record.steps == []
+    pointer = record.metadata["actions"]
+    assert len(_read_jsonl(tmp_path / pointer)) == 1
+    step.assert_not_called()
 
 
 def test_write_action_log_rejects_nan_before_touching_disk(tmp_path: Path) -> None:
