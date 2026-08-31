@@ -93,3 +93,14 @@ def judgement_source(record: TrialRecord) -> str | None:
 def error_event(t: int, error_type: str, message: str) -> Event:
     """Record an exception's type and message at the failing control step."""
     return Event(kind="error", t=t, data={"type": error_type, "message": message})
+
+
+def perturbation_event(t: int, perturber_name: str) -> Event:
+    """Record that a Perturber modified the observation at control step ``t``.
+
+    ``perturber_name`` is the ``type(perturber).__name__`` of the perturber
+    that produced the modified observation. This event is only recorded when the
+    perturber returns a different object (not the same identity as the input),
+    so the transcript only grows when a distortion actually occurred.
+    """
+    return Event(kind="perturbation", t=t, data={"perturber": perturber_name})
