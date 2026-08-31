@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Epochs, Task
+from inspect_robots.types import Action, Observation, StepResult
 
 
 def _golden_log() -> EvalLog:
@@ -104,6 +105,18 @@ def test_eval_log_round_trips_through_dict() -> None:
     assert restored.results.metrics["success_at_end"] == 1.0
 
 
+def test_halted_log_round_trips_and_old_log_defaults_false() -> None:
+    """Preserve an explicit halt while keeping older schema-v1 logs readable."""
+    data = _golden_log().to_dict()
+    data["status"] = "error"
+    data["halted"] = True
+
+    assert EvalLog.from_dict(data).halted is True
+
+    del data["halted"]
+    assert EvalLog.from_dict(data).halted is False
+
+
 def test_results_without_errored_trials_reads_with_default() -> None:
     """Logs written before EvalResults.errored_trials existed must still read."""
     data = _golden_log().to_dict()
@@ -154,6 +167,7 @@ def test_operator_messages_without_source_remain_readable(tmp_path: Path) -> Non
 def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     # Older schema-v1 logs missing additive fields must remain readable.
     data = _golden_log().to_dict()
+    del data["halted"]
     del data["eval"]["max_steps"]
     del data["eval"]["max_seconds"]
     for sample in data["samples"]:
@@ -181,6 +195,7 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].policy_transcripts == ()
     assert restored.eval.max_steps is None
     assert restored.eval.max_seconds is None
+    assert restored.halted is False
 
 
 def test_seconds_horizon_round_trips_declared_and_resolved_values() -> None:
@@ -358,15 +373,16 @@ def test_eval_set_reports_failed_task_and_keeps_completed_logs(tmp_path: Path) -
 
     good = task("good")
     bad = task("bad", reducer="bogus")
+    after = task("after")
     success, logs = eval_set(
-        [good, bad],
+        [good, bad, after],
         ScriptedPolicy(),
         CubePickEmbodiment(),
         log_dir=str(tmp_path),
     )
 
     assert success is False
-    assert len(logs) == 2
+    assert len(logs) == 3
     assert logs[0].status == "success"
     assert logs[0].eval.task == good.name
     assert logs[1].status == "error"
@@ -376,7 +392,83 @@ def test_eval_set_reports_failed_task_and_keeps_completed_logs(tmp_path: Path) -
     assert logs[1].eval.embodiment == "cubepick"
     assert logs[1].eval.max_steps == bad.max_steps
     assert logs[1].samples == ()
-    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert logs[2].status == "success"
+    assert logs[2].eval.task == after.name
+    assert all(log.halted is False for log in logs)
+    assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize("error_type", [SafetyAbort, EmbodimentFault])
+def test_eval_set_stops_after_in_trial_robot_halt(
+    error_type: type[SafetyAbort] | type[EmbodimentFault],
+    tmp_path: Path,
+) -> None:
+    """Never reset the next task after the robot reports a halt."""
+
+    class _HaltingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reset_calls = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.reset_calls += 1
+            return super().reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            del action
+            raise error_type("robot halted")
+
+    def task(name: str) -> Task:
+        return Task(
+            name=name,
+            scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+            scorer=success_at_end(),
+            max_steps=60,
+        )
+
+    embodiment = _HaltingEmbodiment()
+    success, logs = eval_set(
+        [task("first"), task("must-not-start")],
+        ScriptedPolicy(),
+        embodiment,
+        log_dir=str(tmp_path),
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].halted is True
+    assert logs[0].eval.task == "first"
+    assert logs[0].samples[0].error == f"{error_type.__name__}: robot halted"
+    assert embodiment.reset_calls == 1
+    (log_path,) = tuple(tmp_path.glob("*.json"))
+    assert read_eval_log(str(log_path)).halted is True
+
+
+def test_eval_set_treats_halt_marker_as_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A halt marker must force failure independently of human-facing status."""
+    calls: list[object] = []
+
+    def halted_eval(task: object, *args: object, **kwargs: object) -> list[EvalLog]:
+        del args, kwargs
+        calls.append(task)
+        return [replace(_golden_log(), halted=True)]
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "eval", halted_eval)
+
+    success, logs = eval_set(
+        ["first", "must-not-start"],
+        "scripted",
+        "cubepick",
+    )
+
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].status == "success"
+    assert logs[0].halted is True
+    assert calls == ["first"]
 
 
 def test_eval_set_error_log_preserves_string_component_names(tmp_path: Path) -> None:

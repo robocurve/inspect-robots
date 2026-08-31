@@ -87,6 +87,24 @@ def _grading_hook(
     return grader.grade
 
 
+def _close_after_halt(embodiment: Embodiment) -> None:
+    """Close an owned embodiment without allowing cleanup to erase a halt."""
+    try:
+        embodiment.close()
+    except Exception as exc:
+        # The run is already stopped and requires operator attention. A close
+        # failure is material, but replacing the halt would let eval_set()
+        # contain it as an ordinary task error and start the next robot task.
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.warn(
+                "embodiment.close() failed after the run halted; preserving "
+                f"the halt: {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -267,7 +285,9 @@ def eval(
     ergonomic that keeps logs and the CLI reproducible. An embodiment resolved
     from a registry name is owned by ``eval()`` and is closed when the run
     finishes (even on a halt); a caller-constructed embodiment object stays
-    open — the caller owns its lifecycle.
+    open — the caller owns its lifecycle. If owned-embodiment cleanup fails
+    after a halt is already established, the cleanup failure warns but cannot
+    replace that halt. Cleanup failures after non-halted runs still propagate.
 
     ``seed=None`` draws a fresh seed from the OS and records it in the log, so
     an "unseeded" run remains reproducible after the fact (and is distinct from
@@ -341,7 +361,7 @@ def eval(
         else embodiment
     )
     try:
-        return _run_eval(
+        logs = _run_eval(
             task,
             policy,
             embodiment,
@@ -357,11 +377,25 @@ def eval(
             operator_input=operator_input,
             before_scoring=before_scoring,
         )
-    finally:
-        # Close what we opened: a registry-resolved embodiment is released even
-        # when the run halts, so a real robot never leaks its connection.
+    except (SafetyAbort, EmbodimentFault, KeyboardInterrupt):
+        # Cleanup cannot replace a robot halt or operator cancellation with an
+        # ordinary exception that eval_set() would contain and advance past.
+        if owns_embodiment:
+            _close_after_halt(embodiment)
+        raise
+    except BaseException:
+        # Preserve the existing lifecycle contract for every other failure:
+        # close what eval() resolved, and let a close failure propagate.
         if owns_embodiment:
             embodiment.close()
+        raise
+
+    if owns_embodiment:
+        if any(log.halted for log in logs):
+            _close_after_halt(embodiment)
+        else:
+            embodiment.close()
+    return logs
 
 
 def _run_eval(
@@ -747,6 +781,7 @@ def _run_eval(
         stats=stats,
         samples=tuple(scene_results),
         error=error,
+        halted=halted,
     )
     bus.on_eval_end(log)
     if cancelled_exc is not None:
@@ -834,21 +869,22 @@ def eval_set(
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
-    ``success`` is ``True`` iff every returned log has ``status == "success"``.
+    ``success`` is ``True`` iff no returned log is halted and every returned
+    log has ``status == "success"``.
     A task that raises before or without producing a log contributes one
     ``status="error"`` log carrying the exception text, and the remaining
-    tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
-    ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
-    propagate. A halt inside a trial ends that task with an error log and the
-    set continues to the next task.
+    tasks still run. A halt inside a trial returns that task's error log with
+    ``halted=True`` and stops the set before the next task starts. A
+    ``SafetyAbort`` or ``EmbodimentFault`` that escapes ``eval()`` (raised
+    outside a trial) and ``KeyboardInterrupt`` still propagate.
     ``CompatibilityError``, unknown policy or embodiment registry names, and
     task-factory ``ConfigError`` are therefore reported once per affected
     task. Only grading configuration errors raised before the task loop
     propagate.
 
-    With a string embodiment, a non-safety exception from ``close()`` can
-    produce an error row even when that task's completed JSON log is already
-    on disk.
+    With a string embodiment, a non-safety exception from ``close()`` after a
+    non-halted run can produce an error row even when that task's completed
+    JSON log is already on disk.
 
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
@@ -869,24 +905,25 @@ def eval_set(
     logs: list[EvalLog] = []
     for task in task_list:
         try:
-            logs.extend(
-                eval(
-                    task,
-                    policy,
-                    embodiment,
-                    log_dir=log_dir,
-                    sinks=sinks,
-                    seed=seed,
-                    fail_on_error=fail_on_error,
-                    controller=controller,
-                    approver=approver,
-                    remap=remap,
-                    store_frames=store_frames,
-                    store_actions=store_actions,
-                    operator_input=operator_input,
-                    before_scoring=before_scoring,
-                )
+            task_logs = eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=log_dir,
+                sinks=sinks,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+                store_actions=store_actions,
+                operator_input=operator_input,
+                before_scoring=before_scoring,
             )
+            logs.extend(task_logs)
+            if any(log.halted for log in task_logs):
+                return False, logs
         except (SafetyAbort, EmbodimentFault):
             raise
         except Exception as exc:

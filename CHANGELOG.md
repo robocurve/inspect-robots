@@ -22,12 +22,20 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** `eval_set()` now stops before the next task when an in-trial
+  `SafetyAbort` or `EmbodimentFault` returns a halted error log, so the next
+  rollout cannot reset a robot that requires operator intervention. The
+  backward-compatible `EvalLog.halted` field makes the stop condition explicit
+  without parsing error text. A cleanup failure cannot mask an established
+  halt, while ordinary task and cleanup errors retain their existing behavior
+  ([plan 0081](plans/0081-eval-set-halt-boundary.md),
+  [#423](https://github.com/robocurve/inspect-robots/issues/423)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
-  `eval()` (raised outside a trial) and `KeyboardInterrupt` still propagate. A
-  halt inside a trial ends that task with an error log and, as before this
-  change, the set continues to the next task
+  `eval()` (raised outside a trial) and `KeyboardInterrupt` still propagate;
+  in-trial halts stop the set as described above
   ([plan 0079](plans/0079-eval-set-error-log.md),
   [#298](https://github.com/robocurve/inspect-robots/issues/298)).
 

@@ -229,6 +229,7 @@ def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) ->
     log = read_eval_log(str(written))
     scene = log.samples[0]
     assert log.status == "cancelled"
+    assert log.halted is True
     assert scene.status == "cancelled"
     assert scene.policy_transcripts == ({"act_calls": 2},)
     assert scene.termination_reasons == (None,)
@@ -398,6 +399,7 @@ def test_halted_eval_with_pass_at_k_reducer_still_writes_log(tmp_path: Path) -> 
     )
     assert isinstance(log, EvalLog)
     assert log.status == "error"
+    assert log.halted is True
     assert log.error is not None and "motor stalled" in log.error
     assert log.samples[0].error is not None and "reducer" in log.samples[0].error
     # The halt path keeps the parallel tuples aligned: the faulted trial gets
@@ -773,6 +775,95 @@ def test_raising_bind_task_aborts_before_any_rollout(tmp_path: Path) -> None:
         eval(_task(max_steps=5), ScriptedPolicy(), "bind-raises-cubepick", log_dir=str(tmp_path))
     assert not list(tmp_path.glob("*.json"))  # no rollout started, no log written
     assert _CLOSED == ["closed"]  # registry-owned embodiment still released
+
+
+def test_close_failure_cannot_mask_returned_robot_halt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cleanup error must not let eval_set advance after an in-trial halt."""
+    events: list[str] = []
+
+    class _HaltingCloseFailure(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            events.append("reset")
+            return super().reset(scene, seed=seed)
+
+        def step(self, action: Action) -> StepResult:
+            del action
+            raise SafetyAbort("guard opened")
+
+        def close(self) -> None:
+            events.append("close")
+            raise RuntimeError("disconnect failed")
+
+    embodiment = _HaltingCloseFailure()
+    monkeypatch.setattr(
+        "inspect_robots.registry.resolve",
+        lambda kind, name: embodiment if kind == "embodiment" and name == "owned" else None,
+    )
+
+    with pytest.warns(RuntimeWarning, match="preserving the halt"):
+        success, logs = eval_set(
+            [_task(), _task()],
+            ScriptedPolicy(),
+            "owned",
+            log_dir=str(tmp_path),
+        )
+
+    assert success is False
+    assert len(logs) == 1
+    assert logs[0].halted is True
+    assert events == ["reset", "close"]
+
+
+def test_close_failure_cannot_mask_escaping_robot_halt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An outside-trial halt keeps precedence over a cleanup exception."""
+
+    class _BindingHaltCloseFailure(CubePickEmbodiment):
+        def bind_task(self, envelope: TaskEnvelope) -> None:
+            del envelope
+            raise EmbodimentFault("drive fault")
+
+        def close(self) -> None:
+            raise RuntimeError("disconnect failed")
+
+    embodiment = _BindingHaltCloseFailure()
+    monkeypatch.setattr(
+        "inspect_robots.registry.resolve",
+        lambda kind, name: embodiment if kind == "embodiment" and name == "owned" else None,
+    )
+
+    with (
+        pytest.warns(RuntimeWarning, match="preserving the halt"),
+        pytest.raises(EmbodimentFault, match="drive fault"),
+    ):
+        eval_set(
+            [_task(), _task()],
+            ScriptedPolicy(),
+            "owned",
+            log_dir=str(tmp_path),
+        )
+
+
+def test_close_failure_after_non_halted_run_still_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only an established halt takes precedence over cleanup failure."""
+
+    class _CloseFailure(CubePickEmbodiment):
+        def close(self) -> None:
+            raise RuntimeError("disconnect failed")
+
+    embodiment = _CloseFailure()
+    monkeypatch.setattr(
+        "inspect_robots.registry.resolve",
+        lambda kind, name: embodiment if kind == "embodiment" and name == "owned" else None,
+    )
+
+    with pytest.raises(RuntimeError, match="disconnect failed"):
+        eval(_task(), ScriptedPolicy(), "owned", log_dir=str(tmp_path))
 
 
 def test_compatibility_check_runs_before_bind_task(tmp_path: Path) -> None:

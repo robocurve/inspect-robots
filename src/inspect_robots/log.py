@@ -129,7 +129,11 @@ class EvalResults:
 
 @dataclass(frozen=True)
 class EvalLog:
-    """The full record returned by [`eval`][inspect_robots.eval.eval] and persisted to disk."""
+    """The full record returned by [`eval`][inspect_robots.eval.eval] and persisted to disk.
+
+    ``halted`` marks a condition that forbids unattended continuation, such as
+    a robot safety/fault halt or operator cancellation.
+    """
 
     version: int
     status: str  # "started" | "success" | "error" | "cancelled"
@@ -138,6 +142,8 @@ class EvalLog:
     stats: EvalStats
     samples: tuple[SceneResult, ...] = ()
     error: str | None = None
+    # The default keeps schema-v1 logs written before this field readable.
+    halted: bool = False
 
     SCHEMA_VERSION: ClassVar[int] = SCHEMA_VERSION
 
@@ -179,6 +185,7 @@ class EvalLog:
             stats=EvalStats(**data["stats"]),
             samples=tuple(samples),
             error=data.get("error"),
+            halted=data.get("halted", False),
         )
 
 

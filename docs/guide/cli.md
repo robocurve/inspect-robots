@@ -478,7 +478,9 @@ task_name  metrics-or-error` row per task, and the shared log directory once
 producing a log contributes an in-memory error row and the remaining tasks
 still run. A `SafetyAbort` or `EmbodimentFault` that escapes `eval()` (raised
 outside a trial) and `KeyboardInterrupt` still propagate. A halt inside a
-trial ends that task with an error log and the set continues to the next task.
+trial returns that task's error log with `halted=true` and stops the set before
+the next task can reset the embodiment. Continuing requires an explicit
+operator re-run; `--fail-on-error` never overrides this safety boundary.
 
 `--retry-attempts` is accepted and threaded through to `eval_set()`, whose
 resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
