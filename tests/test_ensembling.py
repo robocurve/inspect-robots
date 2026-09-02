@@ -118,3 +118,29 @@ def test_eval_with_ensembling_succeeds(tmp_path: object) -> None:
     )
     assert logs[0].status == "success"
     assert logs[0].results.metrics["success_at_end"] == 1.0
+
+
+def test_empty_chunk_raises_policy_error() -> None:
+    from inspect_robots.errors import PolicyError
+
+    class _EmptyChunkPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(name="empty-chunk-policy", action_space=_DELTA_SPACE)
+            self.config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            return None
+
+        def act(self, observation: Observation) -> ActionChunk:
+            chunk = object.__new__(ActionChunk)
+            object.__setattr__(chunk, "actions", ())
+            object.__setattr__(chunk, "control_hz", None)
+            object.__setattr__(chunk, "inference_latency_s", None)
+            object.__setattr__(chunk, "meta", {})
+            return chunk
+
+    ctrl = EnsemblingController(_DELTA_SPACE, m=0.1)
+    store: dict[str, object] = {}
+    obs = Observation()
+    with pytest.raises(PolicyError, match="empty-chunk-policy.*empty ActionChunk"):
+        ctrl.next_action(_EmptyChunkPolicy(), obs, 0, store)
