@@ -142,5 +142,5 @@ def test_empty_chunk_raises_policy_error() -> None:
     ctrl = EnsemblingController(_DELTA_SPACE, m=0.1)
     store: dict[str, object] = {}
     obs = Observation()
-    with pytest.raises(PolicyError, match="empty-chunk-policy.*empty ActionChunk"):
+    with pytest.raises(PolicyError, match=r"empty-chunk-policy.*empty ActionChunk"):
         ctrl.next_action(_EmptyChunkPolicy(), obs, 0, store)
