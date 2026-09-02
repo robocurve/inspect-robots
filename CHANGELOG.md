@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **W&B plugin (0.1.0):** adds `WandbSink`, a first-party logging sink that
+  sends evaluation configuration and aggregate metrics to Weights & Biases
+  ([#365](https://github.com/robocurve/inspect-robots/issues/365)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),

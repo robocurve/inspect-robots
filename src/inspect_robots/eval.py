@@ -16,6 +16,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,7 @@ class _Broadcast:
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        self._started_sinks: list[LogSink] = []
         policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
         for sink in sinks:
             hook = getattr(sink, "log_policy_messages", None)
@@ -221,6 +223,7 @@ class _Broadcast:
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
+            self._started_sinks.append(s)
             s.on_eval_start(spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
@@ -240,6 +243,24 @@ class _Broadcast:
     def on_eval_end(self, log: EvalLog) -> None:
         for s in self._sinks:
             s.on_eval_end(log)
+        self._started_sinks.clear()
+
+    def on_eval_error(self, error: BaseException) -> None:
+        """Offer best-effort cleanup to sinks after an escaped eval error."""
+        started_sinks = self._started_sinks
+        self._started_sinks = []
+        for sink in started_sinks:
+            hook = getattr(sink, "on_eval_error", None)
+            if callable(hook):
+                try:
+                    hook(error)
+                except BaseException as exc:
+                    with suppress(BaseException):
+                        warnings.warn(
+                            f"Log sink abort cleanup failed with {type(exc).__name__}: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
 
 def eval(
@@ -340,6 +361,7 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    bus_holder: list[_Broadcast] = []
     try:
         return _run_eval(
             task,
@@ -356,7 +378,12 @@ def eval(
             store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
+            bus_holder=bus_holder,
         )
+    except BaseException as exc:
+        if bus_holder:
+            bus_holder[0].on_eval_error(exc)
+        raise
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
         # when the run halts, so a real robot never leaks its connection.
@@ -380,6 +407,7 @@ def _run_eval(
     store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    bus_holder: list[_Broadcast],
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -423,6 +451,7 @@ def _run_eval(
 
     sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
     bus = _Broadcast(sink_list)
+    bus_holder.append(bus)
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 
