@@ -994,6 +994,32 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     assert scene.operator_notes == ("clean pickup", None)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("grader unsafe"), EmbodimentFault("grader faulted")],
+)
+def test_before_scoring_halt_error_halts_eval_and_writes_log(
+    error: Exception, tmp_path: Path
+) -> None:
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise error
+
+    (log,) = eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        before_scoring=bad_hook,
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error == f"{type(error).__name__}: {error}"
+    assert list(tmp_path.glob("*.json"))
+    assert log.samples[0].status == "error"
+    assert log.results.errored_trials == 1
+    assert log.samples[0].epochs == ({},)
+
+
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
     def bad_hook(record: TrialRecord, scene: Scene) -> None:
         raise RuntimeError("hook exploded")
@@ -1114,6 +1140,15 @@ def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
     assert log.samples[0].epochs[0] == {"success_at_end": 0.0}
 
 
+class _FaultOnSecondParkEmbodiment(_ParkedEmbodiment):
+    def observe_parked(self) -> object:
+        self.park_calls += 1
+        if self.park_calls == 2:
+            assert isinstance(self.park_result, BaseException)
+            raise self.park_result
+        return None
+
+
 @pytest.mark.parametrize(
     "error",
     [SafetyAbort("park unsafe"), EmbodimentFault("park faulted")],
@@ -1121,16 +1156,26 @@ def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
 def test_eval_halts_when_observe_parked_raises_a_halt_error(
     error: Exception, tmp_path: Path
 ) -> None:
-    embodiment = _ParkedEmbodiment(error)
+    embodiment = _FaultOnSecondParkEmbodiment(error)
 
-    with pytest.raises(type(error), match=str(error)):
-        eval(
-            _task(max_steps=1),
-            ScriptedPolicy(),
-            embodiment,
-            grader=_CaptureGrader(),
-            log_dir=str(tmp_path),
-        )
+    (log,) = eval(
+        _task(epochs=3, max_steps=1),
+        ScriptedPolicy(),
+        embodiment,
+        grader=_CaptureGrader(),
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error == f"{type(error).__name__}: {error}"
+    assert list(tmp_path.glob("*.json"))
+
+    scene = log.samples[0]
+    assert scene.status == "error"
+    assert log.results.errored_trials == 1
+    assert scene.epochs == ({"success_at_end": 0.0}, {})
+    assert len(scene.termination_reasons) == len(scene.epochs)
+    assert embodiment.park_calls == 2
 
 
 def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
