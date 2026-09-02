@@ -384,6 +384,44 @@ class _ProbeSink(NullSink):
         self.removed_on_end = not self.live_sink.path.exists()
 
 
+def test_live_snapshot_carries_the_same_grader_config_as_the_final_log(
+    tmp_path: Path,
+) -> None:
+    """Live and final logs share one EvalSpec, so grader provenance cannot drift."""
+
+    class _NamedGrader:
+        name = "probe-grader"
+
+        def grade(self, record: TrialRecord, scene: Scene) -> None:
+            """Stamp a verdict so the trial is graded."""
+            del scene
+            record.operator_judgement = "success"
+
+    live_sink = LiveLogSink(str(tmp_path), min_write_interval_s=0)
+    probe = _ProbeSink(live_sink)
+    task = Task(
+        name="live-grader-config",
+        scenes=[Scene(id="scene-0", instruction="reach")],
+        scorer=success_at_end(),
+        max_steps=2,
+    )
+
+    (log,) = eval(
+        task,
+        _DeltaPolicy(),
+        CubePickEmbodiment(),
+        sinks=[live_sink, probe],
+        grader=_NamedGrader(),
+        log_dir=str(tmp_path),
+    )
+
+    assert log.eval.grader == "probe-grader"
+    snapshots = [*probe.start_logs, *probe.trial_logs]
+    assert snapshots
+    assert all(snapshot.eval.grader == "probe-grader" for snapshot in snapshots)
+    assert all(snapshot.eval.grader_config == log.eval.grader_config for snapshot in snapshots)
+
+
 @pytest.mark.parametrize("store_frames", [False, True])
 def test_eval_integration_probe_observes_valid_mid_run_snapshots(
     store_frames: bool, tmp_path: Path

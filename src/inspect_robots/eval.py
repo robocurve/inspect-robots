@@ -63,16 +63,20 @@ if TYPE_CHECKING:
 def _grading_hook(
     grader: Grader | str | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
-) -> Callable[[TrialRecord, Scene], None] | None:
-    """Resolve ``grader``/``before_scoring`` into the single pre-scoring hook.
+) -> tuple[Callable[[TrialRecord, Scene], None] | None, Grader | None]:
+    """Resolve ``grader``/``before_scoring`` into the pre-scoring hook and its grader.
 
     The two arguments write to the same seam, so passing both is always a
     caller bug and raises ``ConfigError``. A string resolves through the
     registry, and the result must satisfy the ``Grader`` protocol — a broken
     entry point fails here, at configuration time, not deep inside scoring.
+
+    The resolved grader comes back alongside the hook so the caller can record
+    what graded the run; a bare ``before_scoring`` callable has no identity to
+    record and yields ``None``.
     """
     if grader is None:
-        return before_scoring
+        return before_scoring, None
     if before_scoring is not None:
         raise ConfigError("pass either grader or before_scoring, not both")
     if isinstance(grader, str):
@@ -84,7 +88,24 @@ def _grading_hook(
             f"grader must implement the Grader protocol (a name and a "
             f"grade(record, scene) method); got {type(grader).__name__}"
         )
-    return grader.grade
+    return grader.grade, grader
+
+
+def _grader_identity(grader: Grader | None) -> tuple[str | None, dict[str, Any]]:
+    """Return the grader's registry name and effective config for the eval spec.
+
+    ``config()`` is an optional duck-typed hook, like the embodiment's
+    ``bind_task``, deliberately not part of the ``Grader`` Protocol: adding it
+    there would make every existing out-of-tree grader fail the protocol's
+    ``isinstance`` check. A grader without one is still named in the log and
+    simply records no configuration.
+    """
+    if grader is None:
+        return None, {}
+    hook = getattr(grader, "config", None)
+    if not callable(hook):
+        return grader.name, {}
+    return grader.name, cast("dict[str, Any]", dict(hook()))
 
 
 def _now_iso() -> str:
@@ -331,7 +352,7 @@ def eval(
     """
     from inspect_robots.registry import resolve
 
-    before_scoring = _grading_hook(grader, before_scoring)
+    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -356,6 +377,7 @@ def eval(
             store_actions=store_actions,
             operator_input=operator_input,
             before_scoring=before_scoring,
+            grader_identity=_grader_identity(resolved_grader),
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -380,6 +402,7 @@ def _run_eval(
     store_actions: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    grader_identity: tuple[str | None, dict[str, Any]],
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -435,6 +458,7 @@ def _run_eval(
     if store_frames:
         frame_store = FrameStore(str(Path(log_dir) / "frames" / run_stamp))
 
+    grader_name, grader_config = grader_identity
     spec = EvalSpec(
         task=task.name,
         policy=policy.info.name,
@@ -448,6 +472,8 @@ def _run_eval(
             "is_simulated": embodiment.info.is_simulated,
             "capabilities": sorted(embodiment.info.capabilities),
         },
+        grader=grader_name,
+        grader_config=grader_config,
         seed=seed,
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
@@ -864,7 +890,7 @@ def eval_set(
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
     """
-    before_scoring = _grading_hook(grader, before_scoring)
+    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     logs: list[EvalLog] = []
     for task in task_list:
@@ -884,7 +910,11 @@ def eval_set(
                     store_frames=store_frames,
                     store_actions=store_actions,
                     operator_input=operator_input,
-                    before_scoring=before_scoring,
+                    # Hand the grader itself down, not just its bound method:
+                    # each task builds its own EvalSpec and a bare callable
+                    # would leave every eval_set log with no grader recorded.
+                    grader=resolved_grader,
+                    before_scoring=None if resolved_grader is not None else before_scoring,
                 )
             )
         except (SafetyAbort, EmbodimentFault):

@@ -40,6 +40,14 @@ def _golden_log() -> EvalLog:
             created="2026-06-26T00:00:00+00:00",
             inspect_robots_version="0.0.0",
             git_commit="deadbeef",
+            grader="vlm",
+            grader_config={
+                "model": "judge-model",
+                "base_url": "https://example.invalid/v1",
+                "rubric": "Grade success if the cube moved.",
+                "max_cameras": 4,
+                "effort": None,
+            },
             seed=0,
             max_steps=1200,
         ),
@@ -127,6 +135,13 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
     }
     assert restored.samples[0].operator_judgements == ("yes",)
     assert restored.samples[0].judgement_sources == ("prompt",)
+    assert restored.eval.grader == "vlm"
+    assert restored.eval.grader_config["model"] == "judge-model"
+    assert restored.eval.grader_config["rubric"] == "Grade success if the cube moved."
+    assert restored.eval.grader_config["max_cameras"] == 4
+    # ``None`` (no reasoning_effort sent) must survive as null, not vanish.
+    assert restored.eval.grader_config["effort"] is None
+    assert "effort" in restored.eval.grader_config
     assert restored.samples[0].operator_notes == ("gripper closed early",)
     assert restored.samples[0].operator_messages == (({"t": 3, "text": "keep left <now>"},),)
     assert isinstance(restored.samples[0].operator_messages, tuple)
@@ -156,6 +171,8 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     data = _golden_log().to_dict()
     del data["eval"]["max_steps"]
     del data["eval"]["max_seconds"]
+    del data["eval"]["grader"]
+    del data["eval"]["grader_config"]
     for sample in data["samples"]:
         del sample["instruction"]
         del sample["scene_metadata"]
@@ -181,6 +198,8 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].policy_transcripts == ()
     assert restored.eval.max_steps is None
     assert restored.eval.max_seconds is None
+    assert restored.eval.grader is None
+    assert restored.eval.grader_config == {}
 
 
 def test_seconds_horizon_round_trips_declared_and_resolved_values() -> None:
