@@ -3874,6 +3874,85 @@ def test_run_setup_interviews_options_alongside_device_slots(
     assert text.count("auto_start = true") == 1
 
 
+def test_run_setup_options_suggest_context_aware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A slot with suggest callback. It should suggest True if geom is in args.
+    geom_slot = OptionSlot(
+        arg="collision_guardrail",
+        label="Collision guardrail",
+        default=False,
+        suggest=lambda args: "geom" in args,
+    )
+
+    class _Factory:
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (geom_slot,)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"option-body": _Factory} if kind == "embodiment" else {},
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+
+    # 1. Without geom key: suggest default (False) -> [y/N], we accept with "" (means No)
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\nother = arg\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+    )
+    assert result == 0
+    # Confirm it asked and default was [y/N]
+    prompt = next(p for p in prompts if "Collision guardrail" in p)
+    assert "[y/N]" in prompt
+    assert path.read_text(encoding="utf-8").count("collision_guardrail = false") == 1
+
+    # 2. With geom key: suggest True -> [Y/n], we accept with "" (means Yes)
+    path.write_text(
+        "[defaults]\nembodiment = option-body\n\n[embodiment.args]\ngeom = measured\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+    )
+    assert result == 0
+    prompt = next(p for p in prompts if "Collision guardrail" in p)
+    assert "[Y/n]" in prompt
+    assert path.read_text(encoding="utf-8").count("collision_guardrail = true") == 1
+
+    # 3. Explicit config overrides suggest callback: if it already sets collision_guardrail = false,
+    # and geom is present, it should suggest False -> [y/N], we accept with "" (means No)
+    path.write_text(
+        "[defaults]\n"
+        "embodiment = option-body\n\n"
+        "[embodiment.args]\n"
+        "geom = measured\n"
+        "collision_guardrail = false\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("option-body"), "n", ""])
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+    )
+    assert result == 0
+    prompt = next(p for p in prompts if "Collision guardrail" in p)
+    assert "[y/N]" in prompt
+    assert path.read_text(encoding="utf-8").count("collision_guardrail = false") == 1
+
+
 def test_run_setup_option_colliding_with_managed_key_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
