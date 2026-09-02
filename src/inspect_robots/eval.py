@@ -16,6 +16,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,7 @@ class _Broadcast:
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        self._started_sinks: list[LogSink] = []
         policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
         for sink in sinks:
             hook = getattr(sink, "log_policy_messages", None)
@@ -221,6 +223,7 @@ class _Broadcast:
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
+            self._started_sinks.append(s)
             s.on_eval_start(spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
@@ -240,20 +243,24 @@ class _Broadcast:
     def on_eval_end(self, log: EvalLog) -> None:
         for s in self._sinks:
             s.on_eval_end(log)
+        self._started_sinks.clear()
 
     def on_eval_error(self, error: BaseException) -> None:
         """Offer best-effort cleanup to sinks after an escaped eval error."""
-        for sink in self._sinks:
+        started_sinks = self._started_sinks
+        self._started_sinks = []
+        for sink in started_sinks:
             hook = getattr(sink, "on_eval_error", None)
             if callable(hook):
                 try:
                     hook(error)
-                except Exception as exc:
-                    warnings.warn(
-                        f"Log sink abort cleanup failed with {type(exc).__name__}: {exc}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                except BaseException as exc:
+                    with suppress(BaseException):
+                        warnings.warn(
+                            f"Log sink abort cleanup failed with {type(exc).__name__}: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
 
 def eval(

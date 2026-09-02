@@ -1037,16 +1037,110 @@ def test_before_scoring_exception_notifies_sinks_for_cleanup(tmp_path: Path) -> 
 
 def test_broadcast_makes_abort_cleanup_best_effort() -> None:
     class _BareSink:
-        pass
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
 
     class _FailingSink:
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+
         def on_eval_error(self, error: BaseException) -> None:
             raise RuntimeError("cleanup exploded")
 
-    with pytest.warns(RuntimeWarning, match="cleanup exploded"):
-        _Broadcast([cast(LogSink, _BareSink()), cast(LogSink, _FailingSink())]).on_eval_error(
-            RuntimeError("eval exploded")
+    broadcast = _Broadcast([cast(LogSink, _BareSink()), cast(LogSink, _FailingSink())])
+    broadcast.on_eval_start(
+        EvalSpec(
+            task="t",
+            policy="p",
+            embodiment="e",
+            created="now",
+            inspect_robots_version="0",
         )
+    )
+
+    with pytest.warns(RuntimeWarning, match="cleanup exploded"):
+        broadcast.on_eval_error(RuntimeError("eval exploded"))
+
+
+def test_broadcast_does_not_mask_cleanup_base_exception() -> None:
+    class _BaseExceptionSink:
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+
+        def on_eval_error(self, error: BaseException) -> None:
+            raise KeyboardInterrupt("cleanup interrupted")
+
+    broadcast = _Broadcast([cast(LogSink, _BaseExceptionSink())])
+    broadcast.on_eval_start(
+        EvalSpec(
+            task="t",
+            policy="p",
+            embodiment="e",
+            created="now",
+            inspect_robots_version="0",
+        )
+    )
+
+    with pytest.warns(RuntimeWarning, match="cleanup interrupted"):
+        broadcast.on_eval_error(RuntimeError("eval exploded"))
+
+
+def test_broadcast_does_not_raise_when_cleanup_warning_is_an_error() -> None:
+    class _FailingSink:
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+
+        def on_eval_error(self, error: BaseException) -> None:
+            raise RuntimeError("cleanup exploded")
+
+    broadcast = _Broadcast([cast(LogSink, _FailingSink())])
+    broadcast.on_eval_start(
+        EvalSpec(
+            task="t",
+            policy="p",
+            embodiment="e",
+            created="now",
+            inspect_robots_version="0",
+        )
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        broadcast.on_eval_error(RuntimeError("eval exploded"))
+
+
+def test_eval_only_notifies_sinks_that_reached_startup(tmp_path: Path) -> None:
+    class _StartFailureSink(NullSink):
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            del spec
+            raise RuntimeError("startup exploded")
+
+        def on_eval_error(self, error: BaseException) -> None:
+            self.errors.append(f"{type(error).__name__}: {error}")
+
+    class _NeverStartedSink(NullSink):
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def on_eval_error(self, error: BaseException) -> None:
+            self.errors.append(f"{type(error).__name__}: {error}")
+
+    started = _StartFailureSink()
+    never_started = _NeverStartedSink()
+    with pytest.raises(RuntimeError, match="startup exploded"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            sinks=[started, never_started],
+        )
+
+    assert started.errors == ["RuntimeError: startup exploded"]
+    assert never_started.errors == []
 
 
 def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> None:
