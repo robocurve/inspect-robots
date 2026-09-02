@@ -116,6 +116,39 @@ Each slot is one yes/no question in the setup wizard. Its `arg` is the
 config value is the suggested answer. A declaration is skipped when its `arg`
 collides with a device slot, a camera key, or an earlier option declaration.
 
+## Declare number slots
+
+Declare finite numeric settings on the registered embodiment factory. Import
+[`NumberSlot`](/api/#inspect_robots.conformance.NumberSlot) from the
+`inspect_robots.conformance` submodule:
+
+```python
+from inspect_robots.conformance import NumberSlot
+
+NUMBER_SLOTS = (
+    NumberSlot(
+        arg="motor_temp_limit",
+        label="Motor temperature limit (degrees C)",
+        default=70,
+        minimum=1,
+        allow_none=True,
+    ),
+)
+```
+
+Each slot writes one `[embodiment.args]` value. Bounds are inclusive, and an
+omitted bound leaves that side unbounded. Set `allow_none=True` to accept
+`none` or `null` as a disabled value. On re-runs, a valid carried config value
+is the suggestion; otherwise the declared default is used. Number slots are
+asked after option slots. A declaration is skipped when its `arg` collides
+with a device slot, a camera key, an option slot, or an earlier number slot.
+
+Importing `NumberSlot` requires the inspect-robots core release that provides
+it. On an older core, that import fails while the plugin entry point loads and
+drops the whole plugin, rather than silently ignoring only `NUMBER_SLOTS`.
+Plugins that adopt number slots must raise their minimum inspect-robots
+version accordingly.
+
 ## The conformance kit
 
 Add one test built on

@@ -25,6 +25,7 @@ from inspect_robots._setup import (
     _can_serial,
     _identify_by_replug,
     _identify_camera_by_replug,
+    _number_constraint,
     _prefer_plain_alias,
     _preferred_name,
     _prompt_device_slot,
@@ -38,7 +39,7 @@ from inspect_robots._setup import (
     _v4l2_color_capture,
     run_setup,
 )
-from inspect_robots.conformance import DeviceSlot, OptionSlot
+from inspect_robots.conformance import DeviceSlot, NumberSlot, OptionSlot
 
 
 def _scripted_input(
@@ -344,6 +345,20 @@ def _register_option_slots(
     )
 
 
+def _register_number_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    numbers: tuple[NumberSlot, ...],
+    name: str = "number-body",
+) -> None:
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = numbers
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {name: _Factory} if kind == "embodiment" else {},
+    )
+
+
 def _slot_defaults(name: str = "slot-body") -> list[str]:
     return ["", name, "", "", "", ""]
 
@@ -351,6 +366,31 @@ def _slot_defaults(name: str = "slot-body") -> list[str]:
 AUTO_START = OptionSlot(
     arg="auto_start",
     label="Skip the operator start prompts (auto_start)",
+)
+TEMP_LIMIT = NumberSlot(
+    arg="motor_temp_limit",
+    label="Motor temperature limit (C)",
+    default=70,
+    minimum=1,
+    allow_none=True,
+)
+BOUNDED_NUMBER = NumberSlot(
+    arg="bounded_number",
+    label="Bounded number",
+    default=50,
+    minimum=1,
+    maximum=100,
+)
+MAXIMUM_NUMBER = NumberSlot(
+    arg="maximum_number",
+    label="Maximum-only number",
+    default=5,
+    maximum=10,
+)
+UNBOUNDED_NUMBER = NumberSlot(
+    arg="unbounded_number",
+    label="Unbounded number",
+    default=2,
 )
 
 
@@ -3954,6 +3994,477 @@ def test_run_setup_no_declared_options_asks_nothing(
     assert len(prompts) == 7
     assert prompts[6] == "Configure cameras? [y/N] "
     assert not any(AUTO_START.label in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize(("answer", "written"), [("", "70"), ("65", "65")])
+def test_run_setup_writes_declared_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    written: str,
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", answer])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{TEMP_LIMIT.label} [70]: "
+    assert f"motor_temp_limit = {written}" in text
+
+
+def test_run_setup_number_suggestion_comes_from_valid_carried_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n[embodiment.args]\nmotor_temp_limit = 65.5\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{TEMP_LIMIT.label} [65.5]: "
+    assert "motor_temp_limit = 65.5" in text
+
+
+def test_run_setup_number_answer_overrides_carried_value_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n[embodiment.args]\nmotor_temp_limit = 65\n",
+        encoding="utf-8",
+    )
+    input_fn, _ = _scripted_input([*_slot_defaults("number-body"), "n", "60"])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert text.count("motor_temp_limit") == 1
+    assert "motor_temp_limit = 60" in text
+
+
+def test_run_setup_number_accepts_carried_none_as_suggestion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n[embodiment.args]\nmotor_temp_limit = null\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{TEMP_LIMIT.label} [none]: "
+    assert "motor_temp_limit = none" in text
+
+
+@pytest.mark.parametrize(
+    ("slot", "carried"),
+    [
+        (TEMP_LIMIT, "banana"),
+        (TEMP_LIMIT, "true"),
+        (TEMP_LIMIT, "nan"),
+        (TEMP_LIMIT, "0"),
+        (BOUNDED_NUMBER, "101"),
+    ],
+)
+def test_run_setup_invalid_carried_number_falls_back_silently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slot: NumberSlot,
+    carried: str,
+) -> None:
+    _register_number_slots(monkeypatch, (slot,))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        f"[defaults]\nembodiment = number-body\n\n[embodiment.args]\n{slot.arg} = {carried}\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == f"{slot.label} [{slot.default}]: "
+    assert f"{slot.arg} = {slot.default}" in text
+    assert "ignoring invalid" not in out.getvalue()
+
+
+@pytest.mark.parametrize("answer", ["none", "null", "NONE", "NuLl"])
+def test_run_setup_number_accepts_none_spellings_verbatim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    input_fn, _ = _scripted_input([*_slot_defaults("number-body"), "n", answer])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert f"motor_temp_limit = {answer}" in text
+
+
+@pytest.mark.parametrize(
+    ("slot", "invalid", "valid", "constraint"),
+    [
+        (
+            UNBOUNDED_NUMBER,
+            "none",
+            "3",
+            "unbounded_number must be a finite number",
+        ),
+        (TEMP_LIMIT, "0", "1", "motor_temp_limit must be a finite number >= 1, or none"),
+        (
+            BOUNDED_NUMBER,
+            "101",
+            "100",
+            "bounded_number must be a finite number >= 1 and <= 100",
+        ),
+        (UNBOUNDED_NUMBER, "banana", "3", "unbounded_number must be a finite number"),
+        (UNBOUNDED_NUMBER, "nan", "3", "unbounded_number must be a finite number"),
+    ],
+)
+def test_run_setup_reprompts_invalid_number_answers_with_constraint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slot: NumberSlot,
+    invalid: str,
+    valid: str,
+    constraint: str,
+) -> None:
+    _register_number_slots(monkeypatch, (slot,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", invalid, valid])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert sum(prompt.startswith(slot.label) for prompt in prompts) == 2
+    assert out.getvalue().count(constraint) == 1
+    assert f"{slot.arg} = {valid}" in text
+
+
+@pytest.mark.parametrize(
+    ("slot", "expected"),
+    [
+        (UNBOUNDED_NUMBER, "unbounded_number must be a finite number"),
+        (TEMP_LIMIT, "motor_temp_limit must be a finite number >= 1, or none"),
+        (MAXIMUM_NUMBER, "maximum_number must be a finite number <= 10"),
+        (BOUNDED_NUMBER, "bounded_number must be a finite number >= 1 and <= 100"),
+        (
+            NumberSlot("unbounded_none", "Unbounded none", allow_none=True),
+            "unbounded_none must be a finite number, or none",
+        ),
+        (
+            NumberSlot("maximum_none", "Maximum none", None, None, 10, True),
+            "maximum_none must be a finite number <= 10, or none",
+        ),
+        (
+            NumberSlot("bounded_none", "Bounded none", None, 1, 100, True),
+            "bounded_none must be a finite number >= 1 and <= 100, or none",
+        ),
+    ],
+)
+def test_number_constraint_renders_bound_and_none_arms(slot: NumberSlot, expected: str) -> None:
+    assert _number_constraint(slot) == expected
+
+
+def test_run_setup_none_default_displays_and_writes_canonical_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slot = NumberSlot("gain", "Optional gain", allow_none=True)
+    _register_number_slots(monkeypatch, (slot,))
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[7] == "Optional gain [none]: "
+    assert "gain = none" in text
+
+
+def test_run_setup_abort_during_numbers_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_number_slots(monkeypatch, (TEMP_LIMIT,))
+    input_fn, _ = _scripted_input([*_slot_defaults("number-body"), "n", EOFError()])
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 1
+    assert "setup aborted; nothing written" in out.getvalue()
+    assert not _config_path(tmp_path).exists()
+
+
+def test_run_setup_interview_order_is_devices_options_then_numbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot("left_channel", "can", "left CAN channel"),
+        )
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (AUTO_START,)
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = (TEMP_LIMIT,)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"number-body": _Factory} if kind == "embodiment" else {},
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n[embodiment.args]\nleft_channel = can9\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", "y", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert prompts[6] == "Configure devices? [Y/n] "
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
+    assert prompts[8] == f"{TEMP_LIMIT.label} [70]: "
+    assert text.count("left_channel = can9") == 1
+    assert text.count("auto_start = true") == 1
+    assert text.count("motor_temp_limit = 70") == 1
+
+
+def test_run_setup_number_colliding_with_camera_key_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collision = NumberSlot("top_cam_device", "Numeric top camera", default=1)
+    _register_number_slots(monkeypatch, (collision, TEMP_LIMIT))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n"
+        "[embodiment.args]\ntop_cam_device = /dev/old-top\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert not any(prompt.startswith(collision.label) for prompt in prompts)
+    assert sum(prompt.startswith(TEMP_LIMIT.label) for prompt in prompts) == 1
+    assert text.count("top_cam_device = /dev/old-top") == 1
+
+
+def test_run_setup_number_colliding_with_device_arg_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collision = NumberSlot("left_channel", "Numeric left channel", default=1)
+
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot("left_channel", "can", "left CAN channel"),
+        )
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = (collision, TEMP_LIMIT)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"number-body": _Factory} if kind == "embodiment" else {},
+    )
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(
+        "[defaults]\nembodiment = number-body\n\n[embodiment.args]\nleft_channel = can9\n",
+        encoding="utf-8",
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        sysfs_net=tmp_path / "none-net",
+    )
+
+    text = path.read_text(encoding="utf-8")
+    assert result == 0
+    assert not any(prompt.startswith(collision.label) for prompt in prompts)
+    assert sum(prompt.startswith(TEMP_LIMIT.label) for prompt in prompts) == 1
+    assert text.count("left_channel = can9") == 1
+
+
+def test_run_setup_number_colliding_with_option_arg_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collision = NumberSlot("auto_start", "Numeric auto start", default=1)
+
+    class _Factory:
+        OPTION_SLOTS: ClassVar[tuple[OptionSlot, ...]] = (AUTO_START,)
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = (collision, TEMP_LIMIT)
+
+    monkeypatch.setattr(
+        "inspect_robots.registry.registered",
+        lambda kind: {"number-body": _Factory} if kind == "embodiment" else {},
+    )
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", "y", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert not any(prompt.startswith(collision.label) for prompt in prompts)
+    assert sum(AUTO_START.label in prompt for prompt in prompts) == 1
+    assert sum(prompt.startswith(TEMP_LIMIT.label) for prompt in prompts) == 1
+    assert text.count("auto_start = true") == 1
+
+
+def test_run_setup_duplicate_number_arg_uses_first_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    duplicate = NumberSlot("motor_temp_limit", "Duplicate temperature", default=50)
+    _register_number_slots(monkeypatch, (TEMP_LIMIT, duplicate))
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    text = _config_path(tmp_path).read_text(encoding="utf-8")
+    assert result == 0
+    assert sum(prompt.startswith(TEMP_LIMIT.label) for prompt in prompts) == 1
+    assert not any(prompt.startswith(duplicate.label) for prompt in prompts)
+    assert text.count("motor_temp_limit = 70") == 1
+
+
+def test_run_setup_no_declared_numbers_leaves_option_prompt_count_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_option_slots(monkeypatch, (AUTO_START,), name="number-body")
+    input_fn, prompts = _scripted_input([*_slot_defaults("number-body"), "n", ""])
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert len(prompts) == 8
+    assert prompts[6] == "Configure cameras? [y/N] "
+    assert prompts[7] == f"{AUTO_START.label} [y/N] "
 
 
 def test_run_setup_device_gate_defaults_no_without_probe_or_existing_arg(
