@@ -4109,6 +4109,7 @@ def test_run_setup_number_accepts_carried_none_as_suggestion(
         (TEMP_LIMIT, "true"),
         (TEMP_LIMIT, "nan"),
         (TEMP_LIMIT, "0"),
+        (TEMP_LIMIT, "'70'"),
         (BOUNDED_NUMBER, "101"),
     ],
 )
@@ -4185,6 +4186,7 @@ def test_run_setup_number_accepts_none_spellings_verbatim(
         ),
         (UNBOUNDED_NUMBER, "banana", "3", "unbounded_number must be a finite number"),
         (UNBOUNDED_NUMBER, "nan", "3", "unbounded_number must be a finite number"),
+        (UNBOUNDED_NUMBER, "'70'", "3", "unbounded_number must be a finite number"),
     ],
 )
 def test_run_setup_reprompts_invalid_number_answers_with_constraint(

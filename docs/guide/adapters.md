@@ -136,6 +136,10 @@ NUMBER_SLOTS = (
 )
 ```
 
+The written value determines the type the constructor receives: `70` arrives
+as `int`, `70.5` as `float`, and `none` as `None`. Annotate the constructor
+argument as `float | int | None` or coerce, rather than assuming `float`.
+
 Each slot writes one `[embodiment.args]` value. Bounds are inclusive, and an
 omitted bound leaves that side unbounded. Set `allow_none=True` to accept
 `none` or `null` as a disabled value. On re-runs, a valid carried config value
