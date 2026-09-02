@@ -6,6 +6,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -20,10 +21,10 @@ from inspect_robots.errors import (
     SafetyAbort,
     _CancelledTrial,
 )
-from inspect_robots.eval import _git_commit
+from inspect_robots.eval import _Broadcast, _git_commit
 from inspect_robots.log import EvalLog, EvalSpec
 from inspect_robots.logging.json_log import JsonLogSink
-from inspect_robots.logging.sink import NullSink
+from inspect_robots.logging.sink import LogSink, NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
@@ -1005,6 +1006,46 @@ def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
             CubePickEmbodiment(),
             log_dir=str(tmp_path),
             before_scoring=bad_hook,
+        )
+
+
+def test_before_scoring_exception_notifies_sinks_for_cleanup(tmp_path: Path) -> None:
+    class _AbortSink(NullSink):
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def on_eval_error(self, error: BaseException) -> None:
+            self.errors.append(f"{type(error).__name__}: {error}")
+
+    sink = _AbortSink()
+
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise RuntimeError("hook exploded")
+
+    with pytest.raises(RuntimeError, match="hook exploded"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            sinks=[sink],
+            before_scoring=bad_hook,
+        )
+
+    assert sink.errors == ["RuntimeError: hook exploded"]
+
+
+def test_broadcast_makes_abort_cleanup_best_effort() -> None:
+    class _BareSink:
+        pass
+
+    class _FailingSink:
+        def on_eval_error(self, error: BaseException) -> None:
+            raise RuntimeError("cleanup exploded")
+
+    with pytest.warns(RuntimeWarning, match="cleanup exploded"):
+        _Broadcast([cast(LogSink, _BareSink()), cast(LogSink, _FailingSink())]).on_eval_error(
+            RuntimeError("eval exploded")
         )
 
 

@@ -40,6 +40,10 @@ counts, errored trials, total steps, duration, and every aggregate result metric
 The same sink instance can be reused by `eval_set()`; each task receives its own
 W&B run.
 
+> [!WARNING]
+> The evaluation specification is uploaded as W&B run config. Keep credentials
+> and other secrets out of policy and embodiment configuration.
+
 Use `mode="offline"` to write a local W&B run for later synchronization, or
 `mode="disabled"` to exercise the integration without recording data.
 

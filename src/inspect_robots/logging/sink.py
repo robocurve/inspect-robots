@@ -26,6 +26,12 @@ A third duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
 or ``None`` when frame storage is off. A callable with this claimed name MUST
 accept that one-argument signature. It deliberately remains off ``LogSink`` and
 ``NullSink`` like the other optional extensions.
+
+A fourth duck-typed extension, ``on_eval_error(error)``, is called by ``eval()``
+when an exception escapes after ``on_eval_start``. It gives resource-owning sinks
+one best-effort cleanup point while preserving the original exception. A callable
+with this claimed name MUST accept the escaping ``BaseException``. It remains
+off ``LogSink`` so existing sinks keep their structural conformance unchanged.
 """
 
 from __future__ import annotations
@@ -88,4 +94,8 @@ class NullSink:
 
     def on_eval_end(self, log: EvalLog) -> None:
         """Provide the optional no-op for sinks that need no finalization."""
+        return None
+
+    def on_eval_error(self, error: BaseException) -> None:
+        """Provide the optional no-op for sinks that need abort cleanup."""
         return None

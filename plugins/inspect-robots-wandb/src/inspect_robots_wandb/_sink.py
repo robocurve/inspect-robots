@@ -50,10 +50,16 @@ class WandbSink(NullSink):
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Create a W&B run and record the immutable evaluation specification."""
+        if self._run is not None:
+            previous_run = self._run
+            self._run = None
+            previous_run.finish(exit_code=1)
+
         wandb = _load_wandb()
         kwargs: dict[str, Any] = {
             "project": self.project,
             "config": asdict(spec),
+            "reinit": "create_new",
         }
         optional = {
             "entity": self.entity,
@@ -82,7 +88,28 @@ class WandbSink(NullSink):
             "eval/duration_s": log.stats.duration_s,
         }
         payload.update({f"metric/{name}": value for name, value in log.results.metrics.items()})
+        exit_code = 0 if log.status == "success" else 1
         try:
             run.log(payload)
+        except Exception:
+            exit_code = 1
+            raise
         finally:
-            run.finish(exit_code=0 if log.status == "success" else 1)
+            run.finish(exit_code=exit_code)
+
+    def on_eval_error(self, error: BaseException) -> None:
+        """Record an escaped evaluation exception and close the active run."""
+        run = self._run
+        self._run = None
+        if run is None:
+            return
+
+        try:
+            run.log(
+                {
+                    "eval/status": "error",
+                    "eval/error": f"{type(error).__name__}: {error}",
+                }
+            )
+        finally:
+            run.finish(exit_code=1)
