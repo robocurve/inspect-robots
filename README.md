@@ -385,8 +385,8 @@ the compatibility check before anything moves, not mid-rollout.
 
 ## First-party plugins
 
-Policies, embodiments, and attended operator input have ready-made plugins
-shipped from this repo as separate packages:
+Policies, embodiments, logging, and attended operator input have ready-made
+plugins shipped from this repo as separate packages:
 
 - **[inspect-robots-ros](plugins/inspect-robots-ros/)**: run evals on ROS 1 or
   ROS 2 arms through rosbridge, with no ROS installation on the eval machine
@@ -413,6 +413,9 @@ shipped from this repo as separate packages:
   `--voice`, or narrate streamed policy notes and terminal summaries with
   `run --speak`. Spoken input is feedback-only, so trial end and verdicts stay
   on the keyboard.
+- **[inspect-robots-wandb](plugins/inspect-robots-wandb/)**: send evaluation
+  configuration and aggregate metrics to Weights & Biases through a reusable
+  `WandbSink`.
 
 ```bash
 # Isaac Lab world + a π0 checkpoint served by XPolicyLab, evaluated end to end:

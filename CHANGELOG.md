@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **W&B plugin (0.1.0):** adds `WandbSink`, a first-party logging sink that
+  sends evaluation configuration and aggregate metrics to Weights & Biases
+  ([#365](https://github.com/robocurve/inspect-robots/issues/365)).
+
 - **Docs:** new guide page of example commands covering model selection,
   reasoning-effort levels, VLA policies (MolmoAct 2, Pi 0/0.5 via XPolicyLab),
   control interfaces, instruction sources, operator interfaces, and eval sets

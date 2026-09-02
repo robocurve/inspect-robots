@@ -80,8 +80,8 @@ class instead of comparing names.
 
 ## First-party plugins
 
-Six plugins ship from the Inspect Robots repository as separate packages, covering policies,
-embodiments, and attended operator input:
+Seven plugins ship from the Inspect Robots repository as separate packages, covering policies,
+embodiments, logging, and attended operator input:
 
 - [`inspect-robots-ros`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-ros):
   run evals on ROS 1 or ROS 2 arms through rosbridge, with no ROS installation
@@ -109,6 +109,9 @@ embodiments, and attended operator input:
   `run --speak`. Silence filtering protects the input path. Speech synthesis and
   playback always run on a worker, while blocking speech may wait boundedly on
   that work from the control thread.
+- [`inspect-robots-wandb`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-wandb):
+  log evaluation configuration and aggregate metrics to Weights & Biases through
+  the `wandb` sink.
 
 ### `inspect-robots-isaacsim`: the body
 
