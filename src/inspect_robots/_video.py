@@ -170,7 +170,8 @@ def _ffmpeg_argv(ffmpeg: str, width: int, height: int, fps: float, out_path: Pat
     ``libx264`` is pinned rather than trusting the build's mp4 default: an
     LGPL ffmpeg without it silently falls back to mpeg4, which browsers
     won't play — pinning turns that into a loud per-stream failure. The pad
-    filter keeps odd dimensions legal for yuv420p.
+    filter keeps odd dimensions legal for yuv420p, and ``+faststart`` places
+    MP4 metadata before media data for progressive browser playback.
     """
     return [
         ffmpeg,
@@ -193,6 +194,8 @@ def _ffmpeg_argv(ffmpeg: str, width: int, height: int, fps: float, out_path: Pat
         "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v",
         "libx264",
+        "-movflags",
+        "+faststart",
         "-pix_fmt",
         "yuv420p",
         str(out_path),
