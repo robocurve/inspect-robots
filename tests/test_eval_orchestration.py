@@ -3,9 +3,12 @@ partial-record delivery, fail_on_error timing, embodiment lifecycle, seeding."""
 
 from __future__ import annotations
 
+import importlib
+import json
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -239,6 +242,189 @@ def test_cancelled_eval_writes_partial_log_with_forensic_data(tmp_path: Path) ->
     assert log.error == "cancelled by user (KeyboardInterrupt)"
     assert log.stats.frames_dir is not None
     assert list(Path(log.stats.frames_dir).rglob("*.npy"))
+
+
+def test_run_stamp_mkdir_redraws_collision_and_names_action_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every artifact uses the run stamp whose directory claim succeeded."""
+    eval_module = importlib.import_module("inspect_robots.eval")
+    values = iter(("a" * 32, "b" * 32))
+    monkeypatch.setattr(eval_module.uuid, "uuid4", lambda: SimpleNamespace(hex=next(values)))
+    actual_mkdir = Path.mkdir
+    claims: list[Path] = []
+
+    def collide_once(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent.name == "frames" and parents and not exist_ok:
+            claims.append(path)
+            if len(claims) == 1:
+                raise FileExistsError
+        actual_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", collide_once)
+    sink = _RecordingSink()
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[sink],
+    )
+
+    assert len(claims) == 2
+    assert claims[0].name.endswith("_aaaaaaaa")
+    assert claims[1].name.endswith("_bbbbbbbb")
+    assert not claims[1].exists()
+    pointer = Path(sink.records[0].metadata["actions"])
+    assert pointer.parts[1] == claims[1].name
+    header = json.loads((tmp_path / pointer).read_text(encoding="utf-8").splitlines()[0])
+    assert header["run_id"] == claims[1].name
+
+
+def test_run_stamp_uses_full_uuid_after_sixteen_failed_claims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded short-stamp redraw loop ends in one full UUID claim."""
+    eval_module = importlib.import_module("inspect_robots.eval")
+    counter = 0
+
+    def next_uuid() -> SimpleNamespace:
+        nonlocal counter
+        counter += 1
+        return SimpleNamespace(hex=f"{counter:032x}")
+
+    actual_mkdir = Path.mkdir
+    claims: list[Path] = []
+
+    def collide_sixteen(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent.name == "frames" and parents and not exist_ok:
+            claims.append(path)
+            if len(claims) <= 16:
+                raise FileExistsError
+        actual_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(eval_module.uuid, "uuid4", next_uuid)
+    monkeypatch.setattr(Path, "mkdir", collide_sixteen)
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        sinks=[NullSink()],
+        store_actions=False,
+    )
+
+    assert len(claims) == 17
+    assert len(claims[-1].name.rsplit("_", 1)[-1]) == 32
+
+
+def test_non_frames_run_removes_empty_stamp_directory(tmp_path: Path) -> None:
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_actions=False,
+    )
+
+    assert not (tmp_path / "frames").exists()
+
+
+def test_non_frames_run_removes_new_empty_log_directory(tmp_path: Path) -> None:
+    log_dir = tmp_path / "new-logs"
+
+    eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(log_dir),
+        sinks=[NullSink()],
+        store_actions=False,
+    )
+
+    assert not log_dir.exists()
+
+
+def test_cancelled_non_frames_run_removes_empty_stamp_directory(tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt()),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            store_actions=False,
+        )
+
+    assert not (tmp_path / "frames").exists()
+
+
+def test_frames_run_keeps_claimed_stamp_directory(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(max_steps=1),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_frames=True,
+        store_actions=False,
+    )
+
+    assert log.stats.frames_dir is not None
+    assert Path(log.stats.frames_dir).is_dir()
+
+
+def test_non_frames_run_preserves_claim_that_gained_content(tmp_path: Path) -> None:
+    artifacts: list[Path] = []
+
+    class _StampArtifactPolicy(ScriptedPolicy):
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            del scene_id, epoch
+            artifact = Path(log_dir) / "frames" / run_id / "capture.txt"
+            artifact.write_text("kept", encoding="utf-8")
+            artifacts.append(artifact)
+
+    eval(
+        _task(max_steps=1),
+        _StampArtifactPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_actions=False,
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text(encoding="utf-8") == "kept"
+
+
+def test_non_frames_cleanup_preserves_sibling_claim(tmp_path: Path) -> None:
+    sibling = tmp_path / "frames" / "another-run"
+
+    class _SiblingClaimPolicy(ScriptedPolicy):
+        def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
+            del scene_id, epoch, log_dir, run_id
+            sibling.mkdir()
+
+    eval(
+        _task(max_steps=1),
+        _SiblingClaimPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_actions=False,
+    )
+
+    assert sibling.is_dir()
 
 
 def test_cancelled_eval_reraises_typed_exception_with_original_cause(
