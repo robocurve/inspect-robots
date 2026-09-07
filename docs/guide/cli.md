@@ -328,7 +328,7 @@ rig; replace the three camera paths with your rig's V4L2 color nodes
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
 [defaults]
 policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = yam_arms     # same plugin; cameras configured below
+embodiment = yam_arms     # from the inspect-robots-yam plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
