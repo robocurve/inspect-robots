@@ -458,6 +458,70 @@ def test_all_trials_errored_degrades_to_error_status(tmp_path: Path) -> None:
     assert log.results.metrics == {}
 
 
+def test_survivor_minority_across_errored_scenes_degrades_to_error(
+    tmp_path: Path,
+) -> None:
+    # Issue #440: a run in which no scene completed cleanly and the errored
+    # trials are the majority must not report success on the surviving
+    # minority's metrics.
+    class _FlakyPolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self._resets += 1
+            if self._resets > 1:
+                raise PolicyError(f"synthetic failure on trial {self._resets}")
+            super().reset(scene)
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=60,
+        epochs=6,
+    )
+    (log,) = eval(task, _FlakyPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.error == (
+        "all 1 scene(s) errored and 5 of 6 trial(s) errored; "
+        "metrics rest on only 1 surviving trial(s)"
+    )
+    assert log.results.errored_trials == 5
+    assert log.results.total_trials == 6
+    # The per-scene data is still recorded for forensics.
+    assert log.samples[0].status == "error"
+
+
+def test_partially_errored_run_with_clean_scene_stays_success(
+    tmp_path: Path,
+) -> None:
+    # A fully-errored scene next to a clean scene is partial failure, not
+    # survivor bias: the run stays successful and the bad scene stays visible.
+    class _BoomFirstScenePolicy(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            if scene.id == "s0":
+                raise PolicyError("synthetic failure on s0")
+            super().reset(scene)
+
+    task = Task(
+        name="t",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=0),
+            Scene(id="s1", instruction="reach", init_seed=1),
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+        epochs=2,
+    )
+    (log,) = eval(task, _BoomFirstScenePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    assert [s.status for s in log.samples] == ["error", "success"]
+    assert log.results.errored_trials == 2
+    assert log.results.total_trials == 4
+
+
 def test_halt_error_message_is_not_overwritten_by_all_errored(tmp_path: Path) -> None:
     # A SafetyAbort halt already sets status/error; the all-errored degrade
     # must not clobber the more specific message.
