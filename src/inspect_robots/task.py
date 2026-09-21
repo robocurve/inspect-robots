@@ -85,6 +85,8 @@ class Task:
             raise ConfigError(
                 f"Task {self.name!r}: max_seconds must be finite and > 0, got {self.max_seconds!r}"
             )
+        if not self.scenes:
+            raise ConfigError(f"Task {self.name!r}: scenes must not be empty")
         # Scene ids become per-trial identity downstream (the rollout builds
         # "{scene.id}-e{epoch}", which FrameStore turns into a filename), so a
         # duplicate would silently overwrite another trial's frames.

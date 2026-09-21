@@ -228,6 +228,14 @@ def test_task_rejects_invalid_steps_horizon(max_steps: int) -> None:
         )
 
 
+def test_task_rejects_empty_scenes() -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.task import Task
+
+    with pytest.raises(ConfigError, match="scenes must not be empty"):
+        Task(name="t", scenes=[], scorer="success_at_end", max_steps=80)
+
+
 def test_task_rejects_duplicate_scene_ids() -> None:
     # Scene ids become per-trial identity (rollout builds "{scene.id}-e{epoch}",
     # which FrameStore turns into a filename), so a duplicate silently
