@@ -281,6 +281,7 @@ def test_encode_pins_argv_and_pipes_exact_bytes(
     ]:
         assert argv[argv.index(flag) + 1] == value
     assert argv[argv.index("-pix_fmt") + 1] == "rgb24"  # input pix_fmt
+    assert argv[argv.index("-movflags") + 1] == "+faststart"
     assert argv[-3:-1] == ["-pix_fmt", "yuv420p"]  # output pix_fmt
     assert proc.stdout is subprocess.DEVNULL
     expected = np.load(frames[0][1]).tobytes() + np.load(frames[1][1]).tobytes()

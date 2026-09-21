@@ -9,14 +9,17 @@ still reaches disk.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from inspect_robots import eval, read_eval_log
-from inspect_robots.logging.json_log import _sanitize
+from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats
+from inspect_robots.logging.json_log import JsonLogSink, _sanitize
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
@@ -43,6 +46,22 @@ def _read_strict(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"), parse_constant=_forbid_constants)
     assert isinstance(data, dict)
     return data
+
+
+def _sink_log() -> EvalLog:
+    return EvalLog(
+        version=1,
+        status="success",
+        eval=EvalSpec(
+            task="strict-json",
+            policy="scripted",
+            embodiment="cubepick",
+            created="2026-09-03T00:00:00+00:00",
+            inspect_robots_version="test",
+        ),
+        results=EvalResults(total_scenes=0, total_trials=0),
+        stats=EvalStats("start", "end", 0.0, 0),
+    )
 
 
 class _NoDistanceEmbodiment(CubePickEmbodiment):
@@ -196,3 +215,150 @@ def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> No
     assert isinstance(samples, list)
     transcript = samples[0]["policy_transcripts"][0]
     assert transcript == {"inf": None, "nan": None}
+
+
+def test_json_sink_redraws_final_and_temp_names_after_link_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = iter(("a" * 32, "1" * 32, "b" * 32, "2" * 32))
+    monkeypatch.setattr(
+        "inspect_robots.logging.json_log.uuid.uuid4",
+        lambda: SimpleNamespace(hex=next(values)),
+    )
+    occupied = tmp_path / "strict-json_aaaaaaaa.json"
+    occupied.write_text("first run", encoding="utf-8")
+    actual_link = os.link
+    links: list[tuple[Path, Path]] = []
+
+    def record_link(source: Path, target: Path) -> None:
+        links.append((source, target))
+        actual_link(source, target)
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", record_link)
+    sink = JsonLogSink(str(tmp_path))
+
+    sink.on_eval_end(_sink_log())
+
+    assert occupied.read_text(encoding="utf-8") == "first run"
+    assert sink.path == tmp_path / "strict-json_bbbbbbbb.json"
+    assert sink.path.is_file()
+    assert links[0][0].name == f".strict-json_aaaaaaaa.{'1' * 32}.tmp"
+    assert links[1][0].name == f".strict-json_bbbbbbbb.{'2' * 32}.tmp"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_json_sink_uses_full_uuid_after_sixteen_collisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter = 0
+
+    def next_uuid() -> SimpleNamespace:
+        nonlocal counter
+        counter += 1
+        return SimpleNamespace(hex=f"{counter:032x}")
+
+    actual_link = os.link
+    calls = 0
+
+    def collide_sixteen(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 16:
+            raise FileExistsError
+        actual_link(source, target)
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.uuid.uuid4", next_uuid)
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", collide_sixteen)
+    sink = JsonLogSink(str(tmp_path))
+    log = _sink_log()
+    log = replace(log, eval=replace(log.eval, task="a" * 300))
+
+    sink.on_eval_end(log)
+
+    assert sink.path is not None
+    assert len(sink.path.stem.rsplit("_", 1)[-1]) == 32
+    assert len(sink.path.name.encode()) <= 255
+    assert calls == 17
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_json_sink_propagates_full_uuid_collision_without_temp_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def always_collide(_source: Path, _target: Path) -> None:
+        raise FileExistsError
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", always_collide)
+    sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(FileExistsError):
+        sink.on_eval_end(_sink_log())
+
+    assert sink.path is None
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_json_sink_falls_back_to_replace_when_hard_links_are_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replaced: list[tuple[Path, Path]] = []
+    actual_replace = os.replace
+
+    def no_links(_source: Path, _target: Path) -> None:
+        raise OSError("hard links unavailable")
+
+    def record_replace(source: Path, target: Path) -> None:
+        replaced.append((source, target))
+        actual_replace(source, target)
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", no_links)
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.replace", record_replace)
+    sink = JsonLogSink(str(tmp_path))
+
+    sink.on_eval_end(_sink_log())
+
+    assert sink.path is not None and sink.path.is_file()
+    assert replaced == [(replaced[0][0], sink.path)]
+    assert not replaced[0][0].exists()
+
+
+def test_json_sink_cleans_temp_when_serialization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_dump(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("cannot serialize")
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.json.dump", fail_dump)
+    sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(ValueError, match="cannot serialize"):
+        sink.on_eval_end(_sink_log())
+
+    assert sink.path is None
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_json_sink_cleans_temp_when_replace_fallback_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_links(_source: Path, _target: Path) -> None:
+        raise OSError("hard links unavailable")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", no_links)
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.replace", fail_replace)
+    sink = JsonLogSink(str(tmp_path))
+
+    with pytest.raises(OSError, match="replace failed"):
+        sink.on_eval_end(_sink_log())
+
+    assert sink.path is None
+    assert not list(tmp_path.glob(".*.tmp"))

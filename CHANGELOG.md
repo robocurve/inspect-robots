@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** concurrent evals sharing one log directory now atomically claim
+  run-stamp directories and completed JSON-log filenames, preventing merged
+  frame/action sidecars and overwritten final logs. Rendered MP4s also place
+  metadata first for progressive browser playback
+  ([plan 0082](plans/0082-collision-proof-run-identity.md),
+  [#355](https://github.com/robocurve/inspect-robots/issues/355)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes

@@ -1,8 +1,9 @@
 """The canonical JSON eval-log sink.
 
 Writes the immutable [`EvalLog`][inspect_robots.log.EvalLog] to ``log_dir`` once the run
-finishes. The write is atomic (temp file + ``os.replace``) so an interrupted
-overnight run never leaves a half-written log.
+finishes. The write is atomic (complete temp file + hard-link claim, with an
+``os.replace`` fallback) so an interrupted overnight run never leaves a
+half-written log and supported filesystems never overwrite a colliding run.
 
 The file is strict RFC 8259 JSON: non-finite floats (``nan``, ``±inf``, e.g. a
 ``min_distance_to_goal`` score when no distance was ever recorded) are mapped
@@ -29,9 +30,10 @@ if TYPE_CHECKING:
     from inspect_robots.types import Action, Observation, StepResult
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-# Leaves room for the filename's "_" + 8 hex chars + ".json.tmp" suffix inside a
-# 255-byte name, with headroom for filesystems that allow less.
+# Leaves room for the longest hidden temp suffix
+# "_<8 hex>.<32 hex>.tmp" inside a 255-byte filename.
 _SLUG_MAX = 200
+_SHORT_ID_ATTEMPTS = 16
 
 
 def _slug(name: str) -> str:
@@ -91,11 +93,41 @@ class JsonLogSink:
     def on_eval_end(self, log: EvalLog) -> None:
         """Atomically serialize the final log and expose its path."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
-        self.path = self.log_dir / filename
-        tmp = self.path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        task_slug = _slug(log.eval.task)
+        attempt = 0
+        while True:
+            identifier = uuid.uuid4().hex
+            final_suffix = identifier if attempt == _SHORT_ID_ATTEMPTS else identifier[:8]
+            final_stem = f"{task_slug}_{final_suffix}"
+            final = self.log_dir / f"{final_stem}.json"
+            # Keep the hidden name below 255 bytes even when the final attempt
+            # uses the full identifier. Its own full UUID still makes it unique.
+            tmp_stem = f"{task_slug}_{identifier[:8]}"
+            tmp = self.log_dir / f".{tmp_stem}.{uuid.uuid4().hex}.tmp"
+            tmp_created = False
+            try:
+                with tmp.open("x", encoding="utf-8") as fh:
+                    tmp_created = True
+                    json.dump(
+                        _sanitize(log.to_dict()),
+                        fh,
+                        indent=2,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                try:
+                    os.link(tmp, final)
+                except FileExistsError:
+                    if attempt == _SHORT_ID_ATTEMPTS:
+                        raise
+                    attempt += 1
+                    continue
+                except OSError:
+                    os.replace(tmp, final)
+                self.path = final
+                return
+            finally:
+                if tmp_created:
+                    tmp.unlink(missing_ok=True)
