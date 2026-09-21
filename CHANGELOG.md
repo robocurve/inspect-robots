@@ -32,6 +32,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Setup wizard:** the generated `config.ini` no longer annotates values you
+  typed yourself with comments written for the suggested ones. Accepting the
+  suggestions is unchanged; replacing a value now writes the bare `key = value`
+  instead of telling you that a core builtin such as `scripted` came from the
+  yam plugin, or that `max_steps = 80` is "120 s at 10 Hz".
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes

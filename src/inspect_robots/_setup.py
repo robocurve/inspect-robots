@@ -94,7 +94,7 @@ _V4L2_COLOR_FOURCCS = frozenset(
 
 _DEFAULT_COMMENTS: dict[str, str] = {
     "policy": "from the inspect-robots-yam plugin",
-    "embodiment": "same plugin; cameras configured below",
+    "embodiment": "from the inspect-robots-yam plugin; cameras configured below",
     "max_steps": "120 s at 10 Hz",
     "rerun": "live viewer of cameras/state/actions each run",
     "store_frames": "save each run's camera frames under logs/frames/",
@@ -1499,8 +1499,8 @@ def _render_config(
         # an existing config passes free-text validation and survives Enter.
         value = defaults[key].replace("\n", "\n\t")
         line = f"{key} = {value}"
-        if comment := _DEFAULT_COMMENTS.get(key):
-            line = f"{line:<26}# {comment}" if len(line) < 26 else f"{line}  # {comment}"
+        if defaults[key] == SUGGESTED[key] and (comment := _DEFAULT_COMMENTS.get(key)):
+            line = f"{line:<25} # {comment}"
         default_lines.append(line)
     for key, value in carried.get("defaults", {}).items():
         if key not in SUGGESTED:

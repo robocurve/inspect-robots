@@ -1376,6 +1376,30 @@ def test_read_raw_config_returns_unicode_decode_error_text(tmp_path: Path) -> No
     assert "utf-8" in result
 
 
+def test_render_config_drops_comments_on_replaced_values() -> None:
+    """Replaced values lose the comment that described the suggested one.
+
+    The policy/embodiment/max_steps comments name yam's plugin and step
+    budget; left on a core builtin they assert something untrue about the
+    user's own config file.
+    """
+    rendered = _render_config(
+        dict(SUGGESTED) | {"policy": "scripted", "embodiment": "cubepick", "max_steps": "80"},
+        {},
+        {},
+    )
+
+    assert rendered == (
+        "[defaults]\n"
+        "policy = scripted\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "max_steps = 80\n"
+        "rerun = true              # live viewer of cameras/state/actions each run\n"
+        "store_frames = true       # save each run's camera frames under logs/frames/\n"
+    )
+
+
 def test_render_config_matches_readme_quickstart_block() -> None:
     rendered = _render_config(
         dict(SUGGESTED),
@@ -1390,7 +1414,7 @@ def test_render_config_matches_readme_quickstart_block() -> None:
     assert rendered == (
         "[defaults]\n"
         "policy = molmoact2        # from the inspect-robots-yam plugin\n"
-        "embodiment = yam_arms     # same plugin; cameras configured below\n"
+        "embodiment = yam_arms     # from the inspect-robots-yam plugin; cameras configured below\n"
         "scorer = success_at_end\n"
         "max_steps = 1200          # 120 s at 10 Hz\n"
         "rerun = true              # live viewer of cameras/state/actions each run\n"
@@ -3327,19 +3351,6 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
         in out.getvalue()
         for device in current_devices
     )
-
-
-def test_render_config_comment_at_exact_boundary_never_glues(tmp_path: Path) -> None:
-    policy = "policy-with-17chr"  # "policy = " + 17 chars == 26, the pad width
-    assert len(f"policy = {policy}") == 26
-    path = tmp_path / "config.ini"
-    path.write_text(_render_config({"policy": policy}, {}, {}), encoding="utf-8")
-
-    carried = _read_raw_config(path)
-
-    assert not isinstance(carried, str)
-    assert carried["defaults"]["policy"] == policy
-    assert f"policy = {policy}  # " in path.read_text(encoding="utf-8")
 
 
 def test_run_setup_multiline_prompted_default_still_parses(tmp_path: Path) -> None:
