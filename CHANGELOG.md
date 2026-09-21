@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** a run in which no scene completed cleanly and the errored trials
+  are the majority no longer reports `status == "success"` on the surviving
+  minority's metrics (survivor bias,
+  [#440](https://github.com/robocurve/inspect-robots/issues/440)). The run is
+  now an `error` with the surviving-trial count in the message; runs that
+  merely lost flaky trials stay tolerated.
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes

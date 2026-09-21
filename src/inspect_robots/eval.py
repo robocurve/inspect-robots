@@ -282,7 +282,11 @@ def eval(
     empty entry in ``SceneResult.epochs``.
 
     A run in which **every** trial errored (nothing was scored) always ends
-    with ``status == "error"``, regardless of ``fail_on_error``.
+    with ``status == "error"``, regardless of ``fail_on_error``. So does a run
+    in which no scene completed cleanly and the errored trials are the
+    majority (issue #440): without this, the run would be labelled a success
+    on metrics reduced from a surviving minority alone. Runs that merely lost
+    flaky trials stay tolerated.
 
     Ctrl-C during a rollout records the partial trial and writes a log with
     ``status == "cancelled"``, then re-raises the interrupt (as a
@@ -719,6 +723,26 @@ def _run_eval(
         # total failure (issue #73).
         status = "error"
         error = f"all {total_trials} trial(s) errored; nothing was scored"
+    elif (
+        status == "success"
+        and total_trials > 0
+        and scene_results
+        and all(scene.status == "error" for scene in scene_results)
+        and errored_trials > total_trials / 2
+    ):
+        # Survivor bias (issue #440): no scene completed cleanly and the
+        # errored trials are the majority, so the per-scene metrics were
+        # reduced from a surviving minority and the run looks healthy anyway.
+        # A run whose data is dominated by failures is not a success. Runs
+        # with only flaky-trial losses stay tolerated (partial success is a
+        # deliberate design: see test_errored_trials_are_not_scored).
+        survivors = total_trials - errored_trials
+        status = "error"
+        error = (
+            f"all {len(scene_results)} scene(s) errored and "
+            f"{errored_trials} of {total_trials} trial(s) errored; "
+            f"metrics rest on only {survivors} surviving trial(s)"
+        )
 
     metrics: dict[str, float] = {}
     for scorer in scorers:
