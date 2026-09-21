@@ -9,11 +9,13 @@ import pytest
 
 from inspect_robots.conformance import (
     DeviceSlot,
+    NumberSlot,
     OptionSlot,
     assert_embodiment_conformant,
     check_embodiment,
     device_slots,
     missing_runtime_requirements,
+    number_slots,
     option_slots,
 )
 from inspect_robots.embodiment import EmbodimentInfo
@@ -179,6 +181,101 @@ def test_option_slots_attribute_or_iteration_failure_is_empty() -> None:
 
     assert option_slots(_BrokenAttribute()) == ()
     assert option_slots(_Factory) == ()
+
+
+def test_number_slots_absent_attribute_is_empty() -> None:
+    class _Factory:
+        pass
+
+    assert number_slots(_Factory) == ()
+    assert number_slots(None) == ()
+
+
+def test_number_slots_valid_tuple_round_trips_in_order() -> None:
+    slots = (
+        NumberSlot("temperature", "Motor temperature (C)", 70, 1, 100, True),
+        NumberSlot("gain", "Gain", 0.5),
+    )
+
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = slots
+
+    assert number_slots(_Factory) == slots
+
+
+def test_number_slot_field_defaults() -> None:
+    slot = NumberSlot(arg="gain", label="Gain")
+
+    assert slot.default is None
+    assert slot.minimum is None
+    assert slot.maximum is None
+    assert slot.allow_none is False
+
+
+def test_number_slots_accepts_lists_and_ignores_offending_entries() -> None:
+    valid = NumberSlot(arg="gain", label="Gain", default=1)
+
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[list[object]] = [
+            "not a slot",
+            valid,
+            None,
+        ]
+
+    assert number_slots(_Factory) == (valid,)
+
+
+@pytest.mark.parametrize("garbage", [7, None])
+def test_number_slots_whole_value_garbage_is_empty(garbage: object) -> None:
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[object] = garbage
+
+    assert number_slots(_Factory) == ()
+
+
+def test_number_slots_attribute_or_iteration_failure_is_empty() -> None:
+    class _BrokenAttribute:
+        @property
+        def NUMBER_SLOTS(self) -> object:
+            raise RuntimeError("broken descriptor")
+
+    class _BrokenIteration:
+        def __iter__(self) -> object:
+            raise RuntimeError("broken iterator")
+
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[object] = _BrokenIteration()
+
+    assert number_slots(_BrokenAttribute()) == ()
+    assert number_slots(_Factory) == ()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        NumberSlot("bad", "Bad", default=True),
+        NumberSlot("bad", "Bad", default=1, minimum=True),
+        NumberSlot("bad", "Bad", default=1, maximum=False),
+        NumberSlot("bad", "Bad", default=float("nan")),
+        NumberSlot("bad", "Bad", default=float("inf")),
+        NumberSlot("bad", "Bad", default=1, minimum=float("nan")),
+        NumberSlot("bad", "Bad", default=1, maximum=float("inf")),
+        NumberSlot("bad", "Bad", default=1, minimum=2, maximum=1),
+        NumberSlot("bad", "Bad", default=0, minimum=1),
+        NumberSlot("bad", "Bad", default=2, maximum=1),
+        NumberSlot("bad", "Bad"),
+    ],
+)
+def test_number_slots_ignore_invalid_declarations_and_keep_valid_siblings(
+    invalid: NumberSlot,
+) -> None:
+    first = NumberSlot("first", "First", default=1)
+    last = NumberSlot("last", "Last", allow_none=True)
+
+    class _Factory:
+        NUMBER_SLOTS: ClassVar[tuple[NumberSlot, ...]] = (first, invalid, last)
+
+    assert number_slots(_Factory) == (first, last)
 
 
 def test_runtime_requirements_absent_attribute_is_empty() -> None:

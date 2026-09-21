@@ -20,6 +20,7 @@ fine). The adapter authoring guide covers the human half.
 from __future__ import annotations
 
 import importlib.util
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -102,6 +103,69 @@ def option_slots(factory: object) -> tuple[OptionSlot, ...]:
         return ()
     try:
         return tuple(slot for slot in slots if isinstance(slot, OptionSlot))
+    except Exception:
+        return ()
+
+
+@dataclass(frozen=True)
+class NumberSlot:
+    """One numeric constructor argument the setup wizard interviews.
+
+    ``arg`` is the ``[embodiment.args]`` key to write and ``label`` is the
+    prompt shown to the operator, including any unit. ``default`` is the
+    suggestion when no valid carried value exists. ``minimum`` and
+    ``maximum`` are inclusive bounds; ``None`` leaves that side unbounded.
+    ``allow_none`` accepts a disabled value written as ``none``.
+    """
+
+    arg: str
+    label: str
+    default: float | int | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+    allow_none: bool = False
+
+
+def _finite_number(value: object) -> bool:
+    if not isinstance(value, (float, int)) or isinstance(value, bool):
+        return False
+    return not isinstance(value, float) or math.isfinite(value)
+
+
+def _valid_number_slot(slot: NumberSlot) -> bool:
+    if slot.minimum is not None and not _finite_number(slot.minimum):
+        return False
+    if slot.maximum is not None and not _finite_number(slot.maximum):
+        return False
+    if slot.minimum is not None and slot.maximum is not None and slot.minimum > slot.maximum:
+        return False
+    if slot.default is None:
+        return slot.allow_none
+    if not _finite_number(slot.default):
+        return False
+    if slot.minimum is not None and slot.default < slot.minimum:
+        return False
+    return slot.maximum is None or slot.default <= slot.maximum
+
+
+def number_slots(factory: object) -> tuple[NumberSlot, ...]:
+    """The declared numeric slots, defensively read.
+
+    Reads ``NUMBER_SLOTS`` off ``factory`` and returns valid ``NumberSlot``
+    instances in declaration order. Non-iterables, malformed entries,
+    non-finite or boolean numeric fields, inverted bounds, and defaults that
+    cannot pass their slot constraints are ignored without crashing setup.
+    """
+    try:
+        slots = getattr(factory, "NUMBER_SLOTS", None)
+    except Exception:
+        return ()
+    if not isinstance(slots, Iterable):
+        return ()
+    try:
+        return tuple(
+            slot for slot in slots if isinstance(slot, NumberSlot) and _valid_number_slot(slot)
+        )
     except Exception:
         return ()
 
