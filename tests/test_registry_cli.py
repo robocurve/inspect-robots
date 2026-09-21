@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import shlex
@@ -7684,6 +7685,101 @@ def test_doctor_uses_default_embodiment_and_guides_when_unset(
     monkeypatch.setenv(ENV_EMBODIMENT, "cubepick")
     assert main(["doctor"]) == 0
     assert "cubepick" in capsys.readouterr().out
+
+
+def _register_device_embodiment(name: str) -> None:
+    from inspect_robots.conformance import DeviceSlot
+    from inspect_robots.mock import CubePickEmbodiment
+    from inspect_robots.registry import embodiment as embodiment_decorator
+
+    class _DeviceCubePick(CubePickEmbodiment):
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot(arg="wrist_cam", kind="v4l2", label="wrist camera"),
+            DeviceSlot(arg="gripper", kind="serial", label="gripper serial"),
+        )
+
+        def __init__(self, **_kwargs: Any) -> None:
+            super().__init__()
+
+    embodiment_decorator(name)(_DeviceCubePick)
+
+
+def test_doctor_reports_missing_device_paths_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _register_device_embodiment("device-doctor-missing")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-missing",
+            "-E",
+            f"wrist_cam={tmp_path / 'no-cam'}",
+            "-E",
+            f"gripper={tmp_path / 'no-serial'}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[error] device: wrist camera (wrist_cam): v4l2 path" in out
+    assert "[error] device: gripper serial (gripper): serial path" in out
+    assert out.index("device: wrist camera") < out.index("conformant")
+
+
+def test_doctor_passes_when_configured_device_paths_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cam = tmp_path / "cam"
+    cam.write_text("", encoding="utf-8")
+    gripper = tmp_path / "gripper"
+    gripper.write_text("", encoding="utf-8")
+    _register_device_embodiment("device-doctor-present")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-present",
+            "-E",
+            f"wrist_cam={cam}",
+            "-E",
+            f"gripper={gripper}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[error] device" not in out
+
+
+def test_doctor_reports_unreadable_device_path_and_continues(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked = tmp_path / "locked" / "cam0"
+    real_exists = Path.exists
+
+    def failing_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self == locked:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", failing_exists)
+    _register_device_embodiment("device-doctor-unreadable")
+    rc = main(
+        [
+            "doctor",
+            "--embodiment",
+            "device-doctor-unreadable",
+            "-E",
+            f"wrist_cam={locked}",
+            "-E",
+            f"gripper={tmp_path / 'no-serial'}",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[error] device: wrist camera (wrist_cam): v4l2 path" in out
+    assert "could not be checked: Permission denied" in out
+    assert "[error] device: gripper serial (gripper): serial path" in out
+    assert out.index("device: gripper serial") < out.index("conformant")
 
 
 def test_doctor_ignores_config_args_for_a_different_embodiment(

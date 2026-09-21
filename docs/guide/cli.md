@@ -488,8 +488,17 @@ viewer window is a separate design question from running the set at all.
 
 ## `inspect-robots doctor`
 
-`doctor` reports a registered embodiment's missing declared runtime modules
-before constructing it, then checks its spaces for adapter conformance.
+`doctor` checks the configured embodiment before construction. It reports
+missing declared runtime modules and checks the values written for the
+embodiment's declared device slots. Missing camera or serial paths and
+missing CAN interfaces are reported together. A path that cannot be checked, for
+example because a parent directory is not searchable, is reported as an error
+and the remaining slots are still checked. Device checks validate presence only
+and do not confirm that the device is functioning properly. The command exits
+nonzero if it finds any stale configured device references.
+
+After construction, `doctor` checks the embodiment's spaces for adapter
+conformance.
 
 ```bash
 inspect-robots doctor --embodiment my_arms

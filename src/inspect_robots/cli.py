@@ -2721,7 +2721,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     Purely declarative — the embodiment is constructed (adapters keep
     constructors hardware-free by convention) but never reset or stepped.
     """
-    from inspect_robots.conformance import check_embodiment, missing_runtime_requirements
+    from inspect_robots.conformance import (
+        check_device_slots,
+        check_embodiment,
+        missing_runtime_requirements,
+    )
     from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
@@ -2733,9 +2737,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     kvs = {**config_kvs, **_parse_kvs(args.embodiment_args)}
     print(f"embodiment: {name} ({source})")
-    missing = missing_runtime_requirements(registered("embodiment").get(name))
+    factory = registered("embodiment").get(name)
+    missing = missing_runtime_requirements(factory)
     for module, remedy in missing.items():
         print(f"  [error] runtime-requirement: {module} missing → {remedy}")
+    # Check before construction so constructor failures do not hide device findings.
+    device_issues = check_device_slots(factory, kvs)
+    for issue in device_issues:
+        print(f"  [{issue.severity}] {issue.code}: {issue.message}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
@@ -2744,7 +2753,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 1 if not report.ok or missing else 0
+    return 1 if not report.ok or missing or device_issues else 0
 
 
 def _cmd_setup() -> int:
