@@ -32,6 +32,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** a registry-owned embodiment cleanup failure no longer replaces an
+  escaping `SafetyAbort`, `EmbodimentFault`, or `KeyboardInterrupt`. Cleanup is
+  still attempted and its failure is reported as a warning, while the original
+  stop signal propagates so `eval_set()` cannot advance to another task
+  ([plan 0081](plans/0081-close-halt-precedence.md)).
+
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with
   the remaining tasks. A `SafetyAbort` or `EmbodimentFault` that escapes
