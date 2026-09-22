@@ -1,0 +1,80 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inspect-robots-review-recovery-probe",
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1",
+  "main": "test/recovery-probe.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "REVIEW_HEAD_LIMITS_JSON": "{}"
+  },
+  "services": [
+    {
+      "binding": "RUNNER",
+      "service": "inspect-robots-review-recovery-probe",
+      "entrypoint": "CodeRunner"
+    },
+    {
+      "binding": "MODEL",
+      "service": "inspect-robots-review-recovery-probe",
+      "entrypoint": "ProbeModel"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LEDGER",
+        "class_name": "ReviewLedger"
+      },
+      {
+        "name": "SANDBOX",
+        "class_name": "ReviewSandbox"
+      },
+      {
+        "name": "STATS",
+        "class_name": "ProbeStats"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ReviewLedger",
+        "ReviewSandbox",
+        "ProbeStats"
+      ]
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "ReviewSandbox",
+      "image": "registry.cloudflare.com/7f405baff0972dc740a02ee0f700d2c1/inspect-robots-review-runner-reviewsandbox@sha256:11a76dd6b774bfddfdc72c205916e3113febcf27d4e59667f03163d089431f6f",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "PROBE",
+      "name": "inspect-review-recovery-probe",
+      "class_name": "RecoveryProbe"
+    }
+  ],
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.md"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

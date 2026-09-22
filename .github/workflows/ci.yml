@@ -11,6 +11,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  reviewer-tests:
+    name: PR reviewer tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tools/pr-reviewer
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/pr-reviewer/package-lock.json
+      - run: npm ci
+      - run: npm run types
+      - run: npm run check
+
   # Lint + strict typing, once, on a single interpreter. (mypy targets the 3.10
   # floor via pyproject; running it on 3.11 avoids NumPy's 3.12-only stub syntax.)
   quality:
@@ -440,7 +459,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
+    needs: [reviewer-tests, quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -453,7 +472,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
+    needs: [reviewer-tests, quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
     runs-on: ubuntu-latest
     permissions:
       issues: write

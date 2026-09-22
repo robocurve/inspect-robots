@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inspect-robots-reviewer",
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "MODE": "advisory", "ENABLED": "true",
+    "REVIEW_PR_LIMITS_JSON": "{\"455\":20000000,\"456\":25000000}",
+    "REVIEW_HEAD_LIMITS_JSON": "{\"455-467b9bff8cf4f70d51268f1828171cd377e11262\":7000000,\"456-696fbaa9a00d7c345a81dd179fa10934f51ade89\":25000000}"
+  },
+  "services": [{"binding": "PUBLISHER", "service": "inspect-robots-review-publisher", "entrypoint": "GithubPublisher"}, {"binding": "RUNNER", "service": "inspect-robots-review-runner", "entrypoint": "CodeRunner"}],
+  "durable_objects": {"bindings": [{"name": "LEDGER", "class_name": "ReviewLedger"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["ReviewLedger"]}],
+  "workflows": [{"binding": "REVIEW", "name": "inspect-robots-review", "class_name": "ReviewWorkflow"}],
+  "triggers": {"crons": ["*/10 * * * *"]},
+  "observability": {"enabled": true},
+  "limits": {"cpu_ms": 30000},
+  "rules": [{"type": "Text", "globs": ["**/*.md"], "fallthrough": true}]
+}

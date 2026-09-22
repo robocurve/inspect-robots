@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Advisory automated PR reviews with scope/value screening, exact-revision
+  evidence, courteous maintainer escalation and bounded API spending
+  ([operator guide](tools/pr-reviewer/README.md)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),

@@ -24,6 +24,10 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 - `plans/` — design docs. `plans/0001-foundation-design.md` is the authoritative
   spec (read its §9–§11 "binding resolutions" before changing core interfaces).
 - `examples/` — runnable demos (`quickstart.py`).
+- `tools/pr-reviewer/` — isolated Cloudflare PR review service; see its README
+  for policy, budgets, credentials and deployment. Run `npm ci`, `npm run types`
+  and `npm run check` there. The advisory bot only recommends merge/closure;
+  Jay decides. Never add merge or close endpoints or load PR-supplied policy.
 - `plugins/*` — first-party plugin packages (concrete sims/VLAs that are out of
   scope for the numpy-only core), each its own package with its own pyproject,
   entry point, tests, and coverage scope. A uv workspace (`[tool.uv.workspace]`)

@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inspect-robots-review-publisher",
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1",
+  "main": "src/publisher.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {"GITHUB_APP_ID": "5012304", "GITHUB_INSTALLATION_ID": "163290338"},
+  "observability": {"enabled": true},
+  "limits": {"cpu_ms": 10000}
+}

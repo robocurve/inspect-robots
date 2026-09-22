@@ -1,0 +1,55 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inspect-robots-review-isolation-probe",
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1",
+  "main": "test/isolation-probe.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX",
+        "class_name": "IsolationSandbox"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "IsolationSandbox"
+      ]
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "IsolationSandbox",
+      "image": "registry.cloudflare.com/7f405baff0972dc740a02ee0f700d2c1/inspect-robots-review-runner-reviewsandbox@sha256:11a76dd6b774bfddfdc72c205916e3113febcf27d4e59667f03163d089431f6f",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "PROBE",
+      "name": "inspect-review-isolation-probe",
+      "class_name": "IsolationProbe"
+    }
+  ],
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.py"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
