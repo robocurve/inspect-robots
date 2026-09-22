@@ -329,6 +329,7 @@ def test_null_sink_lifecycle() -> None:
     sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs))
     sink.on_trial_end(record)
     sink.on_eval_end(None)  # type: ignore[arg-type]
+    sink.on_eval_error(RuntimeError("ignored"))
 
 
 # --------------------------------------------------------------------------- #

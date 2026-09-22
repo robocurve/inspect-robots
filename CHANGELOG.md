@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **W&B plugin (0.1.0):** adds `WandbSink`, a first-party logging sink that
+  sends evaluation configuration and aggregate metrics to Weights & Biases
+  ([#365](https://github.com/robocurve/inspect-robots/issues/365)).
+
 - **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
   the task identity and horizon ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
 
