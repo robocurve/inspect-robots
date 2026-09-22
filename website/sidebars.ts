@@ -9,6 +9,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'guide/quickstart',
         'guide/examples',
+        'guide/rig-reference',
         'guide/concepts',
         'guide/writing-a-benchmark',
         'guide/policies-and-embodiments',

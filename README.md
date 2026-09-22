@@ -24,6 +24,7 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 [**Documentation**](https://docs.inspectrobots.org/) ·
 [Quickstart](https://docs.inspectrobots.org/guide/quickstart/) ·
+[Rig reference](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/rig-reference.md) ·
 [Concepts](https://docs.inspectrobots.org/guide/concepts/) ·
 [For LLMs](https://docs.inspectrobots.org/llms.txt)
 

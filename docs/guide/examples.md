@@ -6,6 +6,9 @@ and varying the instruction. Swap in your own tasks, embodiments, and hosts.
 Values chosen during `inspect-robots setup` act as defaults, so the flags shown
 here override your config; the [CLI guide](cli.md) documents every flag.
 
+For physical rig setup, SSH viewing, YAM health checks, control advice, and
+Pi 0.5 serving, see the [rig reference](rig-reference.md).
+
 ## Choosing a model
 
 LLM policies take the model as a policy arg rather than a top-level flag. The
