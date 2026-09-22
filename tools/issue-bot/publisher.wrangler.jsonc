@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "robocurve-issue-publisher",
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1",
+  "main": "src/publisher.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "GITHUB_APP_ID": "5017788",
+    "GITHUB_INSTALLATION_ID": "163417136",
+    "GITHUB_APP_SLUG": "robocurve-issue-bot"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PUBLICATIONS",
+        "class_name": "PublicationJournal"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PublicationJournal"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 30000
+  }
+}
