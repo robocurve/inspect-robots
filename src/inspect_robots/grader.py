@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from inspect_robots._chatwire import HttpPost, chat_completion
-from inspect_robots.errors import ConfigError
+from inspect_robots.errors import ConfigError, _ExplicitEffortRejected
 
 if TYPE_CHECKING:
     import numpy as np
@@ -35,7 +35,9 @@ class Grader(Protocol):
     or cancelled trials) and may mutate the record: set
     ``operator_judgement``/``operator_note`` and append an operator event.
     It must tolerate being unable to grade (e.g. no judge available) by
-    leaving the record unchanged rather than raising.
+    leaving the record unchanged rather than raising. The builtin VLM grader
+    makes one exception: a rejected explicit-effort request stops evaluation
+    after its error log is saved.
     """
 
     name: str
@@ -212,9 +214,10 @@ class _VLMGrader:
         """Capture a model judgement, or degrade to an ungraded trial (R6).
 
         Adopts an existing console verdict or a definitive embodiment
-        termination without spending a model call. Any failure after the
-        rollout (frames, transport, parsing) prints one stderr note and
-        leaves the record unchanged; grading never crashes a finished run.
+        termination without spending a model call. Frame, transport, and reply
+        parsing failures print one stderr note and leave the record unchanged.
+        A rejected explicit-effort request raises
+        a configuration error; eval saves the run log before propagating it.
         """
         from inspect_robots.session import _DEFINITIVE_REASONS
         from inspect_robots.transcript import operator_event
@@ -256,6 +259,8 @@ class _VLMGrader:
             matches = _VERDICT_RE.findall(reply)
             if not matches:
                 raise ConfigError(f"no GRADE line in the reply: {reply.strip()[:200]!r}")
+        except _ExplicitEffortRejected:
+            raise
         except Exception as exc:  # post-rollout, degrading beats crashing the run
             print(f"vlm grader: {exc}; trial left ungraded", file=sys.stderr)
             return
@@ -294,13 +299,14 @@ def vlm_grader(
 
     Configuration fails fast here (missing model, unreadable rubric file,
     unset API key, empty effort) so a misconfigured run stops before any
-    rollout; after the rollout its ``grade`` only ever degrades to an
-    ungraded trial, so an effort value the endpoint rejects surfaces as a
-    per-trial stderr note, not a raise. ``effort`` rides each grading
-    request as ``reasoning_effort``: leaving it unset omits the field for
+    rollout. After rollout, HTTP 400/422 rejection of a request carrying an
+    explicit effort raises a configuration error after eval saves its error
+    log; other failures degrade to an ungraded trial with a stderr note.
+    ``effort`` rides each grading request as ``reasoning_effort``: leaving it
+    unset omits the field for
     the provider default, ``None`` (``-G effort=none``) requests the
-    minimum, and any other value passes through verbatim. The judgement
-    lands on the same record fields the operator grader writes, so the
+    explicit ``none`` level, and any other value passes through verbatim.
+    The judgement lands on the same record fields the operator grader writes, so the
     ``operator`` scorer reads it unchanged.
     """
     resolved_effort: str | float | None = None

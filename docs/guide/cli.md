@@ -172,10 +172,13 @@ Grader arguments ride the repeatable `-G k=v` flag (the grader counterpart of
 mutually exclusive with `rubric`), `base_url` (default
 `https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
 `max_cameras` (frames per phase, default 4), and `effort` (sent to the
-endpoint as `reasoning_effort`: leave it out for the provider default;
-`effort=none` requests the minimum, it does not mean unset; a value the
-endpoint rejects leaves trials ungraded with a stderr note, like any grader
-wire failure). Without a rubric the grader
+endpoint as `reasoning_effort`). Leave effort out for the provider default;
+`effort=none` requests the explicit `none` level, not a fallback to another
+level. HTTP 400/422 rejection of a request with explicit effort stops the
+evaluation after saving its error log; later epochs, scenes, and tasks do not
+run, and the failed grading trial contributes no score. The error includes the
+provider response and requested effort. Other grader failures leave the trial
+ungraded with a stderr note. Without a rubric the grader
 uses a strict default: success only if the frames show the instruction
 completed, failure when the outcome is ambiguous or not visible. A scene that
 carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
@@ -205,9 +208,11 @@ rubric_file = ~/rigs/stacking-rubric.md
 ```
 
 Configuration problems (a missing model or API key, an unreadable rubric
-file) stop the run before the robot moves. After a rollout the grader never
-crashes the run: transport failures or an unparseable reply leave the trial
-ungraded with a stderr note. A trial the embodiment already terminated with a
+file) stop the run before the robot moves. After a rollout, transport failures
+or an unparseable reply leave the trial ungraded with a stderr note. Explicit
+effort request rejections instead save an error log and raise `ConfigError`;
+the affected trial has `grading_error` in its metadata and no fabricated
+success/failure judgement. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
 the console, is adopted without spending a model call. The log records which
 path produced each verdict in `judgement_sources`.

@@ -5,6 +5,8 @@ The split below resolves the "fail fast vs never-crash-overnight" tension:
 - [`ConfigError`][inspect_robots.errors.ConfigError] /
 [`CompatibilityError`][inspect_robots.errors.CompatibilityError] are raised *before* any
   rollout — bad configuration should fail loudly and immediately.
+  A provider rejection of an explicit grading-effort request is discovered
+  after rollout; evaluation saves its error log before raising ``ConfigError``.
 - [`PolicyError`][inspect_robots.errors.PolicyError] is recorded as a failed trial; whether it
 aborts the eval
   is governed by ``fail_on_error`` (Inspect semantics).
@@ -45,6 +47,14 @@ class InspectRobotsError(Exception):
 
 class ConfigError(InspectRobotsError):
     """Invalid task / policy / embodiment configuration. Fail fast."""
+
+
+class _ExplicitEffortRejected(ConfigError):
+    """A provider rejected a request carrying an explicitly supplied effort.
+
+    Grading discovers this after rollout. Persist the error log before raising;
+    do not continue with ungraded trials or a different effort setting.
+    """
 
 
 class CompatibilityError(InspectRobotsError):

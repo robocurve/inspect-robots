@@ -1,4 +1,4 @@
-"""The vlm grader fails fast on configuration and degrades after the rollout."""
+"""VLM grading preserves logs and rejects unsupported explicit effort without fallback."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import numpy.typing as npt
 import pytest
 
 from inspect_robots import eval as ir_eval
+from inspect_robots import eval_set, read_eval_log
 from inspect_robots._pngenc import png_data_url
 from inspect_robots.errors import ConfigError
 from inspect_robots.frames import FrameStore
@@ -18,7 +19,7 @@ from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
 from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scene import Scene
-from inspect_robots.scorer import success_at_end
+from inspect_robots.scorer import operator_scorer, success_at_end
 from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 
@@ -570,16 +571,115 @@ def test_empty_effort_fails_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
         vlm_grader("m", api_key_env="VLM_TEST_KEY", effort="")
 
 
-def test_endpoint_rejection_of_effort_degrades_to_ungraded(
+@pytest.mark.parametrize("effort", [None, "none", "minimal", "high", 0.0])
+@pytest.mark.parametrize("status", [400, 422])
+def test_endpoint_rejection_of_explicit_effort_raises_without_fallback(
+    monkeypatch: pytest.MonkeyPatch, effort: str | float | None, status: int
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    post = _CapturePost()
+    post.response = (status, b'{"error": "unsupported reasoning_effort value"}')
+    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=post, effort=effort)
+    record = _framed_record()
+
+    with pytest.raises(ConfigError, match="unsupported reasoning_effort value"):
+        grader.grade(record, _scene())
+
+    assert record.operator_judgement is None
+    assert len(post.requests) == 1
+    assert post.requests[0]["body"]["reasoning_effort"] == (  # type: ignore[index]
+        "none" if effort is None else effort
+    )
+
+
+def test_endpoint_rejection_without_explicit_effort_still_degrades(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("VLM_TEST_KEY", "secret")
     post = _CapturePost()
     post.response = (400, b'{"error": "unknown reasoning_effort value"}')
-    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=post, effort="hgih")
+    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=post)
     record = _framed_record()
 
     grader.grade(record, _scene())
 
     assert record.operator_judgement is None
     assert "grading request failed with HTTP 400" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("as_set", [False, True])
+@pytest.mark.parametrize("accepted_trials", [0, 1])
+def test_rejected_grader_effort_saves_log_then_stops_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_set: bool, accepted_trials: int
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+
+    class FramedEmbodiment(CubePickEmbodiment):
+        """Count real rollouts and supply final frames for the VLM grader."""
+
+        resets = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.resets += 1
+            return super().reset(scene, seed=seed)
+
+        def observe_parked(self) -> Observation:
+            return Observation(images={"cam": _frame(7)})
+
+    post = _CapturePost()
+    accepted_response = post.response
+
+    def reject_second(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+        post.response = (
+            (400, b'{"error": "unsupported reasoning_effort: none"}')
+            if len(post.requests) >= accepted_trials
+            else accepted_response
+        )
+        return post(url, headers, body)
+
+    grader = vlm_grader("m", api_key_env="VLM_TEST_KEY", http_post=reject_second, effort=None)
+    task = Task(
+        name="explicit-effort",
+        scenes=[_scene(), Scene(id="later", instruction="reach")],
+        scorer=operator_scorer(),
+        max_steps=1,
+        epochs=3,
+    )
+    embodiment = FramedEmbodiment()
+    with pytest.raises(ConfigError, match="unsupported reasoning_effort: none"):
+        if as_set:
+            eval_set(
+                [task, task],
+                ScriptedPolicy(),
+                embodiment,
+                grader=grader,
+                log_dir=str(tmp_path),
+                fail_on_error=False,
+            )
+        else:
+            ir_eval(
+                task,
+                ScriptedPolicy(),
+                embodiment,
+                grader=grader,
+                log_dir=str(tmp_path),
+                fail_on_error=False,
+            )
+
+    assert embodiment.resets == accepted_trials + 1
+    assert len(post.requests) == accepted_trials + 1
+    (path,) = list(tmp_path.glob("*.json"))
+    log = read_eval_log(str(path))
+    assert log.status == "error"
+    assert "unsupported reasoning_effort: none" in (log.error or "")
+    assert log.eval.grader_config["effort"] == "none"
+    assert log.results.total_trials == accepted_trials + 1
+    assert log.results.errored_trials == 1
+    (sample,) = log.samples
+    assert sample.status == "error"
+    assert sample.epochs == ({"operator": 1.0},) * accepted_trials + ({},)
+    assert sample.operator_judgements == ("success",) * accepted_trials + (None,)
+    assert sample.judgement_sources == ("vlm",) * accepted_trials + (None,)
+    assert "unsupported reasoning_effort: none" in sample.trial_metadata[-1]["grading_error"]
+    for metadata in sample.trial_metadata:
+        assert (tmp_path / metadata["actions"]).is_file()

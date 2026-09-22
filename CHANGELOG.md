@@ -40,6 +40,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **VLM grader:** HTTP 400/422 rejection of an explicitly configured effort
+  now stops evaluation after saving the run log, then raises a configuration
+  error. The failed grading trial contributes no score, earlier results are
+  retained, and `eval_set()` does not start another task. Explicit `none` is
+  sent unchanged; it is never replaced with another effort or omitted.
+
 - **CLI:** `--epochs N` now overrides only the epoch count. A task declared with
   a non-default reducer (`Epochs(count=5, reducer="pass_at_2")`, `max`, `mode`)
   keeps that reducer under `run --epochs` and `eval-set --epochs`; previously the

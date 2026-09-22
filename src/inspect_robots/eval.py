@@ -36,6 +36,7 @@ from inspect_robots.errors import (
     PolicyError,
     SafetyAbort,
     _CancelledTrial,
+    _ExplicitEffortRejected,
 )
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
@@ -340,7 +341,10 @@ def eval(
     mutate the record — e.g. capture ``TrialRecord.operator_judgement`` (R6)
     so the ``operator`` scorer can read it, and ``TrialRecord.operator_note``
     alongside it, which is recorded but never scored. Exceptions it raises
-    propagate to the caller. Note this fires on the *other* side of scoring
+    propagate to the caller. A rejected explicit-effort grading request first
+    saves an error log, with no score for the failed grading trial, then raises
+    ``ConfigError``. It stops subsequent epochs and scenes regardless of
+    ``fail_on_error``. Note this fires on the *other* side of scoring
     from ``LogSink.on_trial_end``.
 
     ``grader`` is the component form of the same seam: a
@@ -521,6 +525,7 @@ def _run_eval(
     halted = False
     stopped = False
     cancelled_exc: _CancelledTrial | None = None
+    grading_exc: _ExplicitEffortRejected | None = None
     # A proportion threshold is a share of the whole eval, so the denominator is
     # every trial the run intends to attempt. Using the completed-so-far count
     # made the first error 1/1 = 100%, which trips any threshold below 1.
@@ -651,9 +656,20 @@ def _run_eval(
                                             RuntimeWarning,
                                             stacklevel=2,
                                         )
-                        before_scoring(record, scene)
+                        try:
+                            before_scoring(record, scene)
+                        except _ExplicitEffortRejected as exc:
+                            # A provider rejected the explicitly configured request.
+                            # Keep completed work, but neither score this trial nor
+                            # launch another one with the same rejected setting.
+                            grading_exc = exc
+                            halted = True
+                            status = scene_status = record.status = "error"
+                            error = scene_error = record.error = f"grading failed: {exc}"
+                            record.metadata["grading_error"] = error
+                            errored_trials += 1
                     epoch_values: dict[str, float] = {}
-                    for scorer in scorers:
+                    for scorer in scorers if grading_exc is None else ():
                         try:
                             score = scorer(record, scene.target)
                             value = value_to_float(score.value)
@@ -817,6 +833,8 @@ def _run_eval(
         error=error,
     )
     bus.on_eval_end(log)
+    if grading_exc is not None:
+        raise grading_exc
     if cancelled_exc is not None:
         raise cancelled_exc
     return [log]
@@ -911,8 +929,9 @@ def eval_set(
     set continues to the next task.
     ``CompatibilityError``, unknown policy or embodiment registry names, and
     task-factory ``ConfigError`` are therefore reported once per affected
-    task. Only grading configuration errors raised before the task loop
-    propagate.
+    task. Grading configuration errors raised before the task loop propagate.
+    A provider rejection of explicit grading effort also propagates after the
+    completed work is logged; later tasks do not run with the rejected setting.
 
     With a string embodiment, a non-safety exception from ``close()`` can
     produce an error row even when that task's completed JSON log is already
@@ -961,7 +980,7 @@ def eval_set(
                     before_scoring=None if resolved_grader is not None else before_scoring,
                 )
             )
-        except (SafetyAbort, EmbodimentFault):
+        except (SafetyAbort, EmbodimentFault, _ExplicitEffortRejected):
             raise
         except Exception as exc:
             logs.append(

@@ -20,7 +20,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any, cast
 
-from inspect_robots.errors import ConfigError
+from inspect_robots.errors import ConfigError, _ExplicitEffortRejected
 
 HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
 
@@ -101,6 +101,13 @@ def chat_completion(
             post, url, headers, model, messages, "max_completion_tokens", effort
         )
     if not 200 <= status < 300:
+        if status in (400, 422) and effort is not None and effort != "":
+            raise _ExplicitEffortRejected(
+                f"{what} request failed with HTTP {status}: {_response_excerpt(response_body)}\n"
+                f"Requested effort={effort!r}; no alternative effort was attempted.\n"
+                "fix: check the provider's supported effort levels and request parameters; "
+                "change the explicit effort or omit it only if provider defaults are intended"
+            )
         raise ConfigError(
             f"{what} request failed with HTTP {status}: {_response_excerpt(response_body)}\n"
             f"fix: {fix_hint}"
