@@ -1,0 +1,12 @@
+{
+  "table_tag_id": 20,
+  "tags": [
+    {"id": 0, "object": "cube", "size_m": 0.020, "offset_m": [0, 0, 0.0127]},
+    {"id": 1, "object": "cube", "size_m": 0.020, "offset_m": [0, 0, 0.0127]},
+    {"id": 2, "object": "cube", "size_m": 0.020, "offset_m": [0, 0, 0.0127]},
+    {"id": 3, "object": "cube", "size_m": 0.020, "offset_m": [0, 0, 0.0127]},
+    {"id": 4, "object": "cube", "size_m": 0.020, "offset_m": [0, 0, 0.0127]},
+    {"id": 14, "object": "bowl", "size_m": 0.040, "offset_m": [0, 0, 0]},
+    {"id": 20, "object": "table", "size_m": 0.080, "offset_m": [0, 0, 0]}
+  ]
+}
