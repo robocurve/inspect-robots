@@ -1003,7 +1003,7 @@ def _render_transcript(
     return f"<pre>{_escape(dumped)}</pre>"
 
 
-def _score_chips(values: Mapping[str, float], *, prefix: str = "") -> str:
+def _score_chips(values: Mapping[str, float | None], *, prefix: str = "") -> str:
     """Render sorted score values as compact escaped chips."""
     return "".join(
         f'<span class="score-chip">{_escape(prefix + name)}={_escape(_number(value))}</span>'

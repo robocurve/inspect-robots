@@ -55,6 +55,12 @@ All notable changes to this project are documented here. The format is based on
 
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+- **Core:** a scorer can abstain with `Score(value=None)`. The value used to
+  crash `value_to_float`, so the only workaround was `0.0`, which reads as a
+  failed trial. Abstained epochs are now recorded as `null`, left out by the
+  epoch reducers and the metric mean, and a scorer that abstained everywhere
+  reports a `null` metric
+  ([#436](https://github.com/robocurve/inspect-robots/issues/436)).
 
 - **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
   the embodiment action bounds.

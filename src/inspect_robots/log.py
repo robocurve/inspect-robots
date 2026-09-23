@@ -109,8 +109,8 @@ class SceneResult:
 
     scene_id: str
     status: str  # "success" | "error" | "cancelled"
-    reduced: dict[str, float] = field(default_factory=dict)
-    epochs: tuple[dict[str, float], ...] = ()
+    reduced: dict[str, float | None] = field(default_factory=dict)
+    epochs: tuple[dict[str, float | None], ...] = ()
     error: str | None = None
     # What the scene asked the policy to do — makes a log self-describing.
     instruction: str | None = None
@@ -149,7 +149,7 @@ class EvalResults:
 
     total_scenes: int
     total_trials: int
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float | None] = field(default_factory=dict)
     # Errored trials, which are recorded but never scored (visible per-scene
     # as empty entries in ``SceneResult.epochs``). The default keeps logs
     # written before this field existed readable.

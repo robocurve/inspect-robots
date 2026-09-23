@@ -203,7 +203,7 @@ def test_non_finite_metric_written_as_null_renders_as_not_available() -> None:
     log = _log()
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
 
     document = render_html(log, title="pick-cube - run.json")
