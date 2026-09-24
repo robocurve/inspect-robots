@@ -114,6 +114,31 @@ describe('review gates', () => {
 });
 
 describe('budget ledger in the Workers runtime', () => {
+  it('shares the authorized September allowance across only PRs 475 and 476', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-24T20:00:00Z'));
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    for (let i = 0; i < 40; i++) expect(await ledger.reserve(`baseline-${i}`, `r-${i}`, 1000 + i, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`477-${head}`, 477)).toBe(0);
+    expect(await ledger.reserve('unapproved-pr', `477-${head}`, 477, 1)).toBe(false);
+    expect(await ledger.remaining(`475-${head}`, 475)).toBe(5_000_000);
+    expect(await ledger.reserve('approved-475', `475-${head}`, 475, 5_000_000)).toBe(true);
+    expect(await ledger.reserve('head-cap', `475-${head}`, 475, 1)).toBe(false);
+    await evictDurableObject(ledger);
+    expect(await ledger.reserve('approved-476', `476-${head}`, 476, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`475-${base}`, 475)).toBe(0);
+    expect(await ledger.reserve('shared-cap', `475-${base}`, 475, 1)).toBe(false);
+  });
+  it('does not carry the September exception into later months', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    for (let i = 0; i < 40; i++) expect(await ledger.reserve(`baseline-${i}`, `r-${i}`, 1000 + i, 5_000_000)).toBe(true);
+    for (const pr of [475, 476]) {
+      expect(await ledger.remaining(`${pr}-${head}`, pr)).toBe(0);
+      expect(await ledger.reserve(`expired-${pr}`, `${pr}-${head}`, pr, 1)).toBe(false);
+    }
+  });
   it('limits the authorized trial exception to its exact PR head and preserves the PR ceiling', async () => {
     const ledger = env.LEDGER.getByName(crypto.randomUUID());
     const revision = '456-696fbaa9a00d7c345a81dd179fa10934f51ade89';

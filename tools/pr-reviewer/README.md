@@ -160,6 +160,12 @@ head and PR lifetime exceptions in microdollars. Existing charges are preserved;
 both still share the $200 monthly ceiling. Other heads retain the $5 default,
 and other PRs retain the $15 lifetime cap.
 
+On September 24, 2026, Jay authorized up to $10 additional review budget to
+finish PRs #475 and #476. For September 2026 only, those two PRs may draw on a
+shared $210 monthly ceiling. Other PRs retain the $200 ceiling; per-head and
+per-PR limits remain unchanged. All existing charges count toward the shared
+total, and the exception expires automatically in October.
+
 Reservations are atomic across the deployment and recorded before submission.
 Input is counted using OpenAI's token-count endpoint, limited to 200,000 tokens,
 and reserved at $13/M plus a small token margin. This conservatively covers the

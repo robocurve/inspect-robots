@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { LIMITS, RunOutput, SHA, type Execution, type Job } from './common';
+import { LIMITS, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
 
 export class ReviewLedger extends DurableObject<ReviewerEnv> {
   private prLimit(pr: number): number {
@@ -154,7 +154,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
   async remaining(job: string, pr: number): Promise<number> {
     const month = new Date().toISOString().slice(0, 7);
     const sums = this.ctx.storage.sql.exec<{ review: number; pr: number; month: number }>(`SELECT COALESCE(SUM(CASE WHEN job=? THEN amount ELSE 0 END),0) AS review, COALESCE(SUM(CASE WHEN pr=? THEN amount ELSE 0 END),0) AS pr, COALESCE(SUM(CASE WHEN month=? THEN amount ELSE 0 END),0) AS month FROM charges`, job, pr, month).one();
-    return Math.max(0, Math.min(this.reviewLimit(job, pr) - sums.review, this.prLimit(pr) - sums.pr, LIMITS.month - sums.month));
+    return Math.max(0, Math.min(this.reviewLimit(job, pr) - sums.review, this.prLimit(pr) - sums.pr, monthlyReviewLimit(pr, month) - sums.month));
   }
   async costs(id: string) {
     const job = await this.job(id);
@@ -182,7 +182,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
       if (this.ctx.storage.sql.exec('SELECT id FROM charges WHERE id=?', id).toArray().length) return false;
       const month = new Date().toISOString().slice(0, 7);
       const sums = this.ctx.storage.sql.exec<{ review: number; pr: number; month: number }>(`SELECT COALESCE(SUM(CASE WHEN job=? THEN amount ELSE 0 END),0) AS review, COALESCE(SUM(CASE WHEN pr=? THEN amount ELSE 0 END),0) AS pr, COALESCE(SUM(CASE WHEN month=? THEN amount ELSE 0 END),0) AS month FROM charges`, job, pr, month).one();
-      if (sums.review + amount > this.reviewLimit(job, pr) || sums.pr + amount > this.prLimit(pr) || sums.month + amount > LIMITS.month) return false;
+      if (sums.review + amount > this.reviewLimit(job, pr) || sums.pr + amount > this.prLimit(pr) || sums.month + amount > monthlyReviewLimit(pr, month)) return false;
       this.ctx.storage.sql.exec('INSERT INTO charges(id,job,pr,month,amount) VALUES(?,?,?,?,?)', id, job, pr, month, amount);
       return true;
     });

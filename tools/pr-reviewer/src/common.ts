@@ -8,6 +8,11 @@ export const CHECK_NAME = 'Independent PR review';
 export const MODEL = 'gpt-6-astra';
 export const SHA = /^[a-f0-9]{40}$/;
 export const LIMITS = { review: 5_000_000, pr: 15_000_000, month: 200_000_000, warn: 160_000_000 };
+export function monthlyReviewLimit(pr: number, month: string): number {
+  // Jay authorized $10 extra on 2026-09-24 to finish PRs 475 and 476.
+  // Both share one monthly total; this is not $10 per PR and expires in October.
+  return LIMITS.month + (month === '2026-09' && (pr === 475 || pr === 476) ? 10_000_000 : 0);
+}
 export const POLICY_VERSION = '3';
 
 export const ReviewSchema = z.object({
