@@ -690,6 +690,10 @@ each) with no overall limit, so a run with many trials can exceed the model's
 context window and be rejected by the provider. For very large runs, use the
 offline digest or a model with a larger context.
 
+An endpoint response with `finish_reason: "length"` is rejected as incomplete;
+the command does not print or save that partial document. Responses that omit
+`finish_reason` remain supported for compatible endpoints.
+
 ### Retry with learning
 
 The learnings file exists to be fed back in. The
