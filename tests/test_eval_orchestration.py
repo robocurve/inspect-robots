@@ -1134,6 +1134,36 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     assert scene.operator_notes == ("clean pickup", None)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [SafetyAbort("grader unsafe"), EmbodimentFault("grader faulted")],
+)
+def test_before_scoring_halt_error_halts_eval_and_writes_log(
+    error: Exception, tmp_path: Path
+) -> None:
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise error
+
+    with pytest.raises(type(error)):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            before_scoring=bad_hook,
+            log_dir=str(tmp_path),
+        )
+
+    logs_on_disk = list(tmp_path.glob("*.json"))
+    assert len(logs_on_disk) == 1
+    log = read_eval_log(str(logs_on_disk[0]))
+
+    assert log.status == "error"
+    assert log.error == f"{type(error).__name__}: {error}"
+    assert log.samples[0].status == "error"
+    assert log.results.errored_trials == 1
+    assert log.samples[0].epochs == ({},)
+
+
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
     def bad_hook(record: TrialRecord, scene: Scene) -> None:
         raise RuntimeError("hook exploded")
@@ -1264,6 +1294,15 @@ def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
     assert log.samples[0].epochs[0] == {"success_at_end": 0.0}
 
 
+class _FaultOnSecondParkEmbodiment(_ParkedEmbodiment):
+    def observe_parked(self) -> object:
+        self.park_calls += 1
+        if self.park_calls == 2:
+            assert isinstance(self.park_result, BaseException)
+            raise self.park_result
+        return None
+
+
 @pytest.mark.parametrize(
     "error",
     [SafetyAbort("park unsafe"), EmbodimentFault("park faulted")],
@@ -1271,16 +1310,30 @@ def test_eval_degrades_when_observe_parked_raises(tmp_path: Path) -> None:
 def test_eval_halts_when_observe_parked_raises_a_halt_error(
     error: Exception, tmp_path: Path
 ) -> None:
-    embodiment = _ParkedEmbodiment(error)
+    embodiment = _FaultOnSecondParkEmbodiment(error)
 
-    with pytest.raises(type(error), match=str(error)):
+    with pytest.raises(type(error)):
         eval(
-            _task(max_steps=1),
+            _task(epochs=3, max_steps=1),
             ScriptedPolicy(),
             embodiment,
             grader=_CaptureGrader(),
             log_dir=str(tmp_path),
         )
+
+    logs_on_disk = list(tmp_path.glob("*.json"))
+    assert len(logs_on_disk) == 1
+    log = read_eval_log(str(logs_on_disk[0]))
+
+    assert log.status == "error"
+    assert log.error == f"{type(error).__name__}: {error}"
+
+    scene = log.samples[0]
+    assert scene.status == "error"
+    assert log.results.errored_trials == 1
+    assert scene.epochs == ({"success_at_end": 0.0}, {})
+    assert len(scene.termination_reasons) == len(scene.epochs)
+    assert embodiment.park_calls == 2
 
 
 def test_eval_accepts_observe_parked_declining_without_warning(tmp_path: Path) -> None:
@@ -1657,6 +1710,51 @@ def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
 
     (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.samples[0].policy_transcripts == (None, None)
+
+
+def test_eval_set_halts_on_before_scoring_fault(tmp_path: Path) -> None:
+    for error in (SafetyAbort("stop"), EmbodimentFault("stop")):
+
+        def bad_hook(record: TrialRecord, scene: Scene, err: BaseException = error) -> None:
+            raise err
+
+        with pytest.raises(type(error)):
+            eval_set(
+                [_task(max_steps=2), _task(max_steps=2)],
+                ScriptedPolicy(),
+                CubePickEmbodiment(),
+                before_scoring=bad_hook,
+                log_dir=str(tmp_path),
+            )
+
+        logs_on_disk = list(tmp_path.glob("*.json"))
+        assert len(logs_on_disk) == 1
+
+        log = read_eval_log(str(logs_on_disk[0]))
+        assert log.status == "error"
+        for f in logs_on_disk:
+            f.unlink()
+
+
+def test_eval_set_halts_on_observe_parked_fault(tmp_path: Path) -> None:
+    for error in (SafetyAbort("stop"), EmbodimentFault("stop")):
+        embodiment = _ParkedEmbodiment(park_result=error)
+        with pytest.raises(type(error)):
+            eval_set(
+                [_task(max_steps=2), _task(max_steps=2)],
+                ScriptedPolicy(),
+                embodiment,
+                grader=_CaptureGrader(),
+                log_dir=str(tmp_path),
+            )
+
+        logs_on_disk = list(tmp_path.glob("*.json"))
+        assert len(logs_on_disk) == 1
+
+        log = read_eval_log(str(logs_on_disk[0]))
+        assert log.status == "error"
+        for f in logs_on_disk:
+            f.unlink()
 
 
 def test_policy_bind_task_hook_receives_task_envelope(tmp_path: Path) -> None:
