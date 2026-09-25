@@ -331,6 +331,34 @@ def test_client_failed_service_result_raises_protocol_error(
     client.close()
 
 
+def test_client_failed_service_with_rosbridge_string_values_raises_service_error(
+    stub_server: StubRosbridgeServer,
+) -> None:
+    # rosbridge's call_service failure path sends the exception text as a bare
+    # string in "values" (result=false), not a JSON object.
+    stub_server.service_results["/home"] = (
+        False,
+        cast(dict[str, Any], "Service /home does not exist"),
+    )
+    client = _client(stub_server)
+    client.connect()
+    with pytest.raises(RosbridgeError, match=r"/home.*result=false.*does not exist") as caught:
+        client.call_service("/home")
+    assert caught.value.code == "service_failed"
+    assert client.latched_error is None
+    assert client.receiver_alive
+    client.close()
+
+
+def test_protocol_accepts_string_values_only_on_failed_service_response() -> None:
+    parsed = parse_incoming(
+        {"op": "service_response", "id": "s", "values": "boom", "result": False}
+    )
+    assert parsed == ServiceResponse("s", "boom", False)
+    with pytest.raises(RosbridgeError, match="values"):
+        parse_incoming({"op": "service_response", "id": "s", "values": "boom", "result": True})
+
+
 def test_client_service_timeout_names_service_and_url(stub_server: StubRosbridgeServer) -> None:
     stub_server.deferred_services.add("/home")
     client = RosbridgeClient(

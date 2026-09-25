@@ -53,6 +53,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **ROS plugin:** Accept rosbridge's failed `service_response`, whose `values`
+  is the error string rather than an object. A failed `reset_service` call now
+  raises `service_failed` with rosbridge's message instead of an `invalid_frame`
+  error that also stopped the receive thread.
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 
