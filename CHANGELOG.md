@@ -22,6 +22,10 @@ All notable changes to this project are documented here. The format is based on
   policy, honor provider `Retry-After` delays on HTTP wires, and record the
   effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
 
+- **Agent plugin (0.27.0):** Surface embodiment action bounds and pinned axes in
+  system prompt, update `give_up` guidance for workspace limits, and report
+  "Target reached." when residual is within tolerance ([#408](https://github.com/robocurve/inspect-robots/issues/408)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),
