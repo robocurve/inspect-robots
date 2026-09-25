@@ -65,11 +65,38 @@ class OperatorInput(Protocol):
 
 
 def _stdin_readable() -> bool:
-    return bool(select.select([sys.stdin], [], [], 0)[0])  # pragma: no cover
+    if sys.platform == "win32":  # pragma: no cover
+        if not sys.stdin.isatty():
+            return False
+        import msvcrt
+
+        return msvcrt.kbhit()
+    try:  # pragma: no cover
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except OSError:  # pragma: no cover
+        return False
 
 
-def _stdin_read() -> str:
-    return os.read(sys.stdin.fileno(), 65536).decode("utf-8", errors="replace")  # pragma: no cover
+def _stdin_read() -> str | None:
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        chars: list[str] = []
+        has_keys = False
+        while msvcrt.kbhit():
+            has_keys = True
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                continue
+            if ch == "\r":
+                ch = "\n"
+            chars.append(ch)
+        if not chars:
+            return None if has_keys else ""
+        return "".join(chars)
+    raw = os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
+    return raw.decode("utf-8", errors="replace")  # pragma: no cover
 
 
 def _parse(line: str) -> tuple[str | None, EndRequest | None, bool]:
@@ -107,7 +134,7 @@ class OperatorConsole:
     def __init__(
         self,
         readable: Callable[[], bool] | None = None,
-        read: Callable[[], str] | None = None,
+        read: Callable[[], str | None] | None = None,
         output_fn: Callable[[str], None] = print,
         usage: str = USAGE,
     ) -> None:
@@ -128,20 +155,29 @@ class OperatorConsole:
         usage_requested = False
         while self._readable():
             chunk = self._read()
+            if chunk is None:
+                continue
             if chunk == "":
                 self._eof = True
                 self._buffer = ""
                 break
-            self._buffer += chunk
-            while "\n" in self._buffer:
-                line, self._buffer = self._buffer.split("\n", 1)
-                message, parsed_end, show_usage = _parse(f"{line}\n")
-                if message is not None:
-                    messages.append(message)
-                if parsed_end is not None and end is None:
-                    end = parsed_end
-                if show_usage:
-                    usage_requested = True
+            for ch in chunk:
+                if ch in ("\x08", "\x7f"):
+                    if self._buffer:
+                        self._buffer = self._buffer[:-1]
+                    continue
+                if ch == "\n":
+                    line = self._buffer
+                    self._buffer = ""
+                    message, parsed_end, show_usage = _parse(f"{line}\n")
+                    if message is not None:
+                        messages.append(message)
+                    if parsed_end is not None and end is None:
+                        end = parsed_end
+                    if show_usage:
+                        usage_requested = True
+                    continue
+                self._buffer += ch
         if usage_requested:
             # At most one reminder per poll: Enter autorepeat queues many empty
             # lines, and each print is a full footer repaint.
@@ -155,6 +191,9 @@ class OperatorConsole:
 
         self._buffer = ""
         while self._readable():
-            if self._read() == "":
+            chunk = self._read()
+            if chunk is None:
+                continue
+            if chunk == "":
                 self._eof = True
                 return
