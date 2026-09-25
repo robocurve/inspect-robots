@@ -13,6 +13,7 @@ def _entry(
     page: str | None = "run.html",
     created: str = "2026-07-30T12:00:00Z",
     instruction: str = "pick up the cube",
+    model: str | None = "provider/models/claude-test",
     status: str = "completed",
     status_class: str = "status-completed",
     metrics: dict[str, float] | None = None,
@@ -24,7 +25,7 @@ def _entry(
         created=created,
         instruction=instruction,
         policy="agent",
-        model="provider/models/claude-test",
+        model=model,
         status=status,
         status_class=status_class,
         metrics={"success_at_end": 0.75} if metrics is None else metrics,
@@ -108,7 +109,7 @@ def test_filter_script_and_persisted_key_are_present() -> None:
     document = render_index([_entry("run.json")])
 
     assert 'id="filter"' in document
-    assert "row.textContent.toLocaleLowerCase().includes(query)" in document
+    assert "text.toLocaleLowerCase().includes(query)" in document
     assert "localStorage.setItem" in document
     assert "localStorage.getItem" in document
     assert "inspect-robots-index-filter" in document
@@ -127,10 +128,10 @@ def test_row_without_page_has_no_data_href_attribute() -> None:
     assert '<tr data-href="' not in document
 
 
-def test_delegated_row_click_listener_is_present_once() -> None:
+def test_click_listeners_are_row_delegation_and_header_sort() -> None:
     document = render_index([_entry("run.json")])
 
-    assert document.count('addEventListener("click"') == 1
+    assert document.count('addEventListener("click"') == 2
     assert 'event.target.closest("tr[data-href]")' in document
     assert 'event.target.closest("a")' in document
     assert "getSelection().toString()" in document
@@ -151,6 +152,26 @@ def test_empty_index_has_no_data_href_attribute() -> None:
 
     assert "<!doctype html>" in document
     assert '<tr data-href="' not in document
+    assert '<td class="empty" colspan="9">no evaluation logs found</td>' in document
+
+
+def test_index_has_run_number_and_sortable_headers() -> None:
+    document = render_index(
+        [
+            _entry("old.json", created="2026-07-29T12:00:00Z"),
+            _entry("new.json", created="2026-07-30T12:00:00Z"),
+            _entry("corrupt.json", created="", model=None),
+        ]
+    )
+
+    assert '<th data-col="0">Run #</th>' in document
+    assert '<th data-col="1" class="sort-desc" aria-sort="descending">When</th>' in document
+    assert '<td class="run-num" data-val="1">#1</td>' in document
+    assert '<td class="run-num" data-val="2">#2</td>' in document
+    assert '<td class="run-num" data-val="">-</td>' in document
+    assert "Header click-to-sort" in document
+    assert "const isNum = v => /^-?\\d+(\\.\\d+)?$/.test(v);" in document
+    assert 'th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");' in document
 
 
 def test_static_index_has_no_meta_refresh() -> None:
@@ -178,3 +199,55 @@ def test_long_error_is_truncated_with_full_escaped_tooltip() -> None:
 
     assert f'title="failed &lt;badly&gt; &quot;{"x" * 200}"' in document
     assert "…" in document
+
+def test_unreadable_entries_omitted_from_numbering_and_sorted_last() -> None:
+    from inspect_robots._html_index import IndexEntry, render_index
+    from dataclasses import replace
+    valid1 = replace(_entry("run1.json"), created="2026-09-01T12:00:00Z", page="run1.html")
+    valid2 = replace(_entry("run2.json"), created="2026-09-03T12:00:00Z", page="run2.html")
+    
+    unreadable = IndexEntry(
+        name="corrupt.json",
+        page=None,
+        created="2026-09-02T12:00:00Z", # chronologically between valid1 and valid2
+        instruction="",
+        policy="",
+        model=None,
+        status="error",
+        status_class="status-error",
+        metrics={},
+        errored_trials=0,
+        termination="",
+        error="unreadable",
+    )
+    
+    document = render_index([valid1, valid2, unreadable])
+    
+    # Valid2 is the newest valid, gets #2 (since there are 2 valid runs).
+    # Valid1 is the oldest valid, gets #1.
+    # unreadable gets "-"
+    
+    assert 'href="run2.html"' in document
+    assert 'href="run1.html"' in document
+    assert '>#2<' in document # run2 run number
+    assert '>#1<' in document # run1 run number
+    assert '>-<' in document # corrupt.json run number
+
+    import re
+    # Extract just the rows (table body)
+    tbody_match = re.search(r"<tbody>(.*?)</tbody>", document, re.DOTALL)
+    assert tbody_match
+    tbody = tbody_match.group(1)
+    
+    # Unreadable should be at the end since valid runs are sorted by date
+    # Valid2 is newest, Valid1 is oldest.
+    assert tbody.find("run2.json") < tbody.find("run1.json") < tbody.find("corrupt.json")
+
+def test_reload_persistence_and_number_filtering() -> None:
+    # Check that the JavaScript handles sort persistence and exact matching
+    document = render_index([_entry("run.json")])
+    assert 'localStorage.getItem(sortKey)' in document
+    assert 'localStorage.setItem(sortKey, sortCol + "," + (sortAsc ? "1" : "0"))' in document
+    
+    # Text content of the row should be joined by space
+    assert 'td.textContent.trim()).join(" ");' in document

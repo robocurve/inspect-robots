@@ -113,12 +113,17 @@ th {
   letter-spacing: .04em;
   text-transform: uppercase;
   white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
 }
+th:hover { color: var(--text); }
+th.sort-asc::after { content: " ▲"; }
+th.sort-desc::after { content: " ▼"; }
 td { border-top: 1px solid var(--line); }
 tbody tr:first-child td { border-top: 0; }
 tbody tr:hover { background: var(--bg); }
 a { color: var(--link); }
-.when, .policy, .metrics, .termination, .log { white-space: nowrap; }
+.run-num, .when, .policy, .metrics, .termination, .log { white-space: nowrap; }
 .instruction { min-width: 230px; max-width: 440px; }
 .error-cell { color: var(--red); min-width: 150px; max-width: 280px; overflow-wrap: anywhere; }
 .badge {
@@ -168,7 +173,7 @@ def _error_cell(error: str | None) -> str:
     return f'<span title="{_escape(error)}">{_escape(short)}</span>'
 
 
-def _row(entry: IndexEntry) -> str:
+def _row(entry: IndexEntry, run_number: int | str) -> str:
     """Render one fully escaped table row."""
     model_tail = "" if entry.model is None else entry.model.rsplit("/", 1)[-1]
     policy = _escape(entry.policy)
@@ -184,7 +189,13 @@ def _row(entry: IndexEntry) -> str:
     instruction = _link(entry.page, _escape(entry.instruction))
     log_name = _link(entry.page, _escape(entry.name))
     row_start = "<tr>" if entry.page is None else f'<tr data-href="{_escape(entry.page)}">'
+    run_num_cell = (
+        f'<td class="run-num" data-val="{run_number}">#{run_number}</td>'
+        if isinstance(run_number, int)
+        else f'<td class="run-num" data-val="">{_escape(run_number)}</td>'
+    )
     return row_start + (
+        f"{run_num_cell}"
         f'<td class="when"><time>{_escape(entry.created)}</time></td>'
         f'<td class="instruction">{instruction}</td>'
         f'<td class="policy">{policy}</td>'
@@ -205,12 +216,15 @@ def render_index(
     refresh_seconds: int | None = None,
 ) -> str:
     """Return one self-contained HTML document indexing evaluation logs."""
-    ordered = sorted(entries, key=lambda entry: entry.created, reverse=True)
-    rows = "".join(_row(entry) for entry in ordered)
+    dated = sorted([e for e in entries if e.created and e.page is not None], key=lambda entry: entry.created, reverse=True)
+    undated = [e for e in entries if not (e.created and e.page is not None)]
+    rows = "".join(_row(entry, len(dated) - i) for i, entry in enumerate(dated)) + "".join(
+        _row(entry, "-") for entry in undated
+    )
     empty = (
         ""
         if rows
-        else '<tr class="empty"><td class="empty" colspan="8">no evaluation logs found</td></tr>'
+        else '<tr class="empty"><td class="empty" colspan="9">no evaluation logs found</td></tr>'
     )
     refresh = ""
     if refresh_seconds is not None:
@@ -233,28 +247,92 @@ def render_index(
 <main>
   <div class="toolbar">
     <label for="filter">Filter runs</label>
-    <input id="filter" type="search" placeholder="instruction, policy, status, metric…">
+    <input id="filter" type="search" placeholder="instruction, policy, status, metric, run #…">
   </div>
   <div class="table-wrap"><table>
     <thead><tr>
-      <th>When</th><th>Instruction</th><th>Policy</th><th>Status</th>
-      <th>Metrics</th><th>Termination</th><th>Error</th><th>Log</th>
+      <th data-col="0">Run #</th><th data-col="1" class="sort-desc" aria-sort="descending">When</th>
+      <th data-col="2">Instruction</th><th data-col="3">Policy</th><th data-col="4">Status</th>
+      <th data-col="5">Metrics</th><th data-col="6">Termination</th><th data-col="7">Error</th>
+      <th data-col="8">Log</th>
     </tr></thead>
     <tbody>{rows}{empty}</tbody>
   </table></div>
 </main>
 <script>
 const key = "{_FILTER_KEY}", input = document.querySelector("#filter");
-const rows = document.querySelectorAll("tbody tr:not(.empty)");
+const sortKey = key + "_sort";
+const tbody = document.querySelector("tbody");
+let rows = Array.from(document.querySelectorAll("tbody tr:not(.empty)"));
+
 function applyFilter() {{
   const query = input.value.toLocaleLowerCase();
-  rows.forEach(row => row.hidden = !row.textContent.toLocaleLowerCase().includes(query));
+  rows.forEach(row => {{
+    const text = Array.from(row.children).map(td => td.textContent.trim()).join(" ");
+    row.hidden = !text.toLocaleLowerCase().includes(query);
+  }});
   try {{ localStorage.setItem(key, input.value); }} catch (_) {{}}
 }}
 try {{ input.value = localStorage.getItem(key) || ""; }} catch (_) {{}}
 input.addEventListener("input", applyFilter);
 applyFilter();
-document.querySelector("tbody").addEventListener("click", event => {{
+
+// Header click-to-sort
+const isNum = v => /^-?\\d+(\\.\\d+)?$/.test(v);
+let sortCol = 1, sortAsc = false;
+try {{
+  const saved = localStorage.getItem(sortKey);
+  if (saved) {{
+    const parts = saved.split(",");
+    if (parts.length === 2 && !isNaN(parseInt(parts[0], 10))) {{
+      sortCol = parseInt(parts[0], 10);
+      sortAsc = parts[1] === "1";
+    }}
+  }}
+}} catch (_) {{}}
+
+function applySort() {{
+  document.querySelectorAll("th").forEach(t => {{
+    t.classList.remove("sort-asc", "sort-desc");
+    t.removeAttribute("aria-sort");
+  }});
+  const th = document.querySelector(`th[data-col="${{sortCol}}"]`);
+  if (th) {{
+    th.classList.add(sortAsc ? "sort-asc" : "sort-desc");
+    th.setAttribute("aria-sort", sortAsc ? "ascending" : "descending");
+  }}
+  rows.sort((a, b) => {{
+    const aCell = a.children[sortCol], bCell = b.children[sortCol];
+    const aVal = aCell ? (aCell.dataset.val || aCell.textContent.trim()) : "";
+    const bVal = bCell ? (bCell.dataset.val || bCell.textContent.trim()) : "";
+    let cmp = 0;
+    if (isNum(aVal) && isNum(bVal)) {{
+      cmp = parseFloat(aVal) - parseFloat(bVal);
+    }} else {{
+      cmp = aVal.localeCompare(bVal);
+    }}
+    return sortAsc ? cmp : -cmp;
+  }});
+  rows.forEach(r => tbody.appendChild(r));
+  try {{ localStorage.setItem(sortKey, sortCol + "," + (sortAsc ? "1" : "0")); }} catch (_) {{}}
+}}
+
+if (rows.length > 0) applySort();
+
+document.querySelectorAll("th[data-col]").forEach(th => {{
+  th.addEventListener("click", () => {{
+    const col = parseInt(th.dataset.col, 10);
+    if (sortCol === col) {{
+      sortAsc = !sortAsc;
+    }} else {{
+      sortCol = col;
+      sortAsc = true;
+    }}
+    applySort();
+  }});
+}});
+
+tbody.addEventListener("click", event => {{
   const row = event.target.closest("tr[data-href]");
   if (!row || event.target.closest("a") || getSelection().toString()) return;
   if (event.shiftKey || event.altKey) return;

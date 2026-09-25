@@ -2401,6 +2401,9 @@ def test_view_directory_end_to_end_and_unreadable_log(
     index = (html_dir / "index.html").read_text(encoding="utf-8")
     assert index.index("newer.json") < index.index("older.json")
     assert 'href="newer.html"' in index and 'href="older.html"' in index
+    assert '>#2<' in index
+    assert '>#1<' in index
+    assert '>-<' in index
     assert "foreign.json" in index and "unreadable:" in index
     assert out.out.startswith(f"index: {html_dir / 'index.html'} (3 logs, 2 pages, ")
     assert "[1/3] rendering foreign.json" not in out.err
