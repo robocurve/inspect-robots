@@ -403,6 +403,8 @@ def test_chat_completion_rejects_non_2xx_with_body_excerpt(status: int) -> None:
     [
         b"",
         b'{"choices":[{"message":{"content":null}}]}',
+        b'{"choices":[null]}',
+        b'{"choices":[[]]}',
         # A lone invalid UTF-8 lead byte: no BOM interpretation, so
         # json.loads raises UnicodeDecodeError rather than JSONDecodeError.
         b"\xff",
@@ -565,6 +567,73 @@ def test_cli_llm_reply_lands_verbatim_in_explicit_output(
 
     assert out_path.read_text(encoding="utf-8") == "verbatim reply"
     assert capsys.readouterr().out == f"wrote {out_path}\n"
+
+
+def test_cli_rejects_truncated_reply_without_replacing_learnings(
+    log_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SUMMARY_KEY", "secret")
+
+    def fake_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
+        reply = {
+            "choices": [{"finish_reason": "length", "message": {"content": "partial learnings"}}]
+        }
+        return 200, json.dumps(reply).encode()
+
+    monkeypatch.setattr(chatwire_module, "_urllib_post", fake_post)
+    out_path = tmp_path / "learnings.md"
+    original = "previous complete learnings"
+    out_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match=r"incomplete.*finish_reason.*length"):
+        main(
+            [
+                "summarize",
+                str(log_path),
+                "--model",
+                "model",
+                "--api-key-env",
+                "SUMMARY_KEY",
+                "-o",
+                str(out_path),
+            ]
+        )
+
+    assert out_path.read_text(encoding="utf-8") == original
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_does_not_print_a_truncated_reply_to_stdout(
+    log_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SUMMARY_KEY", "secret")
+
+    def fake_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
+        reply = {"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]}
+        return 200, json.dumps(reply).encode()
+
+    monkeypatch.setattr(chatwire_module, "_urllib_post", fake_post)
+
+    with pytest.raises(SystemExit, match=r"incomplete.*finish_reason.*length"):
+        main(
+            [
+                "summarize",
+                str(log_path),
+                "--model",
+                "model",
+                "--api-key-env",
+                "SUMMARY_KEY",
+                "-o",
+                "-",
+            ]
+        )
+
+    assert capsys.readouterr().out == ""
 
 
 def test_cli_stdout_prints_only_document(

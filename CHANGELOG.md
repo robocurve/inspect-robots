@@ -53,6 +53,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Chat completions:** Explicitly token-truncated responses now raise a guided
+  incomplete-reply error instead of returning partial summary or grading text.
+  Endpoints that omit `finish_reason` or return it as `null` remain compatible.
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 

@@ -569,6 +569,10 @@ The default endpoint is `https://api.anthropic.com/v1`, and the default API key
 variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
 `--api-key-env VAR` for another compatible provider.
 
+An endpoint response with `finish_reason: "length"` is rejected as incomplete;
+the command does not print or save that partial document. Responses that omit
+`finish_reason` remain supported for compatible endpoints.
+
 ### Retry with learning
 
 The learnings file exists to be fed back in. The
