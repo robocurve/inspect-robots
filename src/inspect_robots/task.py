@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Any, cast
 
 from inspect_robots.errors import ConfigError
@@ -156,6 +157,10 @@ class Task:
                 f"Task {self.name!r}: max_seconds={self.max_seconds!r} at "
                 f"control_hz={control_hz!r} does not yield a finite step budget"
             )
-        # Both factors are positive, so the mathematical ceiling is at least
-        # one even if their binary-float product underflows to 0.0.
-        return TaskEnvelope(name=self.name, max_steps=max(1, math.ceil(raw_steps)))
+        # ceil() the product of the values as written, not of their binary
+        # floats: 1.1 * 50.0 is 55.00000000000001, which ceil() turned into a
+        # 56th step. repr() gives each float's shortest round-trip decimal.
+        exact_steps = Fraction(repr(float(self.max_seconds))) * Fraction(repr(float(control_hz)))
+        # Both factors are positive, so the ceiling is at least one step even
+        # where their binary-float product would underflow to 0.0.
+        return TaskEnvelope(name=self.name, max_steps=max(1, math.ceil(exact_steps)))

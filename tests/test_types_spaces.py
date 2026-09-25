@@ -304,6 +304,27 @@ def test_seconds_horizon_underflow_still_resolves_to_one_step() -> None:
     assert task.resolve_envelope(0.5) == TaskEnvelope(name="timed", max_steps=1)
 
 
+@pytest.mark.parametrize(
+    ("max_seconds", "control_hz", "expected"),
+    [(1.1, 50.0, 55), (2.2, 100.0, 220), (8.3, 30.0, 249), (1.01, 10.0, 11)],
+)
+def test_seconds_horizon_ceil_ignores_binary_float_rounding(
+    max_seconds: float, control_hz: float, expected: int
+) -> None:
+    # 1.1 * 50.0 == 55.00000000000001 in binary floating point, so a bare
+    # ceil() of the product ran a 1.1 s task for 56 steps (1.12 s) at 50 Hz.
+    from inspect_robots.scene import Scene
+    from inspect_robots.task import Task, TaskEnvelope
+
+    task = Task(
+        name="timed",
+        scenes=[Scene(id="s", instruction="x")],
+        scorer="success_at_end",
+        max_seconds=max_seconds,
+    )
+    assert task.resolve_envelope(control_hz) == TaskEnvelope(name="timed", max_steps=expected)
+
+
 def test_task_validation_and_scorer_names() -> None:
     from inspect_robots.errors import ConfigError
     from inspect_robots.scene import Scene
