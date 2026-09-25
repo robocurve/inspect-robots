@@ -18,7 +18,11 @@ from inspect_robots.types import Observation
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import Provider
-from inspect_robots_agent._responses import ResponsesClient, _translate_content_parts
+from inspect_robots_agent._responses import (
+    ResponsesClient,
+    _translate_content_parts,
+    _translate_tools,
+)
 from inspect_robots_agent.policy import AgentPolicyConfig, _evicted_view
 
 
@@ -1146,6 +1150,27 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
     policy = LLMAgentPolicy(model="test/model", base_url="http://llm.test/v1", env={})
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "chat"
+
+
+def test_translate_tools_handles_missing_description_and_parameters() -> None:
+    tools: list[dict[str, Any]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "simple_tool",
+            },
+        }
+    ]
+    translated = _translate_tools(tools)
+    assert translated == [
+        {
+            "type": "function",
+            "name": "simple_tool",
+            "description": "",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": False,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
