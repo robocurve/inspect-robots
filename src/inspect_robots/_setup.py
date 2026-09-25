@@ -331,8 +331,14 @@ def _camera_view_state(
         advertise_path_toggle = any(
             record.by_id is None or _is_ambiguous(record, ambiguous) for record in inventory
         )
-        return active_is_by_id, advertise_path_toggle
-    return bool(by_id_rows) or not by_path_rows, len(by_path_rows) > len(by_id_rows)
+    else:
+        active_is_by_id = bool(by_id_rows) or not by_path_rows
+        advertise_path_toggle = len(by_path_rows) > len(by_id_rows)
+
+    if by_id_rows == by_path_rows:
+        advertise_path_toggle = False
+
+    return active_is_by_id, advertise_path_toggle
 
 
 def _identify_by_replug(
@@ -530,7 +536,7 @@ def _prompt_device_slot(
     by_id_dir: Path,
     by_path_dir: Path,
     current: str | None,
-    assigned: dict[str, tuple[str, str, str]],
+    assigned: dict[str, tuple[str, ...]],
     advertise_path_toggle: bool,
     inventory: list[_CameraNode],
     *,
@@ -538,8 +544,21 @@ def _prompt_device_slot(
     out: IO[str],
     identify: Callable[[bool], str | None],
     camera_role: str | None = None,
-) -> tuple[str | None, bool]:
+    rescan_inventory: Callable[[], list[_CameraNode]] | None = None,
+) -> tuple[str | None, bool, str]:
     """Prompt for one slot and return its device plus active listing state."""
+
+    def physical_id(dev_path: str) -> str:
+        if kind != "v4l2" or not inventory:
+            return dev_path
+        resolved = str(Path(dev_path).resolve(strict=False))
+        for rec in inventory:
+            if dev_path in (rec.by_id, rec.by_path, rec.node) or resolved == str(
+                Path(rec.node).resolve(strict=False)
+            ):
+                return rec.camera or rec.node
+        return resolved
+
     warned_current = False
     while True:
         devices = by_id_devices if active_is_by_id else by_path_devices
@@ -556,7 +575,7 @@ def _prompt_device_slot(
         entered = input_fn(prompt).strip()
         selected: str | None = None
         if entered.lower() == "s":
-            return None, active_is_by_id
+            return None, active_is_by_id, ""
         if entered.lower() == "p" and kind == "v4l2":
             active_is_by_id = not active_is_by_id
             devices = by_id_devices if active_is_by_id else by_path_devices
@@ -567,6 +586,19 @@ def _prompt_device_slot(
             selected = identify(active_is_by_id)
             if selected is None:
                 continue
+            if kind == "v4l2" and rescan_inventory is not None:
+                new_inventory = rescan_inventory()
+                if new_inventory:
+                    old_active_rows = list(by_id_devices if active_is_by_id else by_path_devices)
+                    inventory.clear()
+                    inventory.extend(new_inventory)
+                    by_id_devices.clear()
+                    by_id_devices.extend(_camera_rows(inventory, by_id_dir, by_id=True))
+                    by_path_devices.clear()
+                    by_path_devices.extend(_camera_rows(inventory, by_path_dir, by_id=False))
+                    new_active_rows = by_id_devices if active_is_by_id else by_path_devices
+                    if new_active_rows != old_active_rows:
+                        _print_camera_listing(new_active_rows, device_dir, out)
         elif not entered and current is not None:
             if (
                 kind == "v4l2"
@@ -690,11 +722,12 @@ def _prompt_device_slot(
             # resolve to an inventory node.
             continue
 
+        sel_id = physical_id(selected)
         other = next(
             (
-                (assigned_label, device)
-                for assigned_kind, assigned_label, device in assigned.values()
-                if assigned_kind == kind and device == selected
+                (val[1], val[2])
+                for val in assigned.values()
+                if val[0] == kind and (val[3] if len(val) >= 4 else physical_id(val[2])) == sel_id
             ),
             None,
         )
@@ -721,7 +754,7 @@ def _prompt_device_slot(
                 out=out,
             ):
                 continue
-        return selected, active_is_by_id
+        return selected, active_is_by_id, sel_id
 
 
 def _camera_section(
@@ -763,10 +796,10 @@ def _camera_section(
 
     while True:
         assignments: dict[str, str] = {}
-        assigned_devices: dict[str, tuple[str, str, str]] = {}
+        assigned_devices: dict[str, tuple[str, str, str, str]] = {}
         for role in CAM_ROLES:
             key = f"{role}_cam_device"
-            selected, active_is_by_id = _prompt_device_slot(
+            selected, active_is_by_id, physical_id = _prompt_device_slot(
                 f"{role} camera",
                 "v4l2",
                 by_id_devices,
@@ -790,10 +823,11 @@ def _camera_section(
                     by_path_dir=by_path_dir,
                 ),
                 camera_role=role,
+                rescan_inventory=rescan_inventory,
             )
             if selected is not None:
                 assignments[key] = selected
-                assigned_devices[key] = ("v4l2", role, selected)
+                assigned_devices[key] = ("v4l2", role, selected, physical_id)
         if len(assignments) in (0, len(CAM_ROLES)):
             return assignments
         print(
@@ -876,7 +910,7 @@ def _device_section(
 
     listed_kinds: set[str] = set()
     assignments: dict[str, str] = {}
-    assigned_devices: dict[str, tuple[str, str, str]] = {}
+    assigned_devices: dict[str, tuple[str, str, str, str]] = {}
 
     def prompt_slot(slot: DeviceSlot) -> None:
         nonlocal active_is_by_id
@@ -937,7 +971,7 @@ def _device_section(
 
             identify = _identify
 
-        selected, active_is_by_id = _prompt_device_slot(
+        selected, active_is_by_id, physical_id = _prompt_device_slot(
             slot.label,
             slot.kind,
             primary_devices,
@@ -952,12 +986,13 @@ def _device_section(
             input_fn=input_fn,
             out=out,
             identify=identify,
+            rescan_inventory=rescan_inventory if slot.kind == "v4l2" else None,
         )
         assignments.pop(slot.arg, None)
         assigned_devices.pop(slot.arg, None)
         if selected is not None:
             assignments[slot.arg] = selected
-            assigned_devices[slot.arg] = (slot.kind, slot.label, selected)
+            assigned_devices[slot.arg] = (slot.kind, slot.label, selected, physical_id)
 
     for slot in slots:
         prompt_slot(slot)
