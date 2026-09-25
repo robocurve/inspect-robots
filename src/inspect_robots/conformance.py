@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -75,17 +75,21 @@ def device_slots(factory: object) -> tuple[DeviceSlot, ...]:
 
 @dataclass(frozen=True)
 class OptionSlot:
-    """One boolean behavior toggle the setup wizard interviews.
+    """Declarative boolean behavior toggle for the setup wizard (plan 0032).
 
     ``arg`` is the ``[embodiment.args]`` key to write (``true``/``false``);
     ``label`` is the yes/no question shown to the operator ("Skip the
     operator start prompts (auto_start)"); ``default`` is the suggested
-    answer when the key is absent from an existing config.
+    answer when the key is absent from an existing config. ``suggest`` is an
+    optional callback that computes a dynamic suggestion from the carried
+    ``[embodiment.args]`` mapping; its absence or exceptions fall back to
+    ``default``.
     """
 
     arg: str
     label: str
     default: bool = False
+    suggest: Callable[[Mapping[str, str]], bool] | None = None
 
 
 def option_slots(factory: object) -> tuple[OptionSlot, ...]:

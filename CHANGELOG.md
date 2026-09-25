@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+<<<<<<< HEAD
+- **Setup wizard:** `OptionSlot` can now dynamically compute its suggested
+  default from carried `[embodiment.args]` via an optional `suggest` callback
+  ([#303](https://github.com/robocurve/inspect-robots/issues/303)).
+=======
 - **Agent plugin:** Support `service_tier` on the Responses wire, including
   `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
 
@@ -21,6 +26,7 @@ All notable changes to this project are documented here. The format is based on
 - **Agent plugin (0.27.0):** Configure LLM retry attempts and backoff from the
   policy, honor provider `Retry-After` delays on HTTP wires, and record the
   effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
+>>>>>>> origin/main
 
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
