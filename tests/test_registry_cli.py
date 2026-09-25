@@ -1547,7 +1547,7 @@ def test_eval_set_summary_formats_none_metric_as_na(
     log = _step_limit_log(task="unscored_task")
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_eval_set_summary(True, [log], "logs")
     out = capsys.readouterr().out
@@ -1824,7 +1824,7 @@ def _directory_view_log(
     created: str,
     instruction: str = "pick up the cube",
     status: str = "success",
-    metrics: dict[str, float] | None = None,
+    metrics: dict[str, float | None] | None = None,
     errored_trials: int = 0,
 ) -> EvalLog:
     log = _step_limit_log(reasons=("success",))
@@ -1896,7 +1896,7 @@ def test_view_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -2418,7 +2418,7 @@ def test_view_directory_includes_log_with_sanitized_null_metric(
     logs.mkdir()
     log = _directory_view_log(
         created="2026-07-30T12:00:00Z",
-        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+        metrics={"min_distance_to_goal": None},
     )
     _write_log(log, logs, "null-metric.json")
 
@@ -3634,7 +3634,7 @@ def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -4065,7 +4065,7 @@ def test_run_summary_formats_none_metric_as_na(
     log = _transcript_log()
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_run_summary(log, "run.json", is_adhoc=False)
     out = capsys.readouterr().out

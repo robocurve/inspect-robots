@@ -37,6 +37,13 @@ class SmoothMotion:
 
 Register it with [`scorer`](/api/#inspect_robots.registry.scorer) to resolve it by name.
 
+A scorer with no verdict for a trial can abstain by returning
+`Score(value=None)`. The log records the epoch as `null`, which is distinct
+from a `0.0` verdict and from an errored trial (an empty epoch entry).
+Reducers leave abstained epochs out, a scene where every epoch abstained
+reduces to `null`, and a metric averages only the scenes that have a value
+(`null` when none do). Reports show an abstention as `n/a`.
+
 ## Epochs and reducers
 
 When a `Task` runs `epochs > 1`, an epoch reducer collapses the per-epoch
