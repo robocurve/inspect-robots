@@ -1077,7 +1077,8 @@ def test_blueprint_skipped_for_zero_dim_action_space(
     recorder = _BlueprintRecorder()
     _install_fake_rerun(monkeypatch, blueprint=recorder)
     sink = RerunSink()
-    sink.bind_spaces(Box(shape=(0,)), ObservationSpace())
+    sink.bind_spaces(Box(shape=(1,)), ObservationSpace())
+    sink._action_dim = 0
     sink.on_trial_start("s0", 0)
     _blueprint_step(sink)
     assert sink.flush(timeout=5.0)

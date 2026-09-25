@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 import pytest
@@ -78,6 +79,69 @@ def test_box_dim_and_bounds_validation() -> None:
 def test_box_rejects_inverted_bounds() -> None:
     with pytest.raises(ValueError, match="low must be elementwise"):
         Box(shape=(2,), low=np.array([0.0, 1.0]), high=np.array([1.0, 0.5]))
+
+
+@pytest.mark.parametrize(
+    "invalid_shape", [(0,), (-1,), (2, 0), (2, -3), (True,), (2.5,), [3], "invalid"]
+)
+def test_box_rejects_invalid_shapes(invalid_shape: object) -> None:
+    with pytest.raises(ValueError, match="Box shape"):
+        Box(shape=invalid_shape)  # type: ignore[arg-type]
+
+
+def test_box_scalar_shape() -> None:
+    box = Box(shape=(), low=np.array(0.0), high=np.array(1.0))
+    assert box.shape == ()
+    assert box.dim == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "height", "width", "channels"),
+    [
+        ("", 100, 100, 3),
+        ("   ", 100, 100, 3),
+        (123, 100, 100, 3),
+        ("wrist", 0, 100, 3),
+        ("wrist", -10, 100, 3),
+        ("wrist", 100, 0, 3),
+        ("wrist", 100, -5, 3),
+        ("wrist", 100, 100, 0),
+        ("wrist", 100, 100, -1),
+        ("wrist", 100, 100, True),
+        ("wrist", 100, 100, 3.5),
+    ],
+)
+def test_camera_spec_rejects_invalid_attributes(
+    name: Any, height: Any, width: Any, channels: Any
+) -> None:
+    with pytest.raises(ValueError, match="CameraSpec"):
+        CameraSpec(name=name, height=height, width=width, channels=channels)
+
+
+@pytest.mark.parametrize(
+    ("key", "shape"),
+    [
+        ("", (6,)),
+        ("   ", (6,)),
+        (123, (6,)),
+        ("joint_pos", (0,)),
+        ("joint_pos", (-1,)),
+        ("joint_pos", (2, 0)),
+        ("joint_pos", (True,)),
+        ("joint_pos", (3.5,)),
+        ("joint_pos", [6]),
+        ("joint_pos", "bad"),
+    ],
+)
+def test_state_field_rejects_invalid_attributes(key: Any, shape: Any) -> None:
+    with pytest.raises(ValueError, match="StateField"):
+        StateField(key=key, shape=shape)
+
+
+def test_state_field_scalar_shape() -> None:
+    sf = StateField(key="gripper", shape=())
+    assert sf.shape == ()
+    assert sf.key == "gripper"
 
 
 def test_action_semantics_defaults() -> None:
