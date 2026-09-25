@@ -567,6 +567,59 @@ def test_cli_llm_reply_lands_verbatim_in_explicit_output(
     assert capsys.readouterr().out == f"wrote {out_path}\n"
 
 
+def test_cli_renders_response_read_timeout_without_replacing_learnings(
+    log_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("SUMMARY_KEY", "fixture-key")
+
+    class TimeoutResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __enter__(self) -> TimeoutResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.closed = True
+
+        def read(self) -> bytes:
+            raise TimeoutError("fixture response body timeout")
+
+    response = TimeoutResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    out_path = tmp_path / "learnings.md"
+    original = "existing complete learnings"
+    out_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(
+        SystemExit,
+        match=r"chat request failed:.*timed out.*\nfix: check the server response",
+    ):
+        main(
+            [
+                "summarize",
+                str(log_path),
+                "--model",
+                "fixture-model",
+                "--api-key-env",
+                "SUMMARY_KEY",
+                "--base-url",
+                "https://example.invalid/v1",
+                "-o",
+                str(out_path),
+            ]
+        )
+
+    assert out_path.read_text(encoding="utf-8") == original
+    assert capsys.readouterr().out == ""
+    assert response.closed
+
+
 def test_cli_stdout_prints_only_document(
     log_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

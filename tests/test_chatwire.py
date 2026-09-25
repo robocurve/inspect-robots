@@ -7,10 +7,17 @@ import json
 import urllib.error
 import urllib.request
 from email.message import Message
+from http.client import IncompleteRead
+from typing import cast
 
 import pytest
 
-from inspect_robots._chatwire import HttpPost, _urllib_post, chat_completion
+from inspect_robots._chatwire import (
+    HttpPost,
+    _HTTPErrorBodyReadError,
+    _urllib_post,
+    chat_completion,
+)
 from inspect_robots.errors import ConfigError
 
 
@@ -56,14 +63,40 @@ def test_malformed_reply_uses_the_what_prefix() -> None:
 
 
 def test_urllib_post_preserves_http_error_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = io.BytesIO(b"slow down")
+
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
-        raise urllib.error.HTTPError(
-            request.full_url, 429, "rate limited", Message(), io.BytesIO(b"slow down")
-        )
+        raise urllib.error.HTTPError(request.full_url, 429, "rate limited", Message(), body)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     assert _urllib_post("https://x.test", {}, b"{}") == (429, b"slow down")
+    assert body.closed
+
+
+def test_urllib_post_reads_and_closes_a_success_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected_body = b"complete response"
+
+    class Response:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.closed = True
+
+        def read(self) -> bytes:
+            return expected_body
+
+    response = Response()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    assert _urllib_post("https://x.test", {}, b"{}") == (200, expected_body)
+    assert response.closed
 
 
 def test_urllib_post_translates_url_errors_to_neutral_guidance(
@@ -76,6 +109,216 @@ def test_urllib_post_translates_url_errors_to_neutral_guidance(
 
     with pytest.raises(ConfigError, match=r"chat request failed: offline.\nfix: check the base"):
         _urllib_post("https://x.test", {}, b"{}")
+
+
+@pytest.mark.parametrize(
+    ("error", "description"),
+    [
+        pytest.param(TimeoutError("read timed out"), "timed out", id="timeout"),
+        pytest.param(IncompleteRead(b"partial", 4), "incomplete transfer", id="incomplete-read"),
+        pytest.param(
+            ConnectionResetError("peer reset connection"), "connection was interrupted", id="reset"
+        ),
+    ],
+)
+def test_urllib_post_normalizes_response_body_read_failures(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, description: str
+) -> None:
+    class FailingResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __enter__(self) -> FailingResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.closed = True
+
+        def read(self) -> bytes:
+            raise error
+
+    response = FailingResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(
+        ConfigError,
+        match=rf"chat request failed:.*{description}.*\nfix:",
+    ) as exc_info:
+        _urllib_post("https://x.test", {}, b"{}")
+
+    assert exc_info.value.__cause__ is error
+    assert response.closed
+
+
+def test_urllib_post_normalizes_http_error_body_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = TimeoutError("error body read timed out")
+
+    class FailingBody:
+        closed = False
+
+        def read(self, *_args: object, **_kwargs: object) -> bytes:
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = FailingBody()
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "server error",
+            Message(),
+            body,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(_HTTPErrorBodyReadError) as exc_info:
+        _urllib_post("https://x.test", {}, b"{}")
+
+    assert exc_info.value.status_code == 500
+    assert "body read timed out" in exc_info.value.detail
+    assert exc_info.value.__cause__ is error
+    assert body.closed
+
+
+def test_chat_completion_preserves_http_400_and_skips_retry_when_body_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = TimeoutError("error body read timed out")
+
+    class FailingBody:
+        closed = False
+
+        def read(self, *_args: object, **_kwargs: object) -> bytes:
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = FailingBody()
+
+    requests: list[urllib.request.Request] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        requests.append(request)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "bad request",
+            Message(),
+            body,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(
+        ConfigError,
+        match=r"grading request failed with HTTP 400:.*body unavailable",
+    ) as exc_info:
+        chat_completion("https://x.test/v1", "k", "m", [], what="grading", effort="none")
+
+    assert "grading request failed with HTTP 400:" in str(exc_info.value)
+    assert "error response body unavailable" in str(exc_info.value)
+    assert "body read timed out" in str(exc_info.value)
+    assert "\nfix:" in str(exc_info.value)
+    read_error = exc_info.value.__cause__
+    assert isinstance(read_error, _HTTPErrorBodyReadError)
+    assert read_error.status_code == 400
+    assert read_error.__cause__ is error
+    assert body.closed
+    assert len(requests) == 1
+
+
+def test_chat_completion_retains_read_failure_from_max_completion_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = TimeoutError("retry error body read timed out")
+
+    class FailingBody:
+        closed = False
+
+        def read(self, *_args: object, **_kwargs: object) -> bytes:
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    retry_body = FailingBody()
+    requests: list[urllib.request.Request] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        requests.append(request)
+        if len(requests) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                Message(),
+                io.BytesIO(_OPENAI_MAX_TOKENS_400),
+            )
+        raise urllib.error.HTTPError(
+            request.full_url,
+            503,
+            "service unavailable",
+            Message(),
+            retry_body,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(
+        ConfigError,
+        match=r"grading request failed with HTTP 503:.*body unavailable.*\nfix:",
+    ) as exc_info:
+        chat_completion("https://x.test/v1", "k", "m", [], what="grading", effort="none")
+
+    assert len(requests) == 2
+    first_payload = json.loads(cast(bytes, requests[0].data))
+    retry_payload = json.loads(cast(bytes, requests[1].data))
+    assert first_payload["max_tokens"] == 8192
+    assert retry_payload["max_completion_tokens"] == 8192
+    assert "max_tokens" not in retry_payload
+    assert first_payload["reasoning_effort"] == "none"
+    assert retry_payload["reasoning_effort"] == "none"
+    read_error = exc_info.value.__cause__
+    assert isinstance(read_error, _HTTPErrorBodyReadError)
+    assert read_error.status_code == 503
+    assert read_error.__cause__ is error
+    assert retry_body.closed
+
+
+def test_urllib_post_does_not_convert_keyboard_interrupt_during_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptedResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __enter__(self) -> InterruptedResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.closed = True
+
+        def read(self) -> bytes:
+            raise KeyboardInterrupt
+
+    response = InterruptedResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(KeyboardInterrupt):
+        _urllib_post("https://x.test", {}, b"{}")
+
+    assert response.closed
 
 
 _Call = tuple[str, dict[str, str], bytes]
