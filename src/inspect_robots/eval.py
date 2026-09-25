@@ -610,6 +610,17 @@ def _run_eval(
                         status="error",
                         error=scene_error,
                     )
+                except Exception as exc:
+                    error_count += 1
+                    scene_status = "error"
+                    scene_error = f"unexpected framework error ({type(exc).__name__}): {exc}"
+                    record = getattr(exc, "record", None) or TrialRecord(
+                        scene_id=scene.id,
+                        epoch=epoch,
+                        seed=trial_seed,
+                        status="error",
+                        error=scene_error,
+                    )
 
             if record is not None:
                 total_trials += 1
