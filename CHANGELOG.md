@@ -65,6 +65,11 @@ All notable changes to this project are documented here. The format is based on
   flag silently replaced it with `mean`, so the reported metric was computed with
   the wrong reducer.
 
+- **Core:** `DeltaLimitApprover` now raises `SafetyAbort` on `±inf` as well as
+  `NaN`; previously an infinite first absolute-mode target was stored as the
+  reference and disabled the limiter on that dimension for the rest of the
+  trial ([#376](https://github.com/robocurve/inspect-robots/pull/376)).
+
 - **Agent plugin (0.27.0):** Transcript paths are now sanitised; wire-capture
   directories are renamed to share the same stem as `transcripts/` and
   `actions/` ([#370](https://github.com/robocurve/inspect-robots/issues/370)).

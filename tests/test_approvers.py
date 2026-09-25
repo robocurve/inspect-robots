@@ -208,6 +208,14 @@ def test_rewind_reference_uses_the_limiter_store_key() -> None:
     assert np.array_equal(reference, np.array([0.3, 0.4]))
 
 
+def test_rewind_reference_rejects_non_finite_pose() -> None:
+    store: dict[str, object] = {}
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("nan"), 0.0]))
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("inf"), 0.0]))
+
+
 def test_substitution_rewinds_the_next_delta_reference() -> None:
     held = Action(data=np.array([0.0, 0.0]))
 
@@ -446,6 +454,17 @@ def test_nan_raises_safety_abort_in_both_branches() -> None:
         approver = DeltaLimitApprover(space, max_delta=0.1)
         with pytest.raises(SafetyAbort, match="NaN"):
             approver.review(Action(data=np.array([float("nan"), 0.0])), {})
+
+
+@pytest.mark.parametrize("space", [_abs_space(), _delta_space()])
+def test_inf_raises_safety_abort_in_both_branches(space: Box) -> None:
+    approver = DeltaLimitApprover(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([float("inf"), 0.0])), store)
+
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([0.0, float("-inf")])), store)
 
 
 @pytest.mark.parametrize("name", ["", "line\nbreak", "line\rbreak"])

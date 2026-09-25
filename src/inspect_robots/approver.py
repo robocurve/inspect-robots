@@ -160,8 +160,11 @@ class DeltaLimitApprover:
     rotation representation cannot be clamped per-dimension, or a displacement
     pose mode carrying a quaternion or rot6d delta (whose identity is not the
     zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
-    ``NaN`` anywhere in a reviewed action raises
-    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. A modified action is
+    Non-finite values (``NaN`` or ``±inf``) anywhere in a reviewed action raise
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampApprover``
+    (which clamps ``±inf`` to finite box bounds), a delta limiter cannot clamp
+    ``±inf`` into anything meaningful because it has no trustworthy finite bound
+    on the first absolute step. A modified action is
     flagged ``meta["delta_clamped"]``; an unmodified one is returned as the
     same object (rollout detects modification by identity). The reference
     lives in the rollout ``store`` (fresh per trial) under a namespaced key.
@@ -253,14 +256,22 @@ class DeltaLimitApprover:
         the limiter measures subsequent deltas from the pose that actually ran.
         If the limiter has not established a reference, this is a no-op.
         """
+        if not bool(np.all(np.isfinite(pose))):
+            raise ValueError(
+                "DeltaLimitApprover: rewind_reference received a non-finite pose; "
+                "refusing to corrupt reference state"
+            )
         if _LAST_APPROVED_KEY in store:
             store[_LAST_APPROVED_KEY] = pose.copy()
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Limit per-step change, retaining absolute-mode history in trial state."""
         data = np.asarray(action.data, dtype=np.float64)
-        if bool(np.isnan(data).any()):
-            raise SafetyAbort("DeltaLimitApprover: action contains NaN; refusing to pass it on")
+        if not bool(np.all(np.isfinite(data))):
+            raise SafetyAbort(
+                "DeltaLimitApprover: action contains a non-finite value (NaN or ±inf); "
+                "refusing to pass it on"
+            )
         if self._absolute:
             reference = store.get(_LAST_APPROVED_KEY)
             if reference is None:
