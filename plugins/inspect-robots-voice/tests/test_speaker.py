@@ -748,3 +748,160 @@ def test_blocking_timeout_degrades_once_and_keeps_drop_accounting(
 
     playback.release[0].set()
     sink.close()
+
+
+def test_speaker_active_playback_registration() -> None:
+    from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+
+    engine = _FakeEngine()
+    playback = _GatedPlayback(gated_writes=1)
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(
+        0, [_assistant(_tool_call("move", {"note": "test-playback-registration"}))]
+    )
+
+    # Wait for the worker to synthesize and start writing the chunk
+    assert playback.entered[0].wait(timeout=2.0)
+
+    # The speaker should be registered in _active_speakers during playback
+    with _speakers_lock:
+        assert sink in _active_speakers
+
+    # Release the playback write chunk
+    playback.release[0].set()
+    _wait_until(lambda: len(playback.writes) == 3)
+    sink.close()
+
+    # The speaker should be discarded from _active_speakers when done
+    with _speakers_lock:
+        assert sink not in _active_speakers
+
+
+def test_speaker_buffered_playback_holds_mute_until_drained() -> None:
+    from inspect_robots_voice._capture import (
+        _active_speakers,
+        _is_playback_active,
+        _speakers_lock,
+    )
+
+    class _BufferedPlayback(_FakePlayback):
+        def __init__(self, buffer_s: float = 0.15) -> None:
+            super().__init__()
+            self.buffer_s = buffer_s
+            self.play_until = 0.0
+
+        def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None:
+            super().write(samples, sample_rate)
+            self.play_until = time.monotonic() + self.buffer_s
+
+        def drain(self) -> None:
+            remaining = self.play_until - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+
+    engine = _FakeEngine()
+    playback = _BufferedPlayback(buffer_s=0.15)
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "buffered"}))])
+
+    _wait_until(lambda: len(playback.writes) == 3)
+    assert _is_playback_active()
+
+    _wait_until(lambda: not _is_playback_active(), timeout=2.0)
+    sink.close()
+
+def test_interrupted_buffer_aborts_and_keeps_mute_hangover() -> None:
+    class _SlowDrainPlayback:
+        def __init__(self) -> None:
+            self.writes: list[float] = []
+            self.aborted = False
+
+        def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None:
+            self.writes.append(time.monotonic())
+
+        def close(self) -> None:
+            pass
+            
+        def abort(self) -> None:
+            self.aborted = True
+
+        def drain(self, cancel: Callable[[], bool] | None = None) -> None:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if cancel and cancel():
+                    self.abort()
+                    return
+                time.sleep(0.01)
+
+    from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+    engine = _FakeEngine()
+    playback = _SlowDrainPlayback()
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "interrupted"}))])
+    _wait_until(lambda: len(playback.writes) >= 1)
+    
+    # Interrupt it by logging another message
+    sink.log_policy_messages(1, [_assistant(_tool_call("move", {"note": "replacement"}))])
+    
+    # Wait for abort to be called during drain
+    _wait_until(lambda: playback.aborted)
+    
+    # the replacement message should start writing
+    _wait_until(lambda: len(playback.writes) > 3)
+    sink.close()
+
+def test_operator_end_aborts_drain() -> None:
+    class _SlowDrainPlayback:
+        def __init__(self) -> None:
+            self.writes: list[float] = []
+            self.aborted = False
+
+        def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None:
+            self.writes.append(time.monotonic())
+
+        def close(self) -> None:
+            pass
+            
+        def abort(self) -> None:
+            self.aborted = True
+
+        def drain(self, cancel: Callable[[], bool] | None = None) -> None:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if cancel and cancel():
+                    self.abort()
+                    return
+                time.sleep(0.01)
+
+    from inspect_robots_voice._capture import _active_speakers, _speakers_lock
+    engine = _FakeEngine()
+    playback = _SlowDrainPlayback()
+    sink = _sink(engine, playback)
+    sink.start()
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    sink.log_policy_messages(0, [_assistant(_tool_call("move", {"note": "end-trial"}))])
+    _wait_until(lambda: len(playback.writes) >= 1)
+    
+    # operator ends the trial
+    sink.close()
+    
+    # it should abort promptly without sleeping the full 1.0s
+    assert playback.aborted

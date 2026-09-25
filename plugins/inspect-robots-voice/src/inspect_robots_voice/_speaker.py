@@ -19,6 +19,7 @@ import numpy.typing as npt
 
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.types import OPERATOR_END
+from inspect_robots_voice._capture import _register_speaker, _unregister_speaker
 from inspect_robots_voice._tts import KokoroEngine, TtsEngine, resolve_model_files
 
 if TYPE_CHECKING:
@@ -40,6 +41,10 @@ class _Playback(Protocol):
     def write(self, samples: npt.NDArray[np.float32], sample_rate: int) -> None: ...
 
     def close(self) -> None: ...
+    
+    def abort(self) -> None: ...
+    
+    def drain(self, cancel: Callable[[], bool] | None = None) -> None: ...
 
 
 PlaybackFactory = Callable[[], _Playback]
@@ -68,6 +73,33 @@ class _SoundDevicePlayback:
             self._stream.start()
             self._sample_rate = sample_rate
         self._stream.write(samples)
+
+    def abort(self) -> None:
+        stream = self._stream
+        if stream is not None:
+            abort_fn = getattr(stream, "abort", None)
+            if callable(abort_fn):
+                abort_fn()
+            else:
+                self.close()
+
+    def drain(self, cancel: Callable[[], bool] | None = None) -> None:
+        stream = self._stream
+        if stream is None:
+            return
+        latency = getattr(stream, "latency", None)
+        if isinstance(latency, tuple):
+            latency = latency[1] if len(latency) > 1 else latency[0]
+        if isinstance(latency, (int, float)) and latency > 0:
+            if cancel is None:
+                time.sleep(latency)
+            else:
+                deadline = time.monotonic() + latency
+                while time.monotonic() < deadline:
+                    if cancel():
+                        self.abort()
+                        return
+                    time.sleep(min(0.01, deadline - time.monotonic()))
 
     def close(self) -> None:
         stream = self._stream
@@ -309,12 +341,48 @@ class SpeakerSink(NullSink):
                     continue
                 gained = np.asarray(samples * np.float32(self.volume), dtype=np.float32)
                 chunk_size = max(1, int(sample_rate * _CHUNK_SECONDS))
-                for start in range(0, len(gained), chunk_size):
-                    if self._stop.is_set():
-                        return
-                    if self._speech_gen != gen:
-                        break
-                    playback.write(gained[start : start + chunk_size], sample_rate)
+                _register_speaker(self)
+                try:
+                    for start in range(0, len(gained), chunk_size):
+                        if self._stop.is_set():
+                            abort = getattr(playback, "abort", None)
+                            if callable(abort): abort()
+                            return
+                        if self._speech_gen != gen:
+                            abort = getattr(playback, "abort", None)
+                            if callable(abort): abort()
+                            break
+                        playback.write(gained[start : start + chunk_size], sample_rate)
+                    if not self._stop.is_set() and self._speech_gen == gen:
+                        drain = getattr(playback, "drain", None)
+                        if callable(drain):
+                            try:
+                                drain(lambda: self._stop.is_set() or self._speech_gen != gen)
+                            except TypeError:
+                                drain()
+                        elif hasattr(playback, "wait_done") and callable(playback.wait_done):
+                            playback.wait_done()
+                        elif hasattr(playback, "wait") and callable(playback.wait):
+                            playback.wait()
+                        is_playing = getattr(playback, "is_playing", None) or getattr(
+                            playback, "is_active", None
+                        )
+                        if callable(is_playing):
+                            while is_playing():
+                                if self._stop.is_set() or self._speech_gen != gen:
+                                    abort = getattr(playback, "abort", None)
+                                    if callable(abort): abort()
+                                    break
+                                time.sleep(0.01)
+                        elif getattr(playback, "active", False):
+                            while getattr(playback, "active", False):
+                                if self._stop.is_set() or self._speech_gen != gen:
+                                    abort = getattr(playback, "abort", None)
+                                    if callable(abort): abort()
+                                    break
+                                time.sleep(0.01)
+                finally:
+                    _unregister_speaker(self)
             except Exception as exc:
                 with self._condition:
                     self._disabled = True

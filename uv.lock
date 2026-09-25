@@ -915,7 +915,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "inspect-robots-voice"
-version = "0.5.1"
+version = "0.5.2"
 source = { editable = "plugins/inspect-robots-voice" }
 dependencies = [
     { name = "faster-whisper" },
