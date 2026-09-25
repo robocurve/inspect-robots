@@ -195,6 +195,26 @@ def test_observation_space_rejects_inconsistent_state_keys() -> None:
         ObservationSpace(state_keys=frozenset({"eef_pos"}), state=spec)
 
 
+def test_state_spec_rejects_duplicate_field_keys() -> None:
+    with pytest.raises(ValueError, match="duplicate field key 'joint_pos'"):
+        StateSpec(
+            fields=(
+                StateField(key="joint_pos", shape=(6,)),
+                StateField(key="joint_pos", shape=(7,)),
+            )
+        )
+
+
+def test_observation_space_rejects_duplicate_camera_names() -> None:
+    with pytest.raises(ValueError, match="duplicate camera name 'wrist'"):
+        ObservationSpace(
+            cameras=(
+                CameraSpec(name="wrist", height=100, width=100),
+                CameraSpec(name="wrist", height=200, width=200),
+            )
+        )
+
+
 def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
     from inspect_robots.errors import ConfigError
     from inspect_robots.scene import Scene
