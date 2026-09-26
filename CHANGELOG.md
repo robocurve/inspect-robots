@@ -65,6 +65,11 @@ All notable changes to this project are documented here. The format is based on
   flag silently replaced it with `mean`, so the reported metric was computed with
   the wrong reducer.
 
+- **Core:** `FrameStore` now caps filename segments derived from scene IDs and
+  camera names at 100 characters plus a hash suffix, preventing OS path
+  overflow while preserving collision resistance and existing filenames under
+  the cap ([#375](https://github.com/robocurve/inspect-robots/pull/375)).
+
 - **Agent plugin (0.27.0):** Transcript paths are now sanitised; wire-capture
   directories are renamed to share the same stem as `transcripts/` and
   `actions/` ([#370](https://github.com/robocurve/inspect-robots/issues/370)).

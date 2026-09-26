@@ -1684,7 +1684,7 @@ def test_report_private_degrade_edges_remain_tolerant(
     assert 'data-trial="trial"' in markup
 
     chat = [{"role": "user", "content": "hello"}]
-    assert 'class="raw-transcript"' in _render_transcript(chat, trial_prefix="trial")
+    assert 'class="raw-transcript"' in _render_transcript(chat, trial_id="trial")
 
     np.save(tmp_path / "trial_bad.npy", np.zeros((1,), dtype=np.uint8))
     assert _trial_camera_streams(tmp_path, "trial") == {}
@@ -2076,3 +2076,31 @@ def test_wire_malformed_request_degrades_to_an_empty_call(tmp_path: Path) -> Non
     assert "Trial 0 Wire" in document
     assert "no new messages" in document
     assert "<dd>n/a</dd>" in document
+
+
+def test_legacy_uncapped_frame_paths_load_successfully(tmp_path: Path) -> None:
+    import numpy as np
+
+    from inspect_robots._html import render_html
+    from inspect_robots.frames import _safe, _safe_legacy
+
+    long_name = "x" * 110
+    capped = _safe(long_name)
+    legacy = _safe_legacy(long_name)
+    assert capped != legacy
+    assert len(capped) <= 109
+
+    # _log uses scene_id="scene-0" by default
+    legacy_trial = _safe_legacy("scene-0-e0")
+    path = tmp_path / f"{legacy_trial}_{legacy}_000004.npy"
+    np.save(path, np.zeros((10, 10), dtype=np.uint8))
+
+    parts = [
+        {"type": "text", "text": f"camera '{long_name}' (step 4):"},
+        {"type": "text", "text": "[image omitted: streamed camera frame]"},
+    ]
+
+    log = _frame_log(parts)
+    html = render_html(log, title="legacy", frames_dir=tmp_path)
+
+    assert "data:image/png" in html

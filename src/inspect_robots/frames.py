@@ -19,14 +19,23 @@ import numpy as np
 import numpy.typing as npt
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SAFE_MAX = 100
 
 
 def _safe(name: str) -> str:
-    """Make ``name`` filesystem-safe without introducing collisions.
+    """Make ``name`` filesystem-safe without introducing collisions or exceeding path limits.
 
-    Unsafe characters become ``-``; when anything was replaced, a short hash of
+    Unsafe characters become ``-``; when anything was replaced or truncated, a short hash of
     the original is appended so e.g. ``a/b`` and ``a-b`` stay distinct.
     """
+    safe = _SAFE_RE.sub("-", name)
+    if len(safe) > _SAFE_MAX or safe != name:
+        safe = f"{safe[:_SAFE_MAX]}-{zlib.crc32(name.encode()) & 0xFFFFFFFF:08x}"
+    return safe
+
+
+def _safe_legacy(name: str) -> str:
+    """Legacy filesystem-safe conversion used by previous runs (pre _SAFE_MAX)."""
     safe = _SAFE_RE.sub("-", name)
     if safe != name:
         safe = f"{safe}-{zlib.crc32(name.encode()) & 0xFFFFFFFF:08x}"

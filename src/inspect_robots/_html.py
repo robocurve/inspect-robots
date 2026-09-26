@@ -223,7 +223,7 @@ class _FrameReference:
     parts: list[object]
     label_index: int
     placeholder_index: int
-    trial_prefix: str
+    trial_id: str
     camera: str
     step: int
 
@@ -233,7 +233,7 @@ class _FrameContext:
     """The filesystem correlation state for one trial transcript."""
 
     frames_dir: Path
-    trial_prefix: str
+    trial_id: str
     budget: _FrameBudget
     rendered: list[tuple[str, int]] | None = None
 
@@ -674,9 +674,18 @@ def _raw_tool_call(name: str, arguments: object) -> str:
 
 def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[np.uint8] | None:
     """Load one exact-match stored frame, degrading every invalid artifact to ``None``."""
+    from inspect_robots.frames import _safe, _safe_legacy
+
     if frame_ctx.budget.truncated:
         return None
-    path = frame_ctx.frames_dir / f"{frame_ctx.trial_prefix}_{_safe(name)}_{step:06d}.npy"
+    safe_trial = _safe(frame_ctx.trial_id)
+    safe_name = _safe(name)
+    path = frame_ctx.frames_dir / f"{safe_trial}_{safe_name}_{step:06d}.npy"
+    if not path.exists():
+        legacy_trial = _safe_legacy(frame_ctx.trial_id)
+        legacy_name = _safe_legacy(name)
+        if legacy_trial != safe_trial or legacy_name != safe_name:
+            path = frame_ctx.frames_dir / f"{legacy_trial}_{legacy_name}_{step:06d}.npy"
     if not path.exists():
         return None
     try:
@@ -698,7 +707,7 @@ def _frame_image(frame_ctx: _FrameContext, name: str, step: int) -> str | None:
     """Render one correlated frame if it is valid and fits the shared budget."""
     budget = frame_ctx.budget
     if budget.cache is not None:
-        source = budget.cache.get((frame_ctx.trial_prefix, name, step))
+        source = budget.cache.get((frame_ctx.trial_id, name, step))
         if source is None:
             return None
         return _frame_markup(source, frame_ctx, name, step)
@@ -722,12 +731,12 @@ def _frame_markup(source: str, frame_ctx: _FrameContext, name: str, step: int) -
     return (
         f'<img class="frame" loading="lazy" alt="camera {_escape(name)} step {step}" '
         f'data-camera="{_escape(name)}" data-step="{step}" '
-        f'data-trial="{_escape(frame_ctx.trial_prefix)}" '
+        f'data-trial="{_escape(_safe(frame_ctx.trial_id))}" '
         f'src="{source}">'
     )
 
 
-def _frame_references(transcript: object, trial_prefix: str) -> tuple[_FrameReference, ...]:
+def _frame_references(transcript: object, trial_id: str) -> tuple[_FrameReference, ...]:
     """Enumerate renderable user placeholders in stable transcript order."""
     if not _is_chat_transcript(transcript):
         return ()
@@ -756,7 +765,7 @@ def _frame_references(transcript: object, trial_prefix: str) -> tuple[_FrameRefe
                         parts,
                         label_index,
                         index,
-                        trial_prefix,
+                        trial_id,
                         camera,
                         step,
                     )
@@ -769,14 +778,14 @@ def _render_chat_transcript(
     transcript: list[object],
     frame_ctx: _FrameContext | None = None,
     *,
-    trial_prefix: str = "",
+    trial_id: str = "",
     operator_messages: Sequence[dict[str, Any]] = (),
 ) -> str:
     """Render original chat messages as observation-led turns with one raw transcript each."""
     rendered, _residual = _render_chat_and_residual(
         transcript,
         frame_ctx,
-        trial_prefix=trial_prefix,
+        trial_id=trial_id,
         operator_messages=operator_messages,
     )
     return rendered
@@ -786,11 +795,11 @@ def _render_chat_and_residual(
     transcript: list[object],
     frame_ctx: _FrameContext | None,
     *,
-    trial_prefix: str,
+    trial_id: str,
     operator_messages: Sequence[dict[str, Any]],
 ) -> tuple[str, tuple[dict[str, Any], ...]]:
     """Render turns and return only structured feedback that could not be placed."""
-    prefix = frame_ctx.trial_prefix if frame_ctx is not None else trial_prefix
+    prefix = frame_ctx.trial_id if frame_ctx is not None else trial_id
     turns = _group_turns(transcript, _frame_references(transcript, prefix))
     _place_feedback(turns, operator_messages)
     rendered = (
@@ -988,13 +997,11 @@ def _render_transcript(
     transcript: object,
     frame_ctx: _FrameContext | None = None,
     *,
-    trial_prefix: str = "",
+    trial_id: str = "",
 ) -> str:
     """Render chat-shaped records conversationally and all others as bounded JSON."""
     if _is_chat_transcript(transcript):
-        return _render_chat_transcript(
-            cast(list[object], transcript), frame_ctx, trial_prefix=trial_prefix
-        )
+        return _render_chat_transcript(cast(list[object], transcript), frame_ctx, trial_id=trial_id)
     # Escaping happens on the dumped text below, so raw non-ASCII is safe and
     # far more readable than \uXXXX escapes.
     dumped = json.dumps(
@@ -1022,7 +1029,7 @@ def _trial_frame_context(
         return None
     return _FrameContext(
         frame_ctx.frames_dir,
-        _safe(f"{scene_id}-e{trial}"),
+        f"{scene_id}-e{trial}",
         frame_ctx.budget,
         rendered,
     )
@@ -1033,7 +1040,7 @@ def _document_frame_references(log: EvalLog) -> tuple[_FrameReference, ...]:
     references: list[_FrameReference] = []
     for scene in log.samples:
         for trial, transcript in enumerate(scene.policy_transcripts):
-            references.extend(_frame_references(transcript, _safe(f"{scene.scene_id}-e{trial}")))
+            references.extend(_frame_references(transcript, f"{scene.scene_id}-e{trial}"))
     return tuple(references)
 
 
@@ -1043,11 +1050,11 @@ def _prime_live_frame_cache(log: EvalLog, frame_ctx: _FrameContext) -> None:
     cache = cast(dict[tuple[str, str, int], str], budget.cache)
     attempted: set[tuple[str, str, int]] = set()
     for reference in reversed(_document_frame_references(log)):
-        key = (reference.trial_prefix, reference.camera, reference.step)
+        key = (reference.trial_id, reference.camera, reference.step)
         if key in attempted:
             continue
         attempted.add(key)
-        trial_ctx = _FrameContext(frame_ctx.frames_dir, reference.trial_prefix, budget)
+        trial_ctx = _FrameContext(frame_ctx.frames_dir, reference.trial_id, budget)
         array = _load_frame(trial_ctx, reference.camera, reference.step)
         if array is None:
             continue
@@ -1069,19 +1076,19 @@ def _render_trial_transcript(
     operator_messages: Sequence[dict[str, Any]],
 ) -> tuple[str, tuple[dict[str, Any], ...], list[tuple[str, int]]]:
     """Render one trial and return its residual feedback and embedded frame keys."""
-    trial_prefix = _safe(f"{scene_id}-e{trial}")
+    trial_id = f"{scene_id}-e{trial}"
     rendered_frames: list[tuple[str, int]] = []
     trial_ctx = _trial_frame_context(frame_ctx, scene_id, trial, rendered_frames)
     if _is_chat_transcript(transcript):
         document, residual = _render_chat_and_residual(
             cast(list[object], transcript),
             trial_ctx,
-            trial_prefix=trial_prefix,
+            trial_id=trial_id,
             operator_messages=operator_messages,
         )
         return document, residual, rendered_frames
     return (
-        _render_transcript(transcript, trial_ctx, trial_prefix=trial_prefix),
+        _render_transcript(transcript, trial_ctx, trial_id=trial_id),
         tuple(operator_messages),
         rendered_frames,
     )
@@ -1307,16 +1314,24 @@ def _render_trial_wire(
     )
 
 
-def _trial_camera_streams(frames_dir: Path, trial_prefix: str) -> dict[str, list[tuple[int, Path]]]:
+def _trial_camera_streams(frames_dir: Path, trial_id: str) -> dict[str, list[tuple[int, Path]]]:
     """Enumerate one trial's camera streams by stripping its known filename prefix."""
+    from inspect_robots.frames import _safe, _safe_legacy
+
     streams: dict[str, list[tuple[int, Path]]] = {}
-    marker = f"{trial_prefix}_"
-    for path in sorted(frames_dir.glob(f"{trial_prefix}_*.npy")):
-        remainder = path.name[len(marker) :]
-        match = _CAMERA_FRAME_RE.fullmatch(remainder)
-        if match is None:
-            continue
-        streams.setdefault(match.group(1), []).append((int(match.group(2)), path))
+
+    safe_trial = _safe(trial_id)
+    legacy_trial = _safe_legacy(trial_id)
+
+    for prefix in {safe_trial, legacy_trial}:
+        marker = f"{prefix}_"
+        for path in sorted(frames_dir.glob(f"{prefix}_*.npy")):
+            remainder = path.name[len(marker) :]
+            match = _CAMERA_FRAME_RE.fullmatch(remainder)
+            if match is None:
+                continue
+            streams.setdefault(match.group(1), []).append((int(match.group(2)), path))
+
     for frames in streams.values():
         frames.sort()
     return dict(sorted(streams.items()))
@@ -1332,7 +1347,7 @@ def _warn_video_degrade(context: _VideoContext, reason: str) -> None:
 
 def _render_trial_media(
     frames_dir: Path | None,
-    trial_prefix: str,
+    trial_id: str,
     rendered_frames: Sequence[tuple[str, int]],
     context: _VideoContext,
 ) -> str:
@@ -1340,10 +1355,13 @@ def _render_trial_media(
     flipbook: dict[str, list[int]] = {}
     for camera, step in rendered_frames:
         flipbook.setdefault(camera, []).append(step)
+    from inspect_robots.frames import _safe, _safe_legacy
+
     display_names = {_safe(camera): camera for camera in flipbook}
+    display_names.update({_safe_legacy(camera): camera for camera in flipbook})
 
     available_streams = (
-        _trial_camera_streams(frames_dir, trial_prefix)
+        _trial_camera_streams(frames_dir, trial_id)
         if context.enabled and frames_dir is not None
         else {}
     )
@@ -1372,7 +1390,7 @@ def _render_trial_media(
         ffmpeg = cast(str, context.ffmpeg)
         encoded = _encode_composite_mp4(ordered_streams, context.fps, ffmpeg)
         if encoded is None:
-            _warn_video_degrade(context, f"encode failed for {trial_prefix} composite")
+            _warn_video_degrade(context, f"encode failed for {_safe(trial_id)} composite")
         else:
             video, survivors, steps = encoded
             payload = base64.b64encode(video).decode("ascii")
@@ -1384,7 +1402,7 @@ def _render_trial_media(
                 camera_order = " · ".join(display_names.get(key, key) for key in survivors)
                 step_timeline = ",".join(str(step) for step in steps)
                 return (
-                    f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
+                    f'<div class="run-media" data-trial="{_escape(_safe(trial_id))}">'
                     '<div class="run-media-head">Run video'
                     '<button type="button" class="camera-tab" data-follow>Follow</button></div>'
                     f'<div class="camera-order">{_escape(camera_order)}</div>'
@@ -1404,11 +1422,11 @@ def _render_trial_media(
         if context.enabled and context.ffmpeg is None
         else None
     )
-    return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
+    return _render_flipbook_media(trial_id, flipbook, fallback_cameras, reason)
 
 
 def _render_flipbook_media(
-    trial_prefix: str,
+    trial_id: str,
     flipbook: Mapping[str, Sequence[int]],
     cameras: Sequence[str],
     reason: str | None,
@@ -1433,7 +1451,7 @@ def _render_flipbook_media(
     )
     reason_chip = "" if reason is None else f'<span class="chip">{_escape(reason)}</span>'
     return (
-        f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
+        f'<div class="run-media" data-trial="{_escape(_safe(trial_id))}">'
         f'<div class="run-media-head">Run video{reason_chip}</div>'
         f'<div class="camera-tabs">{tabs}</div>{bodies}</div>'
     )
@@ -1543,7 +1561,7 @@ def _scene_section(
             messages,
         )
         residual.extend((trial, message) for message in unplaced)
-        trial_prefix = _safe(f"{scene.scene_id}-e{trial}")
+        trial_prefix = f"{scene.scene_id}-e{trial}"
         media = _render_trial_media(frames_dir, trial_prefix, rendered_frames, video_context)
         transcript_blocks.append(
             f'<details class="transcript"{" open" if open_transcript else ""}>'
