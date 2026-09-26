@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from inspect_robots.approver import Approver
+from inspect_robots.approver import Approver, Perturber
 from inspect_robots.controller import _INFER_KEY, Controller
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
@@ -38,6 +38,7 @@ from inspect_robots.transcript import (
     inference_event,
     operator_event,
     operator_message_event,
+    perturbation_event,
     reset_event,
     step_event,
 )
@@ -219,12 +220,15 @@ def _non_finite_detail(data: object) -> str | None:
 
 
 def _store_frames(
-    frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
+    frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation, suffix: str = ""
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
     """If a frame store is configured, stream images to disk and strip them."""
     if frame_store is None or not obs.images:
         return obs, None
-    refs = {cam: frame_store.put(trial_id, t, cam, image) for cam, image in obs.images.items()}
+    refs = {
+        cam: frame_store.put(trial_id, t, f"{cam}{suffix}", image)
+        for cam, image in obs.images.items()
+    }
     return replace(obs, images={}), refs
 
 
@@ -245,6 +249,35 @@ def _end_operator_trial(operator_input: OperatorInput | None) -> None:
             )
 
 
+def _apply_perturber(
+    perturber: Perturber | None,
+    obs: Observation,
+    record: TrialRecord,
+    store: dict[str, Any],
+    t: int,
+) -> Observation:
+    """Apply the optional perturber and log an event when it modifies the observation.
+
+    Returns the (possibly modified) observation. If the perturber raises an
+    ``InspectRobotsError`` it propagates unchanged; any other exception is
+    wrapped in ``EmbodimentFault`` so a broken perturber is treated as a sensor
+    fault rather than a recoverable policy error.
+    """
+    if perturber is None:
+        return obs
+    try:
+        result = perturber.perturb(obs, store)
+        if result is not obs:
+            record.events.append(perturbation_event(t, type(perturber).__name__))
+        return result
+    except InspectRobotsError:
+        raise
+    except Exception as exc:
+        raise EmbodimentFault(
+            f"{type(perturber).__name__}.perturb() raised {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def rollout(
     policy: Policy,
     embodiment: Embodiment,
@@ -258,6 +291,7 @@ def rollout(
     sink: LogSink,
     frame_store: FrameStore | None = None,
     operator_input: OperatorInput | None = None,
+    perturber: Perturber | None = None,
 ) -> TrialRecord:
     """Run a single trial and return its record.
 
@@ -322,9 +356,20 @@ def rollout(
                     stacklevel=2,
                 )
 
-        obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
+        raw_obs = obs
+        try:
+            obs = _apply_perturber(perturber, obs, record, store, -1)
+        except InspectRobotsError as exc:
+            _record_failure(record, exc, -1)
+            raise
+
+        if obs is raw_obs:
+            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs)
+        else:
+            _, _ = _store_frames(frame_store, trial_id, 0, raw_obs)
+            obs_rec, refs = _store_frames(frame_store, trial_id, 0, obs, suffix="_perturbed")
         t = 0
-        while t < max_steps:
+        while True:
             poll = None
             if operator_input is not None and console_ok:
                 try:
@@ -513,12 +558,20 @@ def rollout(
                 record.truncated = True
                 record.termination_reason = stop_reason
                 break
-            obs = result.observation
-            obs_rec = result_obs_rec
-            refs = result_refs
-        else:
-            record.truncated = True
-            record.termination_reason = "max_steps"
+            if t >= max_steps:
+                record.truncated = True
+                record.termination_reason = "max_steps"
+                break
+            try:
+                obs = _apply_perturber(perturber, result.observation, record, store, t)
+            except InspectRobotsError as exc:
+                _record_failure(record, exc, t)
+                raise
+            if obs is result.observation:
+                obs_rec = result_obs_rec
+                refs = result_refs
+            else:
+                obs_rec, refs = _store_frames(frame_store, trial_id, t, obs, suffix="_perturbed")
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"

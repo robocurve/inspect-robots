@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.approver import Approver, AutoApprover, ClampApprover
+from inspect_robots.approver import Approver, AutoApprover, AutoPerturber, ClampApprover, Perturber
 from inspect_robots.controller import DefaultController
 from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort, _CancelledTrial
 from inspect_robots.frames import FrameStore
@@ -41,18 +41,21 @@ def _run(
     *,
     approver: Approver | None = None,
     frame_store: FrameStore | None = None,
+    perturber: Perturber | None = None,
+    max_steps: int = 40,
 ) -> TrialRecord:
     return rollout(
         policy,  # type: ignore[arg-type]
         embodiment,  # type: ignore[arg-type]
         _SCENE,
-        max_steps=40,
+        max_steps=max_steps,
         seed=0,
         epoch=0,
         controller=DefaultController(),
         approver=approver or AutoApprover(),
         sink=NullSink(),
         frame_store=frame_store,
+        perturber=perturber,
     )
 
 
@@ -914,6 +917,96 @@ def test_raising_server_url_property_does_not_mask_policy_failure() -> None:
     assert excinfo.value.record.error == "PolicyError: base connection failure"
 
 
+def test_auto_perturber_passes_observation_unchanged() -> None:
+    class _CaptureObsPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(name="capture", action_space=_BOX)
+            self.config = PolicyConfig()
+            self.seen: list[Observation] = []
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.seen.append(observation)
+            return ActionChunk(actions=[Action(data=np.zeros(2))], meta={"request_stop": True})
+
+    policy = _CaptureObsPolicy()
+    perturber = AutoPerturber()
+    record = _run(policy, CubePickEmbodiment(), perturber=perturber)
+    assert record.status == "success"
+    # AutoPerturber preserves identity, so no perturbation events are logged
+    assert not any(event.kind == "perturbation" for event in record.events)
+
+
+def test_perturber_modifying_observation_logs_perturbation_event() -> None:
+    class _InstructionPerturber:
+        def perturb(self, observation: Observation, store: dict[str, object]) -> Observation:
+            return replace(observation, instruction="modified instruction")
+
+    class _CaptureObsPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(name="capture", action_space=_BOX)
+            self.config = PolicyConfig()
+            self.seen: list[Observation] = []
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.seen.append(observation)
+            return ActionChunk(actions=[Action(data=np.zeros(2))], meta={"request_stop": True})
+
+    policy = _CaptureObsPolicy()
+    record = _run(policy, CubePickEmbodiment(), perturber=_InstructionPerturber())
+    assert record.status == "success"
+    assert policy.seen[0].instruction == "modified instruction"
+    pert_events = [e for e in record.events if e.kind == "perturbation"]
+    assert len(pert_events) >= 1
+    assert pert_events[0].data["perturber"] == "_InstructionPerturber"
+
+
+def test_perturber_raising_inspect_robots_error_propagates() -> None:
+    class _VetoPerturber:
+        def perturb(self, observation: Observation, store: dict[str, object]) -> Observation:
+            raise SafetyAbort("perturber aborted trial")
+
+    with pytest.raises(SafetyAbort, match="perturber aborted trial") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_VetoPerturber())
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.status == "error"
+
+
+def test_perturber_raising_generic_exception_wrapped_as_embodiment_fault() -> None:
+    class _FaultyPerturber:
+        def perturb(self, observation: Observation, store: dict[str, object]) -> Observation:
+            raise RuntimeError("sensor noise calculation blew up")
+
+    with pytest.raises(
+        EmbodimentFault, match=r"_FaultyPerturber\.perturb\(\) raised RuntimeError"
+    ) as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_FaultyPerturber())
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.status == "error"
+
+
+def test_perturber_raising_during_step_loop_propagates() -> None:
+    class _StepFailPerturber:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def perturb(self, observation: Observation, store: dict[str, object]) -> Observation:
+            self.calls += 1
+            if self.calls > 1:
+                raise SafetyAbort("perturber failed on step")
+            return observation
+
+    with pytest.raises(SafetyAbort, match="perturber failed on step") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), perturber=_StepFailPerturber())
+    assert excinfo.value.record is not None
+    assert excinfo.value.record.status == "error"
+
+
 @pytest.mark.parametrize("invalid_steps", [0, -1, True, False, 2.5, "10"])
 def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
     with pytest.raises(ValueError, match="max_steps must be an integer >= 1"):
@@ -928,3 +1021,60 @@ def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
             approver=AutoApprover(),
             sink=NullSink(),
         )
+
+
+def test_auto_perturber_after_exhausted_budget() -> None:
+    class _FailingPerturber:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def perturb(self, obs: Observation, store: dict[str, object]) -> Observation:
+            self.calls += 1
+            if self.calls > 1:
+                raise SafetyAbort("perturber failed on second call")
+            return obs
+
+    record = _run(
+        ScriptedPolicy(), CubePickEmbodiment(), perturber=_FailingPerturber(), max_steps=1
+    )
+    assert record.status == "success"
+    assert record.truncated is True
+    assert record.termination_reason == "max_steps"
+
+
+def test_multistep_recording_fidelity_with_and_without_framestore(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    class _ImagePerturber:
+        def perturb(self, obs: Observation, store: dict[str, object]) -> Observation:
+            new_images = {}
+            for cam, img in obs.images.items():
+                new_img = np.ones_like(img) * 128
+                new_images[cam] = new_img
+            return replace(obs, images=new_images)
+
+    policy = ScriptedPolicy()
+
+    # Without FrameStore
+    record1 = _run(policy, CubePickEmbodiment(), perturber=_ImagePerturber(), max_steps=2)
+    assert record1.status == "success"
+    assert record1.steps[0].observation.images["top"][0, 0, 0] == 128
+    assert record1.steps[0].result.observation.images["top"][0, 0, 0] == 0  # original is 0
+    assert record1.steps[1].observation.images["top"][0, 0, 0] == 128
+
+    # With FrameStore
+    frame_store = FrameStore(str(tmp_path / "frames"))
+    record2 = _run(
+        policy,
+        CubePickEmbodiment(),
+        perturber=_ImagePerturber(),
+        max_steps=2,
+        frame_store=frame_store,
+    )
+    assert record2.status == "success"
+    assert not record2.steps[0].observation.images
+    assert record2.steps[0].image_refs is not None
+    assert "_perturbed" in record2.steps[0].image_refs["top"].path
+    assert not record2.steps[0].result.observation.images
+    assert record2.steps[0].result_image_refs is not None
+    assert "_perturbed" not in record2.steps[0].result_image_refs["top"].path
