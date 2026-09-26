@@ -187,7 +187,10 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
     lines.extend(["", "## Transcript stats"])
     for scene in log.samples:
         for epoch in range(len(scene.epochs)):
-            transcript = transcript_by_key[(scene.scene_id, epoch)]
+            transcript = transcript_by_key.get(
+                (scene.scene_id, epoch),
+                TrialTranscript(scene.scene_id, epoch, None, "none"),
+            )
             if transcript.source == "none":
                 lines.append(
                     f"- `{scene.scene_id}` epoch {epoch}: no transcript recorded; "

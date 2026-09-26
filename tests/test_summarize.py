@@ -242,6 +242,7 @@ def test_digest_handles_old_parallel_fields_and_defensive_transcript_values() ->
         error=None,
         operator_judgements=(),
         operator_notes=(),
+        operator_messages=((({"text": "try again"}),),),
         trial_metadata=({},),
         termination_reasons=(),
         policy_transcripts=(
@@ -280,6 +281,20 @@ def test_digest_handles_old_parallel_fields_and_defensive_transcript_values() ->
     assert "- Model:" not in digest
     assert "outcome: no reason recorded" in digest
     assert "4 messages; 3 tool calls; last assistant note: none" in digest
+
+
+def test_digest_handles_missing_transcripts_gracefully() -> None:
+    log = _eval_log()
+    # Pass empty transcripts list, verifying that build_digest does not KeyError.
+    digest = build_digest(log, [])
+    assert (
+        "- `scene-a` epoch 0: no transcript recorded; "
+        "0 messages; 0 tool calls; last assistant note: none"
+    ) in digest
+    assert (
+        "- `scene-b` epoch 1: no transcript recorded; "
+        "0 messages; 0 tool calls; last assistant note: none"
+    ) in digest
 
 
 def test_build_messages_fixes_headings_and_keeps_truncated_tail() -> None:
