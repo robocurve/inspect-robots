@@ -27,6 +27,7 @@ from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
+from inspect_robots.registry import policy as policy_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
@@ -689,6 +690,16 @@ class _ClosableEmbodiment(CubePickEmbodiment):
 
 embodiment_decorator("closable-cubepick")(_ClosableEmbodiment)
 
+_POLICY_CLOSED: list[str] = []
+
+
+class _ClosablePolicy(ScriptedPolicy):
+    def close(self) -> None:
+        _POLICY_CLOSED.append("closed")
+
+
+policy_decorator("closable-policy")(_ClosablePolicy)
+
 
 def test_eval_binds_adaptive_policy_before_compat(tmp_path: Path) -> None:
     """A bind() hook runs after resolution and before compat (plan 0008 §3c).
@@ -1008,6 +1019,182 @@ def test_eval_closes_resolved_embodiment_even_on_failure(tmp_path: Path) -> None
     with pytest.raises(CompatibilityError):
         eval(_task(), _WidePolicy(), "closable-cubepick", log_dir=str(tmp_path))
     assert _CLOSED == ["closed"]  # released even though the run failed fast
+
+
+def test_eval_closes_string_resolved_policy(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    eval(_task(max_steps=5), "closable-policy", CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == ["closed"]
+
+
+def test_eval_does_not_close_caller_owned_policy(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    eval(_task(max_steps=5), _ClosablePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == []  # caller owns the object's lifecycle
+
+
+def test_eval_closes_resolved_policy_even_on_failure(tmp_path: Path) -> None:
+    _POLICY_CLOSED.clear()
+    from inspect_robots.embodiment import EmbodimentInfo
+    from inspect_robots.errors import CompatibilityError
+
+    class _IncompatibleEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = EmbodimentInfo(
+                name="incompatible",
+                action_space=Box(
+                    shape=(7,), semantics=ActionSemantics("eef_delta_pos", frame="world")
+                ),
+                observation_space=ObservationSpace(),
+            )
+
+    with pytest.raises(CompatibilityError):
+        eval(_task(), "closable-policy", _IncompatibleEmbodiment(), log_dir=str(tmp_path))
+    assert _POLICY_CLOSED == ["closed"]  # released even though the run failed fast
+
+
+@pytest.mark.parametrize("kind", ["policy", "embodiment", "both"])
+@pytest.mark.parametrize(
+    ("stop_type", "message"),
+    [
+        (SafetyAbort, "unsafe"),
+        (EmbodimentFault, "robot fault"),
+        (KeyboardInterrupt, "operator stop"),
+    ],
+)
+def test_eval_set_preserves_escaping_stop_when_owned_resource_close_fails(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_type: type[BaseException],
+    message: str,
+) -> None:
+    """An owned resource cleanup failure must not turn a set-stopping signal into a task error."""
+    from inspect_robots import registry as reg
+
+    stop = stop_type(message)
+    policy_close_calls = 0
+    embodiment_close_calls = 0
+
+    class _StopPolicy(ScriptedPolicy):
+        def close(self) -> None:
+            nonlocal policy_close_calls
+            policy_close_calls += 1
+            raise RuntimeError("policy close failed")
+
+    class _StopEmbodiment(CubePickEmbodiment):
+        def close(self) -> None:
+            nonlocal embodiment_close_calls
+            embodiment_close_calls += 1
+            raise RuntimeError("embodiment close failed")
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], "stop-policy", _StopPolicy)
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "stop-embodiment", _StopEmbodiment)
+
+    task_runs: list[str] = []
+
+    def hook(record: TrialRecord, scene: Scene) -> None:
+        task_runs.append(scene.id)
+        raise stop
+
+    task1 = _task(max_steps=1)
+    task2 = _task(max_steps=1)
+
+    policy_arg = "stop-policy" if kind in ("policy", "both") else ScriptedPolicy()
+    embodiment_arg = "stop-embodiment" if kind in ("embodiment", "both") else CubePickEmbodiment()
+
+    with (
+        pytest.warns(RuntimeWarning, match=f"preserving {stop_type.__name__}"),
+        pytest.raises(stop_type, match=message) as exc_info,
+    ):
+        eval_set(
+            [task1, task2],
+            policy_arg,
+            embodiment_arg,
+            log_dir=str(tmp_path),
+            before_scoring=hook,
+        )
+
+    if kind in ("policy", "both"):
+        assert policy_close_calls == 1
+    if kind in ("embodiment", "both"):
+        assert embodiment_close_calls == 1
+    assert exc_info.value is stop
+    assert len(task_runs) == 1  # task2 never started
+
+
+def test_eval_closes_both_embodiment_and_policy_even_if_first_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots import registry as reg
+
+    closed: list[str] = []
+
+    class _FailingEmbodiment(CubePickEmbodiment):
+        def close(self) -> None:
+            closed.append("embodiment")
+            raise RuntimeError("embodiment close failed")
+
+    class _TrackingPolicy(ScriptedPolicy):
+        def close(self) -> None:
+            closed.append("policy")
+
+    monkeypatch.setitem(reg._FACTORIES["embodiment"], "failing-embodiment", _FailingEmbodiment)
+    monkeypatch.setitem(reg._FACTORIES["policy"], "tracking-policy", _TrackingPolicy)
+
+    with pytest.raises(RuntimeError, match="embodiment close failed"):
+        eval(_task(max_steps=1), "tracking-policy", "failing-embodiment", log_dir=str(tmp_path))
+
+    assert closed == ["embodiment", "policy"]
+
+
+def test_eval_keeps_cleanup_precedence_for_ordinary_failure_with_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The narrow stop-signal rule must not change ordinary exception cleanup."""
+    from inspect_robots import registry as reg
+
+    class _FailingClosePolicy(ScriptedPolicy):
+        def close(self) -> None:
+            raise RuntimeError("policy disconnect failed")
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], "failing-close-policy", _FailingClosePolicy)
+
+    def hook(record: TrialRecord, scene: Scene) -> None:
+        raise ValueError("ordinary error")
+
+    with pytest.raises(RuntimeError, match="policy disconnect failed"):
+        eval(
+            _task(max_steps=1),
+            "failing-close-policy",
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            before_scoring=hook,
+        )
+
+
+def test_eval_handles_non_callable_policy_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots import registry as reg
+
+    class _NonCallableClosePolicy(ScriptedPolicy):
+        close = "not_a_function"
+
+    monkeypatch.setitem(
+        reg._FACTORIES["policy"], "non-callable-close-policy", _NonCallableClosePolicy
+    )
+    (log,) = eval(
+        _task(max_steps=1),
+        "non-callable-close-policy",
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
 
 
 # --------------------------------------------------------------------------- #
@@ -1657,6 +1844,46 @@ def test_hookless_policy_yields_all_none_transcripts(tmp_path: Path) -> None:
 
     (log,) = eval(_task(epochs=2), _HooklessPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert log.samples[0].policy_transcripts == (None, None)
+
+
+def test_eval_set_preserves_stop_raised_during_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_robots import registry as reg
+
+    policy_close_calls = 0
+
+    class _StopDuringCleanupEmbodiment(CubePickEmbodiment):
+        def close(self) -> None:
+            raise KeyboardInterrupt("stop during embodiment close")
+
+    class _FailingPolicy(ScriptedPolicy):
+        def close(self) -> None:
+            nonlocal policy_close_calls
+            policy_close_calls += 1
+            raise RuntimeError("policy close failed")
+
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"], "stop-during-cleanup", _StopDuringCleanupEmbodiment
+    )
+    monkeypatch.setitem(reg._FACTORIES["policy"], "failing-policy", _FailingPolicy)
+
+    task1 = _task(max_steps=1)
+    task2 = _task(max_steps=1)
+
+    with (
+        pytest.warns(RuntimeWarning, match="preserving KeyboardInterrupt"),
+        pytest.raises(KeyboardInterrupt, match="stop during embodiment close"),
+    ):
+        eval_set(
+            [task1, task2],
+            "failing-policy",
+            "stop-during-cleanup",
+            log_dir=str(tmp_path),
+        )
+
+    assert policy_close_calls == 1
 
 
 def test_policy_bind_task_hook_receives_task_envelope(tmp_path: Path) -> None:

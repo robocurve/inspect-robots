@@ -113,6 +113,27 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _close_preserving_stop_signal(
+    name: str,
+    close_fn: Callable[[], Any],
+    stop: BaseException,
+) -> None:
+    """Close an owned resource without replacing an escaping stop signal."""
+    try:
+        close_fn()
+    except Exception as exc:
+        # Warning filters owned by the caller must not turn this diagnostic into
+        # another exception that masks the safety or cancellation signal.
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.warn(
+                f"{name}.close() raised {type(exc).__name__}: {exc} while handling "
+                f"{type(stop).__name__}; preserving {type(stop).__name__}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+
 def _write_action_log(
     record: TrialRecord,
     log_dir: str,
@@ -291,10 +312,13 @@ def eval(
 
     ``task``/``policy``/``embodiment`` may be objects or **registry names**
     (e.g. ``policy="scripted"``), resolved through the registry — the Inspect-style
-    ergonomic that keeps logs and the CLI reproducible. An embodiment resolved
+    ergonomic that keeps logs and the CLI reproducible. An embodiment or policy resolved
     from a registry name is owned by ``eval()`` and is closed when the run
-    finishes (even on a halt); a caller-constructed embodiment object stays
-    open — the caller owns its lifecycle.
+    finishes (even on a halt); caller-constructed objects stay open — the caller owns
+    their lifecycle. If owned cleanup fails while a ``SafetyAbort``, ``EmbodimentFault``,
+    or ``KeyboardInterrupt`` is escaping, a ``RuntimeWarning`` reports the cleanup failure
+    and the original stop signal retains precedence. Cleanup failures after other outcomes
+    retain their existing propagation behavior.
 
     ``seed=None`` draws a fresh seed from the OS and records it in the log, so
     an "unseeded" run remains reproducible after the fact (and is distinct from
@@ -369,6 +393,7 @@ def eval(
 
     before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     owns_embodiment = isinstance(embodiment, str)
+    owns_policy = isinstance(policy, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
     embodiment = (
@@ -376,32 +401,53 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    stop_signal: BaseException | None = None
     try:
-        return _run_eval(
-            task,
-            policy,
-            embodiment,
-            log_dir=log_dir,
-            sinks=sinks,
-            seed=seed,
-            fail_on_error=fail_on_error,
-            controller=controller,
-            approver=approver,
-            remap=remap,
-            store_frames=store_frames,
-            store_actions=store_actions,
-            operator_input=operator_input,
-            before_scoring=before_scoring,
-            grader_identity=_grader_identity(resolved_grader),
-            environment_id=environment_id,
-            environment_revision=environment_revision,
-            policy_checkpoint=policy_checkpoint,
-        )
+        try:
+            return _run_eval(
+                task,
+                policy,
+                embodiment,
+                log_dir=log_dir,
+                sinks=sinks,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+                store_actions=store_actions,
+                operator_input=operator_input,
+                before_scoring=before_scoring,
+                grader_identity=_grader_identity(resolved_grader),
+                environment_id=environment_id,
+                environment_revision=environment_revision,
+                policy_checkpoint=policy_checkpoint,
+            )
+        except (SafetyAbort, EmbodimentFault, KeyboardInterrupt) as exc:
+            stop_signal = exc
+            raise
     finally:
-        # Close what we opened: a registry-resolved embodiment is released even
-        # when the run halts, so a real robot never leaks its connection.
-        if owns_embodiment:
-            embodiment.close()
+        # Close what we opened: a registry-resolved embodiment and policy are released
+        # even when the run halts, so a real robot or policy connection is never leaked.
+        try:
+            if owns_embodiment:
+                if stop_signal is None:
+                    embodiment.close()
+                else:
+                    _close_preserving_stop_signal("embodiment", embodiment.close, stop_signal)
+        except BaseException as exc:
+            if isinstance(exc, (SafetyAbort, EmbodimentFault, KeyboardInterrupt)):
+                stop_signal = exc
+            raise
+        finally:
+            if owns_policy:
+                close_policy = getattr(policy, "close", None)
+                if callable(close_policy):
+                    if stop_signal is None:
+                        close_policy()
+                    else:
+                        _close_preserving_stop_signal("policy", close_policy, stop_signal)
 
 
 def _run_eval(
@@ -921,9 +967,10 @@ def eval_set(
     task. Only grading configuration errors raised before the task loop
     propagate.
 
-    With a string embodiment, a non-safety exception from ``close()`` can
+    With a string embodiment or policy, a non-safety exception from ``close()`` can
     produce an error row even when that task's completed JSON log is already
-    on disk.
+    on disk. If cleanup also fails while an escaping safety or cancellation
+    signal is active, the stop signal retains precedence and still propagates.
 
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 

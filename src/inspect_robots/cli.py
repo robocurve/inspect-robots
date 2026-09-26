@@ -1663,6 +1663,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     speaker_sink: LogSink | None = None
     live_sink: LiveLogSink | None = None
     rerun_sink: LogSink | None = None
+    stop_signal: BaseException | None = None
     try:
         if is_auto:
             import inspect_robots.taskgen
@@ -1797,7 +1798,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 operator_input=operator_input,
                 grader=grader,
             )
-        except KeyboardInterrupt:
+        except BaseException as exc:
+            stop_signal = exc
+            if not isinstance(exc, KeyboardInterrupt):
+                raise
             if sink.path is not None and sink.path.exists():
                 _print_degraded(f"cancelled: partial log written to {sink.path}")
                 print(_styled(f"hint: inspect it with: inspect-robots inspect {sink.path}", _DIM))
@@ -1823,10 +1827,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 try:
                     _close_voice_input(voice_input)
                 finally:
+                    from inspect_robots.eval import _close_preserving_stop_signal
+
                     try:
-                        embodiment.close()
+                        if stop_signal is None:
+                            embodiment.close()
+                        else:
+                            _close_preserving_stop_signal(
+                                "embodiment", embodiment.close, stop_signal
+                            )
                     finally:
-                        resolved.claim.release()
+                        try:
+                            close_policy = getattr(resolved.policy, "close", None)
+                            if callable(close_policy):
+                                if stop_signal is None:
+                                    close_policy()
+                                else:
+                                    _close_preserving_stop_signal(
+                                        "policy", close_policy, stop_signal
+                                    )
+                        finally:
+                            resolved.claim.release()
     log = logs[0]
     _print_run_summary(log, str(sink.path), is_adhoc)
     resolved_recording_path = getattr(rerun_sink, "resolved_recording_path", None)
@@ -1894,6 +1915,7 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     embodiment = resolved.embodiment
     voice_input: OperatorInput | None = None
     live_sink: LiveLogSink | None = None
+    stop_signal: BaseException | None = None
     try:
         _announce_components(resolved)
         print(f"tasks: {', '.join(task_names)}")
@@ -1938,7 +1960,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 operator_input=operator_input,
                 grader=grader,
             )
-        except KeyboardInterrupt:
+        except BaseException as exc:
+            stop_signal = exc
+            if not isinstance(exc, KeyboardInterrupt):
+                raise
             # eval_set writes one log per task; eval() persists a cancelled log
             # for the interrupted task before re-raising (#118). We don't hold
             # the per-task sink paths, so point at the shared dir. The finally
@@ -1971,10 +1996,23 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
             try:
                 _close_voice_input(voice_input)
             finally:
+                from inspect_robots.eval import _close_preserving_stop_signal
+
                 try:
-                    embodiment.close()
+                    if stop_signal is None:
+                        embodiment.close()
+                    else:
+                        _close_preserving_stop_signal("embodiment", embodiment.close, stop_signal)
                 finally:
-                    resolved.claim.release()
+                    try:
+                        close_policy = getattr(resolved.policy, "close", None)
+                        if callable(close_policy):
+                            if stop_signal is None:
+                                close_policy()
+                            else:
+                                _close_preserving_stop_signal("policy", close_policy, stop_signal)
+                    finally:
+                        resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
     return 0 if success else 1
 
