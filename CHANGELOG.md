@@ -53,6 +53,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** Normalize NumPy integer and Boolean metadata scalars in JSON eval
+  logs to prevent `TypeError` serialization crashes on eval completion
+  ([#492](https://github.com/robocurve/inspect-robots/issues/492)).
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 

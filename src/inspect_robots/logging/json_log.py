@@ -46,12 +46,17 @@ def _slug(name: str) -> str:
 
 
 def _sanitize(obj: object) -> object:
-    """Recursively map non-finite floats to ``None`` (JSON ``null``).
+    """Recursively map non-finite floats to ``None`` (JSON ``null``) and normalize NumPy scalars.
 
     ``json.dump`` would happily emit the non-standard ``Infinity``/``NaN``
-    literals for them (``default=`` never fires for floats), which RFC 8259
-    parsers reject.
+    literals for floats (``default=`` never fires for floats), which RFC 8259
+    parsers reject. NumPy integer and Boolean scalars are coerced to standard Python
+    ``int`` and ``bool`` types so that strict JSON serializers accept them.
     """
+    if isinstance(obj, (bool, np.bool_)):
+        return bool(obj)
+    if isinstance(obj, (int, np.integer)):
+        return int(obj)
     if isinstance(obj, (float, np.floating)):
         val = float(obj)
         return val if math.isfinite(val) else None
