@@ -2675,9 +2675,14 @@ def _cmd_video(args: argparse.Namespace) -> int:
         fps, fps_source = default_fps(log.eval.embodiment_info)
 
     if args.ffmpeg is not None:
-        if not (os.path.isfile(args.ffmpeg) and os.access(args.ffmpeg, os.X_OK)):
+        resolved: str | None = None
+        if os.path.isfile(args.ffmpeg) and os.access(args.ffmpeg, os.X_OK):
+            resolved = args.ffmpeg
+        elif os.path.dirname(args.ffmpeg) == "":
+            resolved = shutil.which(args.ffmpeg)
+        if resolved is None:
             raise SystemExit(f"--ffmpeg {args.ffmpeg} is not an executable file")
-        ffmpeg = args.ffmpeg
+        ffmpeg = resolved
     else:
         which = shutil.which("ffmpeg")
         if which is None:

@@ -53,6 +53,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **CLI:** `inspect-robots video --ffmpeg` now accepts executable binary names
+  discoverable on `PATH` (such as `ffmpeg` or `ffmpeg-7.1`) in addition to
+  direct file paths, resolving them via `shutil.which` rather than rejecting them
+  as non-existent local files ([#505](https://github.com/robocurve/inspect-robots/issues/505)).
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 

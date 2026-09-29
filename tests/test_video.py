@@ -842,6 +842,13 @@ def test_video_ffmpeg_path_validation(
     (proc,) = _FakePopen.calls
     assert proc.argv[0] == str(stub)
 
+    # Executable names on PATH are resolved via shutil.which
+    _FakePopen.calls.clear()
+    monkeypatch.setattr(shutil, "which", lambda cmd: str(stub) if cmd == "my-ffmpeg" else None)
+    assert main(["video", str(log_path), "--ffmpeg", "my-ffmpeg"]) == 0
+    (proc_path,) = _FakePopen.calls
+    assert proc_path.argv[0] == str(stub)
+
 
 def test_video_missing_ffmpeg_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     frames_root = tmp_path / "frames"
