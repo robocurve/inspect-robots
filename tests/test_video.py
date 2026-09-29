@@ -449,13 +449,40 @@ def test_encode_broken_pipe_at_close_is_caught(
 def test_encode_interrupt_mid_pipe_propagates_without_temp_leak(
     tmp_path: Path, fake_popen: type[_FakePopen]
 ) -> None:
-    # Ctrl-C during a multi-thousand-frame encode must not leave the stderr
-    # temp file behind: unlink-on-every-path includes escaping exceptions.
+    # Ctrl-C during a multi-thousand-frame encode must kill the child, close
+    # stdin, wait, unlink partial output, and remove the stderr temp file.
     fake_popen.fail_on_write_after = 0
     fake_popen.write_exception = KeyboardInterrupt
     frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    out = tmp_path / "s.mp4"
+    out.write_bytes(b"partial")
     with pytest.raises(KeyboardInterrupt):
-        encode_stream(frames, tmp_path / "s.mp4", 10.0, "/fake/ffmpeg")
+        encode_stream(frames, out, 10.0, "/fake/ffmpeg")
+    (proc,) = fake_popen.calls
+    assert proc.killed
+    assert proc.stdin_closed_at_wait is True
+    assert proc.out_exists_at_wait is True
+    assert not out.exists()
+    assert _no_temp_leak(tmp_path)
+
+
+def test_encode_escaping_exception_cleans_process_and_output(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    # An unexpected runtime error (MemoryError, generator fault) must also
+    # uphold kill -> wait -> unlink before re-raising.
+    fake_popen.fail_on_write_after = 0
+    fake_popen.write_exception = MemoryError
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+    out = tmp_path / "s.mp4"
+    out.write_bytes(b"partial")
+    with pytest.raises(MemoryError):
+        encode_stream(frames, out, 10.0, "/fake/ffmpeg")
+    (proc,) = fake_popen.calls
+    assert proc.killed
+    assert proc.stdin_closed_at_wait is True
+    assert proc.out_exists_at_wait is True
+    assert not out.exists()
     assert _no_temp_leak(tmp_path)
 
 

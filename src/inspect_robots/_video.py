@@ -322,6 +322,14 @@ def _encode_arrays(
         except OSError:
             broken_pipe = True
         returncode = proc.wait()
+    except BaseException:
+        proc.kill()
+        try:
+            stdin.close()
+        finally:
+            proc.wait()
+            out_path.unlink(missing_ok=True)
+        raise
     finally:
         # Also reached when an unanticipated exception escapes (Ctrl-C
         # mid-pipe, MemoryError): the temp file is unlinked on every path.
