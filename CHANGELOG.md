@@ -53,6 +53,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **CLI:** Live-view tip no longer prints an unreachable bracketed IPv6 URL when
+  the SSH tunnel's server address is an IPv6 address. The suggested serve command
+  binds `0.0.0.0` (IPv4-only), so IPv6 SSH server addresses now fall back to
+  `socket.gethostname()` — the same fallback used for malformed `SSH_CONNECTION`
+  values — while IPv4 sessions continue using the SSH server address unchanged
+  ([#501](https://github.com/robocurve/inspect-robots/issues/501)).
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 

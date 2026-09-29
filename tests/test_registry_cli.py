@@ -327,18 +327,35 @@ def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
     assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --open" in local
     assert "; open http://" not in local
 
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
     cli._announce_live_view(
         args,
         resolved,
-        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+        {
+            "SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22",
+            "DISPLAY": ":0",
+        },
     )
     remote = capsys.readouterr().out
     assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
-    assert "open http://[2001:db8::10]:8300/" in remote
+    # The serve command binds 0.0.0.0 (IPv4-only), so an IPv6 SSH server
+    # address falls back to socket.gethostname() rather than producing an
+    # unreachable bracketed IPv6 URL.
+    assert "open http://[2001:db8::10]:8300/" not in remote
+    assert "2001:db8::10" not in remote
+    assert "open http://robot-host:8300/" in remote
 
-    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
     cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
     assert "open http://robot-host:8300/" in capsys.readouterr().out
+
+    # IPv4 SSH sessions still use the server's IP directly (no colon, no fallback needed).
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "10.0.0.1 50123 192.168.1.10 22"},
+    )
+    ipv4 = capsys.readouterr().out
+    assert "open http://192.168.1.10:8300/" in ipv4
 
 
 @pytest.mark.parametrize("command", ["run", "eval-set"])

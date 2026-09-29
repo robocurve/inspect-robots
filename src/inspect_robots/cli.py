@@ -1570,9 +1570,14 @@ def _announce_live_view(
     url = ""
     if headless:
         fields = env.get("SSH_CONNECTION", "").split()
-        host = fields[2] if len(fields) == 4 else socket.gethostname()
-        if ":" in host and not (host.startswith("[") and host.endswith("]")):
-            host = f"[{host}]"
+        # fields[2] is the server-side IP of the SSH connection. Use it only
+        # when it is an IPv4 address: the suggested serve command binds
+        # 0.0.0.0 (IPv4-only), so an IPv6 server address would produce a URL
+        # that no client can reach.  Fall back to socket.gethostname() for
+        # IPv6 addresses (contain ":") and for malformed SSH_CONNECTION values,
+        # matching the existing fallback for the malformed-input case.
+        raw_host = fields[2] if len(fields) == 4 else ""
+        host = socket.gethostname() if not raw_host or ":" in raw_host else raw_host
         url = f"; open http://{host}:8300/"
     print(
         _styled(
