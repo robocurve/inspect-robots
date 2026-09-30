@@ -134,28 +134,30 @@ describe('budget ledger in the Workers runtime', () => {
     vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
     const ledger = env.LEDGER.getByName(crypto.randomUUID());
     for (let i = 0; i < 40; i++) expect(await ledger.reserve(`baseline-${i}`, `r-${i}`, 1000 + i, 5_000_000)).toBe(true);
-    for (const pr of [475, 476, 512]) {
+    for (const pr of [475, 476, 512, 513]) {
       expect(await ledger.remaining(`${pr}-${head}`, pr)).toBe(0);
       expect(await ledger.reserve(`expired-${pr}`, `${pr}-${head}`, pr, 1)).toBe(false);
     }
   });
-  it('limits PR 512 to five additional dollars across all revisions and reruns', async () => {
+  it('transfers the unused PR 512 allowance to PR 513 without exceeding five dollars', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-09-30T04:00:00Z'));
+    vi.setSystemTime(new Date('2026-09-30T14:00:00Z'));
     const ledger = env.LEDGER.getByName(crypto.randomUUID());
     for (let i = 0; i < 40; i++) expect(await ledger.reserve(`baseline-${i}`, `r-${i}`, 1000 + i, 5_000_000)).toBe(true);
     expect(await ledger.reserve('prior-475', `475-${head}`, 475, 5_000_000)).toBe(true);
     expect(await ledger.reserve('prior-476', `476-${head}`, 476, 5_000_000)).toBe(true);
-    for (const pr of [475, 476, 511, 513]) expect(await ledger.reserve(`unapproved-${pr}`, `${pr}-${base}`, pr, 1)).toBe(false);
-    expect(await ledger.remaining(`512-${head}`, 512)).toBe(5_000_000);
-    expect(await ledger.reserve('first-512', `512-${head}`, 512, 2_000_000)).toBe(true);
-    expect(await ledger.reserve('rerun-512', `512-${head}`, 512, 1_000_000)).toBe(true);
+    for (const pr of [475, 476, 511, 514]) expect(await ledger.reserve(`unapproved-${pr}`, `${pr}-${base}`, pr, 1)).toBe(false);
+    expect(await ledger.reserve('spent-512', `512-${head}`, 512, 1_069_280)).toBe(true);
+    expect(await ledger.reserve('closed-512', `512-${base}`, 512, 1)).toBe(false);
+    expect(await ledger.remaining(`513-${head}`, 513)).toBe(3_930_720);
+    expect(await ledger.reserve('first-513', `513-${head}`, 513, 2_000_000)).toBe(true);
+    expect(await ledger.reserve('rerun-513', `513-${head}`, 513, 1_000_000)).toBe(true);
     await evictDurableObject(ledger);
-    expect(await ledger.remaining(`512-${base}`, 512)).toBe(2_000_000);
-    expect(await ledger.reserve('revision-512', `512-${base}`, 512, 2_000_000)).toBe(true);
-    expect(await ledger.reserve('overflow-512', `512-${base}`, 512, 1)).toBe(false);
+    expect(await ledger.remaining(`513-${base}`, 513)).toBe(930_720);
+    expect(await ledger.reserve('revision-513', `513-${base}`, 513, 930_720)).toBe(true);
+    expect(await ledger.reserve('overflow-513', `513-${base}`, 513, 1)).toBe(false);
     vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
-    expect(await ledger.reserve('lifetime-512', `512-${base}`, 512, 1)).toBe(false);
+    for (const pr of [512, 513]) expect(await ledger.reserve(`lifetime-${pr}`, `${pr}-${base}`, pr, 1)).toBe(false);
   });
   it('limits the authorized trial exception to its exact PR head and preserves the PR ceiling', async () => {
     const ledger = env.LEDGER.getByName(crypto.randomUUID());

@@ -9,9 +9,9 @@ export const MODEL = 'gpt-6-astra';
 export const SHA = /^[a-f0-9]{40}$/;
 export const LIMITS = { review: 5_000_000, pr: 15_000_000, month: 200_000_000, warn: 160_000_000 };
 export function monthlyReviewLimit(pr: number, month: string): number {
-  // Jay authorized $5 extra for PR 512 on 2026-09-30 (UTC). Its deployment
-  // PR cap is $5 across all heads/reruns; other PRs cannot use this allowance.
-  if (month === '2026-09' && pr === 512) return LIMITS.month + 15_000_000;
+  // Jay authorized $5 extra on 2026-09-30 (UTC), then transferred the unused
+  // $3.93072 from PR 512 to release PR 513. Deployment PR caps total $5.
+  if (month === '2026-09' && (pr === 512 || pr === 513)) return LIMITS.month + 15_000_000;
   // Jay authorized $10 extra on 2026-09-24 to finish PRs 475 and 476.
   // Both share one monthly total; this is not $10 per PR and expires in October.
   return LIMITS.month + (month === '2026-09' && (pr === 475 || pr === 476) ? 10_000_000 : 0);

@@ -167,8 +167,10 @@ per-PR limits remain unchanged. All existing charges count toward the shared
 total, and the exception expires automatically in October.
 
 On September 30, 2026 (UTC), Jay authorized up to $5 additional review budget
-for PR #512. In September only, that PR may draw on a $215 monthly ceiling;
-its deployment-only PR lifetime cap is $5 across all revisions and reruns.
+for PR #512, then authorized transferring its unused $3.93072 to release
+PR #513. In September only, those PRs may draw on a $215 monthly ceiling.
+Their deployment-only lifetime caps are $1.06928 for #512 (already spent)
+and $3.93072 for #513, totaling the original $5 across all revisions and reruns.
 PRs #475 and #476 retain their $210 ceiling, and all other PRs retain $200.
 Existing charges remain intact, and the monthly exception expires in October.
 
