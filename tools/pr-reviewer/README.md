@@ -166,6 +166,12 @@ shared $210 monthly ceiling. Other PRs retain the $200 ceiling; per-head and
 per-PR limits remain unchanged. All existing charges count toward the shared
 total, and the exception expires automatically in October.
 
+On September 30, 2026 (UTC), Jay authorized up to $5 additional review budget
+for PR #512. In September only, that PR may draw on a $215 monthly ceiling;
+its deployment-only PR lifetime cap is $5 across all revisions and reruns.
+PRs #475 and #476 retain their $210 ceiling, and all other PRs retain $200.
+Existing charges remain intact, and the monthly exception expires in October.
+
 Reservations are atomic across the deployment and recorded before submission.
 Input is counted using OpenAI's token-count endpoint, limited to 200,000 tokens,
 and reserved at $13/M plus a small token margin. This conservatively covers the
