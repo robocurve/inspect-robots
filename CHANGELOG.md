@@ -9,10 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- **Agent plugin:** Accept `-P service_tier=ultrafast` on the Responses wire
+- **Agent plugin (0.28.0):** Accept `-P service_tier=ultrafast` on the Responses wire
   for OpenAI Ultrafast mode, with a mock-embodiment example for API testing.
 
-- **Agent plugin:** Support `service_tier` on the Responses wire, including
+- **Agent plugin (0.28.0):** Support `service_tier` on the Responses wire, including
   `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
 
 - **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
@@ -21,7 +21,7 @@ All notable changes to this project are documented here. The format is based on
 - **Agent plugin (0.27.0):** Surface environment step budget in system prompt and
   per-observation step count ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
 
-- **Agent plugin (0.27.0):** Configure LLM retry attempts and backoff from the
+- **Agent plugin (0.28.0):** Configure LLM retry attempts and backoff from the
   policy, honor provider `Retry-After` delays on HTTP wires, and record the
   effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
 
