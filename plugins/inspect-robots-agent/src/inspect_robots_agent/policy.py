@@ -101,7 +101,7 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
     | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
 )
 _SPEEDS = frozenset({"fast"})
-_SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast"})
+_SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
