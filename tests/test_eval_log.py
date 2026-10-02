@@ -110,6 +110,8 @@ def test_eval_log_round_trips_through_dict() -> None:
     restored = EvalLog.from_dict(log.to_dict())
     assert restored.to_dict() == log.to_dict()
     assert restored.results.metrics["success_at_end"] == 1.0
+    assert restored.source_logs == ()
+    assert restored.samples[0].errored_trials == 0
 
 
 def test_results_without_errored_trials_reads_with_default() -> None:
@@ -118,6 +120,13 @@ def test_results_without_errored_trials_reads_with_default() -> None:
     data["results"].pop("errored_trials", None)
     log = EvalLog.from_dict(data)
     assert log.results.errored_trials == 0
+
+
+def test_legacy_log_without_halt_flag_reads_with_default() -> None:
+    """Older logs remain readable when they have no structured halt signal."""
+    data = _golden_log().to_dict()
+    data.pop("halted", None)
+    assert EvalLog.from_dict(data).halted is False
 
 
 def test_golden_log_reads_back(tmp_path: Path) -> None:
@@ -173,7 +182,11 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     del data["eval"]["max_seconds"]
     del data["eval"]["grader"]
     del data["eval"]["grader_config"]
+    data.pop("source_logs", None)
     for sample in data["samples"]:
+        sample.pop("frames_dir", None)
+        sample.pop("errored_trials", None)
+        sample.pop("retryable_error", None)
         del sample["instruction"]
         del sample["scene_metadata"]
         del sample["operator_judgements"]
@@ -200,6 +213,10 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.eval.max_seconds is None
     assert restored.eval.grader is None
     assert restored.eval.grader_config == {}
+    assert restored.source_logs == ()
+    assert restored.samples[0].frames_dir is None
+    assert restored.samples[0].errored_trials == 0
+    assert restored.samples[0].retryable_error is False
 
 
 def test_evalspec_positional_order_of_legacy_fields_is_preserved() -> None:

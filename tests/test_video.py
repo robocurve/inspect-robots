@@ -953,3 +953,112 @@ def test_run_summary_video_hint_gated_on_frames_existing(
     empty_root.mkdir()
     cli._print_run_summary(_frames_log(str(empty_root)), str(tmp_path / "run.json"), is_adhoc=True)
     assert "hint: render videos" not in capsys.readouterr().out
+
+
+def test_video_resumed_log_uses_selected_scene_attempt_roots(
+    tmp_path: Path,
+    fake_popen: type[_FakePopen],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Aggregate export reads only selected trials across distinct attempt roots."""
+    from dataclasses import replace
+
+    _which_fake(monkeypatch)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first_image = _rgb(1)
+    second_image = _rgb(2)
+    _write_frames(first, "scene-0-e0_left_cam", [first_image])
+    _write_frames(second, "scene-1-e0_right_cam", [second_image])
+    _write_frames(second, "unselected-e0_top_cam", [_rgb(3)])
+    base = _frames_log(None)
+    scenes = (
+        replace(base.samples[0], scene_id="scene-0", frames_dir=str(first)),
+        replace(base.samples[0], scene_id="scene-1", frames_dir=str(second)),
+    )
+    log_path = _write_log(tmp_path, replace(base, samples=scenes))
+
+    assert main(["video", str(log_path)]) == 0
+
+    output = capsys.readouterr().out
+    assert "wrote 2/2 streams" in output
+    assert len(fake_popen.calls) == 2
+    piped = [bytes(call.stdin.piped) for call in fake_popen.calls]
+    assert first_image.tobytes() in piped
+    assert second_image.tobytes() in piped
+    assert not (second / "unselected-e0_top_cam.mp4").exists()
+
+
+def test_video_resumed_log_handles_shared_root_and_scene_without_frames(
+    tmp_path: Path,
+    fake_popen: type[_FakePopen],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A shared attempt is scanned once while scenes without frames are skipped."""
+    from dataclasses import replace
+
+    _which_fake(monkeypatch)
+    root = tmp_path / "frames"
+    _write_frames(root, "scene-0-e0_left_cam", [_rgb(1)])
+    _write_frames(root, "scene-1-e0_right_cam", [_rgb(2)])
+    base = _frames_log(None)
+    log = replace(
+        base,
+        samples=(
+            replace(base.samples[0], scene_id="scene-0", frames_dir=str(root)),
+            replace(base.samples[0], scene_id="scene-1", frames_dir=str(root)),
+            replace(base.samples[0], scene_id="scene-2", frames_dir=None),
+        ),
+    )
+    path = _write_log(tmp_path, log)
+
+    assert main(["video", str(path)]) == 0
+    assert "wrote 2/2 streams" in capsys.readouterr().out
+    assert len(fake_popen.calls) == 2
+
+
+def test_video_resumed_log_rejects_missing_scene_root(tmp_path: Path) -> None:
+    """A selected attempt whose sidecars disappeared must fail visibly."""
+    from dataclasses import replace
+
+    base = _frames_log(None)
+    log = replace(base, samples=(replace(base.samples[0], frames_dir="missing-root"),))
+    path = _write_log(tmp_path, log)
+    with pytest.raises(SystemExit, match="frames directory not found"):
+        main(["video", str(path)])
+
+
+def test_video_resumed_log_rejects_no_selected_streams(tmp_path: Path) -> None:
+    """Unrelated frames in an attempt root cannot masquerade as selected media."""
+    from dataclasses import replace
+
+    root = tmp_path / "frames"
+    _write_frames(root, "other-e0_top", [_rgb(1)])
+    base = _frames_log(None)
+    log = replace(base, samples=(replace(base.samples[0], frames_dir=str(root)),))
+    path = _write_log(tmp_path, log)
+    with pytest.raises(SystemExit, match="no frames found in selected scenes"):
+        main(["video", str(path)])
+
+
+def test_video_single_attempt_scene_root_keeps_legacy_output_directory(
+    tmp_path: Path,
+    fake_popen: type[_FakePopen],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A scene-local root equal to the log root is still a normal single run."""
+    from dataclasses import replace
+
+    _which_fake(monkeypatch)
+    root = tmp_path / "frames"
+    _write_frames(root, "s0-e0_top", [_rgb(1)])
+    base = _frames_log(str(root))
+    log = replace(base, samples=(replace(base.samples[0], frames_dir=str(root)),))
+    path = _write_log(tmp_path, log)
+
+    assert main(["video", str(path)]) == 0
+    assert f"wrote {root / 's0-e0_top.mp4'}" in capsys.readouterr().out
+    assert len(fake_popen.calls) == 1

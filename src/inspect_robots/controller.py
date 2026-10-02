@@ -23,13 +23,26 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
+from inspect_robots.errors import InspectRobotsError
 from inspect_robots.policy import Policy
 from inspect_robots.spaces import Box
-from inspect_robots.types import Action, Observation
+from inspect_robots.types import Action, ActionChunk, Observation
 
 _BUFFER_KEY = "_controller_action_buffer"
 # Each entry is (inference_latency_s | None, chunk_len): one per policy.act() call.
 _INFER_KEY = "_controller_inferences"
+
+
+def _policy_act(policy: Policy, observation: Observation) -> ActionChunk:
+    """Identify failures raised by policy inference, not controller scheduling."""
+    try:
+        return policy.act(observation)
+    except InspectRobotsError:
+        raise
+    except Exception as exc:
+        from inspect_robots.rollout import _policy_error
+
+        raise _policy_error(policy, exc) from exc
 
 
 @runtime_checkable
@@ -57,7 +70,7 @@ class DefaultController:
         """Reuse buffered chunk actions until the configured replanning boundary."""
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
         if not buffer:
-            chunk = policy.act(observation)
+            chunk = _policy_act(policy, observation)
             take = self.replan_interval or len(chunk)
             taken = list(chunk.actions)[:take]
             buffer.extend(taken)
@@ -162,7 +175,7 @@ class EnsemblingController:
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
         """Query once for step ``t`` and blend every retained prediction for that step."""
-        chunk = policy.act(observation)
+        chunk = _policy_act(policy, observation)
         if not chunk.actions:
             from inspect_robots.errors import PolicyError
 

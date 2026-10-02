@@ -8,6 +8,7 @@ still reaches disk.
 
 from __future__ import annotations
 
+import errno
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -107,6 +108,153 @@ def test_inf_metric_written_as_null(tmp_path: Path) -> None:
     metrics = results["metrics"]
     assert isinstance(metrics, dict)
     assert metrics["min_distance_to_goal"] is None  # inf → null at the JSON boundary
+
+
+@pytest.mark.parametrize("unsupported_links", [False, True])
+def test_json_sink_never_overwrites_a_colliding_log_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsupported_links: bool
+) -> None:
+    """A reused random suffix cannot replace an earlier immutable attempt log."""
+    from types import SimpleNamespace
+
+    from inspect_robots.logging.json_log import JsonLogSink
+
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "inspect_robots.logging.json_log.uuid.uuid4",
+        lambda: SimpleNamespace(hex="a" * 32),
+    )
+    sink = JsonLogSink(str(tmp_path))
+    sink.on_eval_end(log)
+    assert sink.path is not None
+    saved_path = sink.path
+    saved_path.write_text("previous immutable log")
+
+    if unsupported_links:
+
+        def no_links(source: object, destination: object) -> None:
+            del source, destination
+            raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+        monkeypatch.setattr("inspect_robots.logging.json_log.os.link", no_links)
+    with pytest.raises(FileExistsError):
+        sink.on_eval_end(log)
+    assert saved_path.read_text() == "previous immutable log"
+    assert vars(sink)["path"] is None
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("error_code", [errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM, errno.EINVAL])
+def test_eval_publishes_json_when_hard_links_are_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: int
+) -> None:
+    """A completed evaluation still publishes a readable log on portable filesystems."""
+
+    def no_links(source: object, destination: object) -> None:
+        del source, destination
+        raise OSError(error_code, "hard links unsupported")
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", no_links)
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    (path,) = tmp_path.glob("*.json")
+    assert read_eval_log(str(path)).to_dict() == log.to_dict()
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob("*.lock"))
+
+
+def test_portable_json_publication_excludes_a_concurrent_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two writers selecting one name cannot replace each other's completed log."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from types import SimpleNamespace
+
+    from inspect_robots.logging.json_log import JsonLogSink
+
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "inspect_robots.logging.json_log.uuid.uuid4",
+        lambda: SimpleNamespace(hex="c" * 32),
+    )
+    entered = Event()
+    release = Event()
+
+    def no_links(source: object, destination: object) -> None:
+        del source, destination
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        raise OSError(errno.EOPNOTSUPP, "hard links unsupported")
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", no_links)
+    first = JsonLogSink(str(tmp_path))
+    second = JsonLogSink(str(tmp_path))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(first.on_eval_end, log)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(FileExistsError):
+                second.on_eval_end(replace(log, status="error", error="second writer"))
+        finally:
+            release.set()
+        pending.result()
+
+    assert first.path is not None
+    assert read_eval_log(str(first.path)).status == "success"
+    assert second.path is None
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob("*.lock"))
+
+
+@pytest.mark.parametrize("failure_stage", ["link", "replace"])
+def test_json_publication_disk_error_cleans_owned_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    """Real publication failures propagate without exposing partial JSON or stale claims."""
+    from inspect_robots.logging.json_log import JsonLogSink
+
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path / "seed"))
+
+    def failed_link(source: object, destination: object) -> None:
+        del source, destination
+        code = errno.EIO if failure_stage == "link" else errno.EOPNOTSUPP
+        raise OSError(code, "link failure")
+
+    def failed_replace(source: object, destination: object) -> None:
+        del source, destination
+        raise OSError(errno.EIO, "replacement failure")
+
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.link", failed_link)
+    monkeypatch.setattr("inspect_robots.logging.json_log.os.replace", failed_replace)
+    log_dir = tmp_path / "failure"
+    sink = JsonLogSink(str(log_dir))
+    with pytest.raises(OSError) as error:
+        sink.on_eval_end(log)
+    assert error.value.errno == errno.EIO
+    assert sink.path is None
+    assert list(log_dir.iterdir()) == []
+
+
+def test_json_sink_preserves_another_writers_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temp-name collision cannot unlink a different writer's pending log."""
+    from types import SimpleNamespace
+
+    from inspect_robots.logging.json_log import JsonLogSink
+
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "inspect_robots.logging.json_log.uuid.uuid4",
+        lambda: SimpleNamespace(hex="b" * 32),
+    )
+    pending = tmp_path / f"strict-json_{'b' * 32}.json.tmp"
+    pending.write_text("another writer's pending log")
+    sink = JsonLogSink(str(tmp_path))
+    sink.on_eval_end(log)
+    assert pending.read_text() == "another writer's pending log"
+    assert sink.path is not None and sink.path.exists()
 
 
 def test_nan_action_halts_as_safety_abort_and_log_reaches_disk(tmp_path: Path) -> None:

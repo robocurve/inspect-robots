@@ -490,11 +490,77 @@ still run. A `SafetyAbort` or `EmbodimentFault` that escapes `eval()` (raised
 outside a trial) and `KeyboardInterrupt` still propagate. A halt inside a
 trial ends that task with an error log and the set continues to the next task.
 
-`--retry-attempts` is accepted and threaded through to `eval_set()`, whose
-resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
-today does not yet skip already-finished scenes. `--rerun`'s live viewer
-is not offered for `eval-set`: streaming several back-to-back tasks into one
-viewer window is a separate design question from running the set at all.
+Use an explicit checkpoint path to resume a long evaluation set:
+
+```bash
+inspect-robots eval-set 'kitchenbench/*' --policy xpolicylab \
+  -P url=ws://host:19000 --embodiment yam_arms \
+  --log-dir logs/kitchenbench --checkpoint checkpoints/kitchenbench.json \
+  --retry-attempts 2
+```
+
+The first call creates the checkpoint. Repeating the command with the same
+path reuses scenes whose saved status is `success` and whose planned epochs
+all finished. A score of zero still counts as completed work. The CLI reports
+how many scenes it reused and attempted. Keep the checkpoint outside the log
+directory so `inspect-robots view LOG_DIR` sees only evaluation logs.
+
+`--retry-attempts N` permits up to N additional attempts for each scene during
+the current call, with or without a checkpoint. Automatic retries apply only
+to `PolicyError(retryable=True)`, including recognized policy connection and
+timeout failures through the built-in controllers. Controller scheduling
+failures are not retried. Each retry starts that scene at epoch zero
+with the same seed. Ordinary policy errors, malformed actions, scorer errors,
+safety aborts, embodiment faults, and Ctrl-C do not trigger an automatic
+retry. A safety abort or embodiment fault also stops retries of earlier
+recoverable failures in that task, including halts raised by policy lifecycle
+or operator-input hooks. A later explicit call with the same
+checkpoint attempts any unfinished scene, including one that was not eligible
+for automatic retry.
+
+The checkpoint marks an attempt in flight before it starts and clears the mark
+when its log is saved. If a crash or grading-hook error leaves the mark set,
+the current call stops before scheduling later tasks, and the next invocation
+stops before resetting the robot. Inspect the robot and attempt files, then
+start a new checkpoint after reconciling that run.
+
+The checkpoint contains paths to immutable attempt logs. The returned and
+saved aggregate log lists them in `source_logs` and selects one result per
+scene. Its `halted` flag records whether the latest attempt stopped for safety,
+a hardware fault, or cancellation. Metrics with non-finite or saved `null`
+scene scores are omitted from the aggregate. The checkpoint matches task
+declarations, scorer settings, effective controller and approver configuration,
+published policy and embodiment descriptions (including their spaces and
+capabilities), seed,
+`log_dir`, scoring and artifact options, and the CLI's resolved constructor
+arguments and guardrail settings. Constructor arguments and caller supplied
+`checkpoint_inputs` are recorded as a digest, not as raw values. For API
+calls, pass `checkpoint_inputs={"rig_revision": "..."}` to include settings
+that the framework cannot inspect. Keep external model weights, policy
+servers, and rig calibration consistent across calls. A changed model or
+hardware state outside the recorded inputs cannot be detected automatically.
+Custom scorers that are not dataclasses must provide a JSON-serializable
+`checkpoint_identity()` method to identify stable settings. Dataclass scorers
+use their fields by default.
+
+Built-in controllers and approvers include their effective settings in the
+checkpoint identity, including nested controllers and ordered approver chains.
+Custom implementations and subclasses must provide a JSON-serializable
+`checkpoint_identity()` hook declaring their behavior revision and configuration.
+These settings are stored as digests. Calls without a checkpoint do not require
+this hook.
+
+In checkpointed API calls, custom `before_scoring` callbacks must provide a
+JSON-serializable `checkpoint_identity()` hook on the callable or its bound
+method's owner. Include the callback's behavior revision and all hidden grading
+settings. The checkpoint compares the callback's module, qualified name, and
+declared settings digest before reusing scores. Calls without a checkpoint do
+not require this hook.
+
+Only one process can write a checkpoint at a time. If a process dies and
+leaves the sibling `.lock` file, verify that it has stopped before removing
+the lock. A hard kill before an attempt log is written cannot automatically
+recover that in-progress attempt. `--rerun` remains a `run`-only option.
 
 ## `inspect-robots doctor`
 
@@ -664,7 +730,10 @@ wrote 2/2 streams
 Encoding is done by the `ffmpeg` binary (no Python dependencies are added);
 install it from your package manager, or point at a specific build with
 `--ffmpeg PATH`. Videos land in the frames directory by default (`--out DIR`
-overrides). The playback rate defaults to the log's `control_hz` and can be
+overrides). For a resumed aggregate whose scenes came from different
+attempts, videos land under `LOG_DIR/videos/LOG_STEM/` by default. The
+command reads only the selected scene trials from their recorded frame
+roots. The playback rate defaults to the log's `control_hz` and can be
 overridden with `--fps N`. A stream that fails to encode is reported on
 stderr and the remaining streams still encode; the exit code is 1 if any
 stream failed.

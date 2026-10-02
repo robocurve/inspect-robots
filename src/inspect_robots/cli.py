@@ -404,8 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-attempts",
         type=int,
         default=0,
-        help="passed through to eval_set(); resumption of a partial run is "
-        "accepted but not yet honored",
+        help="additional attempts per scene for marked transient policy failures",
+    )
+    p_eval_set.add_argument(
+        "--checkpoint",
+        metavar="PATH",
+        help="create or resume this evaluation-set checkpoint",
     )
 
     p_inspect = sub.add_parser("inspect", help="print a saved eval log")
@@ -1418,6 +1422,8 @@ class _ResolvedComponents(NamedTuple):
     embodiment_name: str
     embodiment_source: str
     claim: DeviceClaim
+    policy_kwargs: dict[str, Any] | None = None
+    embodiment_kwargs: dict[str, Any] | None = None
 
 
 def _check_shared_run_conflicts(args: argparse.Namespace) -> None:
@@ -1502,7 +1508,15 @@ def _resolve_components(args: argparse.Namespace, defaults: Defaults) -> _Resolv
         claim.release()
         raise
     return _ResolvedComponents(
-        policy, policy_name, policy_source, embodiment, embodiment_name, embodiment_source, claim
+        policy,
+        policy_name,
+        policy_source,
+        embodiment,
+        embodiment_name,
+        embodiment_source,
+        claim,
+        policy_kvs,
+        embodiment_kvs,
     )
 
 
@@ -1870,6 +1884,16 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
     print(_styled(f"hint: browse all logs: inspect-robots view {log_dir}", _DIM))
 
 
+def _checkpoint_attempt_count(path: Path) -> int:
+    """Count already-published attempt entries for CLI progress reporting."""
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))["attempts"]
+        return len(entries) if isinstance(entries, list) else 0
+    except (OSError, ValueError, KeyError, TypeError):
+        # eval_set() performs authoritative validation before touching a robot.
+        return 0
+
+
 def _cmd_eval_set(args: argparse.Namespace) -> int:
     """Resolve one policy/embodiment once, then drive every matched task through it.
 
@@ -1883,6 +1907,8 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
     from inspect_robots.logging import JsonLogSink, LiveLogSink
 
     _check_shared_run_conflicts(args)
+    if args.retry_attempts < 0:
+        raise SystemExit("--retry-attempts must be >= 0")
     task_names = _match_tasks(args.tasks)
 
     defaults = load_defaults(os.environ)
@@ -1921,6 +1947,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         if not args.no_live_log:
             live_sink = LiveLogSink(args.log_dir)
             sinks.append(live_sink)
+        prior_attempts = (
+            _checkpoint_attempt_count(Path(args.checkpoint)) if args.checkpoint is not None else 0
+        )
         try:
             success, logs = eval_set(
                 tasks,
@@ -1935,6 +1964,22 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
                 retry_attempts=args.retry_attempts,
+                checkpoint_path=args.checkpoint,
+                checkpoint_inputs=(
+                    {
+                        "policy_name": resolved.policy_name,
+                        "policy_kwargs": resolved.policy_kwargs,
+                        "embodiment_name": resolved.embodiment_name,
+                        "embodiment_kwargs": resolved.embodiment_kwargs,
+                        "guardrails_disabled": args.disable_guardrails,
+                        "max_action_delta": args.max_action_delta,
+                        "grader_kwargs": _parse_kvs(args.grader_args),
+                        "sim": args.sim,
+                        "no_prompt": args.no_prompt,
+                    }
+                    if args.checkpoint is not None
+                    else None
+                ),
                 operator_input=operator_input,
                 grader=grader,
             )
@@ -1976,6 +2021,24 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 finally:
                     resolved.claim.release()
     _print_eval_set_summary(success, logs, args.log_dir)
+    if args.checkpoint is not None:
+        checkpoint = Path(args.checkpoint)
+        entries = json.loads(checkpoint.read_text(encoding="utf-8"))["attempts"]
+        attempted = {
+            (entry["task_index"], scene_id)
+            for entry in entries[prior_attempts:]
+            for scene_id in entry["scene_ids"]
+        }
+        reused = sum(
+            1
+            for index, log in enumerate(logs)
+            for sample in log.samples
+            if sample.status == "success"
+            and len(sample.epochs) == tasks[index].epoch_spec.count
+            and (index, sample.scene_id) not in attempted
+        )
+        print(f"{_styled('checkpoint:', _CYAN)} {_styled(args.checkpoint, _DIM)}")
+        print(f"scenes reused: {reused}  scenes attempted: {len(attempted)}")
     return 0 if success else 1
 
 
@@ -2114,6 +2177,7 @@ def _render_log_page(
         refresh_seconds=refresh_seconds,
         no_video=no_video,
         serve_pass=serve_pass,
+        include_scene_frames=not no_frames,
     )
     if atomic and out_path is not None:
         return _write_html_atomic(document, out_path)
@@ -2647,25 +2711,57 @@ def _cmd_video(args: argparse.Namespace) -> int:
         frames_dir_candidates,
         resolve_frames_dir,
     )
+    from inspect_robots.frames import _safe
 
     log = read_eval_log(args.log)
     frames_dir = log.stats.frames_dir
-    if frames_dir is None:
+    scene_sources = any(
+        scene.frames_dir is not None and scene.frames_dir != frames_dir for scene in log.samples
+    )
+    if frames_dir is None and not scene_sources:
         raise SystemExit("this log has no stored frames (re-run with --store-frames)")
     log_path = Path(args.log)
-    root = resolve_frames_dir(frames_dir, log_path)
-    if root is None:
-        as_is, fallback = frames_dir_candidates(frames_dir, log_path)
-        raise SystemExit(f"frames directory not found; tried {as_is} and {fallback}")
-
-    streams, strays = discover_streams(root)
+    if scene_sources:
+        streams: dict[str, list[tuple[int, Path]]] = {}
+        strays: list[Path] = []
+        scanned: dict[Path, dict[str, list[tuple[int, Path]]]] = {}
+        for scene in log.samples:
+            source = scene.frames_dir or frames_dir
+            if source is None:
+                continue
+            root = resolve_frames_dir(source, log_path)
+            if root is None:
+                as_is, fallback = frames_dir_candidates(source, log_path)
+                raise SystemExit(f"frames directory not found; tried {as_is} and {fallback}")
+            if root not in scanned:
+                discovered, skipped = discover_streams(root)
+                scanned[root] = discovered
+                strays.extend(skipped)
+            for epoch in range(len(scene.epochs)):
+                marker = f"{_safe(f'{scene.scene_id}-e{epoch}')}_"
+                streams.update(
+                    (prefix, frames)
+                    for prefix, frames in scanned[root].items()
+                    if prefix.startswith(marker)
+                )
+        default_out = log_path.parent / "videos" / log_path.stem
+        empty_source = "selected scenes"
+    else:
+        assert frames_dir is not None
+        root = resolve_frames_dir(frames_dir, log_path)
+        if root is None:
+            as_is, fallback = frames_dir_candidates(frames_dir, log_path)
+            raise SystemExit(f"frames directory not found; tried {as_is} and {fallback}")
+        streams, strays = discover_streams(root)
+        default_out = root
+        empty_source = str(root)
     for stray in strays:
         print(
             f"warning: skipping {stray.name}: does not match the frame filename pattern",
             file=sys.stderr,
         )
     if not streams:
-        raise SystemExit(f"no frames found in {root}")
+        raise SystemExit(f"no frames found in {empty_source}")
 
     if args.fps is not None:
         if not (math.isfinite(args.fps) and args.fps > 0):
@@ -2687,7 +2783,7 @@ def _cmd_video(args: argparse.Namespace) -> int:
             )
         ffmpeg = which
 
-    out_dir = root if args.out is None else Path(args.out)
+    out_dir = default_out if args.out is None else Path(args.out)
     if out_dir.exists() and not out_dir.is_dir():
         raise SystemExit(f"--out {out_dir} exists and is not a directory")
     out_dir.mkdir(parents=True, exist_ok=True)

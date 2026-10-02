@@ -421,6 +421,7 @@ def test_wrong_dim_action_attributed_to_policy() -> None:
         _run(_WrongDimPolicy(), CubePickEmbodiment())
     rec = excinfo.value.record
     assert rec is not None and rec.status == "error"
+    assert excinfo.value.retryable is False
 
 
 class _BadDataPolicy(_WrongDimPolicy):
@@ -796,6 +797,7 @@ def test_policy_reset_connection_failure_records_neutral_hint() -> None:
         "a backend it depends on may be down or unreachable."
     )
     assert excinfo.value.record is not None
+    assert excinfo.value.retryable is True
 
 
 def test_named_connection_error_chain_records_url_and_remedy_hint() -> None:
@@ -804,6 +806,10 @@ def test_named_connection_error_chain_records_url_and_remedy_hint() -> None:
 
     class ConnectionError(Exception):
         pass
+
+    # Mimic an optional transport dependency without importing it in the core test.
+    NewConnectionError.__module__ = "urllib3.exceptions"
+    ConnectionError.__module__ = "urllib3.exceptions"
 
     class _ServerPolicy(_BoomPolicy):
         def __init__(self) -> None:
@@ -839,7 +845,33 @@ def test_non_connection_policy_failure_has_no_hint() -> None:
         _run(_ValueErrorPolicy(), CubePickEmbodiment())
 
     assert str(excinfo.value) == "bad response"
+    assert excinfo.value.retryable is False
     assert "hint:" not in str(excinfo.value)
+
+
+def test_policy_error_retry_marker_defaults_off_and_can_be_opted_in() -> None:
+    assert PolicyError("bad action").retryable is False
+    assert PolicyError("temporary", retryable=True).retryable is True
+
+
+def test_timeout_chain_is_retryable_without_connection_hint() -> None:
+    class MaxRetryError(Exception):
+        pass
+
+    exc = MaxRetryError("retries exhausted")
+    exc.__cause__ = TimeoutError("server was slow")
+    wrapped = _policy_error(_BoomPolicy(), exc)
+    assert wrapped.retryable is True
+    assert "hint:" not in str(wrapped)
+
+
+def test_unrelated_named_timeout_is_not_auto_retryable() -> None:
+    class ReadTimeout(Exception):
+        pass
+
+    assert _policy_error(_BoomPolicy(), ReadTimeout("unrelated timeout")).retryable is False
+    ReadTimeout.__module__ = "httpx._exceptions"
+    assert _policy_error(_BoomPolicy(), ReadTimeout("transport timeout")).retryable is True
 
 
 def test_connection_failure_context_cycle_terminates() -> None:

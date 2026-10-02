@@ -1599,6 +1599,7 @@ def render_html(
     no_video: bool = False,
     serve_pass: bool = False,
     video_budget_bytes: int = _VIDEO_BUDGET_BYTES,
+    include_scene_frames: bool = True,
 ) -> str:
     """Return one self-contained HTML document describing the complete evaluation log."""
     git = (
@@ -1660,15 +1661,35 @@ def render_html(
             limit for limit in (frames_budget_bytes, live_frames_budget_bytes) if limit != 0
         ]
         effective_budget = min(finite_limits) if finite_limits else 0
+    has_scene_override = include_scene_frames and any(
+        scene.frames_dir is not None and scene.frames_dir != log.stats.frames_dir
+        for scene in log.samples
+    )
     budget = _FrameBudget(
         limit=effective_budget,
-        cache={} if live_frames_budget_bytes is not None else None,
+        cache=({} if live_frames_budget_bytes is not None and not has_scene_override else None),
     )
     frame_ctx = None if frames_dir is None else _FrameContext(frames_dir, "", budget)
-    if frame_ctx is not None and live_frames_budget_bytes is not None:
+    if frame_ctx is not None and budget.cache is not None:
         _prime_live_frame_cache(log, frame_ctx)
+    if include_scene_frames and has_scene_override:
+        from inspect_robots._video import resolve_frames_dir
+
+        scene_roots = [
+            (
+                resolve_frames_dir(scene.frames_dir, log_path or Path("log.json"))
+                if scene.frames_dir is not None
+                else frames_dir
+            )
+            for scene in log.samples
+        ]
+    else:
+        scene_roots = [frames_dir for _ in log.samples]
     video_eligible = (
-        frame_ctx is not None and log.status != "started" and not serve_pass and not no_video
+        any(root is not None for root in scene_roots)
+        and log.status != "started"
+        and not serve_pass
+        and not no_video
     )
     ffmpeg = shutil.which("ffmpeg") if video_eligible else None
     if video_eligible:
@@ -1690,13 +1711,13 @@ def render_html(
             budget=budget,
             video_context=video_context,
             log_path=log_path,
-            frames_dir=frames_dir,
-            frame_ctx=frame_ctx,
+            frames_dir=scene_root,
+            frame_ctx=(None if scene_root is None else _FrameContext(scene_root, "", budget)),
             scores_pending=log.status == "started",
             wire_media_elided=wire_media_elided,
             log_started=log.status == "started",
         )
-        for scene in log.samples
+        for scene, scene_root in zip(log.samples, scene_roots, strict=True)
     )
     no_transcripts = (
         '<p class="none">no policy transcripts recorded</p>' if transcript_count == 0 else ""

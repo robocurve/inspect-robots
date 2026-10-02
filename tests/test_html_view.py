@@ -1054,6 +1054,11 @@ def test_live_frame_budget_allocates_newest_first_and_reuses_encoded_cache(
             ),
         )
     )
+    log = dataclasses.replace(
+        log,
+        stats=dataclasses.replace(log.stats, frames_dir=str(tmp_path)),
+        samples=(dataclasses.replace(log.samples[0], frames_dir=str(tmp_path)),),
+    )
     encode_calls: list[npt.NDArray[np.uint8]] = []
     encode = png_data_url
 
@@ -2076,3 +2081,36 @@ def test_wire_malformed_request_degrades_to_an_empty_call(tmp_path: Path) -> Non
     assert "Trial 0 Wire" in document
     assert "no new messages" in document
     assert "<dd>n/a</dd>" in document
+
+
+def test_resumed_log_renders_frames_from_each_selected_scene_root(tmp_path: Path) -> None:
+    """Each selected scene must embed the bytes from its own immutable attempt."""
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    red = np.full((2, 2, 3), [255, 0, 0], dtype=np.uint8)
+    green = np.full((2, 2, 3), [0, 255, 0], dtype=np.uint8)
+    np.save(first_root / "scene-0-e0_top_cam_000004.npy", red)
+    np.save(second_root / "scene-1-e0_top_cam_000004.npy", green)
+    base = _frame_log(_parts())
+    first = dataclasses.replace(base.samples[0], frames_dir=str(first_root))
+    second = dataclasses.replace(base.samples[0], scene_id="scene-1", frames_dir=str(second_root))
+    merged = dataclasses.replace(base, samples=(first, second))
+
+    document = render_html(
+        merged, title="resumed", log_path=tmp_path / "aggregate.json", no_video=True
+    )
+
+    assert document.count('<img class="frame"') == 2
+    assert png_data_url(red) in document
+    assert png_data_url(green) in document
+    assert "<h2>scene-0</h2>" in document
+    assert "<h2>scene-1</h2>" in document
+    hidden = render_html(
+        merged,
+        title="resumed",
+        log_path=tmp_path / "aggregate.json",
+        include_scene_frames=False,
+    )
+    assert '<img class="frame"' not in hidden

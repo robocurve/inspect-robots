@@ -9,6 +9,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Core and CLI:** `eval_set()` now supports explicit checkpoints and bounded
+  retries for marked transient policy failures. Completed scenes are reused
+  across invocations, while immutable attempt logs and per-scene frame sources
+  remain available for audit and media export. The CLI adds `--checkpoint`
+  and activates `--retry-attempts`. Safety and hardware halts stop automatic
+  task retries, and unsaved checkpoint attempts stop the set
+  ([#136](https://github.com/robocurve/inspect-robots/issues/136)).
+  Controller and approver settings participate in checkpoint matching; custom
+  middleware and grading callbacks declare their checkpoint identity. Policy
+  lifecycle and operator-input safety and hardware halts suppress retries. Final JSON
+  publication protects collisions on filesystems with or without hard links.
+
 - **Agent plugin (0.28.0):** Accept `-P service_tier=ultrafast` on the Responses wire
   for OpenAI Ultrafast mode, with a mock-embodiment example for API testing.
 

@@ -9,6 +9,7 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -16,8 +17,9 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -56,6 +58,7 @@ from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
+    from inspect_robots.logging.json_log import JsonLogSink
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
@@ -286,6 +289,7 @@ def eval(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    _policy_prebound: bool = False,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -396,6 +400,7 @@ def eval(
             environment_id=environment_id,
             environment_revision=environment_revision,
             policy_checkpoint=policy_checkpoint,
+            policy_prebound=_policy_prebound,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -424,6 +429,7 @@ def _run_eval(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    policy_prebound: bool = False,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -434,9 +440,10 @@ def _run_eval(
     # runs before the compatibility check so the policy can adopt the
     # embodiment's spaces. Duck-typed — bind is not part of the Policy
     # Protocol, so existing policies are untouched.
-    bind = getattr(policy, "bind", None)
-    if callable(bind):
-        bind(embodiment.info)
+    if not policy_prebound:
+        bind = getattr(policy, "bind", None)
+        if callable(bind):
+            bind(embodiment.info)
 
     # Fail fast on incompatible pairings before touching any hardware/sim.
     # This also validates the embodiment rate needed by a seconds-based task
@@ -545,6 +552,8 @@ def _run_eval(
         scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
+        scene_errored_trials = 0
+        scene_errors_retryable: list[bool] = []
 
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
@@ -560,6 +569,11 @@ def _run_eval(
                     error_count += 1
                     scene_status = "error"
                     scene_error = f"policy.on_trial_start failed: {exc}"
+                    scene_errors_retryable.append(False)
+                    if isinstance(exc, (SafetyAbort, EmbodimentFault)):
+                        halted = True
+                        status = "error"
+                        error = f"{type(exc).__name__}: {exc}"
                     record = TrialRecord(
                         scene_id=scene.id,
                         epoch=epoch,
@@ -587,6 +601,7 @@ def _run_eval(
                     error = str(exc)
                     scene_status = "cancelled"
                     scene_error = error
+                    scene_errors_retryable.append(False)
                     halted = True
                     cancelled_exc = exc
                     record = exc.record
@@ -597,12 +612,14 @@ def _run_eval(
                     error = f"{type(exc).__name__}: {exc}"
                     scene_status = "error"
                     scene_error = error
+                    scene_errors_retryable.append(False)
                     halted = True
                     record = exc.record
                 except PolicyError as exc:
                     error_count += 1
                     scene_status = "error"
                     scene_error = f"{type(exc).__name__}: {exc}"
+                    scene_errors_retryable.append(exc.retryable)
                     record = exc.record or TrialRecord(
                         scene_id=scene.id,
                         epoch=epoch,
@@ -622,6 +639,7 @@ def _run_eval(
                     epoch_dicts.append({})
                     if record.status == "error":
                         errored_trials += 1
+                        scene_errored_trials += 1
                     judgements.append(None)
                     judgement_sources.append(None)
                     notes.append(None)
@@ -674,6 +692,7 @@ def _run_eval(
                             # never crash the eval and lose the trials that ran.
                             detail = f"scorer {scorer.name!r} failed: {exc}"
                             scene_status = "error"
+                            scene_errors_retryable.append(False)
                             scene_error = (
                                 detail if scene_error is None else f"{scene_error}; {detail}"
                             )
@@ -704,10 +723,15 @@ def _run_eval(
                             # different thing entirely and is collected just above.
                             detail = f"policy.on_trial_end failed: {exc}"
                             scene_status = "error"
+                            scene_errors_retryable.append(False)
                             scene_error = (
                                 detail if scene_error is None else f"{scene_error}; {detail}"
                             )
-                            if status == "success":
+                            if isinstance(exc, (SafetyAbort, EmbodimentFault)):
+                                halted = True
+                                status = "error"
+                                error = f"{type(exc).__name__}: {exc}"
+                            elif status == "success":
                                 status = "error"
                                 error = detail
 
@@ -762,6 +786,7 @@ def _run_eval(
                 # error log — it must never crash the eval and lose the log.
                 detail = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
                 scene_status = "error"
+                scene_errors_retryable.append(False)
                 scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                 if status == "success":
                     status = "error"
@@ -783,6 +808,9 @@ def _run_eval(
                 termination_reasons=tuple(termination_reasons),
                 operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
+                frames_dir=str(frame_store.root) if frame_store is not None else None,
+                errored_trials=scene_errored_trials,
+                retryable_error=bool(scene_errors_retryable) and all(scene_errors_retryable),
             )
         )
         if stopped:
@@ -822,6 +850,7 @@ def _run_eval(
         stats=stats,
         samples=tuple(scene_results),
         error=error,
+        halted=halted,
     )
     bus.on_eval_end(log)
     if cancelled_exc is not None:
@@ -906,6 +935,8 @@ def eval_set(
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
     retry_attempts: int = 0,
+    checkpoint_path: str | None = None,
+    checkpoint_inputs: Mapping[str, object] | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
@@ -935,14 +966,56 @@ def eval_set(
     sink must reset its per-run state in ``on_eval_start`` and tolerate one
     complete lifecycle per task.
 
-    Resumption of a partially-completed run (skipping already-finished scenes via
-    a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
-    now so callers don't get retrofitted, but is not yet honored.
+    ``checkpoint_path`` saves immutable attempt logs and a single-writer manifest.
+    A later call with the same inputs reuses fully completed scenes. The optional
+    ``retry_attempts`` budget permits only explicitly retryable policy failures
+    to restart their scene during this invocation. Each retry begins at epoch zero.
+    ``checkpoint_inputs`` adds caller-specific, JSON-serializable settings to the
+    identity comparison. Its values are stored only as a SHA-256 digest.
+    Built-in controllers and approvers contribute their effective settings,
+    recursively for smoothing and approver chains. Custom implementations,
+    including subclasses, must declare a JSON ``checkpoint_identity()`` hook.
+    A custom ``before_scoring`` callback in checkpoint mode must declare a JSON
+    ``checkpoint_identity()`` hook on the callable or its bound-method owner.
+    Include its behavior revision and hidden grading settings in that identity.
+    An attempt without a saved log leaves the checkpoint in flight; a later
+    call fails before robot reset so the operator can reconcile the run.
+    That invocation stops immediately and returns only the task logs collected
+    so far, so a later task cannot clear the unresolved attempt's marker.
     """
     before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     if not task_list:
         raise ConfigError("eval_set() requires at least one task; got an empty sequence")
+    if (
+        not isinstance(retry_attempts, int)
+        or isinstance(retry_attempts, bool)
+        or retry_attempts < 0
+    ):
+        raise ConfigError(f"retry_attempts must be an integer >= 0, got {retry_attempts!r}")
+    if checkpoint_path is not None and not checkpoint_path:
+        raise ConfigError("checkpoint_path must be a nonempty path")
+    if retry_attempts or checkpoint_path is not None:
+        return _resumable_eval_set(
+            task_list,
+            policy,
+            embodiment,
+            log_dir=log_dir,
+            sinks=sinks,
+            seed=seed,
+            fail_on_error=fail_on_error,
+            controller=controller,
+            approver=approver,
+            remap=remap,
+            store_frames=store_frames,
+            store_actions=store_actions,
+            operator_input=operator_input,
+            before_scoring=before_scoring,
+            grader=resolved_grader,
+            retry_attempts=retry_attempts,
+            checkpoint_path=checkpoint_path,
+            checkpoint_inputs=checkpoint_inputs,
+        )
     logs: list[EvalLog] = []
     for task in task_list:
         try:
@@ -982,3 +1055,309 @@ def eval_set(
             )
     success = all(log.status == "success" for log in logs)
     return success, logs
+
+
+def _clear_json_sink_path(sink: JsonLogSink) -> None:
+    """Forget a prior attempt path before a reused sink starts another eval."""
+    sink.path = None
+
+
+def _checkpoint_inputs_digest(
+    inputs: Mapping[str, object] | None, *, name: str = "checkpoint_inputs"
+) -> str | None:
+    """Fingerprint external run settings without storing their raw values."""
+    if inputs is None:
+        return None
+    try:
+        encoded = json.dumps(dict(inputs), sort_keys=True, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(f"{name} must be JSON serializable: {exc}") from exc
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _instance_identity(value: object) -> str | None:
+    """Name an optional callback or component for checkpoint comparison."""
+    if value is None:
+        return None
+    cls = type(value)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _callback_identity(value: object) -> dict[str, object] | None:
+    """Require custom grading callbacks to declare hidden settings for reuse."""
+    if value is None:
+        return None
+    hook = getattr(value, "checkpoint_identity", None)
+    if not callable(hook):
+        owner = getattr(value, "__self__", None)
+        hook = getattr(owner, "checkpoint_identity", None)
+    if not callable(hook):
+        raise ConfigError(
+            "before_scoring needs a JSON checkpoint_identity() hook in checkpoint mode"
+        )
+    return {
+        "type": _instance_identity(value),
+        "module": getattr(value, "__module__", None),
+        "qualname": getattr(value, "__qualname__", None),
+        "config_sha256": _checkpoint_inputs_digest(
+            {"identity": hook()}, name="before_scoring checkpoint_identity()"
+        ),
+    }
+
+
+def _resumable_eval_set(
+    task_list: list[Task | str],
+    policy: Policy | str,
+    embodiment: Embodiment | str,
+    *,
+    log_dir: str,
+    sinks: list[LogSink] | None,
+    seed: int | None,
+    fail_on_error: bool | float,
+    controller: Controller | None,
+    approver: Approver | None,
+    remap: dict[str, str] | None,
+    store_frames: bool,
+    store_actions: bool,
+    operator_input: OperatorInput | None,
+    before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    grader: Grader | None,
+    retry_attempts: int,
+    checkpoint_path: str | None,
+    checkpoint_inputs: Mapping[str, object] | None,
+) -> tuple[bool, list[EvalLog]]:
+    """Run unfinished scene subsets and publish aggregates from durable attempts."""
+    from inspect_robots._eval_set_checkpoint import (
+        _checkpoint_seed,
+        _component_identity,
+        _identity,
+        _open_checkpoint,
+    )
+    from inspect_robots._eval_set_merge import _complete, _merge_task, _pending_scenes
+    from inspect_robots.log import read_eval_log
+    from inspect_robots.logging.json_log import JsonLogSink
+    from inspect_robots.registry import resolve
+
+    checkpoint = Path(checkpoint_path) if checkpoint_path is not None else None
+    if checkpoint is not None and (isinstance(policy, str) or isinstance(embodiment, str)):
+        # Resolve registry components even when every scene is already complete.
+        # Otherwise a changed factory could reuse scores without ever being opened.
+        try:
+            resolved_policy = (
+                cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
+            )
+            owns_embodiment = isinstance(embodiment, str)
+            resolved_embodiment = (
+                cast(Embodiment, resolve("embodiment", embodiment))
+                if isinstance(embodiment, str)
+                else embodiment
+            )
+        except (SafetyAbort, EmbodimentFault):
+            raise
+        except Exception as exc:
+            if checkpoint.exists():
+                raise ConfigError(f"checkpoint component could not resolve: {exc}") from exc
+            return False, [
+                _error_log_for(task, policy, embodiment, seed=seed, exc=exc) for task in task_list
+            ]
+        try:
+            return _resumable_eval_set(
+                task_list,
+                resolved_policy,
+                resolved_embodiment,
+                log_dir=log_dir,
+                sinks=sinks,
+                seed=seed,
+                fail_on_error=fail_on_error,
+                controller=controller,
+                approver=approver,
+                remap=remap,
+                store_frames=store_frames,
+                store_actions=store_actions,
+                operator_input=operator_input,
+                before_scoring=before_scoring,
+                grader=grader,
+                retry_attempts=retry_attempts,
+                checkpoint_path=checkpoint_path,
+                checkpoint_inputs=checkpoint_inputs,
+            )
+        finally:
+            if owns_embodiment:
+                resolved_embodiment.close()
+    if checkpoint is not None:
+        # Adaptive policies publish their actual spaces only after binding to
+        # the robot. Each attempt skips rebinding this already identified policy.
+        bind = getattr(policy, "bind", None)
+        if callable(bind):
+            bind(cast(Embodiment, embodiment).info)
+    if seed is None:
+        seed = _checkpoint_seed(checkpoint) if checkpoint is not None else None
+        if seed is None:
+            seed = int.from_bytes(os.urandom(4), "little")
+
+    resolved_tasks: list[Task | None] = []
+    resolution_errors: dict[int, Exception] = {}
+    for index, task in enumerate(task_list):
+        if isinstance(task, str):
+            try:
+                resolved_tasks.append(cast(Task, resolve("task", task)))
+            except Exception as exc:
+                if checkpoint is not None:
+                    raise ConfigError(f"checkpoint task {task!r} could not resolve: {exc}") from exc
+                resolved_tasks.append(None)
+                resolution_errors[index] = exc
+        else:
+            resolved_tasks.append(task)
+
+    options: dict[str, object] = {
+        "fail_on_error": fail_on_error,
+        "remap": remap,
+        "store_frames": store_frames,
+        "store_actions": store_actions,
+        "grader": _grader_identity(grader),
+        "controller": (
+            _component_identity(
+                controller or DefaultController(cast(Policy, policy).config.replan_interval),
+                name="controller",
+            )
+            if checkpoint is not None
+            else None
+        ),
+        "approver": (
+            _component_identity(approver or AutoApprover(), name="approver")
+            if checkpoint is not None
+            else None
+        ),
+        "operator_input": _instance_identity(operator_input),
+        "before_scoring": (
+            _callback_identity(before_scoring)
+            if checkpoint is not None and grader is None
+            else None
+        ),
+        "checkpoint_inputs_sha256": (
+            _checkpoint_inputs_digest(checkpoint_inputs) if checkpoint is not None else None
+        ),
+    }
+    identity = (
+        _identity(
+            [cast(Task, task) for task in resolved_tasks],
+            policy,
+            embodiment,
+            seed=seed,
+            log_dir=log_dir,
+            options=options,
+        )
+        if checkpoint is not None
+        else None
+    )
+    context = (
+        _open_checkpoint(checkpoint, identity)
+        if checkpoint is not None and identity is not None
+        else nullcontext(None)
+    )
+    logs: list[EvalLog] = []
+    with context as manifest:
+        for index, raw_task in enumerate(task_list):
+            resolved_task = resolved_tasks[index]
+            if resolved_task is None:
+                logs.append(
+                    _error_log_for(
+                        raw_task, policy, embodiment, seed=seed, exc=resolution_errors[index]
+                    )
+                )
+                continue
+
+            attempts: list[tuple[EvalLog, str]] = []
+            if manifest is not None:
+                for entry in manifest.attempts:
+                    if entry["task_index"] == index:
+                        path = manifest.attempt_log_path(entry)
+                        attempts.append((read_eval_log(str(path)), str(path)))
+            merged = _merge_task(resolved_task, attempts) if attempts else None
+            to_run = (
+                _pending_scenes(resolved_task, merged)
+                if merged is not None
+                else list(resolved_task.scenes)
+            )
+            first_run = not attempts
+            attempt_counts: dict[str, int] = {scene.id: 0 for scene in resolved_task.scenes}
+            while first_run or to_run:
+                first_run = False
+                scene_ids = [scene.id for scene in to_run]
+                for scene_id in scene_ids:
+                    attempt_counts[scene_id] += 1
+                attempt_task = replace(resolved_task, scenes=tuple(to_run))
+                if (
+                    sinks
+                    and isinstance(sinks[0], JsonLogSink)
+                    and sinks[0].log_dir.resolve() == Path(log_dir).resolve()
+                ):
+                    json_sink = sinks[0]
+                    attempt_sinks = sinks
+                else:
+                    json_sink = JsonLogSink(log_dir)
+                    attempt_sinks = [json_sink, *(sinks or [])]
+                _clear_json_sink_path(json_sink)
+                if manifest is not None:
+                    manifest.start_attempt()
+                try:
+                    (attempt_log,) = eval(
+                        attempt_task,
+                        policy,
+                        embodiment,
+                        log_dir=log_dir,
+                        sinks=attempt_sinks,
+                        seed=seed,
+                        fail_on_error=fail_on_error,
+                        controller=controller,
+                        approver=approver,
+                        remap=remap,
+                        store_frames=store_frames,
+                        store_actions=store_actions,
+                        operator_input=operator_input,
+                        grader=grader,
+                        before_scoring=None if grader is not None else before_scoring,
+                        _policy_prebound=manifest is not None,
+                    )
+                except KeyboardInterrupt:
+                    if manifest is not None and json_sink.path is not None:
+                        manifest.add_attempt(index, scene_ids, json_sink.path)
+                    raise
+                except (SafetyAbort, EmbodimentFault):
+                    raise
+                except Exception as exc:
+                    if manifest is not None and json_sink.path is not None:
+                        manifest.add_attempt(index, scene_ids, json_sink.path)
+                    logs.append(
+                        _error_log_for(resolved_task, policy, embodiment, seed=seed, exc=exc)
+                    )
+                    if manifest is not None and json_sink.path is None:
+                        return False, logs
+                    break
+                if json_sink.path is None:
+                    raise ConfigError("eval() returned without a durable attempt log")
+                path = json_sink.path.resolve()
+                if manifest is not None:
+                    manifest.add_attempt(index, scene_ids, path)
+                attempts.append((attempt_log, str(path)))
+                merged = _merge_task(resolved_task, attempts)
+                recorded = {sample.scene_id: sample for sample in attempt_log.samples}
+                if attempt_log.halted:
+                    to_run = []
+                else:
+                    to_run = [
+                        scene
+                        for scene in to_run
+                        if scene.id in recorded
+                        and recorded[scene.id].retryable_error
+                        and not _complete(recorded[scene.id], resolved_task.epoch_spec.count)
+                        and attempt_counts[scene.id] <= retry_attempts
+                    ]
+            else:
+                aggregate = cast(EvalLog, merged)
+                aggregate_sink = JsonLogSink(log_dir)
+                aggregate_sink.on_eval_end(aggregate)
+                if manifest is not None and aggregate_sink.path is not None:
+                    manifest.set_aggregate(index, aggregate_sink.path)
+                logs.append(aggregate)
+    return all(log.status == "success" for log in logs), logs

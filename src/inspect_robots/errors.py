@@ -55,7 +55,12 @@ class PolicyError(InspectRobotsError):
     """The policy raised during inference. Recorded as a failed trial.
 
     Connection-level failures carry a remediation hint in the message.
+    ``retryable`` is opt-in and permits a bounded eval-set retry.
     """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class EmbodimentFault(InspectRobotsError):
