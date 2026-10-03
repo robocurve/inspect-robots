@@ -589,6 +589,7 @@ def _run_eval(
         termination_reasons: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
+        trial_seeds: list[int | None] = []
         scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
@@ -790,6 +791,7 @@ def _run_eval(
                     )
                 )
                 policy_transcripts.append(record.policy_transcript)
+                trial_seeds.append(record.seed)
                 bus.on_trial_end(record)
 
             if halted:
@@ -838,6 +840,8 @@ def _run_eval(
                 termination_reasons=tuple(termination_reasons),
                 operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
+                init_seed=scene.init_seed,
+                trial_seeds=tuple(trial_seeds),
             )
         )
         if stopped:

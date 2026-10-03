@@ -96,6 +96,7 @@ def _parallel_lengths(path: Path) -> set[int]:
         len(sample.trial_metadata),
         len(sample.termination_reasons),
         len(sample.policy_transcripts),
+        len(sample.trial_seeds),
     }
 
 
@@ -116,6 +117,7 @@ def test_lifecycle_throttle_parallel_epochs_replacement_and_reuse(tmp_path: Path
     assert _parallel_lengths(first_path) == {1}
     trial_started = read_eval_log(str(first_path))
     assert trial_started.samples[0].trial_metadata[0]["live"]["step"] == 0
+    assert trial_started.samples[0].trial_seeds == (None,)
     before_step = first_path.read_bytes()
     transition = _transition()
     sink.log_step(4, transition.observation, transition.action, transition.result)
@@ -149,6 +151,7 @@ def test_lifecycle_throttle_parallel_epochs_replacement_and_reuse(tmp_path: Path
     assert sample.judgement_sources == ("console",)
     assert sample.operator_notes == ("steady",)
     assert sample.termination_reasons == ("done",)
+    assert sample.trial_seeds == (7,)
 
     sink.on_trial_start("scene-a", 1)
     assert len(read_eval_log(str(first_path)).samples) == 1
@@ -159,6 +162,7 @@ def test_lifecycle_throttle_parallel_epochs_replacement_and_reuse(tmp_path: Path
     assert errored.samples[0].status == "error"
     assert errored.samples[0].error == "policy failed"
     assert errored.samples[0].policy_transcripts[1] == ["fallback transcript"]
+    assert errored.samples[0].trial_seeds == (7, 7)
     assert errored.results.errored_trials == 1
 
     sink.on_eval_end(_final_log())
@@ -181,6 +185,7 @@ def test_bound_scene_identity_populates_snapshots_with_unknown_fallback(
             Scene(
                 id="scene-a",
                 instruction="pick up the cube",
+                init_seed=42,
                 metadata={"rubric": "lift cleanly", "adapter_object": object()},
             ),
             Scene(id="scene-b", instruction="place the cube"),
@@ -193,6 +198,7 @@ def test_bound_scene_identity_populates_snapshots_with_unknown_fallback(
     first = read_eval_log(str(sink.path)).samples[0]
     assert first.instruction == "pick up the cube"
     assert first.scene_metadata == {"rubric": "lift cleanly"}
+    assert first.init_seed == 42
 
     mutable_snapshot = sink._samples("first")[0]
     mutable_snapshot.scene_metadata["rubric"] = "mutated"
@@ -203,12 +209,14 @@ def test_bound_scene_identity_populates_snapshots_with_unknown_fallback(
     by_id = {sample.scene_id: sample for sample in read_eval_log(str(sink.path)).samples}
     assert by_id["scene-b"].instruction == "place the cube"
     assert by_id["scene-b"].scene_metadata == {}
+    assert by_id["scene-b"].init_seed is None
 
     sink.on_trial_end(_record())
     sink.on_trial_start("unknown", 0)
     by_id = {sample.scene_id: sample for sample in read_eval_log(str(sink.path)).samples}
     assert by_id["unknown"].instruction is None
     assert by_id["unknown"].scene_metadata == {}
+    assert by_id["unknown"].init_seed is None
     sink.on_eval_end(_final_log())
 
 

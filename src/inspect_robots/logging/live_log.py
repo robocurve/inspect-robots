@@ -47,6 +47,7 @@ class _LiveScene:
     trial_metadata: list[dict[str, Any]] = field(default_factory=list)
     termination_reasons: list[str | None] = field(default_factory=list)
     policy_transcripts: list[Any] = field(default_factory=list)
+    trial_seeds: list[int | None] = field(default_factory=list)
 
 
 class LiveLogSink:
@@ -87,7 +88,7 @@ class LiveLogSink:
         self._started_clock = 0.0
         self._last_write_clock: float | None = None
         self._frames_dir: str | None = None
-        self._bound_scenes: dict[str, tuple[str | None, dict[str, Any]]] = {}
+        self._bound_scenes: dict[str, tuple[str | None, dict[str, Any], int | None]] = {}
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Bind the frame directory that every snapshot for the next run records."""
@@ -103,6 +104,7 @@ class LiveLogSink:
             scene.id: (
                 scene.instruction,
                 _json_safe_scene_metadata(scene.metadata),
+                scene.init_seed,
             )
             for scene in scenes
         }
@@ -163,6 +165,7 @@ class LiveLogSink:
             scene.termination_reasons.append(None)
             self._current_transcript = []
             scene.policy_transcripts.append(self._current_transcript)
+            scene.trial_seeds.append(None)
             self._current_scene = scene
             self._current_index = len(scene.epochs) - 1
             self._current_step = 0
@@ -225,6 +228,7 @@ class LiveLogSink:
                 if record.policy_transcript is not None
                 else self._current_transcript
             )
+            scene.trial_seeds[index] = record.seed
             if record.status == "error":
                 scene.status = "error"
                 scene.error = record.error
@@ -260,6 +264,7 @@ class LiveLogSink:
             bound_scene = self._bound_scenes.get(scene.scene_id)
             instruction = bound_scene[0] if bound_scene is not None else None
             scene_metadata = bound_scene[1] if bound_scene is not None else {}
+            init_seed = bound_scene[2] if bound_scene is not None else None
             metadata = [dict(value) for value in scene.trial_metadata]
             if scene is self._current_scene and self._current_index is not None:
                 metadata[self._current_index] = {
@@ -281,6 +286,8 @@ class LiveLogSink:
                     trial_metadata=tuple(metadata),
                     termination_reasons=tuple(scene.termination_reasons),
                     policy_transcripts=tuple(scene.policy_transcripts),
+                    init_seed=init_seed,
+                    trial_seeds=tuple(scene.trial_seeds),
                 )
             )
         return tuple(samples)
