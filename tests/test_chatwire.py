@@ -298,6 +298,8 @@ def test_unreadable_http_error_body_keeps_its_status(monkeypatch: pytest.MonkeyP
         ("http://x.test/v 1", "whitespace or control characters"),
         ("http://x.test:abc/v1", "Port could not be cast"),
         ("http://[::1/v1", "Invalid IPv6 URL"),
+        ("http://user:pass@x.test/v1", "credentials in the URL are not supported"),
+        ("http://x.test:0/v1", "port 0 is not valid"),
     ],
 )
 def test_malformed_url_is_a_plain_config_error_not_a_transport_error(
@@ -308,3 +310,27 @@ def test_malformed_url_is_a_plain_config_error_not_a_transport_error(
         _urllib_post(url, {}, b"{}")
     assert type(info.value) is ConfigError
     assert problem in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("url", "key"),
+    [
+        ("http://127.0.0.1:1/v1/chat/completions", "sk-ok\n"),
+        ("http://a..b/v1/chat/completions", "sk-ok"),
+    ],
+)
+def test_requests_that_can_never_be_sent_are_plain_config_errors(url: str, key: str) -> None:
+    """A newline in the key or an unencodable host fails before connecting, as config."""
+    with pytest.raises(ConfigError, match=r"invalid request") as info:
+        _urllib_post(url, {"Authorization": f"Bearer {key}"}, b"{}")
+    assert type(info.value) is ConfigError
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["HTTPS://api.example.com/v1", "http://[::1]:8080/v1?api-version=1", "https://bücher.de/v1"],
+)
+def test_valid_urls_pass_the_check(url: str) -> None:
+    from inspect_robots._chatwire import _check_url
+
+    _check_url(url)

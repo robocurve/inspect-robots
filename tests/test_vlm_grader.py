@@ -744,3 +744,12 @@ def test_preflight_rejects_a_malformed_base_url(
     with pytest.raises(ConfigError) as again:
         grader.preflight()
     assert again.value is first.value
+
+
+def test_preflight_rejects_an_api_key_with_a_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "sk-ok\n")
+    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url="http://127.0.0.1:1/v1")
+    with pytest.raises(ConfigError, match=r"invalid request"):
+        grader.preflight()
