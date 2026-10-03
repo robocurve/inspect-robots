@@ -277,6 +277,11 @@ class _OperatorScorer:
         # this scorer only READS it, so scoring stays reproducible from a log.
         verdict = record.operator_judgement
         if verdict is None:
+            grading_error = record.metadata.get("grading_error")
+            if grading_error:
+                # The grader tried and failed: abstain rather than score a
+                # robot failure that never happened (plan 0085).
+                return Score(value=None, explanation=f"ungraded: grader failed: {grading_error}")
             return Score(value=False, explanation="no operator judgement recorded")
         return Score(
             value=is_affirmative_verdict(verdict),
@@ -285,7 +290,13 @@ class _OperatorScorer:
 
 
 def operator_scorer(*, name: str = "operator") -> Scorer:
-    """Score from the human operator's recorded success judgement (R6)."""
+    """Score from the recorded success judgement (R6).
+
+    A trial with no judgement scores as failure, except when the grader
+    recorded ``metadata["grading_error"]``: then the scorer abstains
+    (``Score(value=None)``), so a grading outage is excluded from the metric
+    instead of counting as robot failures.
+    """
     return _OperatorScorer(name=name)
 
 

@@ -43,6 +43,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.5",
+    "towncrier>=24.7",
     "inspect-robots[docs]",
     # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.10)
     # rejects; pin the 2.4.x line for a deterministic dev/CI gate (runtime is free).
@@ -139,6 +140,47 @@ exclude_also = [
     ": \\.\\.\\.$",             # one-line Protocol method bodies (def ...: ...)
     "pragma: no cover",
 ]
+
+# ---------------------------------------------------------------------------
+# Changelog fragments (towncrier): see changelog.d/README.md
+# ---------------------------------------------------------------------------
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## [{version}] - {project_date}"
+issue_format = "[#{issue}](https://github.com/robocurve/inspect-robots/issues/{issue})"
+underlines = ["", "", ""]
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "security"
+name = "Security"
+showcontent = true
 
 # ---------------------------------------------------------------------------
 # uv workspace

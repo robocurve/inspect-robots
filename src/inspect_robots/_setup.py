@@ -267,6 +267,17 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
         print(f"  {number}. {Path(device).name}", file=out)
 
 
+def _print_unverified_camera_hint(devices: list[str], out: IO[str]) -> None:
+    """Say when the listing is the unfiltered fallback because no node probed color-capable."""
+    if not devices:
+        return
+    message = (
+        "could not confirm which nodes are color cameras (probe inconclusive), "
+        "so every device is listed; some may be metadata-only nodes"
+    )
+    print(_paint(message, _YELLOW, out), file=out)
+
+
 def _print_camera_path_hint(
     by_id_devices: list[str],
     by_path_devices: list[str],
@@ -760,6 +771,7 @@ def _camera_section(
     if inventory:
         _print_camera_name_hint(inventory, active_is_by_id, out)
     else:
+        _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
         _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
@@ -908,6 +920,7 @@ def _device_section(
                 if inventory:
                     _print_camera_name_hint(inventory, active_is_by_id, out)
                 else:
+                    _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
                     _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
         identify: Callable[[bool], str | None]

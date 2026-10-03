@@ -1,0 +1,1 @@
+**CLI:** Terminate the `ffmpeg` subprocess, close stdin, wait for exit, and unlink partial output if video encoding is interrupted by an escaping exception (e.g. `KeyboardInterrupt`, `MemoryError`) ([#508](https://github.com/robocurve/inspect-robots/issues/508)).

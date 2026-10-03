@@ -32,6 +32,7 @@ catch.
 from __future__ import annotations
 
 import configparser
+import math
 import os
 import sys
 from collections.abc import Mapping
@@ -58,8 +59,10 @@ def _parse_value(text: str) -> Any:
 
     A value wrapped in matching single or double quotes is returned as the
     literal inner string with no coercion — the escape hatch for strings the
-    heuristics would otherwise claim (``-P effort="'none'"`` sends the wire
-    string ``none`` instead of omitting the parameter).
+    heuristics would otherwise claim (``-P effort="'none'"`` returns the string
+    ``none`` untouched, while bare ``effort=none`` parses to Python ``None``;
+    effort-taking components interpret both as the explicit ``none`` effort
+    level, not as an omitted setting or a fallback to another level).
     """
     if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
         return text[1:-1]
@@ -70,7 +73,10 @@ def _parse_value(text: str) -> Any:
         return None
     for caster in (int, float):
         try:
-            return caster(text)
+            val = caster(text)
+            if caster is float and not math.isfinite(val):
+                continue
+            return val
         except ValueError:
             continue
     return text

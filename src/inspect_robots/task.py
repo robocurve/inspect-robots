@@ -49,6 +49,16 @@ class TaskEnvelope:
     name: str
     max_steps: int
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.max_steps, int)
+            or isinstance(self.max_steps, bool)
+            or self.max_steps < 1
+        ):
+            raise ConfigError(
+                f"TaskEnvelope max_steps must be an integer >= 1, got {self.max_steps!r}"
+            )
+
 
 @dataclass
 class Task:
@@ -75,8 +85,12 @@ class Task:
             raise ConfigError(
                 f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
             )
-        if self.max_steps is not None and (isinstance(self.max_steps, bool) or self.max_steps < 1):
-            raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps}")
+        if self.max_steps is not None and (
+            not isinstance(self.max_steps, int)
+            or isinstance(self.max_steps, bool)
+            or self.max_steps < 1
+        ):
+            raise ConfigError(f"Task {self.name!r}: max_steps must be >= 1, got {self.max_steps!r}")
         if self.max_seconds is not None and (
             isinstance(self.max_seconds, bool)
             or not math.isfinite(self.max_seconds)
