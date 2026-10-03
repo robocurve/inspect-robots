@@ -50,7 +50,13 @@ from inspect_robots.log import (
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
-from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
+from inspect_robots.scorer import (
+    Score,
+    get_reducer,
+    reduce_scores,
+    reducer_min_epochs,
+    value_to_float,
+)
 from inspect_robots.task import Task
 from inspect_robots.transcript import judgement_source
 
@@ -390,7 +396,8 @@ def eval(
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
     [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer
-    or a grader whose ``preflight()`` request is rejected (checked before any
+    (including ``pass_at_<k>`` with fewer than ``k`` planned epochs) or a
+    grader whose ``preflight()`` request is rejected (checked before any
     string component is resolved). A trial the grader tried and failed to
     grade is scored as an abstention by the ``operator`` scorer, and the run
     then ends with ``status == "error"`` and an "N of M trial(s) ungraded"
@@ -507,6 +514,14 @@ def _run_eval(
         get_reducer(epoch_spec.reducer)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    # A reducer that needs more epochs than planned can never succeed; say so
+    # before spending robot time. Abstentions are still checked at scoring.
+    min_epochs = reducer_min_epochs(epoch_spec.reducer)
+    if epoch_spec.count < min_epochs:
+        raise ConfigError(
+            f"epoch reducer {epoch_spec.reducer!r} needs at least {min_epochs} epochs, "
+            f"but the task plans {epoch_spec.count}; raise Epochs.count or lower k"
+        )
 
     if seed is None:
         # Draw and record a real seed so the run stays reproducible after the
