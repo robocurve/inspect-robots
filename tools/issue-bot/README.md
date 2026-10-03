@@ -62,7 +62,8 @@ implementation and review, runs on that recorded commit after main advances,
 and the fix PR is committed on it; nothing is silently rebased. Publishing
 requires the pinned commit to remain in main's history (`stale_base` otherwise),
 and a PR GitHub reports as conflicting holds with `merge_conflict` instead of
-waiting for CI that never runs. The bot's comments do not invalidate that input.
+waiting for CI that never runs; that draft PR stays open, so close it before
+requesting `/triage` again or the new run stops at the competing-fix check. The bot's comments do not invalidate that input.
 An issue edit or closure stops the workflow (`issue_changed`). Duplicate
 checks run at intake and again before publishing/readying a fix. No backlog is
 automatically imported.

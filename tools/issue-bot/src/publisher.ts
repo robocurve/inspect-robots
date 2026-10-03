@@ -191,11 +191,14 @@ export class PublicationJournal extends DurableObject<PublisherEnv> {
     // The fix is built and reviewed on its pinned base; main may have advanced since.
     // Require that base to still be in main's history, and let GitHub's
     // mergeability check and CI judge the combination with newer commits.
+    // main...base diffs the base against the merge base, which is the base itself
+    // when it is an ancestor of main, so the response stays small however much
+    // lands on main. "behind" or "identical" means the base is in main's history.
     const compare = await github(
       token,
-      repoPath(`/compare/${input.issue.base}...main?per_page=1`),
+      repoPath(`/compare/main...${input.issue.base}?per_page=1`),
     );
-    if (!["ahead", "identical"].includes(compare.status))
+    if (!["behind", "identical"].includes(compare.status))
       throw new Error("stale_base");
     const base = await github(token, repoPath(`/commits/${input.issue.base}`));
     if (base.sha !== input.issue.base) throw new Error("stale_base");
