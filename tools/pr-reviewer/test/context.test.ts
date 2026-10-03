@@ -87,4 +87,15 @@ describe('Codex source context', () => {
     });
     await expect(collectContext(read, job)).rejects.toThrow('context_too_large');
   });
+  it('counts the context size in bytes, not characters', async () => {
+    const basic = fixture([]);
+    // About 400k characters but about 1.2 MB of UTF-8: only a byte count trips it.
+    const euros = '\u20ac'.repeat(20_000);
+    const read = vi.fn(async (path: string) => {
+      if (path.startsWith('/compare/')) return { merge_base_commit: { sha: base } };
+      if (path.startsWith('/issues/9/comments')) return Array.from({ length: 20 }, () => ({ user: { id: 1, login: 'c' }, body: euros }));
+      return basic(path);
+    });
+    await expect(collectContext(read, job)).rejects.toThrow('context_too_large');
+  });
 });

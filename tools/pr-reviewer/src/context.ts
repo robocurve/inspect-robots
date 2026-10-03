@@ -55,7 +55,7 @@ export async function collectContext(read: Read, job: Job) {
   // Structured fields, never concatenated: a review comment's path is chosen by
   // the PR author and must not be able to prefix text attributed to the
   // maintainer.
-  const reviewEntry = (r: any) => ({ kind: 'review', state: r.state ?? 'COMMENTED', body: r.body, created_at: r.submitted_at, updated_at: r.submitted_at });
+  const reviewEntry = (r: any) => ({ kind: 'review', state: r.state ?? 'COMMENTED', body: r.body, created_at: r.submitted_at, updated_at: null });
   const inlineEntry = (c: any) => ({ kind: 'inline', id: c.id, in_reply_to_id: c.in_reply_to_id ?? null, path: c.path, line: c.line ?? c.original_line ?? null, outdated: c.line == null, body: c.body, created_at: c.created_at, updated_at: c.updated_at });
   const byTime = (a: any, b: any) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''));
   const maintainerComments: any[] = [
