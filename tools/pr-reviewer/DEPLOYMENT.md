@@ -173,3 +173,10 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - Credential-free full-run transport verification `cf_29b39bf5d1e334c4fb4bb3998971a4531d42094deee133f4cd9ef4646f0192e4` completed with one launch and two synthetic model turns. Both offline package installs and the protected-checkpoint command succeeded. Injected lost completion/cleanup acknowledgements did not discard its result. These synthetic fixtures were never published as PR reviews and made no OpenAI calls.
 - Production runner: `faf4ba9d-f649-42c4-8eea-c3c209c1a4dd`; image digest `sha256:35794a21c569c4889a36cdde424baecc1941819e8cd3e39202af1ddb672dc61f`. Reviewer: `375434cd-6c5d-4971-9ea1-194dd386b9a0`. Publisher unchanged.
 - Existing charges and caps remain intact. PR373's earlier incomplete run used $2.474582 including unresolved reservations; $2.525418 remained. PR349 was stopped for the security fix after $0.601795; $4.398205 remained. Neither produced an approval. Replacements must be genuine fresh runs, not cosmetic edits or resumed compromised execution state.
+
+## Per-author monthly cap: 2026-10-03
+
+- Merged #516: a $20 per-UTC-month review allowance per PR author, keyed by immutable GitHub user ID and shared across all of that author's PRs. The maintainer's PRs are exempt; PRs with no recorded author (pre-cap history) are uncapped. A run blocked by the cap is held as `contributor_budget_exhausted` before any sandbox or model spend.
+- `npm run types` (no changes), `tsc --noEmit` and all 97 Workers/SQLite tests passed on the merged branch.
+- Reviewer: `cc98cf1a-7763-4590-ba50-ba0e5dfb5dcb` (previous `ed77d94f-dbc5-4b6a-b1bb-06cad773c02d`). Runner and publisher unchanged. `/health` reports policy 3, advisory, enabled.
+- Existing charges, per-head, per-PR and $200 monthly caps are unchanged. Authors are recorded from the next webhook for each PR onward.
