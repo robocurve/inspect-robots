@@ -50,7 +50,12 @@ subclasses so callers can tell them apart without parsing prose:
 - `_ChatTransportError(ConfigError)`, raised by `_urllib_post` for `URLError`
   (same message as today) and also for `OSError` (including `TimeoutError` on
   `response.read()`) and `http.client.HTTPException` (e.g.
-  `RemoteDisconnected`), which today escape as raw exceptions.
+  `RemoteDisconnected`), which today escape as raw exceptions. Handler order:
+  `HTTPError` first, then `URLError`, then `OSError`/`HTTPException` (`URLError`
+  subclasses `OSError`). `exc.read()` inside the `HTTPError` branch can itself
+  raise `OSError` or `http.client.IncompleteRead`; that is wrapped too. New
+  messages keep the `chat request failed:` prefix so taskgen's rewording regex
+  (`taskgen.py:221-232`) still applies.
 
 Both remain `ConfigError`, so every existing caller and `except ConfigError`
 behaves exactly as before. Malformed 2xx replies keep raising plain
@@ -75,11 +80,21 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
   a clean message and nonzero exit, no traceback, no embodiment constructed.
 - **Python API.** `eval()` calls `preflight()` right after `_grading_hook`
   resolves the grader and before resolving string components
-  (`eval.py:392`). `eval_set()` calls it once before its first task.
-- **Once per grader object.** `_VLMGrader` records that preflight was
-  attempted (`self._preflight_attempted`) whether it succeeded or only warned,
-  so the CLI, `eval_set` and each per-task `eval()` make at most one request
-  per grader. A 4xx raises and the run ends there, so it is never retried.
+  (`eval.py:392`). `eval_set()` calls it after the empty-task-list check
+  (`eval.py:~1005`) and **before** the task loop, outside the per-task
+  `try/except Exception` (`eval.py:1009-1047`), so a preflight `ConfigError`
+  propagates out of `eval_set` instead of becoming the first task's error log
+  while later tasks run.
+- **Once per grader object, outcome cached.** `_VLMGrader` caches the
+  preflight outcome: passed or warned (no further requests), or the raised
+  `ConfigError`, which every later `preflight()` call re-raises. So the CLI,
+  `eval_set` and each per-task `eval()` make at most one request per grader,
+  and a caller that catches the error and calls `eval()` again with the same
+  grader is still stopped.
+- **Contract for other graders.** The `Grader` docstring states that an
+  optional `preflight()` must be idempotent and cheap to call repeatedly
+  (callers may invoke it from the CLI, `eval_set` and every `eval()`), and
+  should cache its own outcome as the builtin does.
 - `_VLMGrader.preflight()` sends one `chat_completion` with the same
   `base_url`, `api_key`, `model`, `effort` and `http_post`, `what="grading
   preflight"`, and a minimal user message: one short text part asking for
@@ -141,7 +156,8 @@ never interrupts the loop. When the run already ended with a more specific
 error (halt, all trials errored, fail_on_error, a reducer failure such as
 `pass_at_k` with fewer graded epochs than k after abstentions), that status
 and message stay, and `; N of M trial(s) ungraded` is appended so the count is
-not lost.
+not lost (just `N of M trial(s) ungraded`, no leading separator, when the
+existing `error` is empty, e.g. some cancelled runs).
 
 The CLI already prints a failed run's `error` and exits nonzero, and `eval_set`
 already reports a task with `status == "error"` as failed.
@@ -168,8 +184,12 @@ lines 176, 191 and 436).
   grader failure (abstention).
 - `docs/guide/scoring.md`: one sentence linking ungraded VLM trials to
   abstention.
-- Docstrings: `Grader` protocol (optional `preflight()`, grading_error marker),
-  `_VLMGrader.grade`, `vlm_grader`, `_OperatorScorer`/`operator_scorer`.
+- Docstrings: `Grader` protocol (optional idempotent `preflight()`,
+  grading_error marker), `_VLMGrader.grade`, `vlm_grader`,
+  `_OperatorScorer`/`operator_scorer`, and the `eval()`/`eval_set()`
+  docstrings (preflight before rollouts; ungraded trials fail the run).
+- `src/inspect_robots/CLAUDE.md` module map (around line 19): grading failures
+  no longer degrade with only a stderr note.
 - Writing-style rule from `AGENTS.md`: no em dashes in new prose.
 - Changelog fragments: `+grader-preflight.added.md` and
   `+ungraded-trials-abstain.changed.md`.
@@ -186,6 +206,8 @@ tests/test_registry_cli.py           # CLI preflight: clean exit, no embodiment 
 tests/test_vlm_grader.py             # preflight + grading_error tests
 tests/test_eval_orchestration.py     # run status, abstention, eval_set preflight once
 tests/test_scorers.py                # operator scorer abstention
+tests/test_grader_config.py          # existing http_post doubles see the preflight request
+src/inspect_robots/CLAUDE.md         # module map wording
 docs/guide/cli.md, docs/guide/scoring.md
 changelog.d/+grader-preflight.added.md
 changelog.d/+ungraded-trials-abstain.changed.md
@@ -194,9 +216,25 @@ plans/0085-grader-preflight-and-loud-ungraded.md
 
 ## Tests (mocked `http_post`, no network)
 
+Test conventions:
+
+- Preflight adds one request before the first grading request whenever a VLM
+  grader goes through `eval()`. Existing doubles that count or index requests
+  (`tests/test_vlm_grader.py:127` asserts two requests;
+  `tests/test_grader_config.py:96,113,126,151-153,182` index `post.bodies[0]`)
+  are updated to expect the preflight request first, identified by a fixed
+  marker in its text part (a module constant such as `_PREFLIGHT_PROMPT`),
+  or to filter it out with a small shared helper.
+- CLI preflight tests cannot pass `http_post` through `-G`; they monkeypatch
+  `inspect_robots._chatwire._urllib_post` (looked up at call time).
+
+
 - CLI: `run` and `eval-set` with a preflight 400 exit nonzero with the guided
   message and no traceback, and the embodiment factory and auto-task generation
   are never called; a 503 warns and the run proceeds.
+- `eval_set` with a preflight 400: raises before the first task; no task runs
+  and no embodiment reset happens. A caller that catches it and calls `eval()`
+  with the same grader gets the cached error with no new request.
 - Preflight: 400 and 422 with explicit effort raise `ConfigError` before any
   rollout (assert the embodiment was never constructed or reset and no trial
   ran); 401/403/404 raise too; 500 and a transport error warn and the run
