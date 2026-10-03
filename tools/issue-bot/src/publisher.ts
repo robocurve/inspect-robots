@@ -188,14 +188,26 @@ export class PublicationJournal extends DurableObject<PublisherEnv> {
     )
       throw new Error("unapproved_artifact");
     await this.readIssue(token, input);
-    const main = await github(token, repoPath("/commits/main"));
-    if (main.sha !== input.issue.base) throw new Error("base_changed");
-    return main;
+    // The fix is built and reviewed on its pinned base; main may have advanced since.
+    // Require that base to still be in main's history, and let GitHub's
+    // mergeability check and CI judge the combination with newer commits.
+    // main...base diffs the base against the merge base, which is the base itself
+    // when it is an ancestor of main, so the response stays small however much
+    // lands on main. "behind" or "identical" means the base is in main's history.
+    const compare = await github(
+      token,
+      repoPath(`/compare/main...${input.issue.base}?per_page=1`),
+    );
+    if (!["behind", "identical"].includes(compare.status))
+      throw new Error("stale_base");
+    const base = await github(token, repoPath(`/commits/${input.issue.base}`));
+    if (base.sha !== input.issue.base) throw new Error("stale_base");
+    return base;
   }
   async createFix(input: FixPublication): Promise<PublishedFix> {
     return this.serialize(async () => {
       const token = await installationToken(this.env, true);
-      const main = await this.verifyFix(token, input);
+      const base = await this.verifyFix(token, input);
       const branch = `issue-bot/${input.issue.number}-${input.jobId.slice(0, 12)}`;
       await this.verifyNoCompetingFix(token, input.issue.number, branch);
       const marker = `<!-- robocurve-issue-fix:${input.jobId}:${input.artifactDigest} -->`;
@@ -205,7 +217,7 @@ export class PublicationJournal extends DurableObject<PublisherEnv> {
         await this.ctx.storage.put("commit-date", date);
       }
       const tree = await github(token, repoPath("/git/trees"), "POST", {
-        base_tree: main.commit.tree.sha,
+        base_tree: base.commit.tree.sha,
         tree: input.files.map((f) => ({
           path: f.path,
           mode: f.mode,
@@ -320,6 +332,8 @@ export class PublicationJournal extends DurableObject<PublisherEnv> {
       const marker = `<!-- robocurve-issue-fix:${input.jobId}:${input.artifactDigest} -->`;
       const pr = await github(token, repoPath(`/pulls/${published.number}`));
       this.verifyPr(pr, published.head, marker);
+      // GitHub runs no pull_request CI for a conflicting PR, so waiting would never end.
+      if (pr.mergeable === false) throw new Error("merge_conflict");
       const checks = await github(
         token,
         repoPath(
