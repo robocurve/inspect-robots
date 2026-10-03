@@ -5,7 +5,7 @@ Self-contained: run inside a stock openpi environment
 no openpi patches needed. The YAM transforms and the yam_pi05 inference config
 are inlined below, matching what the checkpoint was trained with.
 
-    uv run python serve_pi05_yam.py --ckpt <dir with params/ + assets/> --port 8204
+    uv run --no-sync python serve_pi05_yam.py --ckpt <dir with params/ + assets/> --port 8204
 
 Wire contract (inspect_robots_yam.policy.ActServerPolicy): POST /act, json_numpy
 body {top_cam, left_cam, right_cam: HxWx3 uint8, instruction: str,

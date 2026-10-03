@@ -115,7 +115,8 @@ rig before using a transform for control or collision checking.
 Check an idle rig before an eval: configured V4L2 cameras should deliver fresh,
 non-uniform frames (depth-configured RealSense slots are skipped), and both
 arms should report finite joint positions within their configured limits
-(grippers are checked for finite values only). The check writes a labeled montage to `health.jpg`:
+(grippers are checked for finite values only). The check writes a labeled
+montage to `health.jpg`:
 
 ```bash
 inspect-robots-yam-health
@@ -238,13 +239,16 @@ On the robot host, with the YAM config selected:
 ```bash
 inspect-robots run --policy molmoact2 \
     -P name=pi05 -P server_url=http://gpu-box:9XXX \
+    -P action_horizon=16 -P remedy='start serve_pi05_yam.py on the GPU host' \
     -P cam_height=360 -P cam_width=640 \
     -E cam_height=360 -E cam_width=640 -E control_hz=30 \
     --max-steps 3600 \
     --instruction "stack the red block on the blue block"
 ```
 
-The camera dimensions and control rate match the training setup. At 30 Hz,
+The camera dimensions, control rate and 16-step action horizon match the
+training setup; `remedy` replaces the client's MolmoAct2 launch hint shown when
+the server is unreachable. At 30 Hz,
 3,600 steps represent two minutes of control, excluding inference and other
 overhead. `name` only labels the run in logs; keep it aligned with the served
 checkpoint. If JAX reports "no kernel image" on a new GPU, the source recipe
