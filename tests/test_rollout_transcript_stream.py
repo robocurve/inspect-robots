@@ -329,3 +329,99 @@ def test_broadcast_does_not_catch_safety_abort_or_embodiment_fault() -> None:
     broadcast_fault = _Broadcast([_FaultSink()])
     with pytest.raises(EmbodimentFault, match="hardware fault"):
         broadcast_fault.log_step(0, None, None, None)  # type: ignore[arg-type]
+
+
+class _CriticalSink(NullSink):
+    """A sink whose failures must surface, like the canonical JsonLogSink."""
+
+    critical = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def log_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
+        raise RuntimeError("critical transcript failure")
+
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        raise RuntimeError("critical bind failure")
+
+    def on_eval_end(self, log: Any) -> None:
+        raise OSError("disk full")
+
+
+class _BindRecordingSink(_RecordingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bound: list[str] = []
+        self.ended = 0
+
+    def bind_scenes(self, scenes: Sequence[Scene]) -> None:
+        self.bound.append("scenes")
+
+    def on_eval_end(self, log: Any) -> None:
+        self.ended += 1
+
+
+def test_broken_transcript_hook_is_skipped_for_the_rest_of_the_trial() -> None:
+    """Plan 0020's latch survives sink isolation: one failure per trial, not per step."""
+    bad, good = _RecordingSink(raise_messages=True), _RecordingSink()
+    bus = _Broadcast([bad, good])
+    with pytest.warns(RuntimeWarning, match="log_policy_messages"):
+        for t in range(3):
+            bus.log_policy_messages(t, [{"t": t}])
+    assert len(bad.message_calls) == 1
+    assert len(good.message_calls) == 3
+
+    bus.on_trial_start("s0", 1)  # a new trial retries the hook once
+    with pytest.warns(RuntimeWarning):
+        bus.log_policy_messages(0, [{"t": 0}])
+    assert len(bad.message_calls) == 2
+
+
+def test_critical_sink_failures_surface_after_other_sinks_are_served() -> None:
+    critical, other = _CriticalSink(), _BindRecordingSink()
+    bus = _Broadcast([critical, other])
+
+    with pytest.raises(OSError, match="disk full"):
+        bus.on_eval_end(object())  # type: ignore[arg-type]
+    assert other.ended == 1
+
+    with pytest.raises(RuntimeError, match="critical bind failure"):
+        bus.bind_scenes([_SCENE])
+    assert other.bound == ["scenes"]
+
+    # Transcript hooks are never critical: they warn and latch like any sink.
+    with pytest.warns(RuntimeWarning, match="critical transcript failure"):
+        bus.log_policy_messages(0, [])
+
+
+class _SecondCriticalSink(NullSink):
+    critical = True
+
+    def on_eval_end(self, log: Any) -> None:
+        raise OSError("second disk full")
+
+
+class _DiscardingSink(NullSink):
+    """Stands in for the live snapshot, which deletes itself at eval end."""
+
+    discards_on_eval_end = True
+
+    def __init__(self) -> None:
+        self.ended = 0
+
+    def on_eval_end(self, log: Any) -> None:
+        self.ended += 1
+
+
+def test_failed_canonical_write_keeps_discarding_sinks_and_warns_on_more_failures() -> None:
+    discarding, other = _DiscardingSink(), _BindRecordingSink()
+    # Critical sinks run first whatever their list position.
+    bus = _Broadcast([discarding, other, _CriticalSink(), _SecondCriticalSink()])
+    with (
+        pytest.warns(RuntimeWarning, match="also failed with OSError: second disk full"),
+        pytest.raises(OSError, match=r"^disk full$"),
+    ):
+        bus.on_eval_end(object())  # type: ignore[arg-type]
+    assert discarding.ended == 0  # the only surviving record is kept
+    assert other.ended == 1

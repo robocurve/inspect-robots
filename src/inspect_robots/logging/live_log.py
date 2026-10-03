@@ -59,6 +59,10 @@ class LiveLogSink:
     a successful run because ``on_eval_end`` removes the live snapshot.
     """
 
+    # on_eval_end deletes the snapshot; the sink fan-out skips it when the
+    # canonical log failed to write, so the run's only record survives.
+    discards_on_eval_end = True
+
     def __init__(
         self,
         log_dir: str,
@@ -242,6 +246,14 @@ class LiveLogSink:
             self._write(self._clock(), force=True)
         except Exception as exc:
             self._disable(exc)
+
+    def retain_snapshot(self) -> None:
+        """Keep the current snapshot: the canonical log failed to write.
+
+        Marks the run finished without deleting the file, so the next
+        ``on_eval_start`` (another ``eval_set`` task) leaves it in place.
+        """
+        self._finished = True
 
     def on_eval_end(self, log: EvalLog) -> None:
         """Remove the transient snapshot after the canonical sink writes the final log."""

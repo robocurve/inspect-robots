@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,53 @@ def _task(*, epochs: int | Epochs = 1, max_steps: int = 60, scorer: object = Non
         max_steps=max_steps,
         epochs=epochs,
     )
+
+
+@pytest.mark.parametrize("collision", [True, False])
+def test_eval_preserves_distinct_scene_camera_reset_frames(tmp_path: Path, collision: bool) -> None:
+    identities = (
+        [("pick", "top-e0_rgb", 11), ("pick-e0_top", "rgb", 22)]
+        if collision
+        else [("first", "top", 11), ("second", "rgb", 22)]
+    )
+    images = {scene: (camera, value) for scene, camera, value in identities}
+
+    class ResetCameraWorld(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            obs = super().reset(scene, seed=seed)
+            camera, value = images[scene.id]
+            return replace(obs, images={camera: np.full((2, 3, 3), value, dtype=np.uint8)})
+
+        def step(self, action: Action) -> StepResult:
+            result = super().step(action)
+            return replace(result, observation=replace(result.observation, images={}))
+
+    sink = _RecordingSink()
+    task = Task(
+        name="frame-identities",
+        scenes=[Scene(id=scene, instruction="reach", init_seed=0) for scene, _, _ in identities],
+        scorer=success_at_end(),
+        max_steps=1,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        ResetCameraWorld(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+    assert log.status == "success"
+    assert log.results.total_trials == 2
+    assert log.stats.frames_dir is not None
+    assert len(list(Path(log.stats.frames_dir).glob("*.npy"))) == 2
+    assert len(sink.records) == 2
+    for record, (_, camera, value) in zip(sink.records, identities, strict=True):
+        refs = record.steps[0].image_refs
+        assert refs is not None
+        np.testing.assert_array_equal(
+            refs[camera].load(), np.full((2, 3, 3), value, dtype=np.uint8)
+        )
 
 
 class _RecordingSink(NullSink):
@@ -1153,6 +1201,27 @@ def test_unknown_reducer_fails_fast_as_config_error(tmp_path: Path) -> None:
         eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
 
 
+def test_pass_at_k_above_planned_epochs_fails_before_rollout(tmp_path: Path) -> None:
+    class _NoRollout(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            raise AssertionError("rollout must not start")
+
+    task = _task(epochs=Epochs(count=1, reducer="pass_at_2"))
+    with pytest.raises(ConfigError, match=r"needs at least 2 epochs, but the task plans 1"):
+        eval(task, ScriptedPolicy(), _NoRollout(), log_dir=str(tmp_path))
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_pass_at_k_equal_to_planned_epochs_runs(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=Epochs(count=2, reducer="pass_at_2"), max_steps=5),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+
+
 def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) -> None:
     # A PolicyError raised outside the rollout internals (no record attached)
     # still yields a scored-as-error trial rather than a crash.
@@ -2062,3 +2131,171 @@ def test_sink_raising_safety_abort_or_embodiment_fault_in_log_step_halts_eval(
     assert signal_cls.__name__ in (log.error or "")
     assert len(log.samples) == 1
     assert log.samples[0].scene_id == "s0"
+
+
+def test_failed_final_log_write_is_not_reported_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sink isolation (#511) must not swallow a lost canonical eval log."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    recorder = _RecordingSink()
+    with pytest.raises(OSError, match="No space left on device"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path)), recorder],
+            log_dir=str(tmp_path),
+        )
+    assert recorder.records  # the other sink still received the run
+
+
+def test_json_log_sink_records_a_failed_write_and_never_advertises_its_path(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a file where the log directory should be", encoding="utf-8")
+    sink = JsonLogSink(str(blocker))
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path / "ok"))
+    with pytest.raises(OSError):
+        sink.on_eval_end(log)
+    assert sink.write_failed is True
+    assert sink.path is None
+
+
+def test_live_snapshot_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        self.write_failed = True
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    live = LiveLogSink(str(tmp_path))
+    with pytest.raises(OSError):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[live, JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert live.path is not None and live.path.exists()
+
+
+def test_eval_set_keeps_the_snapshot_of_a_task_whose_final_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later task must not delete an earlier task's only surviving record."""
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    real_write = JsonLogSink.on_eval_end
+    calls = {"n": 0}
+
+    def first_write_fails(self: JsonLogSink, log: EvalLog) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            self.write_failed = True
+            raise OSError("No space left on device")
+        real_write(self, log)
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", first_write_fails)
+    live = LiveLogSink(str(tmp_path))
+    seen: list[Path] = []
+    real_start = LiveLogSink.on_eval_start
+
+    def record_start(self: LiveLogSink, spec: EvalSpec) -> None:
+        real_start(self, spec)
+        assert self.path is not None
+        seen.append(self.path)
+
+    monkeypatch.setattr(LiveLogSink, "on_eval_start", record_start)
+    ok, logs = eval_set(
+        [_task(), _task()],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[live, JsonLogSink(str(tmp_path))],
+        log_dir=str(tmp_path),
+    )
+    assert not ok
+    assert [log.status for log in logs] == ["error", "success"]
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert seen[0].exists()  # task 1's snapshot survives task 2
+    assert not seen[1].exists()  # task 2 wrote its log, so its snapshot is gone
+
+
+def test_ctrl_c_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run whose log write also fails still raises the interrupt."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    with pytest.raises(KeyboardInterrupt) as info:
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt()),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert isinstance(info.value.__cause__, OSError)
+
+
+def test_eval_rejects_duplicate_scorer_names(tmp_path: Path) -> None:
+    from inspect_robots.scorer import reached_goal_state
+
+    # Rejects colliding default names
+    msg = r"Task 'colliding': duplicate scorer name 'reached_goal_state'"
+    with pytest.raises(ConfigError, match=msg):
+        eval(
+            Task(
+                name="colliding",
+                scenes=[Scene(id="s0", instruction="reach")],
+                scorer=[reached_goal_state(threshold=0.0), reached_goal_state(threshold=100.0)],
+                max_steps=1,
+            ),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_distinct_scorer_names_preserve_per_epoch_and_reduced_metrics(tmp_path: Path) -> None:
+    from inspect_robots.scorer import reached_goal_state
+
+    # Distinct names preserve both scores independently
+    task = Task(
+        name="distinct",
+        scenes=[Scene(id="s0", instruction="reach")],
+        scorer=[
+            reached_goal_state(threshold=0.0, name="strict"),
+            reached_goal_state(threshold=100.0, name="loose"),
+        ],
+        max_steps=1,
+        epochs=1,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_frames=False,
+        store_actions=False,
+    )
+    assert log.status == "success"
+    # Both scorers have their own entries in epoch scores and metrics
+    assert log.samples[0].epochs[0]["strict"] == 0.0
+    assert log.samples[0].epochs[0]["loose"] == 1.0
+    assert log.samples[0].reduced["strict"] == 0.0
+    assert log.samples[0].reduced["loose"] == 1.0
+    assert log.results.metrics["strict"] == 0.0
+    assert log.results.metrics["loose"] == 1.0

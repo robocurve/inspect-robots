@@ -50,7 +50,13 @@ from inspect_robots.log import (
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
-from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
+from inspect_robots.scorer import (
+    Score,
+    get_reducer,
+    reduce_scores,
+    reducer_min_epochs,
+    value_to_float,
+)
 from inspect_robots.task import Task
 from inspect_robots.transcript import judgement_source
 
@@ -213,38 +219,116 @@ def _git_commit() -> str | None:
     return commit
 
 
+class _CriticalSinkError(Exception):
+    """Carry a critical sink's failure past the remaining sinks' fan-out."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 class _Broadcast:
     """Fan a sink lifecycle out to several sinks, preserving hook order."""
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        # Critical sinks (the canonical log) are served first, so a failed
+        # final write is known before any sink discards its own record.
+        self._ordered = sorted(sinks, key=lambda s: not getattr(s, "critical", False))
         policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
         for sink in sinks:
             hook = getattr(sink, "log_policy_messages", None)
             if callable(hook):
                 policy_message_hooks.append(hook)
         self._policy_message_hooks = policy_message_hooks
+        # Transcript hooks that raised this trial: skipped until the next
+        # on_trial_start, preserving plan 0020's per-trial failure latch.
+        self._failed_message_hooks: set[int] = set()
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
 
     @staticmethod
-    def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> None:
+    def _safe_call(
+        sink: Any,
+        method_name: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        may_be_critical: bool = True,
+    ) -> bool:
+        """Call one sink hook, isolating its failure; return whether it succeeded.
+
+        A failing sink warns instead of aborting the eval or starving the other
+        sinks (#511), unless it declares ``critical = True`` (the canonical
+        ``JsonLogSink``): then the error is re-raised once every sink has been
+        offered the hook, so a lost eval log is never reported as success.
+        """
         try:
             fn(*args)
         except (SafetyAbort, EmbodimentFault):
             raise
         except Exception as exc:
+            if may_be_critical and getattr(sink, "critical", False):
+                raise _CriticalSinkError(exc) from exc
             sink_name = type(sink).__name__ if sink is not None else "LogSink"
             warnings.warn(
                 f"LogSink {sink_name}.{method_name}() failed with {type(exc).__name__}: {exc}",
                 RuntimeWarning,
                 stacklevel=3,
             )
+            return False
+        return True
+
+    def _fan_out(self, method_name: str, *args: Any, optional: bool = False) -> None:
+        """Offer one hook to every sink, then surface a critical sink's failure.
+
+        ``optional`` hooks are duck-typed: sinks without a callable attribute
+        of that name are skipped. Critical sinks run first; if one fails,
+        sinks marked ``discards_on_eval_end`` (the live snapshot, which deletes
+        itself) are skipped so the only surviving record of the run is kept.
+        """
+        failure: Exception | None = None
+        for s in self._ordered:
+            hook: Any = getattr(s, method_name, None)
+            if optional and not callable(hook):
+                continue
+            if (
+                failure is not None
+                and method_name == "on_eval_end"
+                and getattr(s, "discards_on_eval_end", False)
+            ):
+                # Keep the record; tell the sink so a later run does not
+                # delete it either (eval_set reuses sinks across tasks).
+                retain = getattr(s, "retain_snapshot", None)
+                if callable(retain):
+                    retain()
+                continue
+            try:
+                self._safe_call(s, method_name, hook, *args)
+            except _CriticalSinkError as exc:
+                if failure is None:
+                    failure = exc.original
+                else:
+                    warnings.warn(
+                        f"LogSink {type(s).__name__}.{method_name}() also failed with "
+                        f"{type(exc.original).__name__}: {exc.original}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        if failure is not None:
+            raise failure
 
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
-        for hook in self._policy_message_hooks:
+        for index, hook in enumerate(self._policy_message_hooks):
+            if index in self._failed_message_hooks:
+                continue
             sink = getattr(hook, "__self__", None)
-            self._safe_call(sink, "log_policy_messages", hook, t, messages)
+            # Never critical: rollout downgrades transcript errors to "streaming
+            # off" anyway, so a failing hook just warns and latches for the trial.
+            ok = self._safe_call(
+                sink, "log_policy_messages", hook, t, messages, may_be_critical=False
+            )
+            if not ok:
+                self._failed_message_hooks.add(index)
 
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Offer the resolved spaces to sinks that declare a bind_spaces hook.
@@ -252,46 +336,33 @@ class _Broadcast:
         Duck-typed like ``log_policy_messages``: sinks without the attribute
         are unaffected, so the sink Protocol is unchanged.
         """
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_spaces", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_spaces", hook, action_space, observation_space)
+        self._fan_out("bind_spaces", action_space, observation_space, optional=True)
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Offer the run's frame directory to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_frames_dir", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_frames_dir", hook, frames_dir)
+        self._fan_out("bind_frames_dir", frames_dir, optional=True)
 
     def bind_scenes(self, scenes: Sequence[Scene]) -> None:
         """Offer the run's scenes to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_scenes", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_scenes", hook, scenes)
+        self._fan_out("bind_scenes", scenes, optional=True)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_eval_start", s.on_eval_start, spec)
+        self._fan_out("on_eval_start", spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_trial_start", s.on_trial_start, scene_id, epoch)
+        self._failed_message_hooks.clear()
+        self._fan_out("on_trial_start", scene_id, epoch)
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "log_step", s.log_step, t, observation, action, result)
+        self._fan_out("log_step", t, observation, action, result)
 
     def on_trial_end(self, record: TrialRecord) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_trial_end", s.on_trial_end, record)
+        self._fan_out("on_trial_end", record)
 
     def on_eval_end(self, log: EvalLog) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_eval_end", s.on_eval_end, log)
+        self._fan_out("on_eval_end", log)
 
 
 def _survivor_warning(log: EvalLog) -> str | None:
@@ -405,7 +476,8 @@ def eval(
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
     [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer
-    or a grader whose ``preflight()`` request is rejected (checked before any
+    (including ``pass_at_<k>`` with fewer than ``k`` planned epochs) or a
+    grader whose ``preflight()`` request is rejected (checked before any
     string component is resolved). A trial the grader tried and failed to
     grade is scored as an abstention by the ``operator`` scorer, and the run
     then ends with ``status == "error"`` and an "N of M trial(s) ungraded"
@@ -522,6 +594,14 @@ def _run_eval(
         get_reducer(epoch_spec.reducer)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    # A reducer that needs more epochs than planned can never succeed; say so
+    # before spending robot time. Abstentions are still checked at scoring.
+    min_epochs = reducer_min_epochs(epoch_spec.reducer)
+    if epoch_spec.count < min_epochs:
+        raise ConfigError(
+            f"epoch reducer {epoch_spec.reducer!r} needs at least {min_epochs} epochs, "
+            f"but the task plans {epoch_spec.count}; raise Epochs.count or lower k"
+        )
 
     if seed is None:
         # Draw and record a real seed so the run stays reproducible after the
@@ -909,7 +989,14 @@ def _run_eval(
         samples=tuple(scene_results),
         error=error,
     )
-    bus.on_eval_end(log)
+    try:
+        bus.on_eval_end(log)
+    except Exception as exc:
+        # A failed final write must not swallow the user's Ctrl-C: eval_set
+        # would otherwise treat the OSError as a task error and continue.
+        if cancelled_exc is not None:
+            raise cancelled_exc from exc
+        raise
     survivor_warning = _survivor_warning(log)
     if survivor_warning is not None:
         warnings.warn(survivor_warning, UserWarning, stacklevel=3)

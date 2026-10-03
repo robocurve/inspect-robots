@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import errno
 import hashlib
 import html
 import json
+import os
 import re
 import struct
 from collections.abc import Sequence
@@ -22,6 +24,7 @@ from inspect_robots._html import (
     _frame_markup,
     _FrameBudget,
     _FrameContext,
+    _load_frame,
     _render_chat_transcript,
     _render_tool_call,
     _render_transcript,
@@ -32,7 +35,7 @@ from inspect_robots._html import (
     render_html,
 )
 from inspect_robots._pngenc import png_data_url
-from inspect_robots.frames import FrameStore, _safe
+from inspect_robots.frames import FrameStore, _frame_filename, _safe
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
 
@@ -1442,7 +1445,7 @@ def test_mp4_tier_renders_one_composite_in_turn_order_without_autoplay(
 
     assert encoded == [
         [
-            (_safe("top camera"), [0, 1]),
+            ("top camera", [0, 1]),
             ("alpha", [0, 1]),
             ("unseen_camera", [0, 1]),
         ]
@@ -1693,6 +1696,209 @@ def test_report_private_degrade_edges_remain_tolerant(
     _warn_video_degrade(video_context, "first")
     _warn_video_degrade(video_context, "second")
     assert capsys.readouterr().err.count("warning: report video unavailable") == 1
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_versioned_frames_render_exact_raw_identities(tmp_path: Path, live: bool) -> None:
+    identities = [
+        ("pick", "top-e0_rgb", 11),
+        ("pick-e0_top", "rgb", 22),
+        ('Scene/[é]%~<&"', 'Rgb/[%~é]<&"', 33),
+    ]
+    store = FrameStore(str(tmp_path))
+    log = _log(status="started" if live else "success")
+    scenes = []
+    for scene, camera, value in identities:
+        store.put(f"{scene}-e0", 0, camera, np.full((2, 3, 3), value, dtype=np.uint8))
+        np.save(
+            tmp_path / f"{_safe(scene + '-e0')}_{_safe(camera)}_000000.npy",
+            np.full((2, 3, 3), 99, dtype=np.uint8),
+        )
+        scenes.append(
+            dataclasses.replace(
+                log.samples[0],
+                scene_id=scene,
+                policy_transcripts=(_chat({"role": "user", "content": _parts(camera, 0)}),),
+            )
+        )
+    document = render_html(
+        dataclasses.replace(log, samples=tuple(scenes)),
+        title="identities",
+        frames_dir=tmp_path,
+        no_video=True,
+        live_frames_budget_bytes=8000000 if live else None,
+    )
+    assert document.count('<img class="frame"') == 3
+    assert png_data_url(np.full((2, 3, 3), 99, dtype=np.uint8)) not in document
+    for scene, camera, value in identities:
+        assert png_data_url(np.full((2, 3, 3), value, dtype=np.uint8)) in document
+        assert f'data-trial="{html.escape(scene + "-e0", quote=True)}"' in document
+        assert f'data-camera="{html.escape(camera, quote=True)}"' in document
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("long_camera", [False, True])
+def test_overlong_versioned_lookup_renders_representable_legacy_frame(
+    tmp_path: Path, live: bool, long_camera: bool
+) -> None:
+    if not hasattr(os, "pathconf"):
+        pytest.skip("filesystem component limit query unavailable")
+    limit = os.pathconf(tmp_path, "PC_NAME_MAX")
+    if limit <= 64 or limit > 4096:
+        pytest.skip("filesystem has no practical testable component limit")
+    scene = "scene" if long_camera else "A" * (limit // 2)
+    camera = "B" * (limit // 2) if long_camera else "rgb"
+    frame = np.full((2, 3, 3), 11, dtype=np.uint8)
+    legacy = tmp_path / f"{_safe(scene + '-e0')}_{_safe(camera)}_000000.npy"
+    np.save(legacy, frame)
+    # Pin the actual boundary that previously made an unguarded exists() raise.
+    with pytest.raises(OSError) as caught:
+        (tmp_path / _frame_filename(scene + "-e0", camera, 0)).stat()
+    assert caught.value.errno == errno.ENAMETOOLONG
+    log = _log(
+        status="started" if live else "success",
+        transcripts=(_chat({"role": "user", "content": _parts(camera, 0)}),),
+    )
+    log = dataclasses.replace(log, samples=(dataclasses.replace(log.samples[0], scene_id=scene),))
+    document = render_html(
+        log,
+        title="legacy length",
+        frames_dir=tmp_path,
+        no_video=True,
+        live_frames_budget_bytes=8000000 if live else None,
+    )
+    assert document.count('<img class="frame"') == 1
+    assert png_data_url(frame) in document
+
+
+@pytest.mark.parametrize("error_kind", ["missing", "length", "windows_length", "denied", "io"])
+@pytest.mark.parametrize("legacy_kind", ["valid", "missing", "overlong"])
+def test_versioned_lookup_falls_back_only_for_absence_and_length_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_kind: str, legacy_kind: str
+) -> None:
+    errors = {
+        "missing": FileNotFoundError(errno.ENOENT, "missing"),
+        "length": OSError(errno.ENAMETOOLONG, "too long"),
+        "windows_length": OSError(errno.EINVAL, "too long"),
+        "denied": PermissionError(errno.EACCES, "denied"),
+        "io": OSError(errno.EIO, "io"),
+    }
+    errors["windows_length"].winerror = 206  # type: ignore[attr-defined]
+    context = _FrameContext(tmp_path, "Raw/Trial", _FrameBudget(limit=0))
+    frame = np.full((2, 3, 3), 11, dtype=np.uint8)
+    legacy = tmp_path / f"{_safe('Raw/Trial')}_{_safe('Camera')}_000000.npy"
+    calls: list[Path] = []
+
+    def load(path: Path, *, allow_pickle: bool) -> npt.NDArray[np.uint8]:
+        assert not allow_pickle
+        calls.append(path)
+        if path.name.startswith("~"):
+            raise errors[error_kind]
+        assert path == legacy
+        if legacy_kind != "valid":
+            raise errors["length" if legacy_kind == "overlong" else "missing"]
+        return frame
+
+    monkeypatch.setattr("inspect_robots._html.np.load", load)
+    result = _load_frame(context, "Camera", 0)
+    fallback = error_kind in {"missing", "length", "windows_length"}
+    assert len(calls) == (2 if fallback else 1)
+    if fallback and legacy_kind == "valid":
+        np.testing.assert_array_equal(result, frame)
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("invalid", ["corrupt", "dtype", "shape", "empty"])
+def test_invalid_versioned_frame_does_not_substitute_stale_legacy_pixels(
+    tmp_path: Path, live: bool, invalid: str
+) -> None:
+    stale = np.full((2, 3, 3), 11, dtype=np.uint8)
+    _save_frame(tmp_path, "top_cam", 4, stale)
+    path = tmp_path / _frame_filename("scene-0-e0", "top_cam", 4)
+    if invalid == "corrupt":
+        path.write_bytes(b"not a numpy file")
+    else:
+        arrays: dict[str, npt.NDArray[Any]] = {
+            "dtype": stale.astype(np.float32),
+            "shape": np.zeros((2, 3, 2), dtype=np.uint8),
+            "empty": np.empty((0, 0, 3), dtype=np.uint8),
+        }
+        np.save(path, arrays[invalid])
+    document = render_html(
+        _frame_log(_parts()),
+        title="no stale pixels",
+        frames_dir=tmp_path,
+        no_video=True,
+        live_frames_budget_bytes=8000000 if live else None,
+    )
+    assert '<img class="frame"' not in document
+    assert png_data_url(stale) not in document
+
+
+def test_discovery_preserves_exact_trials_and_merges_versioned_and_legacy_frames(
+    tmp_path: Path,
+) -> None:
+    store = FrameStore(str(tmp_path))
+    frame = np.full((2, 3, 3), 22, dtype=np.uint8)
+    ref = store.put("pick-e0", 0, "top-e0_rgb", frame)
+    other = store.put("pick-e0_top-e0", 0, "rgb", frame)
+    # This legacy path represents both reported identities; each exact new
+    # counterpart must replace it in the corresponding trial's discovery.
+    np.save(tmp_path / "pick-e0_top-e0_rgb_000000.npy", np.full_like(frame, 11))
+    np.save(tmp_path / "pick-e0_top-e0_rgb_000001.npy", frame)
+    (tmp_path / "~f1~pick-e0~bad%GG_000000.npy").write_bytes(b"malformed name")
+    streams = _trial_camera_streams(tmp_path, "pick-e0")
+    assert streams == {
+        "top-e0_rgb": [(0, Path(ref.path)), (1, tmp_path / "pick-e0_top-e0_rgb_000001.npy")]
+    }
+    assert _trial_camera_streams(tmp_path, "pick-e0_top-e0") == {
+        "rgb": [(0, Path(other.path)), (1, tmp_path / "pick-e0_top-e0_rgb_000001.npy")],
+    }
+    raw_trial = "Raw[*]/Trial"
+    raw_ref = store.put(raw_trial, 0, "Camera", frame)
+    store.put("RawX/Trial", 0, "intruder", frame)
+    assert _trial_camera_streams(tmp_path, raw_trial) == {"Camera": [(0, Path(raw_ref.path))]}
+
+
+@pytest.mark.parametrize("placeholders", [False, True])
+def test_mixed_format_composite_preserves_decoded_camera_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placeholders: bool
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    cameras = [_safe("a/b"), "a/b"]
+    frame = np.full((2, 3, 3), 22, dtype=np.uint8)
+    store = FrameStore(str(tmp_path))
+    for camera in cameras:
+        for step in [0, 1]:
+            store.put("scene-0-e0", step, camera, frame)
+            _save_frame(tmp_path, camera, step, np.full_like(frame, 11))
+    for step in [0, 1]:
+        _save_frame(tmp_path, "legacy/name", step, frame)
+    calls: list[list[str]] = []
+
+    def encode(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
+        calls.append([key for key, _ in streams])
+        for _camera, frames in streams:
+            assert [step for step, _ in frames] == [0, 1]
+            assert all(np.all(np.load(path) == 22) for _, path in frames)
+        return b"mock composite", tuple(key for key, _ in streams), (0, 1)
+
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", encode)
+    parts = (
+        [part for camera in [*cameras, "legacy/name"] for part in _parts(camera, 0)]
+        if placeholders
+        else []
+    )
+    document = render_html(_frame_log(parts), title="camera identity", frames_dir=tmp_path)
+    expected_order = (
+        [*cameras, "legacy/name"] if placeholders else sorted([*cameras, _safe("legacy/name")])
+    )
+    assert calls == [expected_order]
+    assert f'<div class="camera-order">{" · ".join(expected_order)}</div>' in document
 
 
 def test_malformed_feedback_and_extra_trial_messages_stay_residual(tmp_path: Path) -> None:
