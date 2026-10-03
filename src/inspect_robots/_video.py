@@ -326,6 +326,8 @@ def _encode_arrays(
         proc.kill()
         try:
             stdin.close()
+        except OSError:
+            pass
         finally:
             proc.wait()
             out_path.unlink(missing_ok=True)

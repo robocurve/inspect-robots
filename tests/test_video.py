@@ -20,6 +20,7 @@ import inspect_robots.cli as cli
 from inspect_robots._video import (
     StreamResult,
     _encode_composite_mp4,
+    _temporary_mp4,
     count_frames,
     default_fps,
     discover_streams,
@@ -446,13 +447,16 @@ def test_encode_broken_pipe_at_close_is_caught(
     assert result.error == "moov atom write failed"
 
 
+@pytest.mark.parametrize("fail_at_close", [False, True])
 def test_encode_interrupt_mid_pipe_propagates_without_temp_leak(
-    tmp_path: Path, fake_popen: type[_FakePopen]
+    tmp_path: Path, fake_popen: type[_FakePopen], fail_at_close: bool
 ) -> None:
     # Ctrl-C during a multi-thousand-frame encode must kill the child, close
-    # stdin, wait, unlink partial output, and remove the stderr temp file.
+    # stdin (even if close raises BrokenPipeError), wait, unlink partial output,
+    # and remove the stderr temp file, preserving KeyboardInterrupt.
     fake_popen.fail_on_write_after = 0
     fake_popen.write_exception = KeyboardInterrupt
+    fake_popen.fail_at_close = fail_at_close
     frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
     out = tmp_path / "s.mp4"
     out.write_bytes(b"partial")
@@ -466,13 +470,15 @@ def test_encode_interrupt_mid_pipe_propagates_without_temp_leak(
     assert _no_temp_leak(tmp_path)
 
 
+@pytest.mark.parametrize("fail_at_close", [False, True])
 def test_encode_escaping_exception_cleans_process_and_output(
-    tmp_path: Path, fake_popen: type[_FakePopen]
+    tmp_path: Path, fake_popen: type[_FakePopen], fail_at_close: bool
 ) -> None:
     # An unexpected runtime error (MemoryError, generator fault) must also
-    # uphold kill -> wait -> unlink before re-raising.
+    # uphold kill -> wait -> unlink before re-raising, even when stdin close fails.
     fake_popen.fail_on_write_after = 0
     fake_popen.write_exception = MemoryError
+    fake_popen.fail_at_close = fail_at_close
     frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
     out = tmp_path / "s.mp4"
     out.write_bytes(b"partial")
@@ -483,6 +489,24 @@ def test_encode_escaping_exception_cleans_process_and_output(
     assert proc.stdin_closed_at_wait is True
     assert proc.out_exists_at_wait is True
     assert not out.exists()
+    assert _no_temp_leak(tmp_path)
+
+
+def test_temporary_mp4_propagates_interrupt_even_with_close_failure(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    # If stdin.close() raises BrokenPipeError while handling KeyboardInterrupt,
+    # BrokenPipeError must not escape and be caught as None by _temporary_mp4.
+    fake_popen.fail_on_write_after = 0
+    fake_popen.write_exception = KeyboardInterrupt
+    fake_popen.fail_at_close = True
+    frames = _write_frames(tmp_path / "f", "s", [_rgb(0)])
+
+    with pytest.raises(KeyboardInterrupt):
+        _temporary_mp4(lambda path: encode_stream(frames, path, 10.0, "/fake/ffmpeg"))
+    (proc,) = fake_popen.calls
+    assert proc.killed
+    assert not list(tmp_path.glob("*.mp4"))
     assert _no_temp_leak(tmp_path)
 
 
