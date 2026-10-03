@@ -173,6 +173,13 @@ class StateSpec:
 
     fields: tuple[StateField, ...] = ()
 
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for item in self.fields:
+            if item.key in seen:
+                raise ValueError(f"StateSpec has duplicate field key {item.key!r}")
+            seen.add(item.key)
+
     @property
     def keys(self) -> frozenset[str]:
         """Names used to align rich and compatibility-level state declarations."""
@@ -193,6 +200,11 @@ class ObservationSpace:
     state: StateSpec | None = None
 
     def __post_init__(self) -> None:
+        seen_cameras: set[str] = set()
+        for cam in self.cameras:
+            if cam.name in seen_cameras:
+                raise ValueError(f"ObservationSpace has duplicate camera name {cam.name!r}")
+            seen_cameras.add(cam.name)
         # If a rich StateSpec is given, keep state_keys consistent with it.
         if self.state is not None:
             if not self.state_keys:
