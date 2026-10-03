@@ -84,8 +84,10 @@ towncrier silently ignores a fragment whose type is misspelled
 strict mypy at `python_version = "3.10"`, so it does **not** parse TOML
 (`tomllib` is 3.11+, and a `tomli` fallback fails mypy on the 3.11 quality job).
 Instead it hardcodes the six types as a tuple and cross-checks them against the
-`[tool.towncrier]` block of `pyproject.toml` read as plain text
-(`re.findall(r'directory = "(\w+)"', block)`), so the two cannot drift. It fails
+whole `pyproject.toml` read as plain text with a regex anchored on the type
+tables, `re.findall(r'^\[\[tool\.towncrier\.type\]\]\s*\ndirectory = "(\w+)"',
+text, re.M)`, asserting the result is non-empty and equal to the tuple in
+order, so the two cannot drift. It fails
 on any file in `changelog.d/` other than `README.md` / `.gitkeep` that does not
 match `^(\d+|\+[a-z0-9][a-z0-9-]*)\.(<types>)(\.\d+)?\.md$` or that is empty
 (an empty fragment renders as a bare link; verified). The sdist ships `tests`
@@ -93,32 +95,39 @@ but not `changelog.d/`, so the test skips when `changelog.d/` is absent. The
 optional `.N` counter matches towncrier's own form for two fragments with the
 same issue and type. It does not require a fragment per PR (see Non-goals).
 
-### `CHANGELOG.md` and migration of the legacy section
+### `CHANGELOG.md` migration (done entirely in this PR)
 
-This PR inserts, directly above `## [Unreleased]`, a one-line note that new
-entries go in `changelog.d/`, followed by the towncrier start marker on its own
-line (note above marker, so the first build puts the new release section below
-the note). The legacy `## [Unreleased]` block is left as is. Checked with
-`git merge-tree` against the 22 open PRs that touch `CHANGELOG.md` (525, 520,
-514, 510, 487, 483, 482, 481, 472, 456, 455, 438, 437, 435, 434, 429, 427, 411,
-376, 375, 349, 307): the insertion adds no new conflicts.
+The migration happens in this PR, not at the next release, so there is never a
+window where new entries land in the legacy block.
 
-From this PR on, whenever an open PR's `CHANGELOG.md` entry conflicts (16 of the
-22 already do), the maintainer resolves it by moving the entry into a
-`changelog.d/` fragment on the PR branch and dropping the `CHANGELOG.md` hunk,
-instead of unioning bullets. That ends the conflict for good.
-
-At the **first release-prep after this lands**, the maintainer:
-
-1. Runs `uv run towncrier build --version X.Y.Z --yes`, which writes
-   `## [X.Y.Z] - <date>` with the fragment entries above the legacy block and
-   deletes the fragments.
-2. Retitles the legacy heading verbatim to
-   `## [0.7.0 to 0.60.0]: consolidated log` without moving any entries (they
-   shipped across those releases, not in X.Y.Z), and deletes the stale
+1. **Move unreleased legacy entries into fragments.** Every entry added to
+   `CHANGELOG.md` since the `v0.60.0` tag (`git diff v0.60.0..HEAD --
+   CHANGELOG.md`; today #450, #498, #502, #504, #479, #509, plus anything merged
+   before this PR lands, e.g. #517-#519 and #438) has not shipped yet. Each
+   becomes a fragment: type from the subsection it sat in, name from its single
+   linked issue (`<issue>.<type>.md`) with the link stripped from the prose, or
+   an orphan `+<slug>.<type>.md` when it links zero or several issues (then the
+   links stay in the prose). The entries are removed from the legacy block.
+   This is redone against the latest `main` immediately before merge.
+2. **Retitle the legacy block.** `## [Unreleased]` becomes
+   `## [0.7.0 to 0.60.0]: consolidated log`, unchanged otherwise: after step 1
+   it holds exactly what shipped through v0.60.0. Delete the stale
    `[Unreleased]: …/compare/v0.3.0...HEAD` link definition (CHANGELOG.md:1049).
-   From then on there is no `[Unreleased]` section: unreleased changes live in
-   `changelog.d/`.
+3. **Note and marker.** Directly above the retitled heading: a one-line note
+   that unreleased changes live in `changelog.d/` and are compiled at release,
+   then the towncrier start marker on its own line (note above marker, so builds
+   insert new release sections below the note and above the legacy block).
+
+After this PR there is no `[Unreleased]` section.
+
+**Open PRs that still edit `CHANGELOG.md`.** 22 open PRs touch it today (525,
+520, 514, 510, 487, 483, 482, 481, 472, 456, 455, 438, 437, 435, 434, 429, 427,
+411, 376, 375, 349, 307). Rule, documented in the maintainer section of
+`CONTRIBUTING.md` and in root `CLAUDE.md`: before merging **any** PR that
+touches `CHANGELOG.md`, conflict or not, the maintainer moves its entry into a
+`changelog.d/` fragment on the PR branch and drops the `CHANGELOG.md` hunk. The
+retitle in step 2 makes most of those PRs conflict, which is harmless because
+their `CHANGELOG.md` hunk is dropped anyway.
 
 ### Release procedure (new, documented in `CONTRIBUTING.md` and `CLAUDE.md`)
 
@@ -135,13 +144,14 @@ entries are listed under a later version. Add a short
 `uv run towncrier build --version X.Y.Z --yes`, commit the updated
 `CHANGELOG.md` and deleted fragments, merge, then dispatch the release
 workflow as today. Plugin-only releases include their fragments in the same way;
-plugin entries keep their inline "(plugin X.Y.Z)" prefix.
+plugin entries keep their inline prefix, e.g. `**Agent plugin (0.28.0):**`.
 
 ### Contributor docs
 
 - `CONTRIBUTING.md` step 4: "Add a changelog fragment
-  `changelog.d/<issue>.<type>.md` (see `changelog.d/README.md`); do not edit
-  `CHANGELOG.md`."
+  `changelog.d/<issue>.<type>.md`, or `changelog.d/+<slug>.<type>.md` if there
+  is no issue (slug: lowercase letters, digits, hyphens); see
+  `changelog.d/README.md`. Do not edit `CHANGELOG.md`."
 - PR template checkbox: "Changelog fragment added in `changelog.d/`".
 - Root `CLAUDE.md` "Working here": one bullet with the same rule, since agents
   read it first; plus the releases bullet above.
@@ -161,7 +171,7 @@ This PR adds its own fragment, `changelog.d/528.changed.md`, and no
   CI-only PRs legitimately have none, and a blocking check would bounce
   external contributors. Revisit after a release cycle.
 - No automated build in `release.yml`: it cannot push to `main`.
-- No rewrite of the legacy 800-line section beyond the one-time move above.
+- No rewrite of the legacy section beyond the migration above.
 - GitHub Releases keep their auto-generated notes.
 
 ## Files
@@ -169,9 +179,10 @@ This PR adds its own fragment, `changelog.d/528.changed.md`, and no
 ```
 pyproject.toml                       # [tool.towncrier] + towncrier in dev extra
 uv.lock                              # lock update for the new dev dependency
-CHANGELOG.md                         # start marker + one-line note
+CHANGELOG.md                         # entries since v0.60.0 moved out; retitle; note + marker
 changelog.d/README.md                # fragment convention
 changelog.d/528.changed.md           # this PR's own entry
+changelog.d/*.md                     # entries migrated from the legacy block
 tests/test_changelog_fragments.py    # fragment-name validation
 CONTRIBUTING.md                      # step 4 + "Releasing (maintainers)"
 .github/PULL_REQUEST_TEMPLATE.md     # checkbox
@@ -189,5 +200,11 @@ plans/0084-changelog-fragments.md    # this plan
   type, an empty fragment, and a bad name (parametrized cases using `tmp_path`);
   it skips when `changelog.d/` is absent; its type tuple matches the pyproject
   block. It passes `mypy` at `python_version = "3.10"` with no TOML import.
+- After the migration, `git diff v0.60.0..HEAD -- CHANGELOG.md` adds no
+  entries inside the retitled block, every removed entry has a fragment with the
+  same prose, and `towncrier build --draft` lists them all.
+- Expected towncrier output quirks, not to be hand-edited: a blank line between
+  the note and the marker, wrapped fragment lines indented 4 spaces, tight lists,
+  two blank lines before the next `##` heading.
 - Full gates: ruff, ruff format, strict mypy (covers tests), pytest at 100%
   coverage.
