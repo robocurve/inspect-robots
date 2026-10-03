@@ -109,15 +109,18 @@ def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[
             f"chat request failed: {exc.reason}.\n"
             "fix: check the base URL and network connectivity, then retry"
         ) from exc
-    except ValueError as exc:
+    except ValueError:
         # Raised before any byte is sent (an API key with a newline or
         # non-latin-1 characters, a host IDNA cannot encode): it will never
         # succeed, so it is configuration, not an outage. UnicodeError is a
-        # ValueError subclass.
+        # ValueError subclass. The original text can contain the Authorization
+        # header (the API key), so it is neither echoed nor chained: this
+        # message reaches stderr and, mid-run, the saved log's grading_error.
         raise ConfigError(
-            f"chat request failed: invalid request ({exc}).\n"
+            "chat request failed: invalid request (the API key contains a newline or "
+            "non-latin-1 characters, or the host name cannot be encoded).\n"
             "fix: check the base URL and the API key"
-        ) from exc
+        ) from None
     except (OSError, http.client.HTTPException) as exc:
         # A read timeout or dropped connection arrives here rather than as a
         # URLError; it is still a transport failure, not a request problem.

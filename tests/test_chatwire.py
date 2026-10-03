@@ -324,6 +324,10 @@ def test_requests_that_can_never_be_sent_are_plain_config_errors(url: str, key: 
     with pytest.raises(ConfigError, match=r"invalid request") as info:
         _urllib_post(url, {"Authorization": f"Bearer {key}"}, b"{}")
     assert type(info.value) is ConfigError
+    # The key must never leak into the message or the exception chain.
+    assert key.strip() not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
 
 
 @pytest.mark.parametrize(
