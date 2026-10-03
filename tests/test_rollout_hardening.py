@@ -490,6 +490,26 @@ def test_approver_introduced_non_finite_action_is_a_safety_abort() -> None:
     step.assert_not_called()
 
 
+def test_approver_introduced_wrong_dim_action_is_a_safety_abort() -> None:
+    class _WrongDimApprover:
+        def review(self, action: Action, store: dict[str, object]) -> Action:
+            del store
+            return replace(action, data=np.array([0.0]))
+
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(
+            SafetyAbort, match="returned a 1-D action but embodiment 'cubepick' expects 2-D"
+        ),
+    ):
+        _run(ScriptedPolicy(), embodiment, approver=_WrongDimApprover())
+
+    step.assert_not_called()
+
+
 # --------------------------------------------------------------------------- #
 # Approval events: a modified action is recorded in the transcript.
 # --------------------------------------------------------------------------- #

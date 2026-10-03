@@ -1995,3 +1995,118 @@ def test_preflight_rejection_stops_eval_set_before_the_first_task(tmp_path: Path
         )
     assert grader.preflights == 1
     assert _ResetCountingEmbodiment.resets == 0
+
+
+def test_eval_isolates_failing_sink_and_preserves_logs_and_other_sinks(tmp_path: Path) -> None:
+    """A failing custom sink does not abort eval or prevent other sinks from logging."""
+
+    class _CrashingSink(NullSink):
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            raise RuntimeError("on_eval_start crashed")
+
+        def on_trial_start(self, scene_id: str, epoch: int) -> None:
+            raise RuntimeError("on_trial_start crashed")
+
+        def log_step(
+            self, t: int, observation: Observation, action: Action, result: StepResult
+        ) -> None:
+            raise RuntimeError("log_step crashed")
+
+        def on_trial_end(self, record: TrialRecord) -> None:
+            raise RuntimeError("on_trial_end crashed")
+
+        def on_eval_end(self, log: EvalLog) -> None:
+            raise RuntimeError("on_eval_end crashed")
+
+    surviving = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        (log,) = eval(
+            _task(max_steps=2),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[_CrashingSink(), surviving, json_sink],
+            log_dir=str(tmp_path),
+        )
+
+    assert log.status == "success"
+    assert len(surviving.records) == 1
+    assert len(surviving.records[0].steps) >= 1
+    # Verify json_sink wrote the final log successfully and it can be reloaded
+    written_logs = list(tmp_path.glob("*.json"))
+    assert len(written_logs) == 1
+    reloaded = read_eval_log(str(written_logs[0]))
+    assert reloaded.status == "success"
+
+    # Verify that warnings for _CrashingSink were raised
+    sink_warnings = [str(w.message) for w in recorded if "_CrashingSink" in str(w.message)]
+    assert any("on_eval_start() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_trial_start() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("log_step() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_trial_end() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_eval_end() failed with RuntimeError" in msg for msg in sink_warnings)
+
+
+@pytest.mark.parametrize("signal_cls", [SafetyAbort, EmbodimentFault])
+def test_sink_raising_safety_abort_or_embodiment_fault_halts_eval(
+    signal_cls: type[Exception], tmp_path: Path
+) -> None:
+    """A sink raising SafetyAbort or EmbodimentFault stops execution immediately."""
+
+    class _HaltSink(NullSink):
+        def on_trial_start(self, scene_id: str, epoch: int) -> None:
+            if scene_id == "s0":
+                raise signal_cls("sink triggered stop")
+
+    task = Task(
+        name="multi",
+        scenes=[
+            Scene(id="s0", instruction="first"),
+            Scene(id="s1", instruction="second"),
+        ],
+        max_steps=3,
+        scorer="success_at_end",
+    )
+    with pytest.raises(signal_cls, match="sink triggered stop"):
+        eval(
+            task,
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[_HaltSink()],
+            log_dir=str(tmp_path),
+        )
+
+
+@pytest.mark.parametrize("signal_cls", [SafetyAbort, EmbodimentFault])
+def test_sink_raising_safety_abort_or_embodiment_fault_in_log_step_halts_eval(
+    signal_cls: type[Exception], tmp_path: Path
+) -> None:
+    """A sink raising SafetyAbort or EmbodimentFault in log_step halts rollout."""
+
+    class _StepHaltSink(NullSink):
+        def log_step(
+            self, t: int, observation: Observation, action: Action, result: StepResult
+        ) -> None:
+            raise signal_cls("stop on step")
+
+    task = Task(
+        name="multi",
+        scenes=[
+            Scene(id="s0", instruction="first"),
+            Scene(id="s1", instruction="second"),
+        ],
+        max_steps=5,
+        scorer="success_at_end",
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[_StepHaltSink()],
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    assert signal_cls.__name__ in (log.error or "")
+    assert len(log.samples) == 1
+    assert log.samples[0].scene_id == "s0"

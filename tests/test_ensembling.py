@@ -144,3 +144,9 @@ def test_empty_chunk_raises_policy_error() -> None:
     obs = Observation()
     with pytest.raises(PolicyError, match=r"empty-chunk-policy.*empty ActionChunk"):
         ctrl.next_action(_EmptyChunkPolicy(), obs, 0, store)
+
+
+@pytest.mark.parametrize("bad_m", [-0.1, -1.0, float("nan"), float("inf"), True, False])
+def test_ensembling_controller_rejects_invalid_m(bad_m: float) -> None:
+    with pytest.raises(ValueError, match="m must be a finite number >= 0"):
+        EnsemblingController(_DELTA_SPACE, m=bad_m)
