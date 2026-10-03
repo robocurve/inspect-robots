@@ -1580,7 +1580,9 @@ def run_setup(
 
     path = config_path(env)
     if path is None:
-        raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
+        raise SystemExit(
+            "cannot locate a config home: set $XDG_CONFIG_HOME, $HOME or (on Windows) %APPDATA%"
+        )
 
     print(f"{_paint('inspect-robots setup', _BOLD, out)} — writes {path}", file=out)
     print(

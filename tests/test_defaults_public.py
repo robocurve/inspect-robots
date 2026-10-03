@@ -61,6 +61,28 @@ def test_config_path_falls_back_to_home_dot_config(tmp_path: Path) -> None:
     )
 
 
+def test_config_path_native_windows_falls_back_to_appdata_then_userprofile(
+    tmp_path: Path,
+) -> None:
+    app_data, profile = tmp_path / "AppData" / "Roaming", tmp_path / "User"
+    assert defaults.config_path({"APPDATA": str(app_data), "USERPROFILE": str(profile)}) == (
+        app_data / "inspect-robots" / "config.ini"
+    )
+    assert defaults.config_path({"USERPROFILE": str(profile)}) == (
+        profile / ".config" / "inspect-robots" / "config.ini"
+    )
+    assert defaults.config_path({"APPDATA": "", "USERPROFILE": str(profile)}) == (
+        profile / ".config" / "inspect-robots" / "config.ini"
+    )
+
+
+def test_config_path_home_wins_over_windows_variables(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert defaults.config_path(
+        {"HOME": str(home), "APPDATA": str(tmp_path / "a"), "USERPROFILE": str(tmp_path / "u")}
+    ) == (home / ".config" / "inspect-robots" / "config.ini")
+
+
 def test_config_path_without_config_home_is_none() -> None:
     assert defaults.config_path({}) is None
 
