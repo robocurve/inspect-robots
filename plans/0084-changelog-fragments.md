@@ -102,12 +102,12 @@ window where new entries land in the legacy block.
 
 1. **Move unreleased legacy entries into fragments.** Every entry added to
    `CHANGELOG.md` since the `v0.60.0` tag (`git diff v0.60.0..HEAD --
-   CHANGELOG.md`; today #450, #498, #502, #504, #479, #509, plus anything merged
-   before this PR lands, e.g. #517-#519 and #438) has not shipped yet. Each
+   CHANGELOG.md`) has not shipped yet. Fragment names come from the links in
+   those entries, not from the PR numbers that added them. Each
    becomes a fragment: type from the subsection it sat in, name from its single
    linked issue (`<issue>.<type>.md`) with the link stripped from the prose, or
-   an orphan `+<slug>.<type>.md` when it links zero or several issues (then the
-   links stay in the prose). The entries are removed from the legacy block.
+   an orphan `+<slug>.<type>.md` when it links zero or several issues, or links
+   a pull request rather than an issue (then the links stay in the prose). The entries are removed from the legacy block.
    This is redone against the latest `main` immediately before merge.
 2. **Retitle the legacy block.** `## [Unreleased]` becomes
    `## [0.7.0 to 0.60.0]: consolidated log`, unchanged otherwise: after step 1
@@ -120,9 +120,9 @@ window where new entries land in the legacy block.
 
 After this PR there is no `[Unreleased]` section.
 
-**Open PRs that still edit `CHANGELOG.md`.** 22 open PRs touch it today (525,
-520, 514, 510, 487, 483, 482, 481, 472, 456, 455, 438, 437, 435, 434, 429, 427,
-411, 376, 375, 349, 307). Rule, documented in the maintainer section of
+**Open PRs that still edit `CHANGELOG.md`.** 21 open PRs touch it today (525,
+520, 514, 510, 487, 483, 482, 481, 472, 456, 455, 437, 435, 434, 429, 427, 411,
+376, 375, 349, 307). Rule, documented in the maintainer section of
 `CONTRIBUTING.md` and in root `CLAUDE.md`: before merging **any** PR that
 touches `CHANGELOG.md`, conflict or not, the maintainer moves its entry into a
 `changelog.d/` fragment on the PR branch and drops the `CHANGELOG.md` hunk. The
@@ -195,7 +195,7 @@ plans/0084-changelog-fragments.md    # this plan
 
 - `uv run towncrier build --draft --version 0.61.0` renders this PR's fragment
   under `## [0.61.0] - <date>` / `### Changed`, with the issue link appended
-  once, above `## [Unreleased]`.
+  once, above `## [0.7.0 to 0.60.0]: consolidated log`.
 - The new test passes with the real `changelog.d/`, and fails for a misspelled
   type, an empty fragment, and a bad name (parametrized cases using `tmp_path`);
   it skips when `changelog.d/` is absent; its type tuple matches the pyproject

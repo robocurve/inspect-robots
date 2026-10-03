@@ -59,6 +59,10 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
   `core-only-import` CI job enforces this.
 - Test-driven; commit/push in small focused steps.
+- **Changelog entries are fragments**: add `changelog.d/<issue>.<type>.md` (or
+  `+<slug>.<type>.md` with no issue); never edit `CHANGELOG.md` in a feature PR.
+  See `changelog.d/README.md`. Before merging an older PR that still edits
+  `CHANGELOG.md`, move its entry into a fragment.
 - Public API is fenced by `inspect_robots.__all__` and guarded by
   `tests/test_api_snapshot.py` — update both together.
 - Documentation source lives in `docs/`, and the Docusaurus site lives in
@@ -99,8 +103,10 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - The `test-extra` tier stays advisory: `continue-on-error: true` means it
   reports success to `ci-ok` even when its steps fail — listing it in `needs`
   does not make it blocking.
-- **Releases are one-click**: Actions → Release → Run workflow → pick
-  patch/minor/major. The version is derived from the git tag by hatch-vcs —
+- **Releases are one-click** after a changelog PR: run `uv run towncrier build
+  --version X.Y.Z --yes` (X.Y.Z = latest `v*` tag plus the bump you will pick)
+  and merge it, then Actions → Release → Run workflow → pick the same
+  patch/minor/major (see "Releasing (maintainers)" in CONTRIBUTING.md). The version is derived from the git tag by hatch-vcs —
   never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: `plugins/*` packages keep static versions in their own pyprojects; bump one in a PR and it publishes alongside the next core release via its `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI trusted-publisher environment). The same
   run publishes to PyPI via trusted publishing; nothing is pushed to main.
 - **PyPI readme is transformed at build time** — `hatch-fancy-pypi-readme`

@@ -13,7 +13,7 @@ What does this change do and why?
 - [ ] Coverage stays at **100%** (`pytest --cov`)
 - [ ] `ruff check .` and `ruff format --check .` pass
 - [ ] `mypy` passes (strict)
-- [ ] `CHANGELOG.md` updated under "Unreleased"
+- [ ] Changelog fragment added in `changelog.d/` (see `changelog.d/README.md`); `CHANGELOG.md` not edited
 - [ ] Public API changes are reflected in `inspect_robots.__all__` and the API-snapshot test
 - [ ] Core stays NumPy-only (new deps are optional extras, lazily imported)
 
