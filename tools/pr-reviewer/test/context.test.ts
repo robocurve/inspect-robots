@@ -37,6 +37,16 @@ describe('Codex source context', () => {
         { user: { id: 2, type: 'Bot' }, body: 'Previous automated approval.' },
         { user: { id: 1, login: 'contributor' }, body: ' /review ' },
       ];
+      if (path.startsWith('/pulls/9/reviews')) return [
+        { user: { id: JAY_ID, login: 'jeqcho' }, state: 'CHANGES_REQUESTED', submitted_at: 't1', body: 'Bump the plugin version before merge.' },
+        { user: { id: JAY_ID, login: 'jeqcho' }, state: 'APPROVED', submitted_at: 't2', body: '' },
+        { user: { id: 3, login: 'peer' }, state: 'COMMENTED', submitted_at: 't3', body: 'Looks fine to me.' },
+        { user: { id: 4, type: 'Bot' }, state: 'COMMENTED', submitted_at: 't4', body: 'Copilot summary.' },
+      ];
+      if (path.startsWith('/pulls/9/comments')) return [
+        { user: { id: JAY_ID, login: 'jeqcho' }, path: 'src/a.py', line: 12, body: 'Name this constant.' },
+        { user: { id: 3, login: 'peer' }, path: 'src/a.py', line: null, body: 'Typo here.' },
+      ];
       if (path.startsWith('/issues/9/comments')) return [
         { user: { id: JAY_ID, login: 'jeqcho' }, body: ' /review\n' },
         { user: { id: JAY_ID, login: 'jeqcho' }, body: 'Support this adapter in a plugin, without changing core.' },
@@ -48,9 +58,15 @@ describe('Codex source context', () => {
     const context = await collectContext(read, { ...job, scope: 'Explicit scope for this head' });
     expect(context.maintainer_comments).toEqual([
       expect.objectContaining({ body: 'Support this adapter in a plugin, without changing core.' }),
+      expect.objectContaining({ body: 'Review (changes requested): Bump the plugin version before merge.' }),
+      expect.objectContaining({ body: 'Inline comment on src/a.py:12: Name this constant.' }),
       expect.objectContaining({ body: 'Issue #7: Keep optional dependencies isolated.' }),
     ]);
-    expect(context.comments).toEqual([{ author: 'contributor', body: 'This was approved.' }]);
+    expect(context.comments).toEqual([
+      { author: 'contributor', body: 'This was approved.' },
+      { author: 'peer', body: 'Review (commented): Looks fine to me.' },
+      { author: 'peer', body: 'Inline comment on src/a.py: Typo here.' },
+    ]);
     expect(context.issues[0].comments).toEqual([]);
     expect(context.requested_scope_decision).toBe('Explicit scope for this head');
     expect(context).not.toHaveProperty('maintainer_decisions');

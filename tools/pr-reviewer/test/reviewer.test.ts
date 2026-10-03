@@ -250,7 +250,7 @@ describe('untrusted input and complete context', () => {
     expect(await verifySignature(body, null, secret)).toBe(false);
   });
   it('has no general GitHub URL or mutation tool', () => {
-    for (const p of ['/pulls/9', '/contents/src/main.py?ref=' + head, '/issues/9/comments']) expect(allowedRead(p)).toBe(true);
+    for (const p of ['/pulls/9', '/contents/src/main.py?ref=' + head, '/issues/9/comments', '/pulls/9/reviews?per_page=100&page=1', '/pulls/9/comments?per_page=100&page=1']) expect(allowedRead(p)).toBe(true);
     for (const p of ['/pulls/9/merge', '/issues/comments/1', '/../../other', 'https://bad.test/', '/actions/runs/1/approve', '/contents/../secrets']) expect(allowedRead(p)).toBe(false);
     expect(safePath('../.env')).toBe(false);
   });
