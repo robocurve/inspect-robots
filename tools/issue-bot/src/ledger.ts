@@ -45,7 +45,10 @@ export interface Stage {
   output: StageOutput | null;
   consumed: boolean;
   failure: string | null;
+  /** Absent on stages prepared before launch tracking; such stages are never replaced. */
   modelUsed?: boolean;
+  /** Evidence only: the launch may still have succeeded, so this never vetoes an output. */
+  launchError?: string;
 }
 interface Outbox {
   publication: Publication;
@@ -141,7 +144,7 @@ export class IssueLedger extends DurableObject<IssueEnv> {
   }
   async pending() {
     return this.ctx.storage.sql
-      .exec<{ data: string }>("SELECT data FROM jobs ORDER BY created,id")
+      .exec<{ data: string }>("SELECT data FROM jobs ORDER BY created,rowid")
       .toArray()
       .map((r) => JSON.parse(r.data) as Job)
       .filter((j) => !["done", "held"].includes(j.state));
@@ -277,6 +280,7 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       output: null,
       consumed: false,
       failure: null,
+      modelUsed: false,
     };
     this.ctx.storage.sql.exec(
       "INSERT INTO stages VALUES(?,?,?,?)",
@@ -369,9 +373,19 @@ export class IssueLedger extends DurableObject<IssueEnv> {
   /** Keep the first launch error as evidence; the launch may still have succeeded. */
   async launchFailed(id: string, reason: string) {
     const s = this.get<Stage>("stages", id);
-    if (!s || s.output || s.failure) return;
+    if (!s || s.output || s.launchError) return;
+    s.launchError = reason;
+    this.saveStage(s);
+  }
+  /** Atomically close a stage whose container never ran; null if it already finished or closed. */
+  async closeNeverStarted(id: string) {
+    const s = this.get<Stage>("stages", id);
+    if (!s || s.output || s.closed) return null;
+    const reason = s.failure ?? s.launchError ?? "stage_container_stopped";
+    s.closed = true;
     s.failure = reason;
     this.saveStage(s);
+    return reason;
   }
   /**
    * Replace a stage whose container never ran, once per job. A stage that reached
@@ -381,7 +395,13 @@ export class IssueLedger extends DurableObject<IssueEnv> {
     const job = this.get<Job>("jobs", id);
     if (!job || job.state !== "running" || !job.stage) return false;
     const s = this.get<Stage>("stages", job.stage);
-    if (!s || s.output || s.modelUsed || (job.launchRetries ?? 0) >= 1)
+    if (
+      !s ||
+      s.output ||
+      s.consumed ||
+      s.modelUsed !== false ||
+      (job.launchRetries ?? 0) >= 1
+    )
       return false;
     s.consumed = true;
     this.saveStage(s);

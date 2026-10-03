@@ -215,7 +215,11 @@ export async function tick(env: IssueEnv, id: string) {
         !s.cleaned &&
         (s.output || s.closed || Date.now() - s.started > 45 * 60000)
       ) {
-        const reason = s.output ? undefined : (s.failure ?? "stage_timeout");
+        const reason = s.output
+          ? undefined
+          : (s.failure ??
+            (s.modelUsed === false ? s.launchError : undefined) ??
+            "stage_timeout");
         await ledger.close(s.request.id, reason);
         await env.RUNNER.cleanup(s.request.sandbox);
         await ledger.cleaned(s.request.id);
@@ -258,8 +262,10 @@ export async function tick(env: IssueEnv, id: string) {
     const activeStage = job.stage ? await ledger.stage(job.stage) : null;
     // Read-only triage can finish on its recorded immutable base. Never carry
     // stale evidence into planning, implementation, or publication of a fix.
+    // A launch retry replaces a consumed triage stage and keeps the same exemption.
     const triaging =
-      activeStage?.request.kind === "triage" && !activeStage.consumed;
+      job.next === "triage" ||
+      (activeStage?.request.kind === "triage" && !activeStage.consumed);
     if (
       current.state !== "open" ||
       current.revision !== job.issue.revision ||
@@ -317,14 +323,14 @@ export async function tick(env: IssueEnv, id: string) {
         age > LAUNCH_GRACE_MS &&
         age < STAGE_EXPIRY_MS
       ) {
-        const s = await ledger.stage(stage.request.id);
-        if (s && !s.output && !s.closed) {
-          const reason = s.failure ?? "stage_container_stopped";
-          await ledger.close(s.request.id, reason);
-          await env.RUNNER.cleanup(s.request.sandbox);
-          await ledger.cleaned(s.request.id);
-          if (!(await ledger.retryLaunch(id))) await ledger.hold(id, reason);
-          return ["done", "held"].includes((await ledger.job(id))?.state ?? "");
+        const reason = await ledger.closeNeverStarted(stage.request.id);
+        if (reason) {
+          await env.RUNNER.cleanup(stage.request.sandbox);
+          await ledger.cleaned(stage.request.id);
+          if (await ledger.retryLaunch(id)) return false;
+          await ledger.hold(id, reason);
+          await ledger.release(id);
+          return true;
         }
       }
     }

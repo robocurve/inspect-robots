@@ -522,6 +522,97 @@ describe("stage launch failures", () => {
     expect((await l.job(id))?.state).toBe("running");
     expect(runner.cleanup).not.toHaveBeenCalled();
   });
+  it("never lets a recorded launch error veto a stage that actually completed", async () => {
+    const { l, e } = fixture(
+      () => Promise.reject(new Error("stage_launch_uncertain")),
+      "running",
+    );
+    const id = await register(l);
+    await tick(e, id);
+    const stage = (await l.stage((await l.job(id))!.stage!))!;
+    expect(await l.reserve(stage.request.token, "charge", 1000)).toBe(true);
+    await l.checkpoint(
+      stage.request.checkpointToken,
+      JSON.stringify(output("NEEDS_INFO")),
+    );
+    expect(await tick(e, id)).toBe(true);
+    expect((await l.job(id))?.state).toBe("done");
+    expect((await l.outbox())[0].publication.status).toBe("NEEDS_INFO");
+  });
+  it("retries triage on its pinned base after main moves", async () => {
+    let base = snapshot.base;
+    const { l, runner, e } = fixture(() =>
+      Promise.reject(new Error("stage_launch_uncertain")),
+    );
+    (e as unknown as { PUBLISHER: unknown }).PUBLISHER = {
+      read: async (path: string) =>
+        JSON.stringify(
+          path === "/commits/main"
+            ? { sha: base }
+            : {
+                ...snapshot,
+                user: { id: snapshot.authorId, login: snapshot.author },
+              },
+        ),
+    };
+    const id = await register(l);
+    await tick(e, id);
+    base = "c".repeat(40);
+    await later(6, () => tick(e, id));
+    await tick(e, id);
+    expect((await l.job(id))?.state).toBe("running");
+    expect(runner.start).toHaveBeenCalledTimes(2);
+    expect(
+      (runner.start.mock.calls[1] as unknown as [{ base: string }])[0],
+    ).toMatchObject({
+      base: snapshot.base,
+    });
+  });
+  it("releases the queue slot when a never-started stage is held", async () => {
+    const { l, e } = fixture(async () => {});
+    const id = await register(l);
+    await tick(e, id);
+    await later(6, () => tick(e, id));
+    await tick(e, id);
+    expect(await later(6, () => tick(e, id))).toBe(true);
+    expect((await l.job(id))?.state).toBe("held");
+    expect((await l.queueState()).owner).toBeNull();
+  });
+  it("never replaces a stage prepared before launch tracking", async () => {
+    const { l, runner, e } = fixture(async () => {});
+    const id = await register(l);
+    await tick(e, id);
+    const stageId = (await l.job(id))!.stage!;
+    await runInDurableObject(l, async (_, state) => {
+      const row = state.storage.sql
+        .exec<{ data: string }>("SELECT data FROM stages WHERE id=?", stageId)
+        .one();
+      const legacy = JSON.parse(row.data);
+      delete legacy.modelUsed;
+      state.storage.sql.exec(
+        "UPDATE stages SET data=? WHERE id=?",
+        JSON.stringify(legacy),
+        stageId,
+      );
+    });
+    await later(6, () => tick(e, id));
+    expect((await l.job(id))?.state).toBe("held");
+    expect(runner.start).toHaveBeenCalledOnce();
+  });
+  it("labels a timeout after model use as stage_timeout, not a launch failure", async () => {
+    const { l, e } = fixture(
+      () => Promise.reject(new Error("stage_launch_uncertain")),
+      "running",
+    );
+    const id = await register(l);
+    await tick(e, id);
+    const stage = (await l.stage((await l.job(id))!.stage!))!;
+    expect(await l.reserve(stage.request.token, "charge", 1000)).toBe(true);
+    await later(46, () => tick(e, id));
+    expect((await l.outbox())[0].publication.summary).toBe(
+      "Automation paused: stage_timeout.",
+    );
+  });
   it("reports a recorded launch error when the stage times out", async () => {
     const { l, e } = fixture(
       () => Promise.reject(new Error("stage_launch_uncertain")),
