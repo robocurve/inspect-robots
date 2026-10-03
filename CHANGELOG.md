@@ -61,6 +61,10 @@ and are compiled into a new version section at release.
 
 ### Fixed
 
+- **Core:** Convert chat response-body timeouts, incomplete transfers, and
+  interrupted connections into guided errors for summarize and grading,
+  including failures while reading an HTTP error body.
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 
