@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { LIMITS, MAINTAINER_LOGIN, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
+import { JAY_ID, LIMITS, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
 
 export class ReviewLedger extends DurableObject<ReviewerEnv> {
   private prLimit(pr: number): number {
@@ -27,19 +27,20 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS executions (job TEXT PRIMARY KEY, token TEXT NOT NULL, sandbox TEXT NOT NULL, started INTEGER NOT NULL, mergeBase TEXT NOT NULL, checkpointToken TEXT, output TEXT)`);
     if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(executions)').toArray().some(c => c.name === 'checkpointToken')) ctx.storage.sql.exec('ALTER TABLE executions ADD COLUMN checkpointToken TEXT');
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS pr_authors (pr INTEGER PRIMARY KEY, author TEXT NOT NULL)`);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS pr_authors (pr INTEGER PRIMARY KEY, author_id INTEGER NOT NULL)`);
   }
-  async recordAuthor(pr: number, author: string): Promise<void> {
-    if (!Number.isSafeInteger(pr) || pr < 1 || !/^[a-zA-Z0-9-]{1,39}(\[bot\])?$/.test(author)) throw new Error('invalid_author');
-    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO pr_authors(pr,author) VALUES(?,?)', pr, author.toLowerCase());
+  async recordAuthor(pr: number, authorId: number): Promise<void> {
+    if (!Number.isSafeInteger(pr) || pr < 1 || !Number.isSafeInteger(authorId) || authorId < 1) throw new Error('invalid_author');
+    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO pr_authors(pr,author_id) VALUES(?,?)', pr, authorId);
   }
   // One contributor's PRs share a monthly allowance, so many PRs from one
-  // author cannot drain the shared monthly budget. PRs with no recorded author
-  // (only pre-cap history) and the maintainer's own PRs are uncapped here.
+  // author cannot drain the shared monthly budget. Keyed by GitHub's immutable
+  // user ID, so renaming an account does not reset it. PRs with no recorded
+  // author (only pre-cap history) and the maintainer's own PRs are uncapped.
   private authorRemaining(pr: number, month: string): number {
-    const author = this.ctx.storage.sql.exec<{ author: string }>('SELECT author FROM pr_authors WHERE pr=?', pr).toArray()[0]?.author;
-    if (!author || author === MAINTAINER_LOGIN) return Number.MAX_SAFE_INTEGER;
-    const spent = this.ctx.storage.sql.exec<{ amount: number }>('SELECT COALESCE(SUM(amount),0) AS amount FROM charges WHERE month=? AND pr IN (SELECT pr FROM pr_authors WHERE author=?)', month, author).one().amount;
+    const author = this.ctx.storage.sql.exec<{ author_id: number }>('SELECT author_id FROM pr_authors WHERE pr=?', pr).toArray()[0]?.author_id;
+    if (author === undefined || author === JAY_ID) return Number.MAX_SAFE_INTEGER;
+    const spent = this.ctx.storage.sql.exec<{ amount: number }>('SELECT COALESCE(SUM(amount),0) AS amount FROM charges WHERE month=? AND pr IN (SELECT pr FROM pr_authors WHERE author_id=?)', month, author).one().amount;
     return LIMITS.author - spent;
   }
   async register(job: Omit<Job, 'status' | 'result' | 'notified' | 'created'>): Promise<boolean> {

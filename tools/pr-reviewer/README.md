@@ -155,7 +155,8 @@ so every comment names its exact revision and checks attach to that head only.
 | Monthly warning to Jay | $160 |
 
 The per-author cap stops one prolific contributor from draining the shared
-monthly budget. Each webhook records the PR author's login; every charge on any
+monthly budget. Each webhook records the PR author's immutable GitHub user ID (so a rename does
+not reset it); every charge on any
 of that author's PRs counts toward their monthly $20. A run that cannot start
 because of it is held with reason `contributor_budget_exhausted` and makes no
 sandbox or model call.
