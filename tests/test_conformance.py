@@ -150,11 +150,17 @@ def test_option_slots_default_is_false() -> None:
 
 def test_option_slots_accepts_lists_and_ignores_offending_entries() -> None:
     valid = OptionSlot(arg="auto_start", label="Auto start")
+    bad_default_str = OptionSlot(arg="str_def", label="Bad", default="true")  # type: ignore[arg-type]
+    bad_default_num = OptionSlot(arg="num_def", label="Bad", default=1)  # type: ignore[arg-type]
+    bad_default_none = OptionSlot(arg="none_def", label="Bad", default=None)  # type: ignore[arg-type]
 
     class _Factory:
         OPTION_SLOTS: ClassVar[list[object]] = [
             "not a slot",
             valid,
+            bad_default_str,
+            bad_default_num,
+            bad_default_none,
             None,
         ]
 

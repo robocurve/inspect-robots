@@ -103,7 +103,11 @@ def option_slots(factory: object) -> tuple[OptionSlot, ...]:
     if not isinstance(slots, Iterable):
         return ()
     try:
-        return tuple(slot for slot in slots if isinstance(slot, OptionSlot))
+        return tuple(
+            slot
+            for slot in slots
+            if isinstance(slot, OptionSlot) and isinstance(slot.default, bool)
+        )
     except Exception:
         return ()
 
