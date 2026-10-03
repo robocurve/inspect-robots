@@ -187,7 +187,7 @@ class EvalLog:
                 f"this Inspect Robots reads version {SCHEMA_VERSION}"
             )
         samples = []
-        for raw in data["samples"]:
+        for raw in data.get("samples", ()):
             sample = dict(raw)
             # JSON has no tuple type: coerce the sequence fields it deserializes
             # as lists back into tuples so a read-back log is genuinely immutable

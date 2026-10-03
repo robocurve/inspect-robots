@@ -482,6 +482,12 @@ def test_guardrail_contribution_requires_callable_review() -> None:
         GuardrailContribution(approvers=(("broken", broken),))
 
 
+def test_guardrail_contribution_valid() -> None:
+    contrib = GuardrailContribution(approvers=(("auto", AutoApprover()),))
+    assert len(contrib.approvers) == 1
+    assert contrib.warnings == ()
+
+
 def test_chain_runs_approvers_in_order() -> None:
     space = _delta_space()
     chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.05))
@@ -490,3 +496,15 @@ def test_chain_runs_approvers_in_order() -> None:
     assert np.allclose(out.data, [0.05, 0.05])
     inside = Action(data=np.array([0.01, 0.01]))
     assert chain.review(inside, {}) is inside  # identity survives the chain
+
+
+def test_chain_approver_requires_callable_review() -> None:
+    class _NotAnApprover:
+        review = "not callable"
+
+    broken: Any = _NotAnApprover()
+    with pytest.raises(ValueError, match="callable review"):
+        ChainApprover(broken)
+
+    with pytest.raises(ValueError, match="callable review"):
+        ChainApprover(None)  # type: ignore[arg-type]
