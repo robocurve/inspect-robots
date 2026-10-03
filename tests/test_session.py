@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import time
+import types
 from collections.abc import Callable
 
 import pytest
@@ -25,7 +26,14 @@ from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import operator_scorer
-from inspect_robots.session import _ESC_GRACE_S, _NOTES_PROMPT, _PROMPT, OperatorSession
+from inspect_robots.session import (
+    _ESC_GRACE_S,
+    _NO_TERMIOS_STATE,
+    _NOTES_PROMPT,
+    _PROMPT,
+    OperatorSession,
+    _stdin_read_bytes,
+)
 
 
 class _RecordingConsole(OperatorConsole):
@@ -565,6 +573,14 @@ def test_prompt_operator_warns_before_judging_step_limited_trial() -> None:
     assert record.operator_judgement == "n"
 
 
+def test_prompt_operator_warns_on_unrecognized_answer() -> None:
+    session, _prompts, output = _scripted_prompt_session(["invalid", "y", ""])
+    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
+    assert output == ["unrecognized answer 'invalid'; expected one of y/n/partial/skip\n"]
+    assert record.operator_judgement == "y"
+
+
 @pytest.mark.parametrize(
     ("termination_reason", "expected_score"),
     [("success", True), ("failure", False)],
@@ -740,13 +756,13 @@ class _ScriptedFd:
     ``poll()`` calls (exercising state that must persist across polls).
     """
 
-    def __init__(self, chunks: list[bytes] | None = None) -> None:
-        self.chunks: list[bytes] = list(chunks) if chunks is not None else []
+    def __init__(self, chunks: list[bytes | None] | None = None) -> None:
+        self.chunks: list[bytes | None] = list(chunks) if chunks is not None else []
 
     def readable(self) -> bool:
         return bool(self.chunks)
 
-    def read(self) -> bytes:
+    def read(self) -> bytes | None:
         return self.chunks.pop(0)
 
 
@@ -2017,7 +2033,7 @@ def test_stale_pump_error_is_cleared_on_window_close() -> None:
     def readable() -> bool:
         return bool(raising) or fd.readable()
 
-    def read() -> bytes:
+    def read() -> bytes | None:
         if raising:
             raise RuntimeError("boom")
         return fd.read()
@@ -2074,3 +2090,101 @@ def test_atexit_restore_stops_a_live_pump() -> None:
     finally:
         session.end_trial()
     assert len(restores) == 1
+
+
+def test_session_read_bytes_windows_unicode_and_arrows(monkeypatch: pytest.MonkeyPatch) -> None:
+    chars = ["c", "a", "f", "é", "\xe0", "K", "\r"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == "café\n".encode()
+
+
+def test_session_read_bytes_windows_extended_key_only_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chars = ["\xe0", "K"]
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: bool(chars)  # type: ignore[attr-defined]
+    fake_msvcrt.getwch = lambda: chars.pop(0)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() is None
+
+
+def test_session_read_bytes_windows_empty_returns_empty_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.kbhit = lambda: False  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    assert _stdin_read_bytes() == b""
+
+
+def test_session_ignored_keys_do_not_latch_eof() -> None:
+    # 1. Plain mode does not latch EOF on None
+    fd = _ScriptedFd([None, b"/stop\n"])
+    session = OperatorSession(
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+    )
+    poll = session.poll()
+    assert poll.end == EndRequest()
+
+    # 2. Footer mode does not latch EOF on None during enter_footer or pump_input
+    fd_footer = _ScriptedFd([None])
+    output: list[str] = []
+    session_footer = OperatorSession(
+        write=output.append,
+        fd_readable=fd_footer.readable,
+        fd_read=fd_footer.read,
+        width_fn=lambda: 80,
+    )
+    session_footer._enter_footer()
+    assert session_footer._pump_eof is False
+
+    fd_footer.chunks.append(None)
+    session_footer._pump_input()
+    assert session_footer._pump_eof is False
+
+
+def test_session_try_enter_footer_retains_plain_mode_when_termios_fails() -> None:
+    output: list[str] = []
+    fd = _ScriptedFd()
+    # 1. raw_mode_fn returns _NO_TERMIOS_STATE
+    session1 = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=lambda: _NO_TERMIOS_STATE,
+        restore_fn=lambda _state: None,
+    )
+    session1.enable_footer(label="sent", echo_interval_s=0.001)
+    session1.begin_trial()
+    assert session1._footer_active is False
+    assert session1._pump_thread is None
+    session1.end_trial()
+
+    # 2. raw_mode_fn raises ImportError
+    def failing_raw_mode() -> object:
+        raise ImportError("No module named 'termios'")
+
+    session2 = OperatorSession(
+        write=output.append,
+        fd_readable=fd.readable,
+        fd_read=fd.read,
+        width_fn=lambda: 200,
+        isatty_fn=lambda: True,
+        raw_mode_fn=failing_raw_mode,
+        restore_fn=lambda _state: None,
+    )
+    session2.enable_footer(label="sent", echo_interval_s=0.001)
+    session2.begin_trial()
+    assert session2._footer_active is False
+    assert session2._pump_thread is None
+    session2.end_trial()
