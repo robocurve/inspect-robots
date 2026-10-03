@@ -260,6 +260,41 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
     assert Path(a.path).exists() and Path(b.path).exists()
 
 
+def test_frame_store_long_names_truncated_and_safe_regression(tmp_path: Path) -> None:
+    import sys
+    import zlib
+
+    from inspect_robots.frames import _safe
+
+    # (a) Collision check: two long names identical for first 100 chars map to distinct paths
+    prefix = "x" * 100
+    safe_1 = _safe(prefix + "1")
+    safe_2 = _safe(prefix + "2")
+    assert safe_1 != safe_2
+
+    # (b) Regression guard: short names remain byte-identical
+    assert _safe("x" * 50) == "x" * 50
+    assert _safe("x" * 100) == "x" * 100
+    assert _safe("a/b") == f"a-b-{zlib.crc32(b'a/b') & 0xFFFFFFFF:08x}"
+    assert _safe("scene/") == f"scene--{zlib.crc32(b'scene/') & 0xFFFFFFFF:08x}"
+    assert _safe("top camera ") == f"top-camera--{zlib.crc32(b'top camera ') & 0xFFFFFFFF:08x}"
+
+    # (c) Long names truncate and keep filename <= 255 bytes on disk
+    root = (
+        f"\\\\?\\{Path(tmp_path / 'frames').resolve()}"
+        if sys.platform == "win32"
+        else str(tmp_path / "frames")
+    )
+    store = FrameStore(root)
+    long_trial = "a" * 300
+    long_camera = "c" * 300
+    img = np.zeros((2, 2, 3), dtype=np.uint8)
+    ref = store.put(long_trial, 0, long_camera, img)
+    path = Path(ref.path)
+    assert path.exists()
+    assert len(path.name.encode()) <= 255
+
+
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)
