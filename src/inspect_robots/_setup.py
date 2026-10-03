@@ -1755,15 +1755,20 @@ def run_setup(
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     bak = path.with_name(path.name + ".bak")
-    tmp = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
+    token = uuid.uuid4().hex
+    tmp = path.with_name(f"{path.name}.tmp.{token}")
+    bak_tmp = path.with_name(f"{path.name}.bak.tmp.{token}")
     try:
         tmp.write_text(text, encoding="utf-8")
         if path.is_file():
-            shutil.copy2(path, bak)
+            shutil.copy2(path, bak_tmp)
+            bak_tmp.replace(bak)
         tmp.replace(path)
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+        if bak_tmp.exists():
+            bak_tmp.unlink(missing_ok=True)
     print(_paint(f"Wrote {path}", _GREEN, out), file=out)
     # Repeat the plugin reminder where it cannot scroll away: the per-prompt
     # warning is easy to miss while Enter-accepting the suggestions.

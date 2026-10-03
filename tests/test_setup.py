@@ -2196,6 +2196,40 @@ def test_run_setup_retains_active_config_and_cleans_tmp_if_replacement_fails(
     assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == old
 
 
+def test_run_setup_symlinked_backup_preserves_external_target(tmp_path: Path) -> None:
+    """When config.ini.bak exists as a symlink to an external file, refreshing the backup
+    must replace the symlink itself without modifying the external target file."""
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    old_active = "[defaults]\npolicy = active-policy\n"
+    path.write_text(old_active, encoding="utf-8")
+
+    external = tmp_path / "external_shared.ini"
+    external_content = "# external shared config\nkeep_me = true\n"
+    external.write_text(external_content, encoding="utf-8")
+
+    bak = path.with_name("config.ini.bak")
+    bak.symlink_to(external)
+
+    input_fn, _ = _scripted_input(["new-policy", "", "", "", "", "", ""])
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+    assert result == 0
+    # External file was NOT overwritten
+    assert external.read_text(encoding="utf-8") == external_content
+    # The backup entry now contains the prior active config and is no longer pointing to external
+    assert bak.read_text(encoding="utf-8") == old_active
+    assert not bak.is_symlink()
+    # Active config contains the new setup
+    assert "policy = new-policy" in path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("answer", ["y", ""])
 def test_run_setup_repairs_malformed_config_and_backs_it_up(tmp_path: Path, answer: str) -> None:
     path = _config_path(tmp_path)
