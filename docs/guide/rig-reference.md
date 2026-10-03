@@ -112,9 +112,10 @@ rig before using a transform for control or collision checking.
 
 ## YAM health checks
 
-Check an idle rig before an eval: all three cameras should deliver fresh,
-non-uniform frames and both arms should report finite joint positions within
-their configured limits. The check writes a labeled montage to `health.jpg`:
+Check an idle rig before an eval: configured V4L2 cameras should deliver fresh,
+non-uniform frames (depth-configured RealSense slots are skipped), and both
+arms should report finite joint positions within their configured limits
+(grippers are checked for finite values only). The check writes a labeled montage to `health.jpg`:
 
 ```bash
 inspect-robots-yam-health
@@ -177,7 +178,7 @@ inspect-robots "stack the red cube on the blue cube" --policy agent \
 `docs_extra` is included in the policy's prompt. Only include material you
 intend to send to the configured model provider. Omit the argument if you
 have no additional advice. To cap an agent's requested speed while checking
-a setup, add `-P max_speed_frac=0.1`.
+a setup, add `-P max_speed_frac=0.05` (the default is 0.1).
 
 ## Worked example: giant Jenga
 
@@ -207,8 +208,9 @@ inspect-robots run --policy agent \
 
 The YAM plugin's `molmoact2` policy is a generic `/act` client and can also
 connect to Pi 0.5 through a compatible server. This recipe uses the public
-[YAM checkpoint](https://huggingface.co/robocurve/pi0.5-yam) and
-[OpenPI serving script](https://gist.github.com/jeqcho/60716eef6c2aa7706e2ecd575a7a7a7e).
+[YAM checkpoint](https://huggingface.co/robocurve/pi0.5-yam) and the
+[OpenPI serving script](https://github.com/robocurve/inspect-robots/blob/main/examples/pi05/serve_pi05_yam.py)
+in this repository's `examples/pi05/`.
 
 On a GPU machine with more than 16 GB VRAM, download OpenPI, the checkpoint,
 and the script. Review the script before running it, then leave the server
@@ -222,7 +224,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync
 uv pip install json_numpy
 uvx --from 'huggingface_hub[cli]' hf download robocurve/pi0.5-yam \
     --local-dir ../pi05-yam
-curl -fLO https://gist.githubusercontent.com/jeqcho/60716eef6c2aa7706e2ecd575a7a7a7e/raw/e3ee89434aa2c7056411c8e05697f00784e82876/serve_pi05_yam.py
+curl -fLO https://raw.githubusercontent.com/robocurve/inspect-robots/main/examples/pi05/serve_pi05_yam.py
 uv run --no-sync python serve_pi05_yam.py --ckpt ../pi05-yam --port 9XXX
 ```
 

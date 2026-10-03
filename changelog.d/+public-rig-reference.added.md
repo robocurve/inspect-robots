@@ -1,0 +1,1 @@
+**Docs:** a public rig reference (`docs/guide/rig-reference.md`) covering rig setup, live view over SSH, YAM geometry, health checks and control interfaces, a giant-Jenga worked example, and serving Pi 0.5 on YAM through OpenPI with the new `examples/pi05/serve_pi05_yam.py`.
