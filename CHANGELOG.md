@@ -9,6 +9,22 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Agent plugin (0.28.0):** Accept `-P service_tier=ultrafast` on the Responses wire
+  for OpenAI Ultrafast mode, with a mock-embodiment example for API testing.
+
+- **Agent plugin (0.28.0):** Support `service_tier` on the Responses wire, including
+  `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
+
+- **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
+  the task identity and horizon ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
+- **Agent plugin (0.27.0):** Surface environment step budget in system prompt and
+  per-observation step count ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
+
+- **Agent plugin (0.28.0):** Configure LLM retry attempts and backoff from the
+  policy, honor provider `Retry-After` delays on HTTP wires, and record the
+  effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
+
 - **Setup wizard:** embodiment plugins can declare bounded numeric settings,
   including optional `none`, through `NumberSlot` / `NUMBER_SLOTS`
   ([plan 0081](plans/0081-number-slots.md),
@@ -18,6 +34,14 @@ All notable changes to this project are documented here. The format is based on
   reasoning-effort levels, VLA policies (MolmoAct 2, Pi 0/0.5 via XPolicyLab),
   control interfaces, instruction sources, operator interfaces, and eval sets
   ([docs/guide/examples.md](docs/guide/examples.md)).
+
+- **Core:** evaluation logs now record what graded the run in `EvalSpec.grader`
+  (the grader's registry name) and `EvalSpec.grader_config` (its effective
+  configuration, read through an optional duck-typed `config()` hook). The
+  builtin `vlm` grader reports the resolved `model`, `base_url`, run-level
+  `rubric`, `max_cameras` and `effort` it actually applies; the API key is
+  never recorded ([plan 0081](plans/0081-grader-config.md),
+  [#413](https://github.com/robocurve/inspect-robots/issues/413)).
 
 - **Core:** evaluation logs now record which path produced each operator
   judgement in `SceneResult.judgement_sources`
@@ -31,6 +55,24 @@ All notable changes to this project are documented here. The format is based on
   of copying the vocabulary and importing the private `scorer._OPERATOR_SUCCESS`.
 
 ### Fixed
+
+- **CLI:** Terminate the `ffmpeg` subprocess, close stdin, wait for exit, and unlink partial output if video encoding is interrupted by an escaping exception (e.g. `KeyboardInterrupt`, `MemoryError`) ([#508](https://github.com/robocurve/inspect-robots/issues/508)).
+
+- **Core:** Treat a failed Git working-tree status check as unknown provenance
+  instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+
+- **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
+  the embodiment action bounds.
+
+- **CLI:** `--epochs N` now overrides only the epoch count. A task declared with
+  a non-default reducer (`Epochs(count=5, reducer="pass_at_2")`, `max`, `mode`)
+  keeps that reducer under `run --epochs` and `eval-set --epochs`; previously the
+  flag silently replaced it with `mean`, so the reported metric was computed with
+  the wrong reducer.
+
+- **Agent plugin (0.27.0):** Transcript paths are now sanitised; wire-capture
+  directories are renamed to share the same stem as `transcripts/` and
+  `actions/` ([#370](https://github.com/robocurve/inspect-robots/issues/370)).
 
 - **Core:** `eval_set()` now preserves completed task logs when a later task
   raises, reports the failure as an in-memory error log, and continues with

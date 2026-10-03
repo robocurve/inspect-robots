@@ -63,6 +63,10 @@ class EmbodimentInfo:
     supported_setups: frozenset[str] = field(default_factory=frozenset)
     supported_target_kinds: frozenset[str] = field(default_factory=frozenset)
     docs: str | None = None
+    # Environment provenance (e.g. simulator build ID, hardware rig ID).
+    environment_id: str | None = None
+    # Scene/asset revision hash or tag.
+    environment_revision: str | None = None
 
 
 @runtime_checkable

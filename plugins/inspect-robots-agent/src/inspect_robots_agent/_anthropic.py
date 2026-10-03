@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall
+from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall, _retry_delay
 
 from ._capture import WireCapture
 
@@ -44,8 +44,9 @@ _MAX_READ_TIMEOUT_S = 600.0
 class AnthropicClient:
     """Blocking Messages-API client with thinking-block replay and bounded retry.
 
-    Retries 429/5xx and transport errors with exponential backoff; other 4xx
-    fail immediately. Terminal ``stop_reason`` values raise rather than
+    Retries 429/5xx and transport errors, honoring a provider ``Retry-After``
+    header before falling back to exponential backoff. Other 4xx fail
+    immediately. Terminal ``stop_reason`` values raise rather than
     returning an empty turn, so a refusal or a truncation surfaces its own
     cause instead of being mistaken for "the model produced no tool call".
     """
@@ -145,6 +146,7 @@ class AnthropicClient:
         last_error = "unknown error"
         last_status: int | None = None
         for attempt in range(self._max_retries):
+            retry_response: httpx.Response | None = None
             t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/messages", json=body)
@@ -165,6 +167,7 @@ class AnthropicClient:
                 # the fast-mode rate-limit guidance for the wrong cause.
                 last_status = None
             else:
+                retry_response = response
                 if self._capture is not None:
                     self._capture.record(
                         attempt=attempt,
@@ -193,7 +196,7 @@ class AnthropicClient:
                         f"{self._rejection_guidance(response.text, temperature, reasoning_effort)}"
                     )
             if attempt + 1 < self._max_retries:
-                time.sleep(self._backoff_s * 2**attempt)
+                time.sleep(_retry_delay(retry_response, backoff_s=self._backoff_s, attempt=attempt))
 
         guidance = ""
         # 429 only: _RETRYABLE_STATUSES also covers 408/409, which are not

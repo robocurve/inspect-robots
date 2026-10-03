@@ -29,8 +29,8 @@ class Epochs:
     reducer: str = "mean"
 
     def __post_init__(self) -> None:
-        if self.count < 1:
-            raise ConfigError(f"Epochs count must be >= 1, got {self.count}")
+        if not isinstance(self.count, int) or isinstance(self.count, bool) or self.count < 1:
+            raise ConfigError(f"Epochs count must be an integer >= 1, got {self.count!r}")
 
 
 @dataclass(frozen=True)

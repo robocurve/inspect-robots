@@ -205,6 +205,7 @@ class MotionQueue:
         self._queue_target(target)
 
     def _queue_target(self, target: npt.NDArray[np.float64]) -> None:
+        target = np.clip(target, self._low, self._high)
         current = self._require_cursor()
         delta = target - current
         ratios: list[np.float64] = []
@@ -222,6 +223,8 @@ class MotionQueue:
             raise ValueError("motion distance is too large to interpolate safely")
         steps = max(1, math.ceil(float(headed_ratio)))
         for fraction in np.linspace(1.0 / steps, 1.0, steps):
-            self._actions.append(Action(data=current + delta * fraction))
+            self._actions.append(
+                Action(data=np.clip(current + delta * fraction, self._low, self._high))
+            )
         self._actions[-1] = Action(data=target.copy())
         self._cursor = target.copy()

@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from inspect_robots_agent._gemini_live import _RECOVERY_CONTINUATION, _RECOVERY_PROLOGUE
-from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall
+from inspect_robots_agent._llm import AssistantMessage, Provider, ToolCall, _retry_delay
 
 from ._capture import WireCapture
 
@@ -35,7 +35,8 @@ class InteractionsClient:
     The streamed cursor contains references, not copied values. A changed
     prefix therefore starts a new chain even when two trials have
     byte-identical prompts. Lost server chains recover by folding the full
-    authoritative view into one unchained request.
+    authoritative view into one unchained request. Provider ``Retry-After``
+    headers take precedence over exponential backoff.
     """
 
     def __init__(
@@ -84,6 +85,7 @@ class InteractionsClient:
         last_error = "unknown error"
 
         for attempt in range(self._max_retries):
+            retry_response: httpx.Response | None = None
             folding = self._needs_fold
             input_items = (
                 self._fold_input(messages)
@@ -114,6 +116,7 @@ class InteractionsClient:
                     time.time() - t_start if self._capture is not None else 0.0,
                 )
             else:
+                retry_response = response
                 self._record_attempt(
                     attempt,
                     body,
@@ -159,7 +162,7 @@ class InteractionsClient:
                     raise RuntimeError(f"LLM request rejected — {last_error}{guidance}")
 
             if attempt + 1 < self._max_retries:
-                time.sleep(self._backoff_s * 2**attempt)
+                time.sleep(_retry_delay(retry_response, backoff_s=self._backoff_s, attempt=attempt))
 
         raise RuntimeError(f"LLM request failed after {self._max_retries} attempts — {last_error}")
 

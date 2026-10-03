@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +19,7 @@ from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
 from inspect_robots_agent._llm import Provider
 from inspect_robots_agent._responses import ResponsesClient, _translate_content_parts
-from inspect_robots_agent.policy import AgentPolicyConfig
+from inspect_robots_agent.policy import AgentPolicyConfig, _evicted_view
 
 
 def _response(*output: dict[str, Any]) -> dict[str, Any]:
@@ -59,8 +61,8 @@ def _tool_call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
     }
 
 
-def _client(handler: Any, **kwargs: Any) -> ResponsesClient:
-    provider = Provider(base_url="http://llm.test/v1", api_key="sk-test", model="m")
+def _client(handler: Any, *, model: str = "m", **kwargs: Any) -> ResponsesClient:
+    provider = Provider(base_url="http://llm.test/v1", api_key="sk-test", model=model)
     return ResponsesClient(provider, transport=httpx.MockTransport(handler), **kwargs)
 
 
@@ -182,6 +184,396 @@ def test_unknown_content_part_is_ignored() -> None:
     assert _translate_content_parts([{"type": "vendor_extension", "value": "x"}]) == []
 
 
+@pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6-astra", "openai/gpt-6-astra"])
+def test_matches_instruction_and_elision_anchors_without_changing_history(
+    role: str, model: str
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    messages: list[dict[str, Any]] = [
+        {"role": role, "content": "control the robot"},
+        {"role": "user", "content": [{"type": "text", "text": "older elided observation"}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "previous state"},
+                {"type": "text", "text": "[1 camera frame(s) elided]"},
+            ],
+            "cache_anchor": True,
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "current state"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}},
+            ],
+        },
+    ]
+    original = deepcopy(messages)
+    client = _client(handler, model=model)
+    client.complete(messages=messages, tools=[])
+    client.complete(messages=messages, tools=[])
+
+    body = bodies[0]
+    assert body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    assert body["input"][0] == {
+        "role": role,
+        "content": [
+            {
+                "type": "input_text",
+                "text": "control the robot",
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }
+        ],
+    }
+    assert body["input"][2]["content"] == [
+        {"type": "input_text", "text": "previous state"},
+        {
+            "type": "input_text",
+            "text": "[1 camera frame(s) elided]",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        },
+    ]
+    assert body["input"][3] == {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "current state"},
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,cG5n",
+            },
+            {
+                "type": "input_text",
+                "text": "",
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            },
+        ],
+    }
+    assert json.dumps(body).count('"prompt_cache_breakpoint"') == 3
+    assert "cache_anchor" not in json.dumps(body)
+    assert messages == original
+    assert bodies[1] == body
+
+
+@pytest.mark.parametrize("model", ["gpt-4.1", "gpt-5.5", "o3", "custom-model", "gpt-60"])
+def test_older_and_unknown_models_keep_existing_caching_behavior(model: str) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    _client(handler, model=model).complete(
+        messages=[
+            {"role": "system", "content": "control the robot"},
+            {"role": "user", "content": "elided history", "cache_anchor": True},
+        ],
+        tools=[],
+    )
+    assert "prompt_cache_options" not in bodies[0]
+    assert bodies[0]["input"] == [
+        {"role": "system", "content": "control the robot"},
+        {"role": "user", "content": "elided history"},
+    ]
+
+
+def _marked_items(body: dict[str, Any]) -> list[int]:
+    return [
+        index
+        for index, item in enumerate(body["input"])
+        if isinstance(blocks := item.get("content", item.get("output")), list)
+        and any("prompt_cache_breakpoint" in block for block in blocks)
+    ]
+
+
+def test_append_only_reuse_survives_nudges_without_marker_accumulation() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "instructions"}]
+    for turn in range(25):
+        messages.append({"role": "user", "content": f"observation or nudge {turn}"})
+        client.complete(messages=messages, tools=[])
+    assert _marked_items(bodies[0]) == [0, 1]
+    assert _marked_items(bodies[1]) == [0, 1, 2]
+    assert _marked_items(bodies[2]) == [0, 2, 3]
+    assert _marked_items(bodies[-1]) == [0, 24, 25]
+    assert all(isinstance(item["content"], list) for item in bodies[-1]["input"])
+    assert "prompt_cache_breakpoint" not in json.dumps(messages)
+
+
+def test_eviction_retains_only_unchanged_prefixes_and_moves_the_anchor() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "instructions"}]
+    for turn in range(4):
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"state {turn}"},
+                    {"type": "text", "text": "camera 'top':"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{turn}"}},
+                ],
+            }
+        )
+        client.complete(messages=_evicted_view(messages, 1, mark_anchor=True), tools=[])
+    assert [_marked_items(body) for body in bodies] == [
+        [0, 1],
+        [0, 1, 2],
+        [0, 1, 2, 3],
+        [0, 2, 3, 4],
+    ]
+    assert bodies[-1]["input"][-1]["content"][-2]["type"] == "input_image"
+    assert bodies[-1]["input"][-1]["content"][-1]["text"] == ""
+    # Changing an early prefix invalidates later entries, even if their own blocks match.
+    messages[1]["content"][0]["text"] = "corrected state"
+    client.complete(messages=_evicted_view(messages, 1, mark_anchor=True), tools=[])
+    assert _marked_items(bodies[-1]) == [0, 3, 4]
+    assert all(len(_marked_items(body)) <= 4 for body in bodies)
+
+
+def test_full_image_history_preserves_images_and_reuses_previous_image_endpoint() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "instructions"}]
+    urls = [f"data:image/png;base64,{turn}" for turn in range(4)]
+    for url in urls:
+        messages.append(
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}
+        )
+        client.complete(messages=messages, tools=[])
+    assert [_marked_items(body) for body in bodies] == [[0, 1], [0, 1, 2], [0, 2, 3], [0, 3, 4]]
+    assert [item["content"][0]["image_url"] for item in bodies[-1]["input"][1:]] == urls
+    assert "prompt_cache_breakpoint" not in json.dumps(messages)
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-4.1"])
+def test_image_endpoints_keep_empty_text_anchor_after_marker_moves(role: str, model: str) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    content = (
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,cG5n"}}]
+        if role == "user"
+        else [{"type": "input_image", "image_url": "data:image/png;base64,cG5n"}]
+    )
+    messages: list[dict[str, Any]] = [{"role": role, "content": content}]
+    if role == "tool":
+        messages[0]["tool_call_id"] = "capture"
+    original = deepcopy(messages)
+    client = _client(handler, model=model)
+    for turn in range(3):
+        client.complete(messages=messages, tools=[])
+        messages.append({"role": "user", "content": f"next observation {turn}"})
+    field = "content" if role == "user" else "output"
+    first = bodies[0]["input"][0][field]
+    if model == "gpt-6-astra":
+        assert first == [
+            {"type": "input_image", "image_url": "data:image/png;base64,cG5n"},
+            {"type": "input_text", "text": "", "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ]
+        assert bodies[1]["input"][0][field] == first
+        assert bodies[2]["input"][0][field] == [first[0], {"type": "input_text", "text": ""}]
+        assert [_marked_items(body) for body in bodies] == [[0], [0, 1], [1, 2]]
+    else:
+        assert first == [{"type": "input_image", "image_url": "data:image/png;base64,cG5n"}]
+    assert messages[:1] == original
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_tool_tail_normalization_keeps_previous_output_eligible_for_reuse(retry: bool) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if retry and len(bodies) == 1:
+            return httpx.Response(429, text="retry")
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra", backoff_s=0)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "instructions"},
+        {"role": "tool", "tool_call_id": "one", "content": "first result"},
+        {"role": "tool", "tool_call_id": "two", "content": "second result"},
+    ]
+    original = deepcopy(messages)
+    client.complete(messages=messages, tools=[])
+    if retry:
+        assert bodies[0] == bodies[1]
+        bodies.pop(0)
+    messages.append({"role": "user", "content": "try another call"})
+    client.complete(messages=messages, tools=[])
+    assert _marked_items(bodies[0]) == [0, 2]
+    assert _marked_items(bodies[1]) == [0, 2, 3]
+    assert bodies[1]["input"][1]["output"] == [{"type": "input_text", "text": "first result"}]
+    assert bodies[0]["input"][2] == bodies[1]["input"][2]
+    assert messages[:3] == original
+
+
+@pytest.mark.parametrize("changed", ["tools", "effort", "temperature"])
+def test_cache_settings_changes_invalidate_prior_endpoints(changed: str) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "A"},
+    ]
+    client.complete(messages=messages, tools=[], reasoning_effort="low")
+    messages.append({"role": "user", "content": "B"})
+    tools = [{"function": {"name": "move", "description": "move", "parameters": {}}}]
+    client.complete(
+        messages=messages,
+        tools=tools if changed == "tools" else [],
+        reasoning_effort="high" if changed == "effort" else "low",
+        temperature=0.2 if changed == "temperature" else None,
+    )
+    assert _marked_items(bodies[-1]) == [0, 2]
+
+
+@pytest.mark.parametrize("failure", ["http", "failed", "incomplete"])
+def test_unsuccessful_requests_do_not_add_prefix_candidates(failure: str) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 2:
+            if failure == "http":
+                return httpx.Response(400, text="rejected")
+            return httpx.Response(200, json={"status": failure, "output": []})
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "A"},
+    ]
+    client.complete(messages=messages, tools=[])
+    messages.append({"role": "user", "content": "B"})
+    if failure == "incomplete":
+        client.complete(messages=messages, tools=[])
+    else:
+        with pytest.raises(RuntimeError):
+            client.complete(messages=messages, tools=[])
+    messages.append({"role": "user", "content": "C"})
+    client.complete(messages=messages, tools=[])
+    assert _marked_items(bodies[-1]) == [0, 1, 3]
+
+
+def test_cache_retry_body_is_stable_and_reset_drops_old_candidates() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(429, text="retry")
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra", backoff_s=0)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "A"},
+    ]
+    client.complete(messages=messages, tools=[])
+    assert bodies[0] == bodies[1]
+    client._reset_cache_tracking()
+    messages.append({"role": "user", "content": "B"})
+    client.complete(messages=messages, tools=[])
+    assert _marked_items(bodies[-1]) == [0, 2]
+
+
+def test_unsupported_assistant_tail_does_not_get_a_marker() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    _client(handler, model="gpt-6-astra").complete(
+        messages=[{"role": "assistant", "content": "unchanged assistant text"}], tools=[]
+    )
+    assert _marked_items(bodies[0]) == []
+    assert bodies[0]["input"] == [{"role": "assistant", "content": "unchanged assistant text"}]
+
+
+def test_policy_reset_clears_candidates_even_for_identical_scene_content() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    policy = LLMAgentPolicy(
+        model="gpt-6-astra",
+        base_url="http://llm.test/v1",
+        wire="responses",
+        transport=httpx.MockTransport(handler),
+        env={},
+    )
+    policy.bind(CubePickEmbodiment().info)
+    scene = Scene(id="same", instruction="same goal")
+    policy.reset(scene)
+    policy._messages.append({"role": "user", "content": "A"})
+    policy._client.complete(messages=policy._messages, tools=[])
+    assert _marked_items(bodies[-1]) == [0, 2]
+    policy.reset(scene)
+    policy._messages.extend([{"role": "user", "content": "A"}, {"role": "user", "content": "B"}])
+    policy._client.complete(messages=policy._messages, tools=[])
+    assert _marked_items(bodies[-1]) == [0, 3]
+
+
+@pytest.mark.parametrize(
+    "messages, expected",
+    [
+        ([], []),
+        ([{"role": "system", "content": "instructions"}], [0]),
+        ([{"role": "user", "content": "elided", "cache_anchor": True}], [0]),
+        ([{"role": "user", "content": []}], []),
+    ],
+)
+def test_coincident_or_absent_cache_targets_are_not_duplicated(
+    messages: list[dict[str, Any]], expected: list[int]
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_response())
+
+    client = _client(handler, model="gpt-6-astra")
+    for _ in range(2):
+        client.complete(messages=messages, tools=[])
+    assert [_marked_items(body) for body in bodies] == [expected, expected]
+
+
 def test_capture_history_keeps_function_outputs_in_call_order_before_images() -> None:
     bodies: list[dict[str, Any]] = []
 
@@ -261,6 +653,39 @@ def test_optional_request_fields_are_omitted_when_unset() -> None:
     assert bodies[0]["tools"] == []
     assert "temperature" not in bodies[0]
     assert "reasoning" not in bodies[0]
+    assert "service_tier" not in bodies[0]
+
+
+@pytest.mark.parametrize(
+    "service_tier", ["auto", "default", "flex", "priority", "fast", "ultrafast"]
+)
+def test_service_tier_is_sent_on_every_retry_and_captured(
+    service_tier: str, tmp_path: Path
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(503, json={"error": {"message": "retry"}})
+        return httpx.Response(200, json={**_response(), "service_tier": "default"})
+
+    capture = WireCapture()
+    capture.begin_trial(log_dir=str(tmp_path), run_id="run-1", trial_id="scene-e0")
+    client = _client(handler, service_tier=service_tier, capture=capture, backoff_s=0)
+    try:
+        client.complete(messages=[], tools=[], reasoning_effort="medium")
+    finally:
+        client.close()
+        capture.end_trial()
+
+    assert len(bodies) == 2
+    assert all(body["service_tier"] == service_tier for body in bodies)
+    assert all(body["reasoning"] == {"effort": "medium"} for body in bodies)
+    rows = _wire_rows(tmp_path)
+    assert len(rows) == 2
+    assert all(row["request"]["service_tier"] == service_tier for row in rows)
+    assert rows[-1]["response"]["service_tier"] == "default"
 
 
 @pytest.mark.parametrize("content", [None, ""])
@@ -323,7 +748,8 @@ def test_cache_miss_synthesizes_tool_call_only_turn_without_null_message() -> No
     assert not any("content" in item and item["content"] is None for item in bodies[0]["input"])
 
 
-def test_replays_all_raw_items_once_before_function_output() -> None:
+@pytest.mark.parametrize("model", ["m", "gpt-6-astra"])
+def test_replays_all_raw_items_once_before_function_output(model: str) -> None:
     reasoning = {
         "id": "rs_1",
         "type": "reasoning",
@@ -339,7 +765,7 @@ def test_replays_all_raw_items_once_before_function_output() -> None:
         requests.append(json.loads(request.content))
         return httpx.Response(200, json=responses.pop(0))
 
-    client = _client(handler)
+    client = _client(handler, model=model)
     first = client.complete(messages=[{"role": "user", "content": "move"}], tools=[])
     client.complete(
         messages=[
@@ -352,10 +778,19 @@ def test_replays_all_raw_items_once_before_function_output() -> None:
 
     replay = requests[1]["input"]
     assert replay[1:4] == [reasoning, message, call]
+    expected_output: Any = "moved"
+    if model == "gpt-6-astra":
+        expected_output = [
+            {
+                "type": "input_text",
+                "text": "moved",
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }
+        ]
     assert replay[4] == {
         "type": "function_call_output",
         "call_id": "call_move",
-        "output": "moved",
+        "output": expected_output,
     }
     assert replay.count(reasoning) == 1
     assert replay.count(message) == 1
@@ -572,6 +1007,25 @@ def test_transient_http_errors_retry_then_succeed(status_code: int) -> None:
     assert calls == 3
 
 
+def test_retry_after_header_overrides_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._responses.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_response(_message("ok")))
+
+    _client(handler, backoff_s=1.0).complete(messages=[], tools=[])
+
+    assert sleeps == [7.0]
+
+
 def test_transport_errors_retry_then_succeed() -> None:
     calls = 0
 
@@ -622,7 +1076,12 @@ def test_close_closes_underlying_http_client() -> None:
     assert client._http.is_closed
 
 
-def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
+@pytest.mark.parametrize(
+    "service_tier", [None, "auto", "default", "flex", "priority", "fast", "ultrafast"]
+)
+def test_policy_uses_responses_wire_through_act_and_records_config(
+    service_tier: str | None,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -633,6 +1092,7 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
         model="test/model",
         base_url="http://llm.test/v1",
         wire="responses",
+        service_tier=service_tier,
         transport=httpx.MockTransport(handler),
         env={},
     )
@@ -647,6 +1107,36 @@ def test_policy_uses_responses_wire_through_act_and_records_config() -> None:
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "responses"
     assert policy.config.effort is None
+    assert asdict(policy.config)["service_tier"] == service_tier
+    if service_tier is None:
+        assert "service_tier" not in body
+    else:
+        assert body["service_tier"] == service_tier
+
+
+@pytest.mark.parametrize("service_tier", ["", "turbo", "FAST", " fast", 42, True, ["fast"]])
+def test_policy_rejects_invalid_service_tier(service_tier: Any) -> None:
+    with pytest.raises(ConfigError, match="service_tier"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            wire="responses",
+            service_tier=service_tier,
+            env={},
+        )
+
+
+@pytest.mark.parametrize("wire", ["chat", "messages", "anthropic", "gemini-live", "interactions"])
+@pytest.mark.parametrize("service_tier", ["fast", "ultrafast"])
+def test_policy_rejects_service_tier_on_other_wires(wire: str, service_tier: str) -> None:
+    with pytest.raises(ConfigError, match="service_tier is only supported on wire='responses'"):
+        LLMAgentPolicy(
+            model="test/model",
+            base_url="http://llm.test/v1",
+            wire=wire,
+            service_tier=service_tier,
+            env={},
+        )
 
 
 def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
@@ -661,3 +1151,110 @@ def test_policy_rejects_invalid_wire_and_defaults_config_to_chat() -> None:
     policy = LLMAgentPolicy(model="test/model", base_url="http://llm.test/v1", env={})
     assert isinstance(policy.config, AgentPolicyConfig)
     assert policy.config.wire == "chat"
+
+
+@pytest.mark.parametrize(
+    ("wire", "base_url"),
+    [
+        ("chat", "http://llm.test/v1"),
+        ("responses", "http://llm.test/v1"),
+        ("messages", "http://llm.test/v1"),
+        ("gemini-live", "ws://llm.test/v1beta"),
+        ("interactions", "http://llm.test/v1beta"),
+    ],
+)
+def test_policy_forwards_retry_configuration_to_every_wire(
+    wire: str,
+    base_url: str,
+) -> None:
+    policy = LLMAgentPolicy(
+        model="m",
+        base_url=base_url,
+        wire=wire,
+        max_retries=8,
+        backoff_s=2.5,
+        wire_capture=False,
+        env={},
+    )
+
+    assert policy._client._max_retries == 8
+    assert policy._client._backoff_s == 2.5
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.max_retries == 8
+    assert policy.config.backoff_s == 2.5
+
+
+def test_policy_keeps_existing_positional_parameter_order() -> None:
+    policy = LLMAgentPolicy(
+        "m",
+        "http://llm.test/v1",
+        None,
+        "chat",
+        False,
+        None,
+        None,
+        100,
+        0.25,
+        max_retries=8,
+        backoff_s=2.5,
+        env={},
+    )
+
+    assert policy._temperature == 0.25
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.temperature == 0.25
+
+
+def test_policy_config_keeps_existing_positional_field_order() -> None:
+    config = AgentPolicyConfig(
+        1,
+        None,
+        0.25,
+        "m",
+        None,
+        None,
+        "chat",
+        True,
+        None,
+        "flex",
+        None,
+        100,
+        "none",
+        0.1,
+        False,
+        "always",
+        "render",
+        2,
+        None,
+        None,
+        None,
+    )
+
+    assert config.effort == "none"
+    assert config.max_speed_frac == 0.1
+    assert config.pre_check is None
+    assert config.service_tier == "flex"
+    assert config.max_retries == 3
+    assert config.backoff_s == 1.0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_retries": 0},
+        {"max_retries": True},
+        {"backoff_s": -1.0},
+        {"backoff_s": float("inf")},
+        {"backoff_s": float("nan")},
+        {"backoff_s": True},
+    ],
+)
+def test_policy_rejects_invalid_retry_configuration(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ConfigError, match=r"max_retries|backoff_s"):
+        LLMAgentPolicy(
+            model="m",
+            base_url="http://llm.test/v1",
+            wire_capture=False,
+            env={},
+            **kwargs,
+        )

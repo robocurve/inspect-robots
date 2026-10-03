@@ -155,6 +155,9 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
         f"- Embodiment: {_one_line(log.eval.embodiment)}",
         f"- Status: {_display_status(log.status)}",
     ]
+    # Skipped when a scene error already carries it, so a failure prints once.
+    if log.error and not any(log.error in scene.error for scene in log.samples if scene.error):
+        lines.append(f"- Error: {_one_line(log.error)}")
     model = log.eval.policy_config.get("model")
     if model is not None:
         lines.append(f"- Model: {_one_line(model)}")
@@ -163,7 +166,9 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
     transcript_by_key = {
         (transcript.scene_id, transcript.epoch): transcript for transcript in transcripts
     }
+    unplaced_errors: list[tuple[str, str]] = []
     for scene in log.samples:
+        placed = False
         for epoch, scores in enumerate(scene.epochs):
             reason = _parallel_value(scene.termination_reasons, epoch)
             fields = [
@@ -182,7 +187,17 @@ def build_digest(log: EvalLog, transcripts: list[TrialTranscript]) -> str:
                     fields.append(f"operator feedback: {_one_line(message['text'])}")
             if not scores and scene.status == "error" and scene.error:
                 fields.append(f"error: {_one_line(scene.error)}")
+                placed = True
             lines.append(f"- `{scene.scene_id}` epoch {epoch}: {'; '.join(fields)}")
+        if scene.error and not placed:
+            unplaced_errors.append((scene.scene_id, scene.error))
+
+    # A scene error is cumulative across epochs, so when every epoch was scored
+    # (e.g. one scorer failed beside a healthy one) it belongs to the scene, not
+    # to any single epoch row.
+    if unplaced_errors:
+        lines.extend(["", "## Scene errors"])
+        lines.extend(f"- `{scene_id}`: {_one_line(error)}" for scene_id, error in unplaced_errors)
 
     lines.extend(["", "## Transcript stats"])
     for scene in log.samples:

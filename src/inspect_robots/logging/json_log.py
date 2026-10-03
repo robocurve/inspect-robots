@@ -23,6 +23,8 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog, EvalSpec
     from inspect_robots.rollout import TrialRecord
@@ -50,8 +52,9 @@ def _sanitize(obj: object) -> object:
     literals for them (``default=`` never fires for floats), which RFC 8259
     parsers reject.
     """
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
+    if isinstance(obj, (float, np.floating)):
+        val = float(obj)
+        return val if math.isfinite(val) else None
     if isinstance(obj, dict):
         return {key: _sanitize(value) for key, value in obj.items()}
     if isinstance(obj, (list, tuple)):

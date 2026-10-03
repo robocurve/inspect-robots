@@ -112,6 +112,11 @@ def _styled(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
+def _format_metric(value: float | int | None) -> str:
+    """Format numeric metric value or return 'n/a' when None."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
 _BOLD = "1"
 _BOLD_BRIGHT_MAGENTA = "1;95"
 _DIM = "2"
@@ -262,6 +267,21 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         metavar="D",
         help="per-step change limit for the default guardrails, in the action "
         "space's native units (default: derived from the space's bounds)",
+    )
+    parser.add_argument(
+        "--environment-id",
+        default=None,
+        help="environment identifier recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--environment-revision",
+        default=None,
+        help="environment revision or commit hash recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--policy-checkpoint",
+        default=None,
+        help="policy model checkpoint path, hash, or revision recorded in evaluation metadata",
     )
 
 
@@ -737,9 +757,12 @@ def _resolve_or_exit(
 def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = False) -> Task:
     """Apply ``--epochs`` with a guided error instead of a raw traceback.
 
-    ``replace()`` reruns ``Task.__post_init__``, which rejects a count below 1
-    via ``ConfigError`` — the same validation-error class ``_resolve_or_exit``
-    already converts to ``SystemExit``.
+    Only the count is overridden: the task's declared epoch reducer (e.g.
+    ``Epochs(count=5, reducer="pass_at_2")``) is carried over, so the flag
+    never silently swaps a benchmark's ``pass_at_k``/``max`` for ``mean``.
+    ``Epochs.__post_init__`` rejects a count below 1 via ``ConfigError`` — the
+    same validation-error class ``_resolve_or_exit`` already converts to
+    ``SystemExit``.
 
     ``attribute_task`` names the offending task, which ``eval-set`` needs to
     say *which* of several tasks rejected the flag; ``run`` has only one.
@@ -749,7 +772,7 @@ def _apply_epochs_or_exit(task: Task, epochs: int, *, attribute_task: bool = Fal
     from inspect_robots.errors import ConfigError
 
     try:
-        return replace(task, epochs=epochs)
+        return replace(task, epochs=replace(task.epoch_spec, count=epochs))
     except ConfigError as exc:
         # `__post_init__` re-validates every field, but the task was already
         # valid and only `epochs` changed — so the epoch-count check is the
@@ -1374,7 +1397,7 @@ def _print_run_summary(log: EvalLog, log_path: str, is_adhoc: bool) -> None:
         trials += f" ({errored_count} errored)"
     print(f"{_styled('scenes:', _CYAN)} {log.results.total_scenes}  {trials}")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_styled(f'{value:.4g}', _BOLD)}")
+        print(f"  {name}: {_styled(_format_metric(value), _BOLD)}")
     print(f"{_styled('log:', _CYAN)} {_styled(log_path, _DIM)}")
     # Every run ends with the copy-pasteable read-back command (issue #90):
     # a bare path teaches a first-time user nothing about what to do next.
@@ -1788,6 +1811,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ),
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
@@ -1843,7 +1869,7 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
     for log in logs:
         ok = log.status == "success"
         metrics = ", ".join(
-            f"{name}={value:.4g}" for name, value in sorted(log.results.metrics.items())
+            f"{name}={_format_metric(value)}" for name, value in sorted(log.results.metrics.items())
         )
         detail = metrics or (log.error or "")
         row = f"  [{_styled(_display_status(log.status), _GREEN if ok else _RED)}] {log.eval.task}"
@@ -1929,6 +1955,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log
@@ -2026,12 +2055,10 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {'n/a' if value is None else f'{value:.4g}'}")
+        print(f"  {name}: {_format_metric(value)}")
     print("scenes:")
     for scene in log.samples:
-        reduced = "  ".join(
-            f"{k}={'n/a' if v is None else f'{v:.4g}'}" for k, v in sorted(scene.reduced.items())
-        )
+        reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
         step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
         details = [reduced] if reduced else []
         if step_limit_count:

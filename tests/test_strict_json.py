@@ -66,20 +66,30 @@ def test_sanitize_maps_non_finite_floats_to_none() -> None:
         "inf": float("inf"),
         "ninf": float("-inf"),
         "nan": float("nan"),
+        "np_nan32": np.float32(np.nan),
+        "np_inf32": np.float32(np.inf),
+        "np_ninf32": np.float32(-np.inf),
+        "np_nan16": np.float16(np.nan),
+        "np_fine32": np.float32(2.5),
         "fine": 1.5,
         "int": 3,
         "flag": True,
-        "nested": [float("inf"), {"d": float("nan")}, (2.0, float("-inf"))],
+        "nested": [float("inf"), {"d": float("nan")}, (2.0, float("-inf"), np.float32(np.nan))],
     }
     clean = _sanitize(dirty)
     assert clean == {
         "inf": None,
         "ninf": None,
         "nan": None,
+        "np_nan32": None,
+        "np_inf32": None,
+        "np_ninf32": None,
+        "np_nan16": None,
+        "np_fine32": 2.5,
         "fine": 1.5,
         "int": 3,
         "flag": True,
-        "nested": [None, {"d": None}, [2.0, None]],
+        "nested": [None, {"d": None}, [2.0, None, None]],
     }
 
 
@@ -196,3 +206,26 @@ def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> No
     assert isinstance(samples, list)
     transcript = samples[0]["policy_transcripts"][0]
     assert transcript == {"inf": None, "nan": None}
+
+
+def test_numpy_float_non_finite_writes_as_null(tmp_path: Path) -> None:
+    def hook(record: TrialRecord, scene: Scene) -> None:
+        record.metadata["np_nan32"] = np.float32(np.nan)
+        record.metadata["np_inf32"] = np.float32(np.inf)
+        record.metadata["np_fine32"] = np.float32(3.14)
+
+    eval(
+        _task(),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        before_scoring=hook,
+    )
+    (path,) = tmp_path.glob("*.json")
+    data = _read_strict(path)
+    samples = data["samples"]
+    assert isinstance(samples, list)
+    meta = samples[0]["trial_metadata"][0]
+    assert meta["np_nan32"] is None
+    assert meta["np_inf32"] is None
+    assert meta["np_fine32"] == pytest.approx(3.14, rel=1e-3)

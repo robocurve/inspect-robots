@@ -150,6 +150,27 @@ class _VLMGrader:
         self._http_post = http_post
         self._effort = effort
 
+    def config(self) -> dict[str, Any]:
+        """Report the configuration that actually governs each grading call.
+
+        The optional hook ``eval()`` reads into ``EvalSpec.grader_config``.
+        Every value is the resolved one this grader applies, not the
+        constructor's input: ``rubric`` already has the default substituted
+        and any ``rubric_file`` read, and ``effort`` is the normalized value
+        that rides the request (``None`` omits ``reasoning_effort`` so the
+        provider default applies, ``"none"`` asks for the minimum). ``rubric``
+        is the run-level fallback only, since ``_rubric_for`` lets a scene's
+        own ``metadata["rubric"]`` win for that scene. The API key is
+        deliberately absent: a log is not a place for a credential.
+        """
+        return {
+            "model": self._model,
+            "base_url": self._base_url,
+            "rubric": self._rubric,
+            "max_cameras": self._max_cameras,
+            "effort": self._effort,
+        }
+
     def _rubric_for(self, scene: Scene) -> str:
         """Prefer a generated per-scene rubric over the run-level one.
 

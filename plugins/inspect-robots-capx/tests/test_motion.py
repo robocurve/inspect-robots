@@ -237,3 +237,31 @@ def test_declared_step_pacing_precedes_movable_zero_limit_guard() -> None:
             max_speed_frac=1e-300,
             gripper_index=1,
         )
+
+
+def test_target_exceeding_bounds_is_clipped_to_box() -> None:
+    motion = _motion(control_hz=10.0, max_speed_frac=0.1)
+    # _space() has low=[-1.0, -2.0, 0.0] and high=[1.0, 2.0, 1.0]
+    motion.begin_turn(np.array([0.0, 0.0, 1.0]))
+    # Provide joint targets well outside bounds
+    motion.move_to_joints(np.array([5.0, -10.0]))
+    chunk = motion.take_chunk()
+
+    # All generated actions must respect space bounds
+    for action in chunk.actions:
+        assert -1.0 <= action.data[0] <= 1.0
+        assert -2.0 <= action.data[1] <= 2.0
+    # Final action and cursor must be clamped to bounds
+    assert np.allclose(chunk.actions[-1].data, [1.0, -2.0, 1.0])
+    assert motion.cursor is not None
+    assert np.allclose(motion.cursor, [1.0, -2.0, 1.0])
+
+
+def test_gripper_exceeding_bounds_is_clipped_to_box() -> None:
+    motion = _motion(control_hz=10.0, max_speed_frac=0.1)
+    motion.begin_turn(np.array([0.0, 0.0, 0.5]))
+    motion._queue_gripper(2.5)  # gripper high is 1.0
+    chunk = motion.take_chunk()
+    assert np.allclose(chunk.actions[-1].data[2], 1.0)
+    assert motion.cursor is not None
+    assert np.allclose(motion.cursor[2], 1.0)

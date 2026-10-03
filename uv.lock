@@ -787,7 +787,7 @@ provides-extras = ["all", "dev", "docs", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-agent"
-version = "0.26.0"
+version = "0.28.0"
 source = { editable = "plugins/inspect-robots-agent" }
 dependencies = [
     { name = "httpx" },
@@ -820,7 +820,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "inspect-robots-capx"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "plugins/inspect-robots-capx" }
 dependencies = [
     { name = "httpx" },

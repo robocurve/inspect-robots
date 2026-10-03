@@ -101,6 +101,7 @@ def _client(
     *,
     api_key: str = "sk-test",
     max_retries: int = 3,
+    backoff_s: float = 0.0,
     capture: WireCapture | None = None,
 ) -> InteractionsClient:
     return InteractionsClient(
@@ -110,7 +111,7 @@ def _client(
             model="google/gemini-3.7-flash",
         ),
         max_retries=max_retries,
-        backoff_s=0.0,
+        backoff_s=backoff_s,
         transport=httpx.MockTransport(handler),
         capture=capture,
     )
@@ -312,6 +313,25 @@ def test_transient_retry_success_and_exhaustion() -> None:
     with pytest.raises(RuntimeError, match=r"failed after 3 attempts.*503"):
         _client(unavailable).complete(_messages(), [])
     assert failed_calls == 3
+
+
+def test_retry_after_header_overrides_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._interactions.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_response("i1", _text("ok")))
+
+    _client(handler, backoff_s=1.0).complete(_messages(), [])
+
+    assert sleeps == [7.0]
 
 
 def test_plain_and_thinking_level_400_errors_fail_fast_with_guidance() -> None:

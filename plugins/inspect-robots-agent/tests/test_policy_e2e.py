@@ -497,7 +497,7 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
     script = _WireScript(wire)
     sink = _RecordingSink()
     policy = LLMAgentPolicy(
-        model="test/model",
+        model="openai/gpt-6-astra" if wire == "responses" else "test/model",
         base_url="http://llm.test/v1",
         wire=wire,
         image_horizon=1,
@@ -544,6 +544,18 @@ def test_wire_capture_matches_each_transport_body_after_blob_inlining(
         ]
         assert elision_blocks
         assert elision_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+
+    if wire == "responses":
+        elision_blocks = [
+            block
+            for message in captured_request["input"]
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+            if "camera frame(s) elided" in block.get("text", "")
+        ]
+        assert elision_blocks
+        assert elision_blocks[-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+        assert captured_request["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
 
 
 def test_zero_llm_call_trial_creates_no_capture_file_or_metadata(tmp_path: Path) -> None:
@@ -2826,3 +2838,72 @@ def test_non_string_params_rejected(param: str, val: Any) -> None:
     assert f"{param} must be a string, got {val!r}." in str(exc_info.value)
     expected_fix = f"fix: the -P parser coerces unquoted values; pass -P '{param}=\"value\"'"
     assert expected_fix in str(exc_info.value)
+
+
+def test_bind_task_adds_step_budget_to_prompt_and_observation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from inspect_robots.task import TaskEnvelope
+
+    policy = _policy(_Script([_tool_response("done", {"summary": "done"})]), transcript_echo=True)
+    policy.bind(CubePickEmbodiment().info)
+    policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+    assert transcript is not None
+    assert "Environment step budget:" in transcript[0]["content"]
+    assert "You have 200 environment steps" in transcript[0]["content"]
+    assert "Pace yourself against the environment step budget" in transcript[0]["content"]
+
+    obs = Observation(
+        state={"eef_pos": np.zeros(3)},
+        instruction="reach",
+        extra={"env_step": 10},
+    )
+    # act will build observation content with step budget
+    policy.act(obs)
+    captured = capsys.readouterr()
+    assert "step 10/200" in captured.err
+    after_act = policy.transcript()
+    assert after_act is not None
+    user_msg = after_act[2]["content"]
+    assert isinstance(user_msg, list)
+    assert any(
+        "Step budget: step 10/200 (190 env steps remaining)" in part.get("text", "")
+        for part in user_msg
+        if isinstance(part, dict)
+    )
+
+
+def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> None:
+    # Scene ID with traversal characters attempting to escape the run directory
+    unsafe_id = "../escaped"
+    script = _Script([_tool_response("done", {"summary": "done"})])
+    policy = _policy(script, wire_capture=True)
+    policy.bind(CubePickEmbodiment().info)
+
+    # Reset and start trial
+    policy.reset(Scene(id=unsafe_id, instruction="stop"))
+    policy.on_trial_start(unsafe_id, 0, str(tmp_path), "run-1")
+    policy.act(Observation())
+
+    record = TrialRecord(scene_id=unsafe_id, epoch=0, seed=0)
+    policy.on_trial_end(record, str(tmp_path), "run-1")
+
+    # Assert wire_capture metadata and file exists at sanitized path
+    wire_ptr = record.metadata["wire_capture"]
+    assert "../escaped" not in wire_ptr
+    wire_file = tmp_path / wire_ptr
+    assert wire_file.is_file()
+    assert wire_file.resolve().is_relative_to((tmp_path / "wire" / "run-1").resolve())
+
+    # Assert transcript metadata and file exists at sanitized path
+    transcript_ptr = record.metadata["transcript"]
+    assert "../escaped" not in transcript_ptr
+    transcript_file = tmp_path / transcript_ptr
+    assert transcript_file.is_file()
+    assert transcript_file.resolve().is_relative_to((tmp_path / "transcripts" / "run-1").resolve())
+
+    # Assert wire directory stem and transcript stem agree
+    assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem

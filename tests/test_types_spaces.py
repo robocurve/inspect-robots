@@ -324,8 +324,17 @@ def test_task_validation_and_scorer_names() -> None:
         Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=0)
     with pytest.raises(ConfigError, match="Epochs count"):
         Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=5, epochs=0)
-    with pytest.raises(ConfigError, match="Epochs count"):
-        Epochs(count=0)
+    for invalid_count in (0, -1, True, False, 2.5, "1"):
+        with pytest.raises(ConfigError, match="Epochs count"):
+            Epochs(count=invalid_count)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match="Epochs count"):
+            Task(
+                name="t",
+                scenes=[scene],
+                scorer="success_at_end",
+                max_steps=5,
+                epochs=invalid_count,  # type: ignore[arg-type]
+            )
 
     # A scorer registry name resolves to one scorer, never to a sequence of
     # one-character "scorers" (str is a Sequence).

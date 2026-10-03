@@ -117,8 +117,8 @@ def reduce_mode(scores: Sequence[Score]) -> Score:
 
 def pass_at_k(k: int) -> Reducer:
     """Unbiased pass@k estimator over the epoch scores (success = value >= 0.5)."""
-    if k < 1:
-        raise ValueError("k must be >= 1")
+    if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+        raise ValueError(f"k must be an integer >= 1, got {k!r}")
 
     def reducer(scores: Sequence[Score]) -> Score:
         n = len(scores)

@@ -163,6 +163,10 @@ class EnsemblingController:
     ) -> Action:
         """Query once for step ``t`` and blend every retained prediction for that step."""
         chunk = policy.act(observation)
+        if not chunk.actions:
+            from inspect_robots.errors import PolicyError
+
+            raise PolicyError(f"policy {policy.info.name!r} returned an empty ActionChunk")
         store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(chunk)))
 
         buffer: list[tuple[int, list[Any], dict[str, Any]]] = store.setdefault(_ENSEMBLE_KEY, [])
