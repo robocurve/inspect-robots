@@ -723,6 +723,7 @@ def _run_eval(
                         sink=bus,
                         frame_store=frame_store,
                         operator_input=operator_input,
+                        remap=remap,
                     )
                 except _CancelledTrial as exc:
                     status = "cancelled"
@@ -741,6 +742,22 @@ def _run_eval(
                     scene_error = error
                     halted = True
                     record = exc.record
+                except ConfigError as exc:
+                    # Dynamic configuration error during rollout (e.g. observation key collision).
+                    # Halts the eval, preserves completed and partial trials, skips scoring
+                    # the failed trial, finalizes sinks, and persists the error log.
+                    status = "error"
+                    error = f"{type(exc).__name__}: {exc}"
+                    scene_status = "error"
+                    scene_error = error
+                    halted = True
+                    record = exc.record or TrialRecord(
+                        scene_id=scene.id,
+                        epoch=epoch,
+                        seed=trial_seed,
+                        status="error",
+                        error=scene_error,
+                    )
                 except PolicyError as exc:
                     error_count += 1
                     scene_status = "error"

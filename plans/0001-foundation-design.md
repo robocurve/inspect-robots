@@ -510,8 +510,8 @@ issues clustered in the rollout↔controller↔record triad. These resolutions a
   re-infer. This is what lets advanced controllers compose without forking the loop.
 
 - **R4 — preprocessing ownership (resolves §2↔§3.7 conflict).** The **policy**
-  owns *model-specific spatial* preprocessing (resize / normalize / color order /
-  key remap to its native names). The **controller** owns *cross-policy temporal*
+  owns *model-specific spatial* preprocessing (resize / normalize / color order).
+  Key remapping is owned by `eval(remap=...)`. The **controller** owns *cross-policy temporal*
   concerns (observation history stacking, action smoothing, ensembling). The
   **embodiment** emits raw sensor frames. No responsibility is claimed twice.
 
