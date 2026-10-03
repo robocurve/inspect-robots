@@ -181,16 +181,7 @@ class EvalLog:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the complete log to nested dictionaries and sequences."""
-        data = asdict(self)
-        for sample in data.get("samples", []):
-            init_seed = sample.pop("init_seed", None)
-            trial_seeds = sample.pop("trial_seeds", ())
-            meta = sample.setdefault("scene_metadata", {})
-            if init_seed is not None:
-                meta["init_seed"] = init_seed
-            if trial_seeds:
-                meta["trial_seeds"] = list(trial_seeds)
-        return data
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalLog:
@@ -203,20 +194,6 @@ class EvalLog:
         samples = []
         for raw in data["samples"]:
             sample = dict(raw)
-            # Provenance is serialized in the extensible scene_metadata to preserve
-            # compatibility with older v1 readers that do not accept unexpected
-            # keyword arguments on SceneResult. Reconstruct them when loading.
-            scene_metadata = dict(sample.get("scene_metadata", {}))
-            init_seed = sample.pop("init_seed", None)
-            if init_seed is None and "init_seed" in scene_metadata:
-                init_seed = scene_metadata.pop("init_seed")
-            trial_seeds = sample.pop("trial_seeds", None)
-            if trial_seeds is None and "trial_seeds" in scene_metadata:
-                trial_seeds = scene_metadata.pop("trial_seeds")
-
-            sample["scene_metadata"] = scene_metadata
-            sample["init_seed"] = init_seed
-            sample["trial_seeds"] = tuple(trial_seeds) if trial_seeds is not None else ()
             # JSON has no tuple type: coerce the sequence fields it deserializes
             # as lists back into tuples so a read-back log is genuinely immutable
             # too, not just one freshly returned by eval(). ``.get`` covers a log
@@ -231,6 +208,8 @@ class EvalLog:
             sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
+            sample["init_seed"] = sample.get("init_seed")
+            sample["trial_seeds"] = tuple(sample.get("trial_seeds", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],
