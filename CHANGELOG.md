@@ -61,6 +61,10 @@ and are compiled into a new version section at release.
 
 ### Fixed
 
+- **Core:** A seconds-based task no longer gets an extra step from binary float
+  rounding: `max_seconds=1.1` at 50 Hz now resolves to 55 steps instead of 56, because
+  `ceil()` is applied to the product of the values as written.
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
 
