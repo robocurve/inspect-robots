@@ -604,6 +604,11 @@ The default endpoint is `https://api.anthropic.com/v1`, and the default API key
 variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
 `--api-key-env VAR` for another compatible provider.
 
+The request carries every trial's transcript tail (up to 24,000 characters
+each) with no overall limit, so a run with many trials can exceed the model's
+context window and be rejected by the provider. For very large runs, use the
+offline digest or a model with a larger context.
+
 ### Retry with learning
 
 The learnings file exists to be fed back in. The
