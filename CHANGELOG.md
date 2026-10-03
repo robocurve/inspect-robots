@@ -56,6 +56,24 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** a run in which no scene completed cleanly now warns instead of
+  passing silently (survivor bias,
+  [#440](https://github.com/robocurve/inspect-robots/issues/440)). Its status is
+  unchanged, since `fail_on_error` stays the caller's tolerance control, but
+  `eval()` emits a `UserWarning` and the run summary and `inspect` print how
+  many trials the metrics rest on.
+
+- **Setup wizard:** local macOS and Windows sessions no longer default to
+  `rerun = false` or print a headless warning just because X11/Wayland display
+  variables are absent. SSH sessions without a display still receive the
+  warning; forwarded displays and saved or explicitly entered viewer settings
+  remain supported. Empty display variables now count as unavailable
+  ([#437](https://github.com/robocurve/inspect-robots/pull/437)).
+
+- **CLI:** The headless live-view tip no longer prints an IPv6 `SSH_CONNECTION`
+  address that the suggested `view --serve --host 0.0.0.0` (IPv4-only) server
+  cannot answer; it falls back to the host name ([#501](https://github.com/robocurve/inspect-robots/issues/501)).
+
 - **Core:** Normalize NumPy integer and Boolean metadata scalars in JSON eval
   logs to prevent `TypeError` serialization crashes on eval completion
   ([#492](https://github.com/robocurve/inspect-robots/issues/492)).

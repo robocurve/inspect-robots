@@ -266,6 +266,25 @@ class _Broadcast:
             s.on_eval_end(log)
 
 
+def _survivor_warning(log: EvalLog) -> str | None:
+    """Describe a "success" whose metrics no clean scene backs, else ``None``.
+
+    ``fail_on_error`` decides whether errored trials fail the run. When it
+    tolerates them yet every scene errored, the metrics rest on whichever
+    trials survived and can look entirely ordinary (issue #440), so callers
+    and readers are warned instead of the status being overridden.
+    """
+    if log.status != "success" or not log.samples:
+        return None
+    if any(scene.status != "error" for scene in log.samples):
+        return None
+    errored, total = log.results.errored_trials, log.results.total_trials
+    return (
+        f"no scene completed cleanly ({errored} of {total} trial(s) errored); "
+        "metrics may rest on a surviving minority of trials"
+    )
+
+
 def eval(
     task: Task | str,
     policy: Policy | str,
@@ -309,7 +328,10 @@ def eval(
     empty entry in ``SceneResult.epochs``.
 
     A run in which **every** trial errored (nothing was scored) always ends
-    with ``status == "error"``, regardless of ``fail_on_error``.
+    with ``status == "error"``, regardless of ``fail_on_error``. A run in which
+    no scene completed cleanly keeps the status ``fail_on_error`` gives it, but
+    emits a ``UserWarning`` (issue #440): its metrics may rest on a surviving
+    minority of trials.
 
     Ctrl-C during a rollout records the partial trial and writes a log with
     ``status == "cancelled"``, then re-raises the interrupt (as a
@@ -831,6 +853,9 @@ def _run_eval(
         error=error,
     )
     bus.on_eval_end(log)
+    survivor_warning = _survivor_warning(log)
+    if survivor_warning is not None:
+        warnings.warn(survivor_warning, UserWarning, stacklevel=3)
     if cancelled_exc is not None:
         raise cancelled_exc
     return [log]

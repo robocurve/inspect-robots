@@ -326,6 +326,14 @@ The result is written to `~/.config/inspect-robots/config.ini`
 that later `inspect-robots config set` edits drop comments from the file.
 The setup command requires an interactive terminal; for scripted
 configuration use `inspect-robots config set`.
+
+For the live Rerun viewer, setup assumes a local desktop on macOS and Windows
+unless an SSH session is detected. On other platforms, or over SSH, it suggests
+`rerun = false` and offers remote-viewing advice when both `DISPLAY` and
+`WAYLAND_DISPLAY` are unset or empty. A forwarded display keeps the viewer
+suggestion enabled. Existing `rerun` settings take precedence, and you can
+override the suggestion at the prompt.
+
 After writing the config, setup lists missing runtime requirements declared by
 the selected registered policy and embodiment, together with their remediation
 commands.
