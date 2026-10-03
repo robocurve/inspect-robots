@@ -431,8 +431,8 @@ describe("queue base freshness", () => {
     expect((await l.outbox())[0].publication.issue.base).toBe(issue.base);
     expect(runner.start).toHaveBeenCalledOnce();
   });
-  it("cannot plan a serious fix using triage from an outdated base", async () => {
-    const { l, id, current, runner, e } = await fixture();
+  it("plans a serious fix on its pinned base after main advances", async () => {
+    const { l, issue, id, current, runner, e } = await fixture();
     await tick(e, id);
     const stage = (await l.stage((await l.job(id))!.stage!))!;
     current.base = "c".repeat(40);
@@ -443,11 +443,18 @@ describe("queue base freshness", () => {
     await tick(e, id);
     expect((await l.job(id))?.next).toBe("plan");
     await tick(e, id);
-    expect((await l.job(id))?.state).toBe("held");
-    expect(runner.start).toHaveBeenCalledOnce();
-    expect((await l.outbox()).map((x) => x.publication.status)).toContain(
-      "REQUIRE_REVIEWER",
-    );
+    expect((await l.job(id))?.state).toBe("running");
+    expect(runner.start).toHaveBeenCalledTimes(2);
+    expect(
+      (
+        runner.start.mock.calls[1] as unknown as [
+          { kind: string; base: string },
+        ]
+      )[0],
+    ).toMatchObject({ kind: "plan", base: issue.base });
+    expect((await l.outbox()).map((x) => x.publication.status)).toEqual([
+      "FIXING",
+    ]);
   });
   it.each([false, true])(
     "still holds edited issues (already started: %s)",
