@@ -184,3 +184,10 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 ## Lifetime cap raise for PRs 404 and 514: 2026-10-03
 
 - The maintainer asked for fresh reviews of #404 and #514, which had $1.656 and $1.262 left under the $15 PR lifetime cap (below the $2 admission floor). Raised only those two PRs to $20 lifetime via `REVIEW_PR_LIMITS_JSON`. Per-head ($5), per-author ($20/month) and monthly ($200) caps are unchanged; existing charges remain.
+
+## Reviews and inline comments as context: 2026-10-03
+
+- Merged #538: the reviewer now reads formal PR reviews (`/pulls/N/reviews`) and inline review comments (`/pulls/N/comments`). The maintainer's (numeric `JAY_ID`) go into `maintainer_comments` as structured entries (`kind`, `state`, `path`, `line`, reply ids, `body`); only `body` is the maintainer's words, and contributor-controlled paths never prefix it. Other humans' go into `comments`; discussion is sorted by time. A UTF-8 context over 900 KB raises `context_too_large` before the workflow step's ~1 MiB result cap.
+- Found because the reviewer approved #411 without seeing the maintainer's "Request changes" review, which asked for a version bump.
+- `tsc --noEmit` and 99 Workers/SQLite tests passed on the merged branch.
+- Publisher (allowlist for the two new read paths) deployed first: `1f418dbf-ecd2-4566-848b-2335d6688de7`. Reviewer: `37d6fbb7-b680-410b-8b35-a5980e1dc5e5`. Runner unchanged. `/health` reports policy 3, advisory, enabled.
