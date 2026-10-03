@@ -94,7 +94,7 @@ def _parallel_value(values: tuple[Any, ...], index: int) -> Any:
     return values[index] if index < len(values) else None
 
 
-def _step_count(scores: dict[str, float]) -> str:
+def _step_count(scores: dict[str, float | None]) -> str:
     value = scores.get("episode_length")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{value:g}"

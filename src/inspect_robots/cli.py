@@ -2055,7 +2055,9 @@ def _cmd_inspect(
                 print(_styled(f"hint: render videos with: inspect-robots video {path}", _DIM))
     print("metrics:")
     for name, value in sorted(log.results.metrics.items()):
-        print(f"  {name}: {_format_metric(value)}")
+        abstained = log.results.abstentions.get(name, 0)
+        suffix = f" ({abstained} abstained)" if abstained else ""
+        print(f"  {name}: {_format_metric(value)}{suffix}")
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))

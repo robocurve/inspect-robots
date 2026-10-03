@@ -524,6 +524,7 @@ def _run_eval(
     error: str | None = None
     error_count = 0
     errored_trials = 0
+    abstentions: dict[str, int] = {}
 
     halted = False
     stopped = False
@@ -534,7 +535,7 @@ def _run_eval(
     planned_trials = len(task.scenes) * epoch_spec.count
     for scene in task.scenes:
         per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
-        epoch_dicts: list[dict[str, float]] = []
+        epoch_dicts: list[dict[str, float | None]] = []
         judgements: list[str | None] = []
         judgement_sources: list[str | None] = []
         notes: list[str | None] = []
@@ -659,7 +660,7 @@ def _run_eval(
                                             stacklevel=2,
                                         )
                         before_scoring(record, scene)
-                    epoch_values: dict[str, float] = {}
+                    epoch_values: dict[str, float | None] = {}
                     for scorer in scorers:
                         try:
                             score = scorer(record, scene.target)
@@ -683,6 +684,8 @@ def _run_eval(
                             continue
                         per_scorer_scores[scorer.name].append(score)
                         epoch_values[scorer.name] = value
+                        if value is None:
+                            abstentions[scorer.name] = abstentions.get(scorer.name, 0) + 1
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
                     # these fields are documented as strictly parallel, so a later
@@ -748,7 +751,7 @@ def _run_eval(
                 stopped = True
                 break
 
-        reduced: dict[str, float] = {}
+        reduced: dict[str, float | None] = {}
         for name, scene_scores in per_scorer_scores.items():
             if not scene_scores:
                 continue
@@ -795,11 +798,14 @@ def _run_eval(
         status = "error"
         error = f"all {total_trials} trial(s) errored; nothing was scored"
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, float | None] = {}
     for scorer in scorers:
         vals = [sr.reduced[scorer.name] for sr in scene_results if scorer.name in sr.reduced]
         if vals:
-            metrics[scorer.name] = mean(vals)
+            # Abstentions carry no verdict, so they are left out of the mean;
+            # a scorer that abstained on every scene reports None, not 0.0.
+            voted = [v for v in vals if v is not None]
+            metrics[scorer.name] = mean(voted) if voted else None
 
     stats = EvalStats(
         started_at=started_iso,
@@ -818,6 +824,7 @@ def _run_eval(
             total_trials=total_trials,
             metrics=metrics,
             errored_trials=errored_trials,
+            abstentions=abstentions,
         ),
         stats=stats,
         samples=tuple(scene_results),

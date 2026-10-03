@@ -30,15 +30,21 @@ Reducer = Callable[[Sequence["Score"]], "Score"]
 
 @dataclass(frozen=True)
 class Score:
-    """The outcome a scorer assigns to one trajectory."""
+    """The outcome a scorer assigns to one trajectory.
 
-    value: ScoreValue
+    A ``value`` of ``None`` means the scorer abstained: it has no verdict for
+    this trajectory, which is recorded as such rather than counted as a zero.
+    """
+
+    value: ScoreValue | None
     explanation: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-def value_to_float(value: ScoreValue) -> float:
-    """Coerce a score value to a float for metric aggregation."""
+def value_to_float(value: ScoreValue | None) -> float | None:
+    """Coerce a score value to a float for metric aggregation; an abstention stays ``None``."""
+    if value is None:
+        return None
     if isinstance(value, bool):
         return 1.0 if value else 0.0
     if isinstance(value, int | float):
@@ -66,7 +72,7 @@ class Scorer(Protocol):
 # --------------------------------------------------------------------------- #
 # Epoch reducers: list[Score] -> Score  (namespaced separately from metrics)
 # --------------------------------------------------------------------------- #
-def _numeric(value: ScoreValue) -> float:
+def _numeric(value: ScoreValue | None) -> float:
     """Strictly coerce a value to a number for numeric reduction.
 
     Unlike [`value_to_float`][inspect_robots.scorer.value_to_float] (which is lenient for metric
@@ -74,6 +80,11 @@ def _numeric(value: ScoreValue) -> float:
     raises on a non-numeric string rather than silently coercing it to 0.0 — so a
     ``mean`` over categorical scores fails loudly instead of lying.
     """
+    if value is None:
+        raise TypeError(
+            "cannot numerically reduce an abstained score; "
+            "reduce_scores() leaves abstentions out before reducing"
+        )
     if isinstance(value, bool):
         return 1.0 if value else 0.0
     if isinstance(value, int | float):
@@ -154,8 +165,16 @@ def get_reducer(name: str) -> Reducer:
 
 
 def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
-    """Apply the named epoch reducer to one scene's scores."""
-    return get_reducer(name)(scores)
+    """Apply the named epoch reducer to one scene's scores.
+
+    Abstained epochs (``value is None``) are left out before reducing; a scene
+    where every epoch abstained reduces to an abstention.
+    """
+    reducer = get_reducer(name)
+    voted = [s for s in scores if s.value is not None]
+    if not voted:
+        return Score(value=None)
+    return reducer(voted)
 
 
 # --------------------------------------------------------------------------- #

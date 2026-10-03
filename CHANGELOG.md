@@ -56,10 +56,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** Normalize NumPy integer and Boolean metadata scalars in JSON eval
+  logs to prevent `TypeError` serialization crashes on eval completion
+  ([#492](https://github.com/robocurve/inspect-robots/issues/492)).
+
 - **CLI:** Terminate the `ffmpeg` subprocess, close stdin, wait for exit, and unlink partial output if video encoding is interrupted by an escaping exception (e.g. `KeyboardInterrupt`, `MemoryError`) ([#508](https://github.com/robocurve/inspect-robots/issues/508)).
 
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+- **Core:** a scorer can abstain with `Score(value=None)`. The value used to
+  crash `value_to_float`, so the only workaround was `0.0`, which reads as a
+  failed trial. Abstained epochs are now recorded as `null`, left out by the
+  epoch reducers and the metric mean, and a scorer that abstained everywhere
+  reports a `null` metric. `EvalResults.abstentions` counts abstained trials
+  per scorer, and `inspect` and `view` show the count beside each metric
+  ([#436](https://github.com/robocurve/inspect-robots/issues/436)).
 
 - **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
   the embodiment action bounds.

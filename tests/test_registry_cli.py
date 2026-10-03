@@ -1597,7 +1597,7 @@ def test_eval_set_summary_formats_none_metric_as_na(
     log = _step_limit_log(task="unscored_task")
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_eval_set_summary(True, [log], "logs")
     out = capsys.readouterr().out
@@ -1874,7 +1874,7 @@ def _directory_view_log(
     created: str,
     instruction: str = "pick up the cube",
     status: str = "success",
-    metrics: dict[str, float] | None = None,
+    metrics: dict[str, float | None] | None = None,
     errored_trials: int = 0,
 ) -> EvalLog:
     log = _step_limit_log(reasons=("success",))
@@ -1946,7 +1946,7 @@ def test_view_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -2468,7 +2468,7 @@ def test_view_directory_includes_log_with_sanitized_null_metric(
     logs.mkdir()
     log = _directory_view_log(
         created="2026-07-30T12:00:00Z",
-        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+        metrics={"min_distance_to_goal": None},
     )
     _write_log(log, logs, "null-metric.json")
 
@@ -3684,7 +3684,7 @@ def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -4115,7 +4115,7 @@ def test_run_summary_formats_none_metric_as_na(
     log = _transcript_log()
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_run_summary(log, "run.json", is_adhoc=False)
     out = capsys.readouterr().out
@@ -8257,3 +8257,29 @@ def test_config_show_displays_the_grader_default(
     out = capsys.readouterr().out
     assert "grader" in out
     assert "vlm" in out
+
+
+def test_inspect_and_view_show_abstention_counts_beside_metrics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A metric averaged over judged trials only must show how many abstained."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(
+            log.results,
+            metrics={"judged": 0.5, "other": 1.0},
+            abstentions={"judged": 3},
+        ),
+    )
+    path = _write_log(log, tmp_path, "abstained.json")
+
+    assert main(["inspect", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "judged: 0.5 (3 abstained)" in out
+    assert "other: 1\n" in out
+
+    assert main(["view", str(path)]) == 0
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<div class="stat-name">judged (3 abstained)</div>' in document
+    assert '<div class="stat-name">other</div>' in document

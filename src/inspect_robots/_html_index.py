@@ -24,7 +24,7 @@ class IndexEntry:
     model: str | None
     status: str
     status_class: str
-    metrics: Mapping[str, float]
+    metrics: Mapping[str, float | None]
     errored_trials: int
     termination: str
     error: str | None
