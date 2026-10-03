@@ -164,6 +164,16 @@ def get_reducer(name: str) -> Reducer:
     raise ValueError(f"unknown epoch reducer {name!r}; known: {sorted(_REDUCERS)} or 'pass_at_<k>'")
 
 
+def reducer_min_epochs(name: str) -> int:
+    """Return the fewest epochs the named reducer can reduce (``k`` for ``pass_at_<k>``).
+
+    Assumes ``name`` already resolved via :func:`get_reducer`.
+    """
+    if name.startswith("pass_at_") and name not in _REDUCERS:
+        return int(name[len("pass_at_") :])
+    return 1
+
+
 def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
     """Apply the named epoch reducer to one scene's scores.
 

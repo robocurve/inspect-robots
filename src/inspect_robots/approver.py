@@ -329,6 +329,11 @@ class ChainApprover:
     """
 
     def __init__(self, *approvers: Approver):
+        for approver in approvers:
+            if not callable(getattr(approver, "review", None)):
+                raise ValueError(
+                    f"ChainApprover element must have a callable review, got {approver!r}"
+                )
         self._approvers = approvers
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:

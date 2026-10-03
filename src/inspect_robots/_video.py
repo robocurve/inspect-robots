@@ -25,8 +25,8 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 # Everything before the trailing _NNNNNN step token FrameStore appended.
-# Trial ids and camera names may both contain "_", so the (trial, camera)
-# split is ambiguous — the whole prefix never needs splitting. \d{6,} keeps
+# Both versioned and legacy flat names keep the whole stream identity here.
+# Legacy trial/camera boundaries are ambiguous; no splitting is needed. \d{6,} keeps
 # t >= 10**6 (overflowing the 06d pad) grouping and sorting correctly.
 _FRAME_RE = re.compile(r"^(.+)_(\d{6,})\.npy$")
 

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+import pytest
 
 from inspect_robots.controller import DefaultController, SmoothingController
+from inspect_robots.errors import PolicyError
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
@@ -38,6 +42,39 @@ def test_replan_interval_reinfers_periodically() -> None:
     for _ in range(6):
         ctrl.next_action(policy, obs, 0, store)
     assert policy.num_inferences == 3  # 6 actions / 2 per inference
+
+
+@pytest.mark.parametrize("bad_interval", [0, -1, 2.5, True, False, "5"])
+def test_default_controller_rejects_invalid_replan_interval(bad_interval: Any) -> None:
+    with pytest.raises(ValueError, match="replan_interval must be an integer >= 1 or None"):
+        DefaultController(replan_interval=bad_interval)
+
+
+def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
+    class _EmptyChunkPolicy:
+        info = PolicyInfo(
+            name="empty-policy",
+            action_space=Box(shape=(1,), semantics=ActionSemantics("joint_delta")),
+        )
+        config = PolicyConfig()
+
+        def act(self, obs: Observation) -> ActionChunk:
+            # Bypass ActionChunk.__post_init__ to simulate an empty sequence returned by an adapter
+            chunk = object.__new__(ActionChunk)
+            object.__setattr__(chunk, "actions", ())
+            object.__setattr__(chunk, "inference_latency_s", None)
+            return chunk
+
+    ctrl = DefaultController()
+    store: dict[str, object] = {}
+    with pytest.raises(PolicyError, match="returned an empty ActionChunk"):
+        ctrl.next_action(_EmptyChunkPolicy(), Observation(), 0, store)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad_alpha", [0.0, -0.5, 1.5, float("nan")])
+def test_smoothing_controller_rejects_invalid_alpha(bad_alpha: float) -> None:
+    with pytest.raises(ValueError, match=r"alpha must be in \(0, 1\]"):
+        SmoothingController(DefaultController(), alpha=bad_alpha)
 
 
 def test_smoothing_controller_composes() -> None:

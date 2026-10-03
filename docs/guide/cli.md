@@ -43,7 +43,9 @@ Resolved in order (first hit wins):
 
 The config file itself is selected in this order: `--config PATH`,
 `$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
-`HOME`. Use a separate file for each rig without changing the config home for
+`HOME`. Native Windows shells usually set neither, so there the path falls back
+to `%APPDATA%\inspect-robots\config.ini`, then
+`%USERPROFILE%\.config\inspect-robots\config.ini`. Use a separate file for each rig without changing the config home for
 the whole process:
 
 ```bash
@@ -364,7 +366,7 @@ rig; replace the three camera paths with your rig's V4L2 color nodes
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
 [defaults]
 policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = yam_arms     # same plugin; cameras configured below
+embodiment = yam_arms     # from the inspect-robots-yam plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
@@ -696,8 +698,8 @@ inspect-robots video logs/adhoc_xxxx.json
 
 ```text
 fps: 10 (control_hz from log)
-wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
-wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~right_cam.mp4 (1200 frames)
 wrote 2/2 streams
 ```
 

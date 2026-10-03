@@ -190,3 +190,142 @@ def test_broadcast_without_message_sinks_keeps_rollout_gate_closed() -> None:
 
 def test_null_sink_deliberately_omits_policy_message_hook() -> None:
     assert getattr(NullSink(), "log_policy_messages", None) is None
+
+
+def test_broadcast_isolates_failing_message_sink() -> None:
+    class _FailingSink(NullSink):
+        def log_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
+            raise RuntimeError("network down")
+
+    healthy = _RecordingSink()
+    broadcast = _Broadcast([_FailingSink(), healthy])
+    hook = getattr(broadcast, "log_policy_messages", None)
+    assert callable(hook)
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"LogSink _FailingSink\.log_policy_messages\(\) failed",
+    ):
+        hook(1, ["msg"])
+
+    assert healthy.message_calls == [(1, ["msg"])]
+
+
+def test_broadcast_isolates_exceptions_across_all_lifecycle_hooks() -> None:
+    class _ExplodingSink:
+        def bind_spaces(self, *args: Any) -> None:
+            raise RuntimeError("fail spaces")
+
+        def bind_frames_dir(self, *args: Any) -> None:
+            raise RuntimeError("fail frames")
+
+        def bind_scenes(self, *args: Any) -> None:
+            raise RuntimeError("fail scenes")
+
+        def on_eval_start(self, *args: Any) -> None:
+            raise RuntimeError("fail eval start")
+
+        def on_trial_start(self, *args: Any) -> None:
+            raise RuntimeError("fail trial start")
+
+        def log_step(self, *args: Any) -> None:
+            raise RuntimeError("fail log step")
+
+        def on_trial_end(self, *args: Any) -> None:
+            raise RuntimeError("fail trial end")
+
+        def on_eval_end(self, *args: Any) -> None:
+            raise RuntimeError("fail eval end")
+
+    class _HealthySink:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def bind_spaces(self, *args: Any) -> None:
+            self.calls.append("bind_spaces")
+
+        def bind_frames_dir(self, *args: Any) -> None:
+            self.calls.append("bind_frames_dir")
+
+        def bind_scenes(self, *args: Any) -> None:
+            self.calls.append("bind_scenes")
+
+        def on_eval_start(self, *args: Any) -> None:
+            self.calls.append("on_eval_start")
+
+        def on_trial_start(self, *args: Any) -> None:
+            self.calls.append("on_trial_start")
+
+        def log_step(self, *args: Any) -> None:
+            self.calls.append("log_step")
+
+        def on_trial_end(self, *args: Any) -> None:
+            self.calls.append("on_trial_end")
+
+        def on_eval_end(self, *args: Any) -> None:
+            self.calls.append("on_eval_end")
+
+    healthy = _HealthySink()
+    broadcast = _Broadcast([_ExplodingSink(), healthy])
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        broadcast.bind_spaces(None, None)  # type: ignore[arg-type]
+        broadcast.bind_frames_dir(None)
+        broadcast.bind_scenes([])
+        broadcast.on_eval_start(None)  # type: ignore[arg-type]
+        broadcast.on_trial_start("s0", 0)
+        broadcast.log_step(0, None, None, None)  # type: ignore[arg-type]
+        broadcast.on_trial_end(None)  # type: ignore[arg-type]
+        broadcast.on_eval_end(None)  # type: ignore[arg-type]
+
+    assert healthy.calls == [
+        "bind_spaces",
+        "bind_frames_dir",
+        "bind_scenes",
+        "on_eval_start",
+        "on_trial_start",
+        "log_step",
+        "on_trial_end",
+        "on_eval_end",
+    ]
+    warning_messages = [str(w.message) for w in recorded]
+    assert len(warning_messages) == 8
+    assert all("LogSink _ExplodingSink" in m for m in warning_messages)
+
+
+def test_broadcast_does_not_catch_keyboard_interrupt_or_system_exit() -> None:
+    class _InterruptSink(NullSink):
+        def log_step(self, *args: Any) -> None:
+            raise KeyboardInterrupt()
+
+    broadcast = _Broadcast([_InterruptSink()])
+    with pytest.raises(KeyboardInterrupt):
+        broadcast.log_step(0, None, None, None)  # type: ignore[arg-type]
+
+    class _ExitSink(NullSink):
+        def on_trial_end(self, *args: Any) -> None:
+            raise SystemExit(1)
+
+    broadcast_exit = _Broadcast([_ExitSink()])
+    with pytest.raises(SystemExit):
+        broadcast_exit.on_trial_end(None)  # type: ignore[arg-type]
+
+
+def test_broadcast_does_not_catch_safety_abort_or_embodiment_fault() -> None:
+    from inspect_robots.errors import EmbodimentFault, SafetyAbort
+
+    class _SafetySink(NullSink):
+        def on_trial_start(self, *args: Any) -> None:
+            raise SafetyAbort("e-stop triggered")
+
+    broadcast = _Broadcast([_SafetySink()])
+    with pytest.raises(SafetyAbort, match="e-stop triggered"):
+        broadcast.on_trial_start("s0", 0)
+
+    class _FaultSink(NullSink):
+        def log_step(self, *args: Any) -> None:
+            raise EmbodimentFault("hardware fault")
+
+    broadcast_fault = _Broadcast([_FaultSink()])
+    with pytest.raises(EmbodimentFault, match="hardware fault"):
+        broadcast_fault.log_step(0, None, None, None)  # type: ignore[arg-type]
