@@ -215,6 +215,36 @@ describe("durable issue coordinator", () => {
       "Full-suite and cross-platform checks were not run.",
     );
   });
+  it("passes plan-review limitations to implementation and revises on findings", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(l, id, output("CONFIRMED"));
+    await run(l, id, output("PLAN"));
+    await run(
+      l,
+      id,
+      output("APPROVE", {
+        result: result("APPROVE", { findings: ["Cover the two-epoch case."] }),
+      }),
+    );
+    expect((await l.job(id))?.next).toBe("plan");
+    expect((await l.job(id))?.feedback).toBe("Cover the two-epoch case.");
+    await run(l, id, output("PLAN"));
+    await run(
+      l,
+      id,
+      output("APPROVE", {
+        result: result("APPROVE", {
+          limitations: ["Hardware behaviour was not exercised."],
+        }),
+      }),
+    );
+    expect((await l.job(id))?.next).toBe("implement");
+    expect((await l.job(id))?.feedback).toBe(
+      "Hardware behaviour was not exercised.",
+    );
+  });
   it("deduplicates concurrent explicit retries of one issue", async () => {
     const l = ledger();
     const ids = await Promise.all([

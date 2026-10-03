@@ -18,7 +18,7 @@ barrier against bot merges into main.
 
 | Status | Meaning and owner |
 | --- | --- |
-| FIXING | A confirmed serious defect entered the plan, implementation and independent review workflow; no action needed yet. Triage limitations are listed but do not block the fix. |
+| FIXING | A confirmed serious defect entered the plan, implementation and independent review workflow; no action needed yet. Triage and plan-review limitations are listed and passed on but do not block the fix; code review still requires none. |
 | CONFIRMED | Concrete evidence establishes the bug, but it was not judged serious, so no automatic fix was started; Jay owns judgment. |
 | NEEDS_INFO | Ask the actual issue author for specific missing evidence. Deleted/bot authors fall back to Jay. |
 | NOT_REPRODUCED | Explain the actual checks and limits; tag Jay. |

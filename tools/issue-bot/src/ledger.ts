@@ -618,10 +618,16 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       job.plan = r.plan;
       job.next = "plan_review";
     } else if (kind === "plan_review") {
-      if (approve) {
+      // Unlike code review, the plan-review policy never asks for zero limitations;
+      // they are caveats for implementation, not objections. Findings still revise.
+      if (r.status === "APPROVE" && r.findings.length === 0) {
         job.approvedPlan = await digest(s.request.plan);
+        job.feedback = r.limitations.join("\n");
         job.next = "implement";
-      } else if (r.status === "REQUEST_CHANGES" && ++job.planRounds < 3) {
+      } else if (
+        ["REQUEST_CHANGES", "APPROVE"].includes(r.status) &&
+        ++job.planRounds < 3
+      ) {
         job.feedback = [...r.findings, ...r.limitations].join("\n");
         job.next = "plan";
       } else return this.hold(id, "plan_review_not_approved");
