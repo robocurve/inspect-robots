@@ -48,7 +48,9 @@ subclasses so callers can tell them apart without parsing prose:
 - `_ChatHTTPError(ConfigError)` with a `status: int` attribute, raised for any
   non-2xx response (same message as today).
 - `_ChatTransportError(ConfigError)`, raised by `_urllib_post` for `URLError`
-  (same message as today).
+  (same message as today) and also for `OSError` (including `TimeoutError` on
+  `response.read()`) and `http.client.HTTPException` (e.g.
+  `RemoteDisconnected`), which today escape as raw exceptions.
 
 Both remain `ConfigError`, so every existing caller and `except ConfigError`
 behaves exactly as before. Malformed 2xx replies keep raising plain
@@ -60,27 +62,42 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
   duck-typed like the existing optional `config()` hook
   (`eval.py:_grader_identity`), so out-of-tree graders without it keep
   satisfying the protocol.
-- `eval()` calls `preflight()` once, right after `_grading_hook` resolves the
-  grader and **before** resolving the task, policy and embodiment
-  (`eval.py:392`), so no hardware is touched when it fails. `eval_set()`
-  resolves its grader once and calls `preflight()` once, before its first task.
-  `_VLMGrader` memoizes success (`self._preflight_done`), so the per-task
-  `eval()` calls inside `eval_set` do not repeat the request.
+- **CLI (the main `--grader vlm` path).** `run` (`cli.py:~1686`) and
+  `eval-set` (`cli.py:~1922`) resolve the embodiment and policy (robot
+  connection, claim, weights), run auto-task generation (an LLM call), and
+  start sessions before reaching `eval()`. So both commands build the grader
+  **first**, with `operator_session=None`, call `preflight()` immediately,
+  and only then resolve components, generate tasks, and start sessions,
+  attaching the session afterwards via the grader's existing
+  `connect_session` (already used by `_build_grader`). A preflight
+  `ConfigError` is converted with `raise SystemExit(str(exc)) from exc`, the
+  same as other grader config errors (`_resolve_or_exit`, `cli.py:738-740`):
+  a clean message and nonzero exit, no traceback, no embodiment constructed.
+- **Python API.** `eval()` calls `preflight()` right after `_grading_hook`
+  resolves the grader and before resolving string components
+  (`eval.py:392`). `eval_set()` calls it once before its first task.
+- **Once per grader object.** `_VLMGrader` records that preflight was
+  attempted (`self._preflight_attempted`) whether it succeeded or only warned,
+  so the CLI, `eval_set` and each per-task `eval()` make at most one request
+  per grader. A 4xx raises and the run ends there, so it is never retried.
 - `_VLMGrader.preflight()` sends one `chat_completion` with the same
   `base_url`, `api_key`, `model`, `effort` and `http_post`, `what="grading
   preflight"`, and a minimal user message: one short text part asking for
-  `GRADE: success`, plus one 1x1 PNG `image_url` part (via `png_data_url`), so
-  a model without image input is rejected here rather than on every trial. The
+  `GRADE: success`, plus one 64x64 solid-color PNG `image_url` part (via
+  `png_data_url`; large enough to avoid "image too small" rejections), so a
+  model without image input is rejected here rather than on every trial. The
   reply's content is not validated; a 2xx with a parseable reply passes.
 - Outcomes:
-  - `_ChatHTTPError` with `400 <= status < 500`: raise `ConfigError` with the
+  - `_ChatHTTPError` with `400 <= status < 500`, except 408 and 429: raise
+    `ConfigError` with the
     original message plus the requested effort (when explicit) and
     `fix: check -G model, -G effort, the API key and that the model accepts
     images; this request was rejected before any rollout`.
-  - `_ChatHTTPError` with 5xx, or `_ChatTransportError`: do not block the
-    session. Print one stderr warning (`vlm grader preflight: ...; continuing,
+  - `_ChatHTTPError` with 5xx, 408 or 429, `_ChatTransportError`, or any
+    exception that is not a `ConfigError` (an injected `http_post` can raise
+    anything): do not block the session. Print one stderr warning (`vlm grader preflight: ...; continuing,
     trials may end up ungraded`) and continue; mid-run failures are then
-    handled by section 3. Not memoized, so a later `eval()` retries it.
+    handled by section 3.
   - Malformed 2xx reply (plain `ConfigError`): raise; the endpoint is not
     OpenAI-compatible.
 - The builtin `operator` grader has no `preflight()`.
@@ -120,8 +137,11 @@ least one trial is ungraded, set `status = "error"` and
 `error = f"{n} of {graded_attempts} trial(s) ungraded: grader failed ({first_reason})"`,
 where `graded_attempts` is the number of trials `before_scoring` ran for.
 This does not count toward `fail_on_error` (grading is not a policy error) and
-never interrupts the loop. An existing more specific error (halt, all trials
-errored, fail_on_error) is not overwritten.
+never interrupts the loop. When the run already ended with a more specific
+error (halt, all trials errored, fail_on_error, a reducer failure such as
+`pass_at_k` with fewer graded epochs than k after abstentions), that status
+and message stay, and `; N of M trial(s) ungraded` is appended so the count is
+not lost.
 
 The CLI already prints a failed run's `error` and exits nonzero, and `eval_set`
 already reports a task with `status == "error"` as failed.
@@ -133,7 +153,9 @@ The mid-run stop, `_ExplicitEffortRejected`, and deferring a raise past
 diff stays visible in the PR history. `effort` handling on `main` is already
 exact (`"none"` is sent verbatim; `grader.py` `vlm_grader`), so nothing from
 that part of #472 is still needed beyond fixing the stale "requests the
-minimum" wording in `vlm_grader`'s docstring and `docs/guide/cli.md`.
+minimum" wording: `vlm_grader`'s docstring, `_VLMGrader.config()`'s docstring
+(`grader.py:~161`, "asks for the minimum"), and `docs/guide/cli.md` (around
+lines 176, 191 and 436).
 
 ## Docs
 
@@ -159,6 +181,8 @@ src/inspect_robots/_chatwire.py      # _ChatHTTPError, _ChatTransportError
 src/inspect_robots/grader.py         # preflight(), grading_error marker, docstrings
 src/inspect_robots/scorer.py         # operator scorer abstains on grading_error
 src/inspect_robots/eval.py           # call preflight; count ungraded; fail run
+src/inspect_robots/cli.py            # build grader first; preflight before components
+tests/test_registry_cli.py           # CLI preflight: clean exit, no embodiment built
 tests/test_vlm_grader.py             # preflight + grading_error tests
 tests/test_eval_orchestration.py     # run status, abstention, eval_set preflight once
 tests/test_scorers.py                # operator scorer abstention
@@ -170,16 +194,24 @@ plans/0085-grader-preflight-and-loud-ungraded.md
 
 ## Tests (mocked `http_post`, no network)
 
+- CLI: `run` and `eval-set` with a preflight 400 exit nonzero with the guided
+  message and no traceback, and the embodiment factory and auto-task generation
+  are never called; a 503 warns and the run proceeds.
 - Preflight: 400 and 422 with explicit effort raise `ConfigError` before any
   rollout (assert the embodiment was never constructed or reset and no trial
   ran); 401/403/404 raise too; 500 and a transport error warn and the run
-  proceeds; malformed 2xx raises; success memoizes (one request across an
-  `eval_set` of two tasks); the request carries the exact effort and an image
+  proceeds; 408 and 429 warn and proceed; a raw `TimeoutError` from the
+  transport warns and proceeds; malformed 2xx raises; one request per grader
+  across an `eval_set` of two tasks, whether the first attempt succeeded or
+  only warned; the request carries the exact effort and an image
   part; graders without `preflight` work unchanged.
 - Grading failure mid-run: the record gets `grading_error`; the operator
   scorer abstains with the reason; metrics exclude the trial and
   `abstentions` counts it; the run ends `status == "error"` with the
   `n of m trial(s) ungraded` message; later trials still run and grade.
+- A halted run with ungraded trials keeps the halt message with
+  `; N of M trial(s) ungraded` appended; `pass_at_k` over abstained epochs
+  degrades to the existing reducer-failure error plus the count.
 - Unchanged paths: a skipped human verdict and a no-grader run still score
   `False`; a definitive termination is adopted without a request; a more
   specific run error is not overwritten.
