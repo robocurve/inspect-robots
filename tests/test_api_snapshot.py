@@ -15,6 +15,11 @@ EXPECTED = {
     "eval_set",
     "generate_scene",
     "read_eval_log",
+    # run uncertainty and paired comparison (plan 0086)
+    "compare_logs",
+    "metric_evidence",
+    "Comparison",
+    "MetricEvidence",
     "EvalLog",
     "EvalResults",
     "EvalSpec",
@@ -78,6 +83,7 @@ EXPECTED = {
     "resolve",
     # public submodules
     "defaults",
+    "evidence",
     # meta
     "__version__",
 }

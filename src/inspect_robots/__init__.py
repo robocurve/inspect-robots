@@ -19,7 +19,7 @@ try:
 except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed tree
     __version__ = "0.0.0+unknown"
 
-from inspect_robots import defaults
+from inspect_robots import defaults, evidence
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.embodiment import (
     Embodiment,
@@ -27,6 +27,7 @@ from inspect_robots.embodiment import (
     EmbodimentInfo,
 )
 from inspect_robots.eval import eval, eval_set
+from inspect_robots.evidence import Comparison, MetricEvidence, compare_logs, metric_evidence
 from inspect_robots.grader import Grader, operator_grader, vlm_grader
 from inspect_robots.log import (
     EvalLog,
@@ -85,6 +86,7 @@ __all__ = [
     "ActionSemantics",
     "Box",
     "CameraSpec",
+    "Comparison",
     "ConsolePoll",
     "Embodiment",
     "EmbodimentBase",
@@ -96,6 +98,7 @@ __all__ = [
     "EvalSpec",
     "EvalStats",
     "Grader",
+    "MetricEvidence",
     "Observation",
     "ObservationSpace",
     "OperatorConsole",
@@ -117,14 +120,17 @@ __all__ = [
     "TaskEnvelope",
     "TrialRecord",
     "__version__",
+    "compare_logs",
     "defaults",
     "embodiment",
     "episode_length",
     "eval",
     "eval_set",
+    "evidence",
     "generate_scene",
     "grader",
     "is_affirmative_verdict",
+    "metric_evidence",
     "min_distance_to_goal",
     "operator_grader",
     "operator_input",
