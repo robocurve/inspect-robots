@@ -103,16 +103,52 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - The `test-extra` tier stays advisory: `continue-on-error: true` means it
   reports success to `ci-ok` even when its steps fail — listing it in `needs`
   does not make it blocking.
-- **Releases are one-click** after a changelog PR: run `uv run towncrier build
-  --version X.Y.Z --yes` (X.Y.Z = latest `v*` tag plus the bump you will pick)
-  and merge it, then Actions → Release → Run workflow → pick the same
-  patch/minor/major (see "Releasing (maintainers)" in CONTRIBUTING.md). The
-  version is derived from the git tag by hatch-vcs. Never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: `plugins/*` packages keep static versions in their own pyprojects; bump one in a PR and it publishes alongside the next core release via its `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI trusted-publisher environment). The same
-  run publishes to PyPI via trusted publishing; nothing is pushed to main.
+- **Releases** are dispatched from Actions (Release workflow) and publish to
+  PyPI via trusted publishing; the workflow never pushes to main. The version
+  is derived from the git tag by hatch-vcs. Never add a static `version =` back
+  to pyproject (`__version__` comes from importlib.metadata). Exception:
+  `plugins/*` packages keep static versions in their own pyprojects; bump one in
+  a PR and it publishes alongside the next core release via its
+  `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged
+  versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI
+  trusted-publisher environment. Follow "Cutting a release" below.
 - **PyPI readme is transformed at build time** — `hatch-fancy-pypi-readme`
   rewrites GitHub-only alert syntax (`> [!NOTE]` etc.) in README.md into bold
   blockquotes (`> **Note:**`) that PyPI renders; keep using alert syntax in the
   README itself. Config lives at the bottom of pyproject.toml.
+
+## Cutting a release
+
+Every release gets a dated `## [X.Y.Z] - <date>` section in `CHANGELOG.md`,
+compiled from the `changelog.d/` fragments **before** the tag is created.
+When asked to cut a release, do exactly this:
+
+1. **Bump:** use the bump the maintainer named. If none was named, ask
+   (patch for fixes only, minor if any `added`/`changed`/`removed` fragment is
+   pending). Never pick one silently.
+2. **Version:** latest tag plus that bump, computed the way `release.yml` does
+   (`git fetch --tags && git tag --list 'v*' --sort=-v:refname | head -1`).
+3. **Changelog PR:** if `changelog.d/` has fragments besides `README.md`, in a
+   fresh worktree off `origin/main` on branch `release/vX.Y.Z`: run
+   `uv run towncrier build --draft --version X.Y.Z` to check the output, then
+   `uv run towncrier build --version X.Y.Z --yes`; include any requested plugin
+   version bumps; commit; open a PR. Do not hand-edit towncrier's output.
+4. **Merge** once `ci-ok` is green: `gh pr merge <N> --squash --admin`
+   (`--admin` uses the mergers-team bypass and is the normal merge path here;
+   it cannot skip `ci-ok`).
+5. **Dispatch** with the **same** bump:
+   `gh workflow run release.yml -f bump=<patch|minor|major>`, then watch the run
+   (`gh run watch`) and confirm the created tag equals `vX.Y.Z` and the PyPI
+   publish jobs succeeded. If the tag differs, stop and tell the maintainer:
+   the changelog section is labelled with the wrong version.
+6. Report the release URL and the compiled changelog section.
+
+Do not automate around this: never push to `main`, never add a bypass actor to
+the rulesets, and never run `towncrier build` outside a PR. The release cut is
+deliberately not fully automatic. Committing the changelog and tagging in one
+run would need a bot that can write to `main`, which the "Only mergers can
+merge" ruleset exists to prevent (decision 2026-10-03). Revisit only if
+releases become frequent enough to justify a scoped release App.
 
 ## Writing style (public-facing text)
 
