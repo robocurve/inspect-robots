@@ -199,6 +199,18 @@ describe("trusted issue publication", () => {
         { login: "reporter", type: "User" },
       ),
     ).toContain("@jeqcho");
+    expect(
+      renderNotice(
+        { ...notice, status: "CONFIRMED" },
+        { login: "reporter", type: "User" },
+      ),
+    ).toContain("not judged serious");
+    expect(
+      renderNotice(
+        { ...notice, status: "FIXING" },
+        { login: "reporter", type: "User" },
+      ),
+    ).toContain("**STATUS:** FIXING\n\n**Issue summary:**");
   });
   it("delivers stale stop notices but retires obsolete assessments after an issue edit", async () => {
     const j = journal();

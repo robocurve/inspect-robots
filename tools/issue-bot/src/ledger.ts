@@ -600,10 +600,15 @@ export class IssueLedger extends DurableObject<IssueEnv> {
         r.status === "CONFIRMED" &&
         r.serious &&
         r.evidence.length > 0 &&
-        r.limitations.length === 0 &&
         !job.duplicate;
+      // Triage limitations are disclosed, not disqualifying: the plan review, code
+      // review (which requires zero limitations), CI and a human merge gate the fix.
       // The persisted legacy flag records an existing fix PR, not a duplicate issue.
-      const status = job.duplicate ? "FIX_PROPOSED" : r.status;
+      const status = job.duplicate
+        ? "FIX_PROPOSED"
+        : serious
+          ? "FIXING"
+          : r.status;
       this.notice(job, status, r.summary, [...r.evidence, ...r.limitations]);
       job.next = serious ? "plan" : null;
       if (!serious) job.state = "done";

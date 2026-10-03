@@ -18,7 +18,8 @@ barrier against bot merges into main.
 
 | Status | Meaning and owner |
 | --- | --- |
-| CONFIRMED | Concrete evidence establishes the bug; Jay owns judgment. Serious, bounded, reproducible defects enter the fix workflow. |
+| FIXING | A confirmed serious defect entered the plan, implementation and independent review workflow; no action needed yet. Triage limitations are listed but do not block the fix. |
+| CONFIRMED | Concrete evidence establishes the bug, but it was not judged serious, so no automatic fix was started; Jay owns judgment. |
 | NEEDS_INFO | Ask the actual issue author for specific missing evidence. Deleted/bot authors fall back to Jay. |
 | NOT_REPRODUCED | Explain the actual checks and limits; tag Jay. |
 | DUPLICATE | Another issue reports the same bug; cite that issue and tag Jay. |

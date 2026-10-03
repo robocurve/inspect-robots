@@ -194,6 +194,27 @@ describe("durable issue coordinator", () => {
       );
     }
   });
+  it("sends a serious confirmed bug to planning despite disclosed triage limitations", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(
+      l,
+      id,
+      output("CONFIRMED", {
+        result: result("CONFIRMED", {
+          limitations: ["Full-suite and cross-platform checks were not run."],
+        }),
+      }),
+    );
+    expect((await l.job(id))?.state).toBe("running");
+    expect((await l.job(id))?.next).toBe("plan");
+    const notice = (await l.outbox())[0].publication;
+    expect(notice.status).toBe("FIXING");
+    expect(notice.details).toContain(
+      "Full-suite and cross-platform checks were not run.",
+    );
+  });
   it("deduplicates concurrent explicit retries of one issue", async () => {
     const l = ledger();
     const ids = await Promise.all([

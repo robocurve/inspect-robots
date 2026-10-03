@@ -68,7 +68,9 @@ export function renderNotice(
                 ? "Resolve the specific blocker below before this workflow continues."
                 : input.status === "NOT_REPRODUCED"
                   ? "Review the checks and limitations below and decide what further investigation is needed."
-                  : "Review the assessment below.";
+                  : input.status === "CONFIRMED"
+                    ? "Review the assessment below. It was not judged serious (data loss, safety/security failure or substantially broken supported behavior), so no automatic fix was started."
+                    : "Review the assessment below.";
   return `**STATUS:** ${input.status}\n\n**Issue summary:** ${safeText(input.summary, 4000)}\n\n@${target}\n\n**Your action:** ${action}\n\n<details>\n<summary>Evidence and checks</summary>\n\n${safeText(input.details.join("\n\n"), 45000)}\n\nAutomated Astra/Codex assessment of base \`${input.issue.base}\`.\n</details>\n\nRecorded issue workflow spending: $${(input.costMicros / 1_000_000).toFixed(3)}. No merge or issue closure was performed.`;
 }
 
