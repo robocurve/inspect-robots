@@ -1755,3 +1755,54 @@ def test_policy_base_bind_task_noop() -> None:
 
     pol = _ConcretePolicy()
     pol.bind_task(TaskEnvelope(name="t", max_steps=10))
+
+
+def test_eval_rejects_duplicate_scorer_names(tmp_path: Path) -> None:
+    from inspect_robots.scorer import reached_goal_state
+
+    # Rejects colliding default names
+    msg = r"Task 'colliding': duplicate scorer name 'reached_goal_state'"
+    with pytest.raises(ConfigError, match=msg):
+        eval(
+            Task(
+                name="colliding",
+                scenes=[Scene(id="s0", instruction="reach")],
+                scorer=[reached_goal_state(threshold=0.0), reached_goal_state(threshold=100.0)],
+                max_steps=1,
+            ),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+        )
+
+
+def test_eval_distinct_scorer_names_preserve_per_epoch_and_reduced_metrics(tmp_path: Path) -> None:
+    from inspect_robots.scorer import reached_goal_state
+
+    # Distinct names preserve both scores independently
+    task = Task(
+        name="distinct",
+        scenes=[Scene(id="s0", instruction="reach")],
+        scorer=[
+            reached_goal_state(threshold=0.0, name="strict"),
+            reached_goal_state(threshold=100.0, name="loose"),
+        ],
+        max_steps=1,
+        epochs=1,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_frames=False,
+        store_actions=False,
+    )
+    assert log.status == "success"
+    # Both scorers have their own entries in epoch scores and metrics
+    assert log.samples[0].epochs[0]["strict"] == 0.0
+    assert log.samples[0].epochs[0]["loose"] == 1.0
+    assert log.samples[0].reduced["strict"] == 0.0
+    assert log.samples[0].reduced["loose"] == 1.0
+    assert log.results.metrics["strict"] == 0.0
+    assert log.results.metrics["loose"] == 1.0

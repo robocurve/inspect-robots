@@ -349,6 +349,43 @@ def test_task_validation_and_scorer_names() -> None:
     assert [s.name for s in mixed.scorers] == ["episode_length", "success_at_end"]
 
 
+def test_task_rejects_duplicate_scorer_names() -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.scene import Scene
+    from inspect_robots.scorer import reached_goal_state
+    from inspect_robots.task import Task
+
+    scene = Scene(id="s", instruction="reach")
+
+    with pytest.raises(ConfigError, match=r"Task 't': duplicate scorer name 'reached_goal_state'"):
+        Task(
+            name="t",
+            scenes=[scene],
+            scorer=[reached_goal_state(0.0), reached_goal_state(100.0)],
+            max_steps=5,
+        )
+
+    with pytest.raises(ConfigError, match=r"Task 't': duplicate scorer name 'success_at_end'"):
+        Task(
+            name="t",
+            scenes=[scene],
+            scorer=["success_at_end", "success_at_end"],
+            max_steps=5,
+        )
+
+    # Distinct names for the same scorer type are accepted
+    task = Task(
+        name="t",
+        scenes=[scene],
+        scorer=[
+            reached_goal_state(0.0, name="reached_strict"),
+            reached_goal_state(100.0, name="reached_loose"),
+        ],
+        max_steps=5,
+    )
+    assert [s.name for s in task.scorers] == ["reached_strict", "reached_loose"]
+
+
 def test_operator_end_constant_is_public_vocabulary() -> None:
     import inspect_robots
     from inspect_robots.types import OPERATOR_END

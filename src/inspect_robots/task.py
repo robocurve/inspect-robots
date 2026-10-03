@@ -94,6 +94,7 @@ class Task:
                 raise ConfigError(f"Task {self.name!r}: duplicate scene id {scene.id!r}")
             seen.add(scene.id)
         _ = self.epoch_spec  # validates an int epochs count via Epochs
+        _ = self.scorers
 
     @property
     def scorers(self) -> list[Scorer]:
@@ -112,6 +113,11 @@ class Task:
                 out.append(cast(Scorer, resolve("scorer", entry)))
             else:
                 out.append(entry)
+        seen_names: set[str] = set()
+        for s in out:
+            if s.name in seen_names:
+                raise ConfigError(f"Task {self.name!r}: duplicate scorer name {s.name!r}")
+            seen_names.add(s.name)
         return out
 
     @property

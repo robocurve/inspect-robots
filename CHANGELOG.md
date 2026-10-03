@@ -56,6 +56,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** Reject duplicate scorer names in `Task` before rollout so colliding scorers cannot combine into a shared epoch reduction or overwrite per-epoch values, and allow optional custom `name` overrides for built-in scorers ([#480](https://github.com/robocurve/inspect-robots/issues/480)).
+
 - **Setup wizard:** local macOS and Windows sessions no longer default to
   `rerun = false` or print a headless warning just because X11/Wayland display
   variables are absent. SSH sessions without a display still receive the

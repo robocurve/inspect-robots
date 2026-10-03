@@ -197,9 +197,9 @@ class _SuccessAtEnd:
         )
 
 
-def success_at_end() -> Scorer:
+def success_at_end(*, name: str = "success_at_end") -> Scorer:
     """Score 1.0 iff the episode terminated with reason ``"success"``."""
-    return _SuccessAtEnd()
+    return _SuccessAtEnd(name=name)
 
 
 @dataclass(frozen=True)
@@ -210,9 +210,9 @@ class _EpisodeLength:
         return Score(value=len(record.steps))
 
 
-def episode_length() -> Scorer:
+def episode_length(*, name: str = "episode_length") -> Scorer:
     """Score = number of environment steps taken."""
-    return _EpisodeLength()
+    return _EpisodeLength(name=name)
 
 
 def _distances(record: TrialRecord) -> list[float]:
@@ -230,9 +230,9 @@ class _MinDistanceToGoal:
         return Score(value=min(dists))
 
 
-def min_distance_to_goal() -> Scorer:
+def min_distance_to_goal(*, name: str = "min_distance_to_goal") -> Scorer:
     """Score = the closest the effector got to the goal (lower is better)."""
-    return _MinDistanceToGoal()
+    return _MinDistanceToGoal(name=name)
 
 
 @dataclass(frozen=True)
@@ -246,9 +246,9 @@ class _ReachedGoalState:
         return Score(value=reached, explanation=f"min_distance <= {self.threshold}")
 
 
-def reached_goal_state(threshold: float = 0.05) -> Scorer:
+def reached_goal_state(threshold: float = 0.05, *, name: str = "reached_goal_state") -> Scorer:
     """Success iff the effector came within ``threshold`` of the goal."""
-    return _ReachedGoalState(threshold=threshold)
+    return _ReachedGoalState(threshold=threshold, name=name)
 
 
 # Recognized affirmative operator verdicts (case-insensitive).
@@ -284,9 +284,9 @@ class _OperatorScorer:
         )
 
 
-def operator_scorer() -> Scorer:
+def operator_scorer(*, name: str = "operator") -> Scorer:
     """Score from the human operator's recorded success judgement (R6)."""
-    return _OperatorScorer()
+    return _OperatorScorer(name=name)
 
 
 class VLMScorer:
