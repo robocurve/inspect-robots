@@ -7,7 +7,9 @@ export const JAY_ID = 42904912;
 export const CHECK_NAME = 'Independent PR review';
 export const MODEL = 'gpt-6-astra';
 export const SHA = /^[a-f0-9]{40}$/;
-export const LIMITS = { review: 5_000_000, pr: 15_000_000, month: 200_000_000, warn: 160_000_000 };
+export const LIMITS = { review: 5_000_000, pr: 15_000_000, author: 20_000_000, month: 200_000_000, warn: 160_000_000 };
+// The maintainer's own PRs are exempt from the per-author monthly cap.
+export const MAINTAINER_LOGIN = 'jeqcho';
 export function monthlyReviewLimit(pr: number, month: string): number {
   // Jay authorized $5 extra on 2026-09-30 (UTC), then transferred the unused
   // $3.93072 from PR 512 to release PR 513. Deployment PR caps total $5.

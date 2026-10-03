@@ -93,6 +93,24 @@ describe('Codex review lifecycle', () => {
     expect(await s.ledger.session(capability)).toBeNull();
     expect(await s.ledger.remaining(`9-${head}`, 9)).toBe(4_900_000);
   });
+  it('declines a run once the PR author has used their monthly allowance', async () => {
+    const s = setup(); await s.ledger.register(job); await s.ledger.claimReviewSlot(job.id);
+    await s.ledger.recordAuthor(9, 'author');
+    await s.ledger.recordAuthor(8, 'author');
+    for (const rev of ['c', 'd', 'e']) await s.ledger.reserve(`other-pr-${rev}`, `8-${rev.repeat(40)}`, 8, 5_000_000);
+    await s.ledger.reserve('earlier-run', `9-${base}`, 9, 3_500_000);
+    await expect(runReview(s.config as any, job, s.step)).rejects.toThrow('contributor_budget_exhausted');
+    expect(s.config.RUNNER.start).not.toHaveBeenCalled();
+  });
+  it('records the PR author when a webhook enqueues a review', async () => {
+    const s = setup();
+    await handleWebhook(await webhook({ ...repo, action: 'opened', number: 9 }, 'pull_request'), s.config);
+    for (const rev of ['c', 'd', 'e']) await s.ledger.reserve(`author-spend-${rev}`, `9-${rev.repeat(40)}`, 9, 5_000_000);
+    await s.ledger.recordAuthor(8, 'author');
+    expect(await s.ledger.remaining(`8-${head}`, 8)).toBe(5_000_000);
+    await s.ledger.reserve('author-spend-2', `8-${base}`, 8, 4_000_000);
+    expect(await s.ledger.remaining(`8-${head}`, 8)).toBe(1_000_000);
+  });
   it('declines an underfunded rerun without starting a sandbox or spending more', async () => {
     const s = setup(); await s.ledger.register(job); await s.ledger.claimReviewSlot(job.id);
     await s.ledger.reserve('earlier-run', `9-${head}`, 9, 3_100_000);

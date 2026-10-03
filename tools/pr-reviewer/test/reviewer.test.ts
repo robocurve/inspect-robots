@@ -1,4 +1,4 @@
-import { env, createExecutionContext, evictDurableObject } from 'cloudflare:test';
+import { env, createExecutionContext, evictDurableObject, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import { current, publicText, renderCost, renderReview, validateReview, verifySignature, type Job, type Review } from '../src/common';
@@ -327,5 +327,40 @@ describe('publisher authority', () => {
     live = { ...pr, head: { sha: base } };
     expect(await publisher.publish(job, approval)).toBe(false);
     expect(writes).toHaveLength(4);
+  });
+});
+
+describe('per-author monthly review cap', () => {
+  it('shares one twenty-dollar monthly allowance across all PRs by the same author', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T12:00:00Z'));
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    for (const pr of [601, 602, 603, 604, 605]) await ledger.recordAuthor(pr, 'Prolific');
+    await ledger.recordAuthor(606, 'someone-else');
+    for (const pr of [601, 602, 603, 604]) expect(await ledger.reserve(`spend-${pr}`, `${pr}-${head}`, pr, 5_000_000)).toBe(true);
+    // A fifth PR still has its own head and PR allowance, but the author is out.
+    expect(await ledger.remaining(`605-${head}`, 605)).toBe(0);
+    expect(await ledger.reserve('spend-605', `605-${head}`, 605, 1)).toBe(false);
+    expect(await ledger.remaining(`606-${head}`, 606)).toBe(5_000_000);
+    await evictDurableObject(ledger);
+    expect(await ledger.reserve('after-evict', `605-${head}`, 605, 1)).toBe(false);
+    vi.setSystemTime(new Date('2026-11-01T00:00:00Z'));
+    expect(await ledger.remaining(`605-${head}`, 605)).toBe(5_000_000);
+  });
+  it('exempts the maintainer and PRs with no recorded author, and validates logins', async () => {
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    for (const pr of [701, 702, 703, 704, 705]) await ledger.recordAuthor(pr, 'JeqCho');
+    for (const pr of [701, 702, 703, 704]) expect(await ledger.reserve(`own-${pr}`, `${pr}-${head}`, pr, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`705-${head}`, 705)).toBe(5_000_000);
+    expect(await ledger.remaining(`799-${head}`, 799)).toBe(5_000_000);
+    await ledger.recordAuthor(706, 'dependabot[bot]');
+    await runInDurableObject(ledger, async (instance: ReviewLedger) => {
+      await expect(instance.recordAuthor(707, 'bad login')).rejects.toThrow('invalid_author');
+      await expect(instance.recordAuthor(0, 'someone')).rejects.toThrow('invalid_author');
+    });
+  });
+  it('maps the contributor hold to its own public reason', () => {
+    expect(holdReason(new Error('contributor_budget_exhausted'))).toEqual({ code: 'contributor_budget_exhausted' });
+    expect(renderHold({ id: 'run', pr: 9, head, base, scope: '', status: 'held', result: null, notified: 0, created: 0 } as Job, { code: 'contributor_budget_exhausted' })).toContain('$20 monthly review allowance');
   });
 });

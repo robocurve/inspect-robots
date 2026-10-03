@@ -17,8 +17,9 @@ async function read(env: Pick<WebhookEnvironment, 'PUBLISHER'>, path: string): P
 async function enqueue(env: WebhookEnvironment, pr: number, scope = '', requestId = '') {
   const info = snapshot(await read(env, `/pulls/${pr}`));
   if (info.state !== 'open' || info.draft) return;
-  const id = (await digest(`${pr}:${info.head}:${info.base}:${POLICY_VERSION}:${scope}:${requestId}`)).slice(0, 48);
   const ledger = () => env.LEDGER.getByName('budget');
+  if (info.author) await ledger().recordAuthor(pr, info.author);
+  const id = (await digest(`${pr}:${info.head}:${info.base}:${POLICY_VERSION}:${scope}:${requestId}`)).slice(0, 48);
   const queuedId = await ledger().enqueueJob({ id, pr, head: info.head, base: info.base, scope });
   if (queuedId) await env.REVIEW.create({ id: queuedId, params: { id: queuedId } });
 }

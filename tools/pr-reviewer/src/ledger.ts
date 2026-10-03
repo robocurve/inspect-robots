@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { LIMITS, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
+import { LIMITS, MAINTAINER_LOGIN, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
 
 export class ReviewLedger extends DurableObject<ReviewerEnv> {
   private prLimit(pr: number): number {
@@ -27,6 +27,20 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS executions (job TEXT PRIMARY KEY, token TEXT NOT NULL, sandbox TEXT NOT NULL, started INTEGER NOT NULL, mergeBase TEXT NOT NULL, checkpointToken TEXT, output TEXT)`);
     if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(executions)').toArray().some(c => c.name === 'checkpointToken')) ctx.storage.sql.exec('ALTER TABLE executions ADD COLUMN checkpointToken TEXT');
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS pr_authors (pr INTEGER PRIMARY KEY, author TEXT NOT NULL)`);
+  }
+  async recordAuthor(pr: number, author: string): Promise<void> {
+    if (!Number.isSafeInteger(pr) || pr < 1 || !/^[a-zA-Z0-9-]{1,39}(\[bot\])?$/.test(author)) throw new Error('invalid_author');
+    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO pr_authors(pr,author) VALUES(?,?)', pr, author.toLowerCase());
+  }
+  // One contributor's PRs share a monthly allowance, so many PRs from one
+  // author cannot drain the shared monthly budget. PRs with no recorded author
+  // (only pre-cap history) and the maintainer's own PRs are uncapped here.
+  private authorRemaining(pr: number, month: string): number {
+    const author = this.ctx.storage.sql.exec<{ author: string }>('SELECT author FROM pr_authors WHERE pr=?', pr).toArray()[0]?.author;
+    if (!author || author === MAINTAINER_LOGIN) return Number.MAX_SAFE_INTEGER;
+    const spent = this.ctx.storage.sql.exec<{ amount: number }>('SELECT COALESCE(SUM(amount),0) AS amount FROM charges WHERE month=? AND pr IN (SELECT pr FROM pr_authors WHERE author=?)', month, author).one().amount;
+    return LIMITS.author - spent;
   }
   async register(job: Omit<Job, 'status' | 'result' | 'notified' | 'created'>): Promise<boolean> {
     const old = this.ctx.storage.sql.exec('SELECT id FROM jobs WHERE id=?', job.id).toArray();
@@ -154,7 +168,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
   async remaining(job: string, pr: number): Promise<number> {
     const month = new Date().toISOString().slice(0, 7);
     const sums = this.ctx.storage.sql.exec<{ review: number; pr: number; month: number }>(`SELECT COALESCE(SUM(CASE WHEN job=? THEN amount ELSE 0 END),0) AS review, COALESCE(SUM(CASE WHEN pr=? THEN amount ELSE 0 END),0) AS pr, COALESCE(SUM(CASE WHEN month=? THEN amount ELSE 0 END),0) AS month FROM charges`, job, pr, month).one();
-    return Math.max(0, Math.min(this.reviewLimit(job, pr) - sums.review, this.prLimit(pr) - sums.pr, monthlyReviewLimit(pr, month) - sums.month));
+    return Math.max(0, Math.min(this.reviewLimit(job, pr) - sums.review, this.prLimit(pr) - sums.pr, monthlyReviewLimit(pr, month) - sums.month, this.authorRemaining(pr, month)));
   }
   async costs(id: string) {
     const job = await this.job(id);
@@ -182,7 +196,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
       if (this.ctx.storage.sql.exec('SELECT id FROM charges WHERE id=?', id).toArray().length) return false;
       const month = new Date().toISOString().slice(0, 7);
       const sums = this.ctx.storage.sql.exec<{ review: number; pr: number; month: number }>(`SELECT COALESCE(SUM(CASE WHEN job=? THEN amount ELSE 0 END),0) AS review, COALESCE(SUM(CASE WHEN pr=? THEN amount ELSE 0 END),0) AS pr, COALESCE(SUM(CASE WHEN month=? THEN amount ELSE 0 END),0) AS month FROM charges`, job, pr, month).one();
-      if (sums.review + amount > this.reviewLimit(job, pr) || sums.pr + amount > this.prLimit(pr) || sums.month + amount > monthlyReviewLimit(pr, month)) return false;
+      if (sums.review + amount > this.reviewLimit(job, pr) || sums.pr + amount > this.prLimit(pr) || sums.month + amount > monthlyReviewLimit(pr, month) || amount > this.authorRemaining(pr, month)) return false;
       this.ctx.storage.sql.exec('INSERT INTO charges(id,job,pr,month,amount) VALUES(?,?,?,?,?)', id, job, pr, month, amount);
       return true;
     });
@@ -197,6 +211,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
     if (this.slotOwner() !== id) throw new Error('review_slot_required');
     const job = await this.job(id);
     if (!job || !SHA.test(mergeBase)) throw new Error('invalid_review_request');
+    if (this.authorRemaining(job.pr, new Date().toISOString().slice(0, 7)) < 2_000_000) throw new Error('contributor_budget_exhausted');
     if (await this.remaining(`${job.pr}-${job.head}`, job.pr) < 2_000_000) throw new Error('insufficient_run_budget');
     // Recheck after awaits; commit the charge, session and durable handle together.
     const prepared = this.ctx.storage.transactionSync(() => {

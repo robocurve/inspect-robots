@@ -11,6 +11,7 @@ const reasons = {
   review_too_large: ['The PR exceeds the reviewer’s file-count or total-context limit.', 'Add bounded handling for this PR’s size or review it manually.'],
   context_too_large: ['The review context exceeds the 200,000-token limit.', 'Reduce duplicated review context or review the PR manually.'],
   insufficient_run_budget: ['A fresh review needs at least $2 of remaining allowance; this revision has less.', 'The service did not start a sandbox or make a model call. Review manually or explicitly authorize a budget adjustment before retrying.'],
+  contributor_budget_exhausted: ['This contributor has used their $20 monthly review allowance across their PRs.', 'The service did not start a sandbox or make a model call. Review manually; the allowance resets at the start of the next UTC month.'],
   budget_exhausted: ['The remaining review budget cannot cover another model call.', 'Check the per-head, per-PR and monthly spending limits before requesting another run.'],
   budget_or_duplicate_reservation: ['A model-call reservation was declined by the budget or duplicate-call guard.', 'Inspect the existing run and spending ledger before retrying; an earlier call may already be charged.'],
   billing_hold: ['The reviewer paused spending after usage exceeded a reservation.', 'Reconcile the spending ledger with provider usage before resuming.'],

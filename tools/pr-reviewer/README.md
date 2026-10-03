@@ -150,8 +150,15 @@ so every comment names its exact revision and checks attach to that head only.
 | --- | --- |
 | Model calls and sandbox allowances for one PR head, including reruns | $5 |
 | All revisions/reruns of a PR, lifetime | $15 |
+| All PRs by one author per UTC calendar month (maintainer exempt) | $20 |
 | All reviews per UTC calendar month | $200 |
 | Monthly warning to Jay | $160 |
+
+The per-author cap stops one prolific contributor from draining the shared
+monthly budget. Each webhook records the PR author's login; every charge on any
+of that author's PRs counts toward their monthly $20. A run that cannot start
+because of it is held with reason `contributor_budget_exhausted` and makes no
+sandbox or model call.
 
 The maintainer authorized a $25 cap for trial PR #456 at head
 `696fbaa9a00d7c345a81dd179fa10934f51ade89`. The deployment-only
