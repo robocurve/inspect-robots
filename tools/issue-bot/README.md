@@ -57,10 +57,14 @@ container destruction succeeds. Comment delivery, including stopped-work
 notices, uses a durable outbox.
 
 Input is pinned to a main commit when the issue reaches the front of the queue,
-and to semantic issue title/body/state. Triage already running can finish on
-its recorded commit after main advances. The bot's comments do not invalidate
-that input. An issue edit stops triage; a main change stops subsequent fix
-stages instead of silently rebasing an approved artifact. Duplicate
+and to semantic issue title/body/state. Every stage, including planning,
+implementation and review, runs on that recorded commit after main advances,
+and the fix PR is committed on it; nothing is silently rebased. Publishing
+requires the pinned commit to remain in main's history (`stale_base` otherwise),
+and a PR GitHub reports as conflicting holds with `merge_conflict` instead of
+waiting for CI that never runs; that draft PR stays open, so close it before
+requesting `/triage` again or the new run stops at the competing-fix check. The bot's comments do not invalidate that input.
+An issue edit or closure stops the workflow (`issue_changed`). Duplicate
 checks run at intake and again before publishing/readying a fix. No backlog is
 automatically imported.
 

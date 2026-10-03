@@ -26,6 +26,8 @@ let failComment: boolean;
 let calls: string[];
 let issueChanged: boolean;
 let competitor: boolean;
+let compareStatus: string;
+let mergeable: boolean | null;
 function journal(): PublicationJournal {
   const values = new Map<string, unknown>();
   return Object.assign(Object.create(PublicationJournal.prototype), {
@@ -50,6 +52,8 @@ beforeEach(async () => {
   calls = [];
   issueChanged = false;
   competitor = false;
+  compareStatus = "identical";
+  mergeable = null;
   const issue = {
     number: 401,
     title: "Logs lost",
@@ -88,7 +92,14 @@ beforeEach(async () => {
           user: { login: "jeqcho", type: "User" },
         };
       if (path.endsWith("/commits/main"))
+        return {
+          sha: "9".repeat(40),
+          commit: { tree: { sha: "8".repeat(40) } },
+        };
+      if (path.endsWith(`/commits/${base}`))
         return { sha: base, commit: { tree: { sha: "d".repeat(40) } } };
+      if (path.includes(`/compare/main...${base}`))
+        return { status: compareStatus };
       if (path.includes("/comments?")) return comments;
       if (path.endsWith("/issues/401/comments")) {
         const comment = {
@@ -148,7 +159,7 @@ beforeEach(async () => {
         };
         return pr;
       }
-      if (path.endsWith("/pulls/999")) return pr;
+      if (path.endsWith("/pulls/999")) return { ...pr, mergeable };
       if (path.includes("/check-runs?"))
         return {
           check_runs: [
@@ -275,6 +286,45 @@ describe("trusted issue publication", () => {
     expect(pr.draft).toBe(false);
     expect(await j.ready(input, first)).toBe(true);
     expect(calls.filter((c) => c === "POST /graphql")).toHaveLength(1);
+  });
+  it("commits the fix on its pinned base after main advances", async () => {
+    compareStatus = "behind";
+    const j = journal();
+    const fix = await j.createFix(input);
+    const trees = vi
+      .mocked(github)
+      .mock.calls.filter(([, path]) => String(path).endsWith("/git/trees"));
+    expect(trees[0][3]).toMatchObject({ base_tree: "d".repeat(40) });
+    const commits = vi
+      .mocked(github)
+      .mock.calls.filter(([, path]) => String(path).endsWith("/git/commits"));
+    expect(commits[0][3]).toMatchObject({ parents: [base] });
+    ci = "success";
+    mergeable = true;
+    expect(await j.ready(input, fix)).toBe(true);
+  });
+  it.each(["ahead", "diverged"])(
+    "refuses a pinned base that left main's history (%s)",
+    async (status) => {
+      compareStatus = status;
+      await expect(journal().createFix(input)).rejects.toThrow("stale_base");
+      expect(calls.some((c) => c.startsWith("POST"))).toBe(false);
+    },
+  );
+  it("refuses to ready a PR whose base was rewritten out of main", async () => {
+    const j = journal();
+    const fix = await j.createFix(input);
+    compareStatus = "diverged";
+    ci = "success";
+    await expect(j.ready(input, fix)).rejects.toThrow("stale_base");
+    expect(calls).not.toContain("POST /graphql");
+  });
+  it("holds a conflicting PR instead of waiting for CI that never runs", async () => {
+    const j = journal();
+    const fix = await j.createFix(input);
+    mergeable = false;
+    await expect(j.ready(input, fix)).rejects.toThrow("merge_conflict");
+    expect(calls).not.toContain("POST /graphql");
   });
   it("refuses an unapproved artifact before making any GitHub write", async () => {
     await expect(
