@@ -1,7 +1,7 @@
 """Guard the public API surface against accidental growth/shrinkage.
 
-If you intend to change the public API, update ``EXPECTED`` here and note it in
-the changelog. Everything not in ``inspect_robots.__all__`` (or prefixed ``_``) is
+If you intend to change the public API, update ``EXPECTED`` here and add a changelog
+fragment in ``changelog.d/``. Everything not in ``inspect_robots.__all__`` (or prefixed ``_``) is
 private and carries no stability guarantee.
 """
 
