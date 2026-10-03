@@ -101,7 +101,36 @@ describe("fixed Container supervisor controller", () => {
       },
     });
     expect(await box.status()).toBeNull();
+    expect(await box.progress()).toEqual({
+      phase: "not_started",
+      output: null,
+    });
     expect(attemptedConnection).toBe(false);
+  });
+
+  it.each([
+    ["idle", "not_started"],
+    ["running", "running"],
+  ])("maps supervisor state %s to phase %s", async (state, phase) => {
+    const { IssueSandbox } = await import("../src/sandbox");
+    const box = Object.create(IssueSandbox.prototype) as InstanceType<
+      typeof IssueSandbox
+    >;
+    Object.defineProperty(box, "ctx", {
+      value: {
+        storage: {
+          get: async () => ({
+            control: "a".repeat(64),
+            digest: "b".repeat(64),
+          }),
+        },
+        container: {
+          running: true,
+          getTcpPort: () => ({ fetch: async () => Response.json({ state }) }),
+        },
+      },
+    });
+    expect(await box.progress()).toEqual({ phase, output: null });
   });
 
   it("polls only the authenticated fixed status route and validates output", async () => {

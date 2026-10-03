@@ -413,6 +413,129 @@ describe("queue base freshness", () => {
     },
   );
 });
+describe("stage launch failures", () => {
+  function fixture(start: () => Promise<void>, phase = "not_started") {
+    const l = ledger();
+    const runner = {
+      start: vi.fn(start),
+      poll: vi.fn().mockResolvedValue(phase),
+      cleanup: vi.fn(),
+    };
+    const e = {
+      ...testEnv,
+      LEDGER: { getByName: () => l },
+      PUBLISHER: {
+        read: async (path: string) =>
+          JSON.stringify(
+            path === "/commits/main"
+              ? { sha: snapshot.base }
+              : {
+                  ...snapshot,
+                  user: { id: snapshot.authorId, login: snapshot.author },
+                },
+          ),
+      },
+      RUNNER: runner,
+    } as unknown as IssueEnv;
+    return { l, runner, e };
+  }
+  async function later<T>(minutes: number, f: () => Promise<T>) {
+    const now = Date.now();
+    const spy = vi.spyOn(Date, "now").mockReturnValue(now + minutes * 60000);
+    try {
+      return await f();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+  async function register(l: DurableObjectStub<IssueLedger>) {
+    return l.register(
+      { ...snapshot, revision: await semanticRevision(snapshot) },
+      "",
+      false,
+    );
+  }
+  it("retries a never-started container once, then holds with the launch error", async () => {
+    const { l, runner, e } = fixture(() =>
+      Promise.reject(new Error("stage_launch_uncertain")),
+    );
+    const id = await register(l);
+    await tick(e, id);
+    await tick(e, id);
+    expect((await l.job(id))?.state).toBe("running");
+    expect(runner.cleanup).not.toHaveBeenCalled();
+    await later(6, () => tick(e, id));
+    expect(runner.cleanup).toHaveBeenCalledOnce();
+    expect((await l.job(id))?.state).toBe("running");
+    await tick(e, id);
+    expect(runner.start).toHaveBeenCalledTimes(2);
+    const [first, second] = runner.start.mock.calls.map(
+      (c) => (c as unknown as [{ sandbox: string }])[0],
+    );
+    expect(second.sandbox).not.toBe(first.sandbox);
+    expect(await later(6, () => tick(e, id))).toBe(true);
+    expect((await l.job(id))?.state).toBe("held");
+    expect(runner.cleanup).toHaveBeenCalledTimes(2);
+    const notices = await l.outbox();
+    expect(notices).toHaveLength(1);
+    expect(notices[0].publication.summary).toBe(
+      "Automation paused: stage_launch_failed (stage_launch_uncertain).",
+    );
+    expect(await l.costs(snapshot.number)).toBe(200000);
+  });
+  it("keeps prose launch errors out of the public hold reason", async () => {
+    const { l, e } = fixture(() =>
+      Promise.reject(new Error("Container 1234 at host x failed")),
+    );
+    const id = await register(l);
+    await tick(e, id);
+    await later(6, () => tick(e, id));
+    await tick(e, id);
+    await later(6, () => tick(e, id));
+    expect((await l.outbox())[0].publication.summary).toBe(
+      "Automation paused: stage_launch_failed.",
+    );
+  });
+  it("does not replay a stage that already reached the model", async () => {
+    const { l, runner, e } = fixture(async () => {});
+    const id = await register(l);
+    await tick(e, id);
+    const stage = (await l.stage((await l.job(id))!.stage!))!;
+    expect(await l.reserve(stage.request.token, "charge", 1000)).toBe(true);
+    await later(6, () => tick(e, id));
+    expect((await l.job(id))?.state).toBe("held");
+    expect(runner.start).toHaveBeenCalledOnce();
+    expect((await l.outbox())[0].publication.summary).toBe(
+      "Automation paused: stage_container_stopped.",
+    );
+  });
+  it.each([
+    ["running", 6],
+    ["not_started", 4],
+    ["not_started", 42],
+    [false, 6],
+  ])("leaves a %s stage alone at %d minutes", async (phase, minutes) => {
+    const { l, runner, e } = fixture(async () => {}, phase as string);
+    const id = await register(l);
+    await tick(e, id);
+    await later(minutes, () => tick(e, id));
+    expect((await l.job(id))?.state).toBe("running");
+    expect(runner.cleanup).not.toHaveBeenCalled();
+  });
+  it("reports a recorded launch error when the stage times out", async () => {
+    const { l, e } = fixture(
+      () => Promise.reject(new Error("stage_launch_uncertain")),
+      "running",
+    );
+    const id = await register(l);
+    await tick(e, id);
+    await later(46, () => tick(e, id));
+    expect((await l.job(id))?.state).toBe("held");
+    expect((await l.outbox())[0].publication.summary).toBe(
+      "Automation paused: stage_launch_failed (stage_launch_uncertain).",
+    );
+  });
+});
 describe("actionable holds", () => {
   it("retains the latest reviewer findings and limitations in the durable notice", async () => {
     const l = ledger(),

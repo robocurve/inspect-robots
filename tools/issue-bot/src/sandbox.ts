@@ -44,6 +44,7 @@ export function validateRequest(input: StageRequest): StageRequest {
   return input;
 }
 
+export type StagePhase = "complete" | "running" | "not_started";
 interface LaunchClaim {
   control: string;
   digest: string;
@@ -136,13 +137,22 @@ export class IssueSandbox extends Container<IssueRunnerEnv> {
     );
   }
   async status(): Promise<string | null> {
+    return (await this.progress()).output;
+  }
+  /** "not_started": no launch claim, a stopped container, or a supervisor that never accepted /start. */
+  async progress(): Promise<{ phase: StagePhase; output: string | null }> {
     const claim = await this.ctx.storage.get<LaunchClaim>("launch-claimed");
-    if (!claim || !this.ctx.container?.running) return null;
+    if (!claim || !this.ctx.container?.running)
+      return { phase: "not_started", output: null };
     const response = await this.controlFetch("/status", claim.control);
     if (!response.ok) throw new Error("stage_status_unavailable");
     const status = JSON.parse(await boundedText(response, 1_600_000));
-    if (status.state !== "complete") return null;
-    return JSON.stringify(StageOutput.parse(status.output));
+    if (status.state === "idle") return { phase: "not_started", output: null };
+    if (status.state !== "complete") return { phase: "running", output: null };
+    return {
+      phase: "complete",
+      output: JSON.stringify(StageOutput.parse(status.output)),
+    };
   }
   async expireStage(): Promise<void> {
     await this.destroy();
@@ -210,13 +220,13 @@ export class CodeRunner extends WorkerEntrypoint<IssueRunnerEnv> {
     if (await this.env.MODEL.completed(request.token)) return;
     await this.box(request.sandbox).launch(JSON.stringify(request));
   }
-  async poll(sandbox: string, token: string): Promise<boolean> {
+  async poll(sandbox: string, token: string): Promise<StagePhase> {
     if (!HASH.test(token)) throw new Error("invalid_stage_token");
-    if (await this.env.MODEL.completed(token)) return true;
-    const output = await this.box(sandbox).status();
-    if (output === null) return false;
+    if (await this.env.MODEL.completed(token)) return "complete";
+    const { phase, output } = await this.box(sandbox).progress();
+    if (output === null) return phase;
     await this.env.MODEL.checkpoint(token, output);
-    return true;
+    return "complete";
   }
   async cleanup(sandbox: string): Promise<void> {
     await this.box(sandbox).destroy();

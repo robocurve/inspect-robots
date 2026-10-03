@@ -124,6 +124,17 @@ Set `ENABLED=false` to stop new stage admission and provider requests. Existing
 result cleanup and pending public notices can still be reconciled. An expired
 or ambiguous stage produces a concrete hold; it is never treated as approval.
 
+A launch error is kept as evidence rather than treated as failure, because the
+container may still have started. If the container is still not running (no
+launch claim, a stopped container, or a supervisor that never accepted `/start`)
+five minutes after the stage was prepared, the coordinator stops waiting instead
+of running out the 45-minute timeout. A stage that never reached the model is
+replaced once per job with a fresh sandbox, which costs another $0.10 container
+allowance. A second failure, or any stage that already made a model request,
+holds with the recorded reason, e.g. `stage_launch_failed (stage_launch_uncertain)`
+or `stage_container_stopped`. Public reasons carry only fixed error codes; prose
+error text goes to Worker logs as `issue_stage_launch_error`.
+
 ## Verification
 
 ```sh

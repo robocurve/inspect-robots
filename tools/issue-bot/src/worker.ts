@@ -188,6 +188,18 @@ export async function handleWebhook(request: Request, env: IssueEnv) {
     await enqueue(env, data.issue.number, false, String(data.comment.id));
   return new Response("Accepted", { status: 202 });
 }
+// Startup waits up to 60 s for the container and 60 s for its port; allow generous slack.
+const LAUNCH_GRACE_MS = 5 * 60000;
+// The sandbox destroys itself at 42 min, so a stopped container after that is the normal timeout.
+const STAGE_EXPIRY_MS = 41 * 60000;
+/** Public hold reasons carry only fixed codes; prose error text goes to Worker logs. */
+function launchFailure(e: unknown) {
+  const message = e instanceof Error ? e.message : String(e);
+  console.error(JSON.stringify({ event: "issue_stage_launch_error", message }));
+  return /^[a-z_]{3,60}$/.test(message)
+    ? `stage_launch_failed (${message})`
+    : "stage_launch_failed";
+}
 export async function tick(env: IssueEnv, id: string) {
   const ledger = env.LEDGER.getByName("coordinator");
   const tickToken = await ledger.tickClaim(id);
@@ -203,13 +215,11 @@ export async function tick(env: IssueEnv, id: string) {
         !s.cleaned &&
         (s.output || s.closed || Date.now() - s.started > 45 * 60000)
       ) {
-        await ledger.close(
-          s.request.id,
-          s.output ? undefined : "stage_timeout",
-        );
+        const reason = s.output ? undefined : (s.failure ?? "stage_timeout");
+        await ledger.close(s.request.id, reason);
         await env.RUNNER.cleanup(s.request.sandbox);
         await ledger.cleaned(s.request.id);
-        if (!s.output) await ledger.hold(id, "stage_timeout");
+        if (reason) await ledger.hold(id, reason);
       }
     }
     if (["done", "held"].includes(job.state)) {
@@ -289,16 +299,35 @@ export async function tick(env: IssueEnv, id: string) {
     if (!stage.launched && (await ledger.claimLaunch(stage.request.id))) {
       try {
         await env.RUNNER.start(stage.request);
-      } catch {
+      } catch (e) {
         /* Launch acknowledgement ambiguous: only poll the saved sandbox. */
+        await ledger.launchFailed(stage.request.id, launchFailure(e));
       }
       return false;
     }
-    if (!stage.output && !stage.closed)
-      await env.RUNNER.poll(
+    if (!stage.output && !stage.closed) {
+      const phase = await env.RUNNER.poll(
         stage.request.sandbox,
         stage.request.checkpointToken,
       );
+      const age = Date.now() - stage.started;
+      // A runner deployed before phases existed returns a boolean; never treat it as stopped.
+      if (
+        phase === "not_started" &&
+        age > LAUNCH_GRACE_MS &&
+        age < STAGE_EXPIRY_MS
+      ) {
+        const s = await ledger.stage(stage.request.id);
+        if (s && !s.output && !s.closed) {
+          const reason = s.failure ?? "stage_container_stopped";
+          await ledger.close(s.request.id, reason);
+          await env.RUNNER.cleanup(s.request.sandbox);
+          await ledger.cleaned(s.request.id);
+          if (!(await ledger.retryLaunch(id))) await ledger.hold(id, reason);
+          return ["done", "held"].includes((await ledger.job(id))?.state ?? "");
+        }
+      }
+    }
     const latest = await ledger.stage(stage.request.id);
     if (latest?.output) {
       await ledger.close(stage.request.id);

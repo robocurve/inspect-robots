@@ -34,6 +34,7 @@ export interface Job {
   summary: string;
   checks: string[];
   published: PublishedFix | null;
+  launchRetries?: number;
 }
 export interface Stage {
   request: StageRequest;
@@ -44,6 +45,7 @@ export interface Stage {
   output: StageOutput | null;
   consumed: boolean;
   failure: string | null;
+  modelUsed?: boolean;
 }
 interface Outbox {
   publication: Publication;
@@ -364,6 +366,29 @@ export class IssueLedger extends DurableObject<IssueEnv> {
     s.failure = reason ?? s.failure;
     this.saveStage(s);
   }
+  /** Keep the first launch error as evidence; the launch may still have succeeded. */
+  async launchFailed(id: string, reason: string) {
+    const s = this.get<Stage>("stages", id);
+    if (!s || s.output || s.failure) return;
+    s.failure = reason;
+    this.saveStage(s);
+  }
+  /**
+   * Replace a stage whose container never ran, once per job. A stage that reached
+   * the model is never replayed: its paid result is uncertain, not absent.
+   */
+  async retryLaunch(id: string) {
+    const job = this.get<Job>("jobs", id);
+    if (!job || job.state !== "running" || !job.stage) return false;
+    const s = this.get<Stage>("stages", job.stage);
+    if (!s || s.output || s.modelUsed || (job.launchRetries ?? 0) >= 1)
+      return false;
+    s.consumed = true;
+    this.saveStage(s);
+    job.launchRetries = (job.launchRetries ?? 0) + 1;
+    this.save(job);
+    return true;
+  }
   async cleaned(id: string) {
     const s = this.get<Stage>("stages", id);
     if (!s) return;
@@ -446,6 +471,8 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       month,
       amount,
     );
+    live.modelUsed = true;
+    this.saveStage(live);
     return true;
   }
   async settle(id: string, amount: number) {
