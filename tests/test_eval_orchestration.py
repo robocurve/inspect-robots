@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,53 @@ def _task(*, epochs: int | Epochs = 1, max_steps: int = 60, scorer: object = Non
         max_steps=max_steps,
         epochs=epochs,
     )
+
+
+@pytest.mark.parametrize("collision", [True, False])
+def test_eval_preserves_distinct_scene_camera_reset_frames(tmp_path: Path, collision: bool) -> None:
+    identities = (
+        [("pick", "top-e0_rgb", 11), ("pick-e0_top", "rgb", 22)]
+        if collision
+        else [("first", "top", 11), ("second", "rgb", 22)]
+    )
+    images = {scene: (camera, value) for scene, camera, value in identities}
+
+    class ResetCameraWorld(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            obs = super().reset(scene, seed=seed)
+            camera, value = images[scene.id]
+            return replace(obs, images={camera: np.full((2, 3, 3), value, dtype=np.uint8)})
+
+        def step(self, action: Action) -> StepResult:
+            result = super().step(action)
+            return replace(result, observation=replace(result.observation, images={}))
+
+    sink = _RecordingSink()
+    task = Task(
+        name="frame-identities",
+        scenes=[Scene(id=scene, instruction="reach", init_seed=0) for scene, _, _ in identities],
+        scorer=success_at_end(),
+        max_steps=1,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        ResetCameraWorld(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+    assert log.status == "success"
+    assert log.results.total_trials == 2
+    assert log.stats.frames_dir is not None
+    assert len(list(Path(log.stats.frames_dir).glob("*.npy"))) == 2
+    assert len(sink.records) == 2
+    for record, (_, camera, value) in zip(sink.records, identities, strict=True):
+        refs = record.steps[0].image_refs
+        assert refs is not None
+        np.testing.assert_array_equal(
+            refs[camera].load(), np.full((2, 3, 3), value, dtype=np.uint8)
+        )
 
 
 class _RecordingSink(NullSink):
