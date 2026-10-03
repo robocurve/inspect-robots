@@ -410,6 +410,55 @@ def test_transient_errors_retry_then_succeed() -> None:
     assert msg.tool_calls
 
 
+def test_retry_after_header_overrides_exponential_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._llm.time.sleep", sleeps.append)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_tool_call_response())
+
+    client = _client(handler, backoff_s=1.0)
+
+    client.complete(messages=[], tools=[])
+
+    assert sleeps == [7.0]
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("Wed, 21 Oct 2015 07:28:00 GMT", 10.0),
+        ("invalid", 2.0),
+        ("1.5", 2.0),
+        ("+7", 2.0),
+        ("1e2", 2.0),
+    ],
+)
+def test_retry_after_date_or_invalid_header_uses_expected_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    header: str,
+    expected: float,
+) -> None:
+    monkeypatch.setattr("inspect_robots_agent._llm.time.time", lambda: 1445412470.0)
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._llm.time.sleep", sleeps.append)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": header}, text="slow down")
+        return httpx.Response(200, json=_tool_call_response())
+
+    _client(handler, backoff_s=2.0).complete(messages=[], tools=[])
+
+    assert sleeps == [expected]
+
+
 def test_retries_exhausted_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="down")

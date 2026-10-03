@@ -463,8 +463,9 @@ def test_reduce_median() -> None:
 def test_pass_at_k_edge_cases() -> None:
     from inspect_robots.scorer import Score, get_reducer, pass_at_k, reduce_scores
 
-    with pytest.raises(ValueError, match="k must be"):
-        pass_at_k(0)
+    for invalid_k in (0, -1, True, False, 2.5):
+        with pytest.raises(ValueError, match="k must be an integer >= 1"):
+            pass_at_k(invalid_k)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="needs at least"):
         reduce_scores("pass_at_5", [Score(value=True), Score(value=False)])
     with pytest.raises(ValueError, match="invalid pass@k"):

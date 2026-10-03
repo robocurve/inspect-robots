@@ -37,6 +37,19 @@ class SmoothMotion:
 
 Register it with [`scorer`](/api/#inspect_robots.registry.scorer) to resolve it by name.
 
+A scorer with no verdict for a trial can abstain by returning
+`Score(value=None)`. The log records the epoch as `null`, which is distinct
+from a `0.0` verdict and from an errored trial (an empty epoch entry).
+Reducers leave abstained epochs out, a scene where every epoch abstained
+reduces to `null`, and a metric averages only the scenes that have a value
+(`null` when none do). Reports show an abstention as `n/a`, and
+`EvalResults.abstentions` counts abstained trials per scorer so each metric's
+denominator stays visible: `inspect` and `view` print it beside the metric.
+The `operator` scorer abstains on a trial the grader tried and failed to judge
+(it carries `grading_error` in its metadata), so a grading outage is left out
+of the metric instead of counting as robot failures; the run then ends in
+error (see "Automated grading" in the CLI guide).
+
 ## Epochs and reducers
 
 When a `Task` runs `epochs > 1`, an epoch reducer collapses the per-epoch
@@ -60,6 +73,12 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 Real robots have no privileged success oracle. The dominant method is a human
 verdict, captured *once* per trial and read back by
 [`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
+Benchmarks that read `operator_judgement` directly, instead of delegating to
+`operator_scorer`, should call
+[`is_affirmative_verdict`](/api/#inspect_robots.scorer.is_affirmative_verdict)
+rather than restate the vocabulary. It owns the recognized affirmative words
+together with the case-folding and whitespace handling around them, so a change
+reaches every consumer at once.
 Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a registered
 component (`inspect_robots.graders` entry point, `grader` decorator) whose
 `grade(record, scene)` runs once per scored trial, after the rollout and

@@ -668,6 +668,25 @@ def test_capture_records_anthropic_transport_error(tmp_path: Path) -> None:
     assert row["error"] == "anthropic offline"
 
 
+def test_retry_after_header_overrides_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("inspect_robots_agent._anthropic.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
+        return httpx.Response(200, json=_anthropic_response(_text("ok"), stop_reason="end_turn"))
+
+    _client(handler, backoff_s=1.0).complete([_USER], [])
+
+    assert sleeps == [7.0]
+
+
 # -- parsing ---------------------------------------------------------------------
 
 

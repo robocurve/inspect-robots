@@ -372,6 +372,52 @@ def test_displacement_explicit_limit_broadcasts_to_a_multidimensional_box() -> N
     assert out.meta.get("delta_clamped") is True
 
 
+def test_displacement_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    max_delta = np.array([[0.05, 0.1, 0.15], [0.2, 0.25, 0.3]])
+    approver = DeltaLimitApprover(space, max_delta=max_delta)
+    out = approver.review(Action(data=np.full(shape, 1.0)), {})
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_absolute_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -10.0),
+        high=np.full(shape, 10.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    max_delta = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+    approver = DeltaLimitApprover(space, max_delta=max_delta)
+    store: dict[str, Any] = {}
+    first = Action(data=np.zeros(shape))
+    assert approver.review(first, store) is first
+    second = Action(data=np.full(shape, 5.0))
+    out = approver.review(second, store)
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_refuses_unbroadcastable_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    with pytest.raises(ValueError, match="does not broadcast"):
+        DeltaLimitApprover(space, max_delta=np.ones((4, 4)))
+
+
 def test_displacement_derived_default_is_box_alone() -> None:
     approver = DeltaLimitApprover(_delta_space())
     inside = Action(data=np.array([0.1, 1.0]))  # at the box edge: untouched

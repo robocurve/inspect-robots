@@ -150,8 +150,11 @@ suppresses the operator grader specifically (combining it with an explicit
 `--grader operator` is an error, and a config-set `grader = operator` is
 downgraded with a stderr note whenever the run cannot actually be attended).
 A custom grader named in config or `--grader` runs regardless of TTY-ness,
-which is what the builtin `vlm` autograder relies on. An unjudged trial
-honestly scores as failure with "no operator judgement recorded".
+which is what the builtin `vlm` autograder relies on. A trial left without a
+judgement (the operator typed `skip`, or no grader ran) honestly scores as
+failure with "no operator judgement recorded". A trial the grader tried and
+failed to judge is different: the `operator` scorer abstains on it (see
+below).
 
 ### Automated grading: `--grader vlm`
 
@@ -173,14 +176,24 @@ mutually exclusive with `rubric`), `base_url` (default
 `https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
 `max_cameras` (frames per phase, default 4), and `effort` (sent to the
 endpoint as `reasoning_effort`: leave it out for the provider default;
-`effort=none` requests the minimum, it does not mean unset; a value the
-endpoint rejects leaves trials ungraded with a stderr note, like any grader
-wire failure). Without a rubric the grader
+`effort=none` sends the literal `"none"`, it does not mean unset; a value the
+endpoint rejects stops the run at the preflight check described below).
+Without a rubric the grader
 uses a strict default: success only if the frames show the instruction
 completed, failure when the outcome is ambiguous or not visible. A scene that
 carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
 generates) wins over all of these for that trial. `-G` without any selected
 grader is an error rather than a silent no-op.
+
+The log records what actually graded the run. `EvalSpec.grader` holds the
+grader's name and `EvalSpec.grader_config` holds its effective configuration,
+so a saved log says which model judged, against which rubric, at which effort.
+The values are the resolved ones: a `rubric_file` is recorded as the text that
+was read from it, an omitted rubric as the default that replaced it, and
+`effort` as the value sent on the wire (`null` when the field was omitted and
+the provider default applied, `"none"` when `effort=none` was given). The
+rubric recorded there is the run-level one, since a scene carrying its own is
+already persisted with that scene. The API key is never recorded.
 
 Both pieces persist in config, and the args section is owned by the grader it
 was written for (the same rule as `[policy.args]`):
@@ -194,10 +207,25 @@ model = claude-sonnet-5
 rubric_file = ~/rigs/stacking-rubric.md
 ```
 
-Configuration problems (a missing model or API key, an unreadable rubric
-file) stop the run before the robot moves. After a rollout the grader never
-crashes the run: transport failures or an unparseable reply leave the trial
-ungraded with a stderr note. A trial the embodiment already terminated with a
+Configuration problems stop the run before the robot moves. A missing model
+or API key or an unreadable rubric file fails when the grader is built. Then a
+**preflight** check sends one small grading request (a short prompt and a
+64x64 test image) with the exact model, endpoint and effort, before the policy
+loads or the robot connects. If the endpoint rejects it (HTTP 4xx: an unknown
+model, a bad key, an unsupported `effort`, a model without image input), or
+the base URL is malformed or not an OpenAI-compatible endpoint, the run exits
+with the message. An outage at that moment (HTTP 5xx,
+408, 429, or a network failure) only prints a warning, so a brief blip does not
+cost the session.
+
+After a rollout the grader never stops the run. If grading a trial fails
+(transport error, rejected request, unparseable reply), the trial is left
+ungraded and its reason is recorded in the trial's metadata as
+`grading_error`. The `operator` scorer then **abstains** on it instead of
+scoring a failure, so the metric covers graded trials only and `inspect` shows
+the abstention count beside it. The run still finishes every trial, then ends
+with status `error` and a message such as
+`3 of 20 trial(s) ungraded: grader failed (grading request failed with HTTP 500: ...)`. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
 the console, is adopted without spending a model call. The log records which
 path produced each verdict in `judgement_sources`.
@@ -316,6 +344,14 @@ The result is written to `~/.config/inspect-robots/config.ini`
 that later `inspect-robots config set` edits drop comments from the file.
 The setup command requires an interactive terminal; for scripted
 configuration use `inspect-robots config set`.
+
+For the live Rerun viewer, setup assumes a local desktop on macOS and Windows
+unless an SSH session is detected. On other platforms, or over SSH, it suggests
+`rerun = false` and offers remote-viewing advice when both `DISPLAY` and
+`WAYLAND_DISPLAY` are unset or empty. A forwarded display keeps the viewer
+suggestion enabled. Existing `rerun` settings take precedence, and you can
+override the suggestion at the prompt.
+
 After writing the config, setup lists missing runtime requirements declared by
 the selected registered policy and embodiment, together with their remediation
 commands.
@@ -415,7 +451,7 @@ grader when a verdict is needed. Both are persisted in the eval log.
 Repeat `-A key=value` to pass generator arguments. Common arguments are
 `model`, `instructions`, `instructions_file`, `base_url`, `api_key_env`,
 `max_cameras`, `scene_id`, and `effort` (sent as `reasoning_effort`: leave
-it out for the provider default; `effort=none` requests the minimum, it
+it out for the provider default; `effort=none` sends the literal `"none"`, it
 does not mean unset; an invalid value fails before rollout). Values use the
 same bool/int/float/None/string parsing as the component argument flags:
 
@@ -488,8 +524,17 @@ viewer window is a separate design question from running the set at all.
 
 ## `inspect-robots doctor`
 
-`doctor` reports a registered embodiment's missing declared runtime modules
-before constructing it, then checks its spaces for adapter conformance.
+`doctor` checks the configured embodiment before construction. It reports
+missing declared runtime modules and checks the values written for the
+embodiment's declared device slots. Missing camera or serial paths and
+missing CAN interfaces are reported together. A path that cannot be checked, for
+example because a parent directory is not searchable, is reported as an error
+and the remaining slots are still checked. Device checks validate presence only
+and do not confirm that the device is functioning properly. The command exits
+nonzero if it finds any stale configured device references.
+
+After construction, `doctor` checks the embodiment's spaces for adapter
+conformance.
 
 ```bash
 inspect-robots doctor --embodiment my_arms
@@ -558,6 +603,11 @@ inspect-robots summarize logs/cubepick-reach_xxxx.json \
 The default endpoint is `https://api.anthropic.com/v1`, and the default API key
 variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
 `--api-key-env VAR` for another compatible provider.
+
+The request carries every trial's transcript tail (up to 24,000 characters
+each) with no overall limit, so a run with many trials can exceed the model's
+context window and be rejected by the provider. For very large runs, use the
+offline digest or a model with a larger context.
 
 ### Retry with learning
 

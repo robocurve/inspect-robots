@@ -8,9 +8,12 @@ provider compatibility endpoints (plan 0008 §4a).
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -206,12 +209,46 @@ class AssistantMessage:
         return message
 
 
+def _retry_delay(
+    response: httpx.Response | None,
+    *,
+    backoff_s: float,
+    attempt: int,
+) -> float:
+    """Return the provider-requested delay, or exponential backoff if absent."""
+    if response is not None:
+        retry_after = response.headers.get("retry-after")
+        if retry_after is not None:
+            delta_seconds = retry_after.strip()
+            if delta_seconds.isascii() and delta_seconds.isdecimal():
+                try:
+                    delay = float(delta_seconds)
+                except (OverflowError, ValueError):
+                    pass
+                else:
+                    if math.isfinite(delay):
+                        return delay
+            else:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    delay = max(0.0, retry_at.timestamp() - time.time())
+                except (IndexError, OverflowError, TypeError, ValueError):
+                    pass
+                else:
+                    if math.isfinite(delay):
+                        return delay
+    return float(backoff_s * 2**attempt)
+
+
 class ChatClient:
     """Blocking chat-completions client with bounded retry on transient failures.
 
-    Retries 429/5xx and transport errors with exponential backoff; a 4xx is
-    our request's fault and fails immediately. Persistent failure raises
-    ``RuntimeError``, which the rollout wraps as ``PolicyError``.
+    Retries 429/5xx and transport errors, honoring a provider ``Retry-After``
+    header before falling back to exponential backoff. A 4xx is our request's
+    fault and fails immediately. Persistent failure raises ``RuntimeError``,
+    which the rollout wraps as ``PolicyError``.
     """
 
     def __init__(
@@ -255,6 +292,7 @@ class ChatClient:
 
         last_error = "unknown error"
         for attempt in range(self._max_retries):
+            retry_response: httpx.Response | None = None
             t_start = time.time() if self._capture is not None else 0.0
             try:
                 response = self._http.post("/chat/completions", json=body)
@@ -272,6 +310,7 @@ class ChatClient:
                     )
                 last_error = str(exc)
             else:
+                retry_response = response
                 if self._capture is not None:
                     self._capture.record(
                         attempt=attempt,
@@ -296,7 +335,7 @@ class ChatClient:
                         )
                     raise RuntimeError(f"LLM request rejected — {last_error}{guidance}")
             if attempt + 1 < self._max_retries:
-                time.sleep(self._backoff_s * 2**attempt)
+                time.sleep(_retry_delay(retry_response, backoff_s=self._backoff_s, attempt=attempt))
         raise RuntimeError(f"LLM request failed after {self._max_retries} attempts — {last_error}")
 
     def close(self) -> None:

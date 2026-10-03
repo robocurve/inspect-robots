@@ -7,6 +7,7 @@ import math
 import os
 import re
 import struct
+import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -264,6 +265,17 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
     print(f"Found {len(devices)} camera device(s) under {directory}:", file=out)
     for number, device in enumerate(devices, start=1):
         print(f"  {number}. {Path(device).name}", file=out)
+
+
+def _print_unverified_camera_hint(devices: list[str], out: IO[str]) -> None:
+    """Say when the listing is the unfiltered fallback because no node probed color-capable."""
+    if not devices:
+        return
+    message = (
+        "could not confirm which nodes are color cameras (probe inconclusive), "
+        "so every device is listed; some may be metadata-only nodes"
+    )
+    print(_paint(message, _YELLOW, out), file=out)
 
 
 def _print_camera_path_hint(
@@ -759,6 +771,7 @@ def _camera_section(
     if inventory:
         _print_camera_name_hint(inventory, active_is_by_id, out)
     else:
+        _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
         _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
@@ -907,6 +920,7 @@ def _device_section(
                 if inventory:
                     _print_camera_name_hint(inventory, active_is_by_id, out)
                 else:
+                    _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
                     _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
         identify: Callable[[bool], str | None]
@@ -1606,7 +1620,12 @@ def run_setup(
                     file=out,
                 )
 
-        headless = "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env
+        # Native macOS/Windows desktops need no X11/Wayland display. SSH
+        # without a display is still headless; a forwarded display takes precedence.
+        headless = not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")) and (
+            sys.platform not in {"darwin", "win32"}
+            or any(env.get(key) for key in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+        )
         defaults = _prompt_defaults(
             carried,
             headless=headless,

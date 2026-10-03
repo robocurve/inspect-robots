@@ -1,0 +1,64 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "robocurve-issue-bot",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "ENABLED": "true",
+    "INSTALLATION_ID": "163417136",
+    "ISSUE_LIMIT_MICROS": "20000000",
+    "MONTH_LIMIT_MICROS": "200000000"
+  },
+  "services": [
+    {
+      "binding": "PUBLISHER",
+      "service": "robocurve-issue-publisher",
+      "entrypoint": "IssuePublisher"
+    },
+    {
+      "binding": "RUNNER",
+      "service": "robocurve-issue-runner",
+      "entrypoint": "CodeRunner"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LEDGER",
+        "class_name": "IssueLedger"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "IssueLedger"
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "ISSUE",
+      "name": "robocurve-issue",
+      "class_name": "IssueWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 30000
+  },
+  "account_id": "7f405baff0972dc740a02ee0f700d2c1"
+}

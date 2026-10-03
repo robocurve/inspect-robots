@@ -443,14 +443,14 @@ class Toolset:
                 )
             target[index] = value
 
-        ratios: list[np.float64] = []
+        ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             for index in named_indices:
                 distance = np.abs(np.subtract(target[index], current[index]))
                 limit = self._step_limits[index]
                 if distance > 0 and limit > 0:
-                    ratios.append(np.divide(distance, limit))
-            ratio = max(ratios, default=np.float64(0.0))
+                    ratios.append(float(np.divide(distance, limit)))
+            ratio = max(ratios, default=0.0)
             headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
         if headed_ratio > self._max_steps:
             return self._cap_error()
@@ -478,7 +478,7 @@ class Toolset:
         vector: npt.NDArray[np.float64],
         named_indices: list[int],
     ) -> ToolResult:
-        ratios: list[np.float64] = []
+        ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             for index in named_indices:
                 value = vector[index]
@@ -489,8 +489,8 @@ class Toolset:
                     return ToolResult(
                         error=f"dimension {self._labels[index]} cannot move in that direction"
                     )
-                ratios.append(np.divide(np.abs(value), limit))
-            ratio = max(ratios, default=np.float64(0.0))
+                ratios.append(float(np.divide(np.abs(value), limit)))
+            ratio = max(ratios, default=0.0)
             headed_ratio = np.divide(ratio, 1.0 - _RELATIVE_HEADROOM)
         if headed_ratio > self._max_steps:
             return self._cap_error()

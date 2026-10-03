@@ -279,12 +279,16 @@ class DeltaLimitApprover:
 def _validate_max_delta(
     max_delta: float | Any, shape: tuple[int, ...], dim: int
 ) -> npt.NDArray[np.float64]:
+    raw = np.asarray(max_delta, dtype=np.float64)
     try:
-        arr = np.broadcast_to(np.asarray(max_delta, dtype=np.float64), (dim,))
-    except ValueError as exc:
-        raise ValueError(
-            f"DeltaLimitApprover: max_delta does not broadcast to {dim} dimensions"
-        ) from exc
+        arr = np.broadcast_to(raw, shape)
+    except ValueError:
+        try:
+            arr = np.broadcast_to(raw, (dim,)).reshape(shape)
+        except ValueError as exc:
+            raise ValueError(
+                f"DeltaLimitApprover: max_delta does not broadcast to {shape} (or {dim} dimensions)"
+            ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
         raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
     # Shaped like the box for the same reason the derived default is: review()

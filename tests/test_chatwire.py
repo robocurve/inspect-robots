@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -10,7 +11,13 @@ from email.message import Message
 
 import pytest
 
-from inspect_robots._chatwire import HttpPost, _urllib_post, chat_completion
+from inspect_robots._chatwire import (
+    HttpPost,
+    _ChatHTTPError,
+    _ChatTransportError,
+    _urllib_post,
+    chat_completion,
+)
 from inspect_robots.errors import ConfigError
 
 
@@ -222,3 +229,112 @@ def test_non_string_effort_is_serialized_verbatim(falsy_or_numeric: float) -> No
     chat_completion("https://x.test/v1", "k", "m", [], effort=falsy_or_numeric, http_post=post)
 
     assert json.loads(calls[0][2])["reasoning_effort"] == falsy_or_numeric
+
+
+class _BodyRaises:
+    """A urlopen response whose body read fails mid-stream."""
+
+    status = 200
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def __enter__(self) -> _BodyRaises:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [TimeoutError("timed out"), http.client.RemoteDisconnected("closed")],
+)
+def test_urllib_post_wraps_read_timeouts_and_dropped_connections(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """Failures that are not URLError are still transport errors, not raw exceptions."""
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        if isinstance(exc, TimeoutError):
+            return _BodyRaises(exc)
+        raise exc
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(_ChatTransportError, match=r"^chat request failed: "):
+        _urllib_post("https://x.test", {}, b"{}")
+
+
+def test_unreadable_http_error_body_keeps_its_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx whose body cannot be read is still a rejected request with its status."""
+
+    class _Broken(io.BytesIO):
+        def read(self, *args: object) -> bytes:
+            raise http.client.IncompleteRead(b"")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.HTTPError(request.full_url, 404, "missing", Message(), _Broken())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert _urllib_post("https://x.test", {}, b"{}") == (404, b"")
+    with pytest.raises(_ChatHTTPError, match=r"HTTP 404: \(empty response body\)") as info:
+        chat_completion("https://x.test/v1", "k", "m", [])
+    assert info.value.status == 404
+
+
+@pytest.mark.parametrize(
+    ("url", "problem"),
+    [
+        ("api.example/v1", "the scheme must be http or https"),
+        ("htps://api.example/v1", "the scheme must be http or https"),
+        ("ftp://x.test/v1", "the scheme must be http or https"),
+        ("https:///v1", "no host given"),
+        ("http://x .test/v1", "whitespace or control characters"),
+        ("http://x.test/v 1", "whitespace or control characters"),
+        ("http://x.test:abc/v1", "Port could not be cast"),
+        ("http://[::1/v1", "Invalid IPv6 URL"),
+        ("http://user:pass@x.test/v1", "credentials in the URL are not supported"),
+        ("http://x.test:0/v1", "port 0 is not valid"),
+    ],
+)
+def test_malformed_url_is_a_plain_config_error_not_a_transport_error(
+    url: str, problem: str
+) -> None:
+    """A URL that can never work is configuration: it must not look like an outage."""
+    with pytest.raises(ConfigError, match="invalid URL") as info:
+        _urllib_post(url, {}, b"{}")
+    assert type(info.value) is ConfigError
+    assert problem in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("url", "key"),
+    [
+        ("http://127.0.0.1:1/v1/chat/completions", "sk-ok\n"),
+        ("http://a..b/v1/chat/completions", "sk-ok"),
+    ],
+)
+def test_requests_that_can_never_be_sent_are_plain_config_errors(url: str, key: str) -> None:
+    """A newline in the key or an unencodable host fails before connecting, as config."""
+    with pytest.raises(ConfigError, match=r"invalid request") as info:
+        _urllib_post(url, {"Authorization": f"Bearer {key}"}, b"{}")
+    assert type(info.value) is ConfigError
+    # The key must never leak into the message or the exception chain.
+    assert key.strip() not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["HTTPS://api.example.com/v1", "http://[::1]:8080/v1?api-version=1", "https://bücher.de/v1"],
+)
+def test_valid_urls_pass_the_check(url: str) -> None:
+    from inspect_robots._chatwire import _check_url
+
+    _check_url(url)

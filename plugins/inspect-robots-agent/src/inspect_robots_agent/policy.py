@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -32,6 +33,7 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
+from inspect_robots.task import TaskEnvelope
 from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
@@ -55,7 +57,7 @@ from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 
-from ._capture import WireCapture
+from ._capture import WireCapture, _safe
 
 _MAX_CONSECUTIVE_FAILURES = 3
 # Shared by the camera label writer and the reader that recovers revealed
@@ -99,6 +101,7 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
     | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
 )
 _SPEEDS = frozenset({"fast"})
+_SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
@@ -271,6 +274,8 @@ class AgentPolicyConfig(PolicyConfig):
     wire: str = "chat"
     wire_capture: bool = True
     speed: str | None = None
+    #: Requested Responses processing tier; None preserves the project default.
+    service_tier: str | None = None
     #: Effective per-response cap on ``wire=messages``; ``None`` on the other
     #: wires, where nothing constrained the output.
     max_output_tokens: int | None = None
@@ -290,6 +295,8 @@ class AgentPolicyConfig(PolicyConfig):
     prior_learnings_sha256: str | None = None
     #: Best-effort module and qualified-name identity of the motion pre-check.
     pre_check: str | None = None
+    max_retries: int = 3
+    backoff_s: float = 1.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -329,16 +336,19 @@ class LLMAgentPolicy(PolicyBase):
         max_output_tokens: int | None = None,
         max_llm_calls: int = 100,
         temperature: float | None = None,
-        effort: str | float | None | _Unset = _UNSET,
+        effort: str | float | _Unset | None = _UNSET,
         max_speed_frac: float = 0.1,
         transcript_echo: bool = False,
         images: str = "always",
         depth: str = "render",
-        image_horizon: int | None | _Unset = _UNSET,
+        image_horizon: int | _Unset | None = _UNSET,
         prior_learnings: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
+        service_tier: str | None = None,
+        max_retries: int = 3,
+        backoff_s: float = 1.0,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -347,6 +357,7 @@ class LLMAgentPolicy(PolicyBase):
             ("base_url", base_url),
             ("api_key_env", api_key_env),
             ("speed", speed),
+            ("service_tier", service_tier),
         ]:
             if val is not None and not isinstance(val, str):
                 raise ConfigError(
@@ -414,6 +425,16 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError("max_speed_frac must be finite and > 0")
         if max_llm_calls < 1:
             raise ConfigError("max_llm_calls must be >= 1")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 1:
+            raise ConfigError("max_retries must be an int >= 1")
+        if (
+            isinstance(backoff_s, bool)
+            or not isinstance(backoff_s, (int, float))
+            or not math.isfinite(backoff_s)
+            or backoff_s < 0
+        ):
+            raise ConfigError("backoff_s must be finite and >= 0")
+        resolved_backoff_s = float(backoff_s)
         environ = dict(os.environ) if env is None else env
         requested_model = model or environ.get(ENV_MODEL)
         direct_claim = (
@@ -455,6 +476,17 @@ class LLMAgentPolicy(PolicyBase):
             )
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
+        if service_tier is not None:
+            if service_tier not in _SERVICE_TIERS:
+                raise ConfigError(
+                    f"service_tier must be one of {sorted(_SERVICE_TIERS)}, "
+                    f"or None, got {service_tier!r}"
+                )
+            if wire != "responses":
+                raise ConfigError(
+                    f"service_tier is only supported on wire='responses', got wire={wire!r}.\n"
+                    "fix: pass -P wire=responses, or drop -P service_tier="
+                )
         if images not in _IMAGE_MODES:
             raise ConfigError(
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
@@ -691,17 +723,43 @@ class LLMAgentPolicy(PolicyBase):
                 provider,
                 max_output_tokens=resolved_max_output_tokens,
                 speed=speed,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
             )
         elif wire == "responses":
-            self._client = ResponsesClient(provider, transport=transport, capture=self._capture)
+            self._client = ResponsesClient(
+                provider,
+                service_tier=service_tier,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         elif wire == "gemini-live":
-            self._client = GeminiLiveClient(provider, capture=self._capture)
+            self._client = GeminiLiveClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                capture=self._capture,
+            )
         elif wire == "interactions":
-            self._client = InteractionsClient(provider, transport=transport, capture=self._capture)
+            self._client = InteractionsClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         else:
-            self._client = ChatClient(provider, transport=transport, capture=self._capture)
+            self._client = ChatClient(
+                provider,
+                max_retries=max_retries,
+                backoff_s=resolved_backoff_s,
+                transport=transport,
+                capture=self._capture,
+            )
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
         # Preserve the operator's requested effort exactly; when it is unset,
@@ -724,8 +782,11 @@ class LLMAgentPolicy(PolicyBase):
             wire=wire,
             wire_capture=wire_capture,
             speed=speed,
+            service_tier=service_tier,
             max_output_tokens=resolved_max_output_tokens,
             max_llm_calls=max_llm_calls,
+            max_retries=max_retries,
+            backoff_s=resolved_backoff_s,
             effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
@@ -749,6 +810,7 @@ class LLMAgentPolicy(PolicyBase):
         self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
         self._revealed: set[str] = set()
+        self._max_steps: int | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -773,8 +835,14 @@ class LLMAgentPolicy(PolicyBase):
             control_hz=embodiment_info.control_hz,
         )
 
+    def bind_task(self, envelope: TaskEnvelope) -> None:
+        """Learn the trial's rollout horizon from the task envelope."""
+        self._max_steps = envelope.max_steps
+
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        if isinstance(self._client, ResponsesClient):
+            self._client._reset_cache_tracking()
         self._hindsight = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
@@ -783,6 +851,13 @@ class LLMAgentPolicy(PolicyBase):
         docs = self._embodiment_docs
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
+        if self._max_steps is not None:
+            formatted += (
+                f"\n\nEnvironment step budget:\nYou have {self._max_steps} environment steps "
+                "for the trial. Every move tool result reports its step count (e.g. "
+                "`executing move_to over N steps (X.Xs)`). Pace yourself against the "
+                "environment step budget, not only the call budget."
+            )
         if self._prior_learnings_text is not None:
             formatted = (
                 formatted
@@ -807,7 +882,7 @@ class LLMAgentPolicy(PolicyBase):
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
         """Begin streaming wire attempts for the next trial when enabled."""
         if self._capture is not None:
-            self._capture.begin_trial(log_dir, run_id, f"{scene_id}-e{epoch}")
+            self._capture.begin_trial(log_dir, run_id, f"{_safe(scene_id)}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist wire capture, hindsight, usage, and the transcript at trial end."""
@@ -833,7 +908,7 @@ class LLMAgentPolicy(PolicyBase):
         transcript_dir = Path(log_dir) / "transcripts" / run_id
         transcript_dir.mkdir(parents=True, exist_ok=True)
 
-        trial_id = f"{record.scene_id}-e{record.epoch}"
+        trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
         path = transcript_dir / f"{trial_id}.jsonl"
 
         with path.open("w", encoding="utf-8") as f:
@@ -891,6 +966,7 @@ class LLMAgentPolicy(PolicyBase):
         observation_content = _observation_content(
             observation,
             self._state_labels,
+            max_steps=self._max_steps,
             reveal=reveal,
             narration=narration,
             depth=depth,
@@ -910,7 +986,7 @@ class LLMAgentPolicy(PolicyBase):
         state_summary = " | ".join(_state_lines(observation, self._state_labels))
         if state_summary:
             summary = f"{summary}, {state_summary}"
-        step_label = _step_label(observation)
+        step_label = _step_label(observation, self._max_steps)
         if step_label:
             self._echo(f"[agent] >> {step_label}: {summary}")
         else:
@@ -925,7 +1001,7 @@ class LLMAgentPolicy(PolicyBase):
                 outgoing = _evicted_view(
                     self._messages,
                     self._image_horizon,
-                    mark_anchor=isinstance(self._client, AnthropicClient),
+                    mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
             message = self._client.complete(
                 outgoing,
@@ -1205,10 +1281,14 @@ def _state_lines(
     return lines
 
 
-def _step_label(observation: Observation) -> str:
-    """Shared prompt/echo step gate: "step {n}" for int env_step (bool included), else ""."""
+def _step_label(observation: Observation, max_steps: int | None = None) -> str:
+    """Shared prompt/echo step gate: "step {n}" (or "step {n}/{max_steps}"), else ""."""
     step = observation.extra.get("env_step")
-    return f"step {step}" if isinstance(step, int) else ""
+    if not isinstance(step, int):
+        return ""
+    if max_steps is not None:
+        return f"step {step}/{max_steps}"
+    return f"step {step}"
 
 
 def _approvals_line(observation: Observation) -> str | None:
@@ -1251,6 +1331,7 @@ def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
     *,
+    max_steps: int | None = None,
     reveal: tuple[str, ...] | None = None,
     narration: str | None = None,
     depth: Mapping[str, Any] | None = None,
@@ -1259,6 +1340,10 @@ def _observation_content(
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
+    step = observation.extra.get("env_step")
+    if isinstance(step, int) and max_steps is not None:
+        remaining = max_steps - step
+        lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
     lines.extend(_state_lines(observation, state_labels))
     app_line = _approvals_line(observation)
     if app_line is not None:

@@ -1505,6 +1505,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     )
     output = out.getvalue()
     assert f"Found 3 camera device(s) under {by_id}:" in output
+    assert "could not confirm which nodes are color cameras" in output
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
     assert 'Next: inspect-robots "place the fork on the plate"' in output
@@ -1569,6 +1570,7 @@ def test_run_setup_lists_race_loser_camera_and_selects_it_by_number(
     assert f"right_cam_device = {d405}" in text
     assert "Found 2 camera device(s)" in out.getvalue()
     assert "no usable by-id entry" in out.getvalue()
+    assert "could not confirm which nodes are color cameras" not in out.getvalue()
     assert any("top camera" in prompt and "'p'" in prompt for prompt in prompts)
 
 
@@ -1717,6 +1719,33 @@ def test_run_setup_healthy_rig_prompts_and_config_unchanged(
     assert all("'p'" not in prompt for prompt in prompts if "camera" in prompt)
 
 
+def test_run_setup_device_slot_camera_warns_when_probe_is_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("inspection_camera", "v4l2", "inspection camera"),),
+    )
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+    pending = [*_slot_defaults(), "", "1"]
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=lambda _prompt: pending.pop(0),
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    assert result == 0
+    assert f"inspection_camera = {devices[0]}" in _config_path(tmp_path).read_text(encoding="utf-8")
+    assert "could not confirm which nodes are color cameras" in out.getvalue()
+
+
 def test_run_setup_device_slot_camera_uses_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1794,7 +1823,28 @@ def test_run_setup_missing_current_prints_reconciliation_hint(
     assert f"top_cam_device = {replacement}" in text
 
 
-def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("platform", "session_env"),
+    [
+        pytest.param("linux", {}, id="linux-no-display"),
+        pytest.param("linux", {"DISPLAY": ""}, id="linux-empty-x11"),
+        pytest.param("linux", {"WAYLAND_DISPLAY": ""}, id="linux-empty-wayland"),
+        pytest.param("linux", {"DISPLAY": "", "WAYLAND_DISPLAY": ""}, id="linux-empty-displays"),
+        pytest.param("freebsd14", {}, id="other-unix-no-display"),
+        *[
+            pytest.param(platform, {ssh_variable: "remote"}, id=f"{platform}-{ssh_variable}")
+            for platform in ("linux", "darwin", "win32")
+            for ssh_variable in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+        ],
+    ],
+)
+def test_run_setup_headless_defaults_rerun_false_and_explains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    session_env: dict[str, str],
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     scripted_input, prompts = _scripted_input([""] * 7)
     out = io.StringIO()
     note = (
@@ -1810,7 +1860,7 @@ def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) ->
         return scripted_input(prompt)
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), **session_env},
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -1824,16 +1874,26 @@ def test_run_setup_headless_defaults_rerun_false_and_explains(tmp_path: Path) ->
     assert "rerun = false" in _config_path(tmp_path).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
 @pytest.mark.parametrize("display_variable", ["DISPLAY", "WAYLAND_DISPLAY"])
+@pytest.mark.parametrize("ssh_variable", [None, "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"])
 def test_run_setup_with_display_defaults_rerun_true_without_note(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
     display_variable: str,
+    ssh_variable: str | None,
 ) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    env = {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": "", "WAYLAND_DISPLAY": ""}
+    env[display_variable] = ":0"
+    if ssh_variable is not None:
+        env[ssh_variable] = "remote"
     input_fn, prompts = _scripted_input([""] * 7)
     out = io.StringIO()
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path), display_variable: ":0"},
+        env,
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -1847,17 +1907,28 @@ def test_run_setup_with_display_defaults_rerun_true_without_note(
     assert "rerun = true" in _config_path(tmp_path).read_text(encoding="utf-8")
 
 
-def test_run_setup_headless_existing_rerun_true_wins_and_note_is_printed(
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+@pytest.mark.parametrize(
+    "session_env",
+    [
+        pytest.param({}, id="no-display-vars"),
+        pytest.param({"DISPLAY": "", "WAYLAND_DISPLAY": ""}, id="empty-display-vars"),
+        pytest.param({"SSH_CONNECTION": "", "SSH_CLIENT": "", "SSH_TTY": ""}, id="empty-ssh-vars"),
+        pytest.param({"SSH_AUTH_SOCK": "/tmp/agent.sock"}, id="local-ssh-agent"),
+    ],
+)
+def test_run_setup_native_desktop_defaults_rerun_true_without_note(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    session_env: dict[str, str],
 ) -> None:
-    path = _config_path(tmp_path)
-    path.parent.mkdir()
-    path.write_text("[defaults]\nrerun = true\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", platform)
     input_fn, prompts = _scripted_input([""] * 7)
     out = io.StringIO()
 
     result = run_setup(
-        {"XDG_CONFIG_HOME": str(tmp_path)},
+        {"XDG_CONFIG_HOME": str(tmp_path), **session_env},
         input_fn=input_fn,
         out=out,
         interactive=True,
@@ -1867,13 +1938,58 @@ def test_run_setup_headless_existing_rerun_true_wins_and_note_is_printed(
 
     assert result == 0
     assert "live rerun viewer [true]" in prompts[4]
-    assert "no display detected (SSH?)" in out.getvalue()
-    assert "rerun = true" in path.read_text(encoding="utf-8")
+    assert "no display detected (SSH?)" not in out.getvalue()
+    assert "rerun = true" in _config_path(tmp_path).read_text(encoding="utf-8")
 
 
-def test_run_setup_strips_typed_overrides_and_whitespace_uses_default(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured_rerun", ["true", "false"])
+@pytest.mark.parametrize(
+    ("platform", "session_env", "headless"),
+    [
+        pytest.param("linux", {}, True, id="linux-headless"),
+        pytest.param("darwin", {}, False, id="macos-desktop"),
+        pytest.param("win32", {}, False, id="windows-desktop"),
+        pytest.param("darwin", {"SSH_CONNECTION": "remote"}, True, id="macos-ssh"),
+        pytest.param("win32", {"SSH_CONNECTION": "remote"}, True, id="windows-ssh"),
+    ],
+)
+def test_run_setup_existing_rerun_preference_wins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    session_env: dict[str, str],
+    headless: bool,
+    configured_rerun: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(f"[defaults]\nrerun = {configured_rerun}\n", encoding="utf-8")
+    input_fn, prompts = _scripted_input([""] * 7)
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), **session_env},
+        input_fn=input_fn,
+        out=out,
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+
+    assert result == 0
+    assert f"live rerun viewer [{configured_rerun}]" in prompts[4]
+    assert ("no display detected (SSH?)" in out.getvalue()) is headless
+    assert f"rerun = {configured_rerun}" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("rerun", ["true", "false"])
+def test_run_setup_strips_typed_overrides_and_whitespace_uses_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rerun: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     input_fn, _ = _scripted_input(
-        ["  my-policy  ", "  my-body  ", "   ", " 42 ", " false ", " false ", ""]
+        ["  my-policy  ", "  my-body  ", "   ", " 42 ", f" {rerun} ", " false ", ""]
     )
 
     result = run_setup(
@@ -1891,7 +2007,7 @@ def test_run_setup_strips_typed_overrides_and_whitespace_uses_default(tmp_path: 
     assert "embodiment = my-body" in text
     assert "scorer = success_at_end" in text
     assert "max_steps = 42" in text
-    assert "rerun = false" in text
+    assert f"rerun = {rerun}" in text
     assert "store_frames = false" in text
     assert "[embodiment.args]" not in text
 
@@ -2041,7 +2157,13 @@ def test_run_setup_declines_malformed_config_repair(tmp_path: Path) -> None:
     assert not path.with_name("config.ini.bak").exists()
 
 
-def test_run_setup_ignores_only_invalid_existing_prompt_values(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("platform", "expected_rerun"), [("linux", "false"), ("darwin", "true"), ("win32", "true")]
+)
+def test_run_setup_ignores_only_invalid_existing_prompt_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, expected_rerun: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     path = _config_path(tmp_path)
     path.parent.mkdir()
     path.write_text(
@@ -2069,7 +2191,7 @@ def test_run_setup_ignores_only_invalid_existing_prompt_values(tmp_path: Path) -
     assert "ignoring invalid rerun 'perhaps' from config.ini" in out.getvalue()
     assert any("policy [kept-policy]" in prompt for prompt in prompts)
     assert any("max steps [1200]" in prompt for prompt in prompts)
-    assert any("live rerun viewer [false]" in prompt for prompt in prompts)
+    assert any(f"live rerun viewer [{expected_rerun}]" in prompt for prompt in prompts)
     assert any("store camera frames [false]" in prompt for prompt in prompts)
 
 
@@ -4240,6 +4362,14 @@ def test_run_setup_reprompts_invalid_number_answers_with_constraint(
 )
 def test_number_constraint_renders_bound_and_none_arms(slot: NumberSlot, expected: str) -> None:
     assert _number_constraint(slot) == expected
+
+
+def test_acceptable_number_rejects_non_finite_floats() -> None:
+    from inspect_robots._setup import _acceptable_number
+
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("nan"))
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("inf"))
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("-inf"))
 
 
 def test_run_setup_none_default_displays_and_writes_canonical_none(

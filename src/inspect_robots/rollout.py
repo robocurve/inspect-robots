@@ -279,6 +279,8 @@ def rollout(
     declares the ``"self_paced"`` capability to document that it does (see
     [`Embodiment`][inspect_robots.embodiment.Embodiment]).
     """
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps < 1:
+        raise ValueError(f"max_steps must be an integer >= 1, got {max_steps!r}")
     trial_id = f"{scene.id}-e{epoch}"
     record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))

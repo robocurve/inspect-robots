@@ -1,0 +1,27 @@
+{
+  "name": "robocurve-issue-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "mkdir -p generated && wrangler types --config wrangler.jsonc --config publisher.wrangler.jsonc --config runner.wrangler.jsonc --env-interface IssueEnv --strict-vars=false --include-runtime=false generated/issue.d.ts && wrangler types --config publisher.wrangler.jsonc --env-interface PublisherEnv --include-runtime=false generated/publisher.d.ts && wrangler types --config runner.wrangler.jsonc --config wrangler.jsonc --env-interface RunnerEnv --include-runtime=false generated/runner.d.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "jose": "^6.2.12",
+    "openai": "^7.20.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.13",
+    "@cloudflare/workers-types": "^5.20260920.1",
+    "@types/node": "^26.6.2",
+    "jsonc-parser": "^3.2.0",
+    "prettier": "^3.9.8",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.135.0"
+  }
+}

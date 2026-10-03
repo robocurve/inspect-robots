@@ -912,3 +912,19 @@ def test_raising_server_url_property_does_not_mask_policy_failure() -> None:
     assert str(excinfo.value) == "base connection failure"
     assert excinfo.value.record is not None
     assert excinfo.value.record.error == "PolicyError: base connection failure"
+
+
+@pytest.mark.parametrize("invalid_steps", [0, -1, True, False, 2.5, "10"])
+def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
+    with pytest.raises(ValueError, match="max_steps must be an integer >= 1"):
+        rollout(
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            _SCENE,
+            max_steps=invalid_steps,
+            seed=0,
+            epoch=0,
+            controller=DefaultController(),
+            approver=AutoApprover(),
+            sink=NullSink(),
+        )

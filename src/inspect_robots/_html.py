@@ -540,6 +540,12 @@ def _number(value: int | float | None) -> str:
     return "n/a" if value is None else f"{value:.4g}"
 
 
+def _metric_label(name: str, abstentions: Mapping[str, int]) -> str:
+    """Name a metric tile, noting abstained trials so the rate's denominator is visible."""
+    abstained = abstentions.get(name, 0)
+    return f"{name} ({abstained} abstained)" if abstained else name
+
+
 def _value(value: object) -> str:
     """Format a scalar or structured spec value without HTML escaping it."""
     if isinstance(value, str):
@@ -1003,7 +1009,7 @@ def _render_transcript(
     return f"<pre>{_escape(dumped)}</pre>"
 
 
-def _score_chips(values: Mapping[str, float], *, prefix: str = "") -> str:
+def _score_chips(values: Mapping[str, float | None], *, prefix: str = "") -> str:
     """Render sorted score values as compact escaped chips."""
     return "".join(
         f'<span class="score-chip">{_escape(prefix + name)}={_escape(_number(value))}</span>'
@@ -1636,7 +1642,7 @@ def render_html(
 
     metric_tiles = "".join(
         '<div class="stat">'
-        f'<div class="stat-name">{_escape(name)}</div>'
+        f'<div class="stat-name">{_escape(_metric_label(name, log.results.abstentions))}</div>'
         f'<div class="stat-value">{_escape(_number(value))}</div></div>'
         for name, value in sorted(log.results.metrics.items())
     )

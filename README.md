@@ -489,7 +489,7 @@ and [`llms-full.txt`](https://docs.inspectrobots.org/llms-full.txt).
 > `uv lock` and commit the updated lockfile. CI installs with
 > `uv sync --locked` and fails with "the lockfile needs to be updated" if you
 > forget. Day-to-day conventions (PR-only `main`, the required `ci-ok` check,
-> one-click releases) are documented in [`CLAUDE.md`](CLAUDE.md).
+> one-click releases) are documented in [`AGENTS.md`](AGENTS.md).
 
 ```bash
 uv venv && uv pip install -e ".[dev]"

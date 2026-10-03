@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 import pytest
@@ -213,8 +214,8 @@ def test_task_envelope_is_a_frozen_view_of_the_horizon() -> None:
         _ = seconds_task.envelope
 
 
-@pytest.mark.parametrize("max_steps", [True, 0, -1])
-def test_task_rejects_invalid_steps_horizon(max_steps: int) -> None:
+@pytest.mark.parametrize("max_steps", [True, False, 0, -1, 10.5, float("nan"), float("inf"), "80"])
+def test_task_rejects_invalid_steps_horizon(max_steps: Any) -> None:
     from inspect_robots.errors import ConfigError
     from inspect_robots.scene import Scene
     from inspect_robots.task import Task
@@ -226,6 +227,15 @@ def test_task_rejects_invalid_steps_horizon(max_steps: int) -> None:
             scorer="success_at_end",
             max_steps=max_steps,
         )
+
+
+@pytest.mark.parametrize("max_steps", [True, False, 0, -1, 10.5, float("nan"), float("inf"), "80"])
+def test_task_envelope_rejects_invalid_max_steps(max_steps: Any) -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.task import TaskEnvelope
+
+    with pytest.raises(ConfigError, match="TaskEnvelope max_steps must be an integer >= 1"):
+        TaskEnvelope(name="t", max_steps=max_steps)
 
 
 def test_task_rejects_duplicate_scene_ids() -> None:
@@ -324,8 +334,17 @@ def test_task_validation_and_scorer_names() -> None:
         Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=0)
     with pytest.raises(ConfigError, match="Epochs count"):
         Task(name="t", scenes=[scene], scorer="success_at_end", max_steps=5, epochs=0)
-    with pytest.raises(ConfigError, match="Epochs count"):
-        Epochs(count=0)
+    for invalid_count in (0, -1, True, False, 2.5, "1"):
+        with pytest.raises(ConfigError, match="Epochs count"):
+            Epochs(count=invalid_count)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match="Epochs count"):
+            Task(
+                name="t",
+                scenes=[scene],
+                scorer="success_at_end",
+                max_steps=5,
+                epochs=invalid_count,  # type: ignore[arg-type]
+            )
 
     # A scorer registry name resolves to one scorer, never to a sequence of
     # one-character "scorers" (str is a Sequence).
