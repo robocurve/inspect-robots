@@ -1,0 +1,1 @@
+**Docs:** The plugins guide gains a "Community plugins" section listing externally maintained packages, starting with [`inspect-robots-wandb`](https://github.com/Galabavamsi/inspect-robots-wandb) (a Weights & Biases logging sink).
