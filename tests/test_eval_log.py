@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -81,6 +81,8 @@ def _golden_log() -> EvalLog:
                         {"role": "assistant", "content": "moving"},
                     ],
                 ),
+                init_seed=12345,
+                trial_seeds=(42,),
             ),
         ),
     )
@@ -162,6 +164,8 @@ def test_golden_log_reads_back(tmp_path: Path) -> None:
             {"role": "assistant", "content": "moving"},
         ],
     )
+    assert restored.samples[0].init_seed == 12345
+    assert restored.samples[0].trial_seeds == (42,)
     assert restored.eval.max_steps == 1200
 
 
@@ -191,6 +195,8 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
         del sample["trial_metadata"]
         del sample["termination_reasons"]
         del sample["policy_transcripts"]
+        sample.pop("init_seed", None)
+        sample.pop("trial_seeds", None)
     path = tmp_path / "old.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     restored = read_eval_log(str(path))
@@ -204,6 +210,8 @@ def test_v1_log_without_additive_fields_reads_back(tmp_path: Path) -> None:
     assert restored.samples[0].trial_metadata == ()
     assert restored.samples[0].termination_reasons == ()
     assert restored.samples[0].policy_transcripts == ()
+    assert restored.samples[0].init_seed is None
+    assert restored.samples[0].trial_seeds == ()
     assert restored.eval.max_steps is None
     assert restored.eval.max_seconds is None
     assert restored.eval.grader is None
@@ -727,3 +735,222 @@ def test_eval_set_and_error_log_for_populates_provenance_on_task_error(tmp_path:
     assert logs[0].eval.environment_id == "explicit-env"
     assert logs[0].eval.environment_revision == "explicit-rev"
     assert logs[0].eval.policy_checkpoint == "explicit-ckpt"
+
+
+def test_trial_seeds_preserves_zero_and_none(tmp_path: Path) -> None:
+    """Trial seeds must preserve 0 as a distinct integer and None as unknown."""
+    sample = replace(_golden_log().samples[0], init_seed=0, trial_seeds=(0, None, 42))
+    log = replace(_golden_log(), samples=(sample,))
+    data = log.to_dict()
+    path = tmp_path / "seeds.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    restored = read_eval_log(str(path))
+    assert restored.samples[0].init_seed == 0
+    assert restored.samples[0].trial_seeds == (0, None, 42)
+
+    # Top-level fallback compatibility (e.g. from JSON with top-level fields)
+    raw_data = {
+        "version": SCHEMA_VERSION,
+        "status": "success",
+        "eval": data["eval"],
+        "results": data["results"],
+        "stats": data["stats"],
+        "samples": [
+            {
+                "scene_id": "s0",
+                "status": "success",
+                "init_seed": 0,
+                "trial_seeds": [0, None, 42],
+            }
+        ],
+    }
+    path2 = tmp_path / "seeds2.json"
+    path2.write_text(json.dumps(raw_data), encoding="utf-8")
+    restored2 = read_eval_log(str(path2))
+    assert restored2.samples[0].init_seed == 0
+    assert restored2.samples[0].trial_seeds == (0, None, 42)
+
+
+def test_older_v1_reader_loads_new_log_with_seed_provenance(tmp_path: Path) -> None:
+    """An older v1 reader (which rejects unknown SceneResult kwargs) loads new logs."""
+
+    # The base revision's SceneResult dataclass has no init_seed or trial_seeds fields.
+    # It constructed SceneResult(**sample) directly from each raw sample dictionary.
+    @dataclass(frozen=True)
+    class LegacySceneResult:
+        scene_id: str
+        status: str
+        reduced: dict[str, float | None] = field(default_factory=dict)
+        epochs: tuple[dict[str, float | None], ...] = ()
+        error: str | None = None
+        instruction: str | None = None
+        scene_metadata: dict[str, Any] = field(default_factory=dict)
+        operator_judgements: tuple[str | None, ...] = ()
+        judgement_sources: tuple[str | None, ...] = ()
+        operator_notes: tuple[str | None, ...] = ()
+        operator_messages: tuple[tuple[dict[str, Any], ...], ...] = ()
+        trial_metadata: tuple[dict[str, Any], ...] = ()
+        termination_reasons: tuple[str | None, ...] = ()
+        policy_transcripts: tuple[Any, ...] = ()
+
+    log = _golden_log()
+    path = tmp_path / "new_writer_log.json"
+    path.write_text(json.dumps(log.to_dict()), encoding="utf-8")
+
+    # Simulate older reader from base revision
+    raw_data = json.loads(path.read_text(encoding="utf-8"))
+    samples = []
+    for raw in raw_data["samples"]:
+        sample = dict(raw)
+        sample["epochs"] = tuple(sample.get("epochs", ()))
+        sample["operator_judgements"] = tuple(sample.get("operator_judgements", ()))
+        sample["judgement_sources"] = tuple(sample.get("judgement_sources", ()))
+        sample["operator_notes"] = tuple(sample.get("operator_notes", ()))
+        sample["operator_messages"] = tuple(
+            tuple(messages) for messages in sample.get("operator_messages", ())
+        )
+        sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
+        sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
+        sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
+        # This will raise TypeError if sample has unknown kwargs like init_seed or trial_seeds
+        samples.append(LegacySceneResult(**sample))
+
+    assert len(samples) == 1
+    assert samples[0].scene_id == "s0"
+    # Older reader tolerates seed provenance in extensible scene_metadata
+    assert "_inspect_seeds" in samples[0].scene_metadata
+    assert samples[0].scene_metadata["_inspect_seeds"]["init_seed"] == 12345
+    assert samples[0].scene_metadata["_inspect_seeds"]["trial_seeds"] == [42]
+
+    # Modern reader reconstructs the typed fields on SceneResult and cleans scene_metadata
+    modern = read_eval_log(str(path))
+    assert modern.samples[0].init_seed == 12345
+    assert modern.samples[0].trial_seeds == (42,)
+    assert modern.samples[0].scene_metadata == {
+        "rubric": "touch the cube",
+        "taskgen": {"model": "vision"},
+    }
+
+
+def test_legacy_log_with_scalar_or_colliding_scene_metadata_preserves_metadata(
+    tmp_path: Path,
+) -> None:
+    """A legacy log containing caller scene_metadata with trial_seeds as an integer
+    or init_seed as a string must not raise TypeError and must preserve caller metadata."""
+    data = _golden_log().to_dict()
+    # Legacy log has no top-level init_seed / trial_seeds or internal _inspect_seeds
+    data["samples"][0].pop("init_seed", None)
+    data["samples"][0].pop("trial_seeds", None)
+    data["samples"][0]["scene_metadata"].pop("_inspect_seeds", None)
+    # Caller scene_metadata has same-named keys
+    data["samples"][0]["scene_metadata"]["trial_seeds"] = 7
+    data["samples"][0]["scene_metadata"]["init_seed"] = "caller-string-seed"
+
+    path = tmp_path / "legacy_colliding.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    restored = read_eval_log(str(path))
+    # Framework fields default cleanly without crashing
+    assert restored.samples[0].init_seed is None
+    assert restored.samples[0].trial_seeds == ()
+    # Caller scene metadata is preserved completely intact
+    assert restored.samples[0].scene_metadata["trial_seeds"] == 7
+    assert restored.samples[0].scene_metadata["init_seed"] == "caller-string-seed"
+
+
+def test_colliding_scene_metadata_round_trip_distinguishes_framework_provenance(
+    tmp_path: Path,
+) -> None:
+    """Caller scene_metadata keys must not collide with or overwrite framework seed provenance."""
+    log = _golden_log()
+    sample = log.samples[0]
+    colliding_sample = replace(
+        sample,
+        init_seed=12345,
+        trial_seeds=(42, 99),
+        scene_metadata={"init_seed": "user_id_123", "trial_seeds": 7, "rubric": "test"},
+    )
+    log_with_collision = replace(log, samples=(colliding_sample,))
+
+    path = tmp_path / "collision_roundtrip.json"
+    path.write_text(json.dumps(log_with_collision.to_dict()), encoding="utf-8")
+
+    restored = read_eval_log(str(path))
+    # Framework provenance preserved in its own fields
+    assert restored.samples[0].init_seed == 12345
+    assert restored.samples[0].trial_seeds == (42, 99)
+    # Caller scene metadata preserved without loss or overwrite
+    assert restored.samples[0].scene_metadata == {
+        "init_seed": "user_id_123",
+        "trial_seeds": 7,
+        "rubric": "test",
+    }
+
+
+def test_eval_records_trial_seeds_and_scene_init_seed(tmp_path: Path) -> None:
+    """eval() writes SceneResult.init_seed and effective derived trial_seeds."""
+    from inspect_robots import eval
+    from inspect_robots.rollout import derive_seed
+
+    eval_seed = 17
+    scene_init_seed = 12345
+    task = Task(
+        name="seeded_task",
+        scenes=[
+            Scene(id="s0", instruction="reach", init_seed=scene_init_seed),
+            Scene(id="s1", instruction="reach", init_seed=None),
+        ],
+        scorer=success_at_end(),
+        max_steps=10,
+        epochs=2,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        seed=eval_seed,
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+    # s0 with init_seed
+    assert log.samples[0].init_seed == scene_init_seed
+    expected_s0_seeds = (
+        derive_seed(eval_seed, scene_init_seed, 0),
+        derive_seed(eval_seed, scene_init_seed, 1),
+    )
+    assert log.samples[0].trial_seeds == expected_s0_seeds
+
+    # s1 without init_seed
+    assert log.samples[1].init_seed is None
+    expected_s1_seeds = (
+        derive_seed(eval_seed, None, 0),
+        derive_seed(eval_seed, None, 1),
+    )
+    assert log.samples[1].trial_seeds == expected_s1_seeds
+
+    # Verify saved log matches when read back from disk
+    (log_path,) = tmp_path.glob("*.json")
+    read_back = read_eval_log(str(log_path))
+    assert read_back.samples[0].init_seed == scene_init_seed
+    assert read_back.samples[0].trial_seeds == expected_s0_seeds
+    assert read_back.samples[1].init_seed is None
+    assert read_back.samples[1].trial_seeds == expected_s1_seeds
+
+
+def test_to_dict_empty_seeds_and_init_seed_only(tmp_path: Path) -> None:
+    """to_dict handles empty seeds and init_seed-only scenes."""
+    sample_no_seeds = replace(_golden_log().samples[0], init_seed=None, trial_seeds=())
+    sample_init_only = replace(_golden_log().samples[0], init_seed=42, trial_seeds=())
+    log = replace(_golden_log(), samples=(sample_no_seeds, sample_init_only))
+    data = log.to_dict()
+    assert "_inspect_seeds" not in data["samples"][0]["scene_metadata"]
+    assert data["samples"][1]["scene_metadata"]["_inspect_seeds"] == {"init_seed": 42}
+
+    path = tmp_path / "empty_seeds.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    restored = read_eval_log(str(path))
+    assert restored.samples[0].init_seed is None
+    assert restored.samples[0].trial_seeds == ()
+    assert restored.samples[1].init_seed == 42
+    assert restored.samples[1].trial_seeds == ()
