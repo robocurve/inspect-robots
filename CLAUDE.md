@@ -106,8 +106,8 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - **Releases are one-click** after a changelog PR: run `uv run towncrier build
   --version X.Y.Z --yes` (X.Y.Z = latest `v*` tag plus the bump you will pick)
   and merge it, then Actions → Release → Run workflow → pick the same
-  patch/minor/major (see "Releasing (maintainers)" in CONTRIBUTING.md). The version is derived from the git tag by hatch-vcs —
-  never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: `plugins/*` packages keep static versions in their own pyprojects; bump one in a PR and it publishes alongside the next core release via its `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI trusted-publisher environment). The same
+  patch/minor/major (see "Releasing (maintainers)" in CONTRIBUTING.md). The
+  version is derived from the git tag by hatch-vcs. Never add a static `version =` back to pyproject (`__version__` comes from importlib.metadata. Exception: `plugins/*` packages keep static versions in their own pyprojects; bump one in a PR and it publishes alongside the next core release via its `publish-<name>` job in `release.yml` (`skip-existing` makes unchanged versions a no-op). A new plugin needs its own `publish-<name>` job and PyPI trusted-publisher environment). The same
   run publishes to PyPI via trusted publishing; nothing is pushed to main.
 - **PyPI readme is transformed at build time** — `hatch-fancy-pypi-readme`
   rewrites GitHub-only alert syntax (`> [!NOTE]` etc.) in README.md into bold

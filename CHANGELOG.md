@@ -63,6 +63,7 @@ and are compiled into a new version section at release.
 
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+
 - **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
   the embodiment action bounds.
 

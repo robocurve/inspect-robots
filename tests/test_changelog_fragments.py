@@ -25,7 +25,7 @@ def fragment_problems(directory: Path) -> list[str]:
     """Describe every file in ``directory`` that towncrier would mishandle."""
     problems = []
     for path in sorted(directory.iterdir()):
-        if path.name in NON_FRAGMENTS:
+        if path.name in NON_FRAGMENTS or path.name.startswith("."):
             continue
         if not path.is_file() or not NAME.match(path.name):
             problems.append(f"{path.name}: not <issue>.<type>.md or +<slug>.<type>.md")

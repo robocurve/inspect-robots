@@ -8,7 +8,8 @@ changelog. A maintainer compiles the fragments into `CHANGELOG.md` with
 ## Naming
 
 - `<issue>.<type>.md`: the GitHub issue the change addresses, e.g.
-  `440.fixed.md`. towncrier appends the issue link, so do not add it yourself.
+  `440.fixed.md`. towncrier appends the issue link after your text (so it
+  renders as `... text. ([#440](...))`); do not add it yourself.
 - `+<slug>.<type>.md`: for a change with no issue, e.g.
   `+doctor-device-slots.added.md`. The slug uses lowercase letters, digits and
   hyphens. Keep any links you need in the text.
