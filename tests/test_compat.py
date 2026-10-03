@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.compat import assert_compatible, check_compatibility
+from inspect_robots.compat import assert_compatible, check_compatibility, remap_observation
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import CompatibilityError, ConfigError
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -379,3 +379,78 @@ def test_remap_observation_unit() -> None:
     assert "eef_pos" not in remapped.state
     assert "base_rgb" in remapped.image_times
     assert remapped.image_times["base_rgb"] == 1.23
+
+
+def test_preflight_rejects_remapping_that_removes_required_source_key() -> None:
+    """Preflight rejects pairings when a remapping removes a required source key."""
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(state_keys=frozenset({"ee", "eef_pos"})),
+        )
+    )
+    # Embodiment provides eef_pos, but remap maps "ee": "eef_pos", removing eef_pos
+    with pytest.raises(CompatibilityError, match="policy requires state 'eef_pos'"):
+        assert_compatible(policy, CubePickEmbodiment(), remap={"ee": "eef_pos"})
+
+
+def test_preflight_accepts_remapping_with_explicit_identity_retaining_source() -> None:
+    """Preflight accepts pairings when an explicit identity mapping retains the source key."""
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(state_keys=frozenset({"ee", "eef_pos"})),
+        )
+    )
+    # Explicit identity mapping retains eef_pos while also providing alias ee
+    report = assert_compatible(
+        policy, CubePickEmbodiment(), remap={"ee": "eef_pos", "eef_pos": "eef_pos"}
+    )
+    assert report.ok
+
+    obs = Observation(
+        state={"eef_pos": np.array([1.0, 2.0])},
+    )
+    remapped = remap_observation(obs, {"ee": "eef_pos", "eef_pos": "eef_pos"})
+    assert "ee" in remapped.state
+    assert "eef_pos" in remapped.state
+
+
+def test_preflight_rejects_camera_remapping_removing_required_source() -> None:
+    """Preflight rejects pairings when camera remapping removes a required source camera."""
+    emb = CubePickEmbodiment()
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(
+                cameras=(
+                    CameraSpec(name="primary", height=32, width=32, channels=3),
+                    CameraSpec(name="top", height=32, width=32, channels=3),
+                )
+            ),
+        )
+    )
+    with pytest.raises(CompatibilityError, match="policy requires camera 'top'"):
+        assert_compatible(policy, emb, remap={"primary": "top"})
+
+
+def test_preflight_accepts_camera_remapping_with_explicit_identity() -> None:
+    """Preflight accepts camera remapping when explicit identity mapping retains source."""
+    emb = CubePickEmbodiment()
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(
+                cameras=(
+                    CameraSpec(name="primary", height=32, width=32, channels=3),
+                    CameraSpec(name="top", height=32, width=32, channels=3),
+                )
+            ),
+        )
+    )
+    report = assert_compatible(policy, emb, remap={"primary": "top", "top": "top"})
+    assert report.ok

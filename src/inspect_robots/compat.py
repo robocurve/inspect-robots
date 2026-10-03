@@ -135,6 +135,16 @@ def _resolve_keys(
     kind: str,
     issues: list[CompatIssue],
 ) -> None:
+    emb_to_policy: dict[str, list[str]] = {}
+    for pol_key, emb_key in remap.items():
+        emb_to_policy.setdefault(emb_key, []).append(pol_key)
+
+    effective_provided: set[str] = set()
+    for emb_key in provided:
+        targets = emb_to_policy.get(emb_key, [emb_key])
+        for target in targets:
+            effective_provided.add(target)
+
     for key in sorted(required):
         target = remap.get(key, key)
         if target not in provided:
@@ -144,6 +154,15 @@ def _resolve_keys(
                     f"missing_{kind}",
                     f"policy requires {kind} {key!r} (→ {target!r}) which the "
                     f"embodiment does not provide; provides {sorted(provided)}",
+                )
+            )
+        elif key not in effective_provided:
+            issues.append(
+                CompatIssue(
+                    "error",
+                    f"missing_{kind}",
+                    f"policy requires {kind} {key!r} which the embodiment does not "
+                    f"provide after remapping; effective keys: {sorted(effective_provided)}",
                 )
             )
 
