@@ -97,6 +97,8 @@ def _default_width() -> int:
 
 def _clip_tail(text: str, limit: int) -> str:
     """Return ``text`` unchanged if it fits ``limit`` characters, else just its trailing tail."""
+    if limit <= 0:
+        return ""
     return text if len(text) <= limit else text[-limit:]
 
 

@@ -23,6 +23,7 @@ import importlib.util
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -229,6 +230,68 @@ class ConformanceReport:
         lines = [f"{self.embodiment}: {len(self.issues)} issue(s)"]
         lines += [f"  [{i.severity}] {i.code}: {i.message}" for i in self.issues]
         return "\n".join(lines)
+
+
+def check_device_slots(
+    factory: object,
+    configured: Mapping[str, object],
+    *,
+    sysfs_net: Path | None = None,
+) -> list[ConformanceIssue]:
+    """Check for configured device-slot values that no longer resolve on this host.
+
+    For each ``DEVICE_SLOTS`` slot with a string value in ``configured``, return an
+    error finding when a camera or serial path does not exist or cannot be checked, or a CAN
+    interface is not present.
+
+    ``configured`` is the resolved ``[embodiment.args]``. A non-string or absent value is skipped by
+    this check. CAN validation checks presence only.
+
+    Returns findings in slot order.
+    """
+    # Lazy import because _setup imports conformance at module load.
+    from inspect_robots._setup import SYSFS_NET, _scan_can
+
+    net = SYSFS_NET if sysfs_net is None else sysfs_net
+    issues: list[ConformanceIssue] = []
+    for slot in device_slots(factory):
+        value = configured.get(slot.arg)
+        if not isinstance(value, str):
+            continue
+        if slot.kind == "can":
+            interfaces = _scan_can(net)
+            if value not in interfaces:
+                present = ", ".join(interfaces) or "none"
+                issues.append(
+                    ConformanceIssue(
+                        "error",
+                        "device",
+                        f"{slot.label} ({slot.arg}): CAN interface {value!r} not found; "
+                        f"present: {present}",
+                    )
+                )
+        else:
+            try:
+                exists = Path(value).exists()
+            except OSError as exc:
+                issues.append(
+                    ConformanceIssue(
+                        "error",
+                        "device",
+                        f"{slot.label} ({slot.arg}): {slot.kind} path {value!r} could not be "
+                        f"checked: {exc.strerror or exc}",
+                    )
+                )
+                continue
+            if not exists:
+                issues.append(
+                    ConformanceIssue(
+                        "error",
+                        "device",
+                        f"{slot.label} ({slot.arg}): {slot.kind} path {value!r} does not exist",
+                    )
+                )
+    return issues
 
 
 def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
