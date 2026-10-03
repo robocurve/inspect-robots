@@ -26,7 +26,10 @@ def test_encode_png_rejects_non_uint8() -> None:
         encode_png(np.zeros((2, 3, 3), dtype=np.float32))
 
 
-@pytest.mark.parametrize("shape", [(4,), (2, 3, 2)])
+@pytest.mark.parametrize(
+    "shape",
+    [(4,), (2, 3, 2), (0, 5), (5, 0), (0, 0, 3), (5, 0, 3), (0, 5, 1)],
+)
 def test_encode_png_rejects_unsupported_shapes(shape: tuple[int, ...]) -> None:
     with pytest.raises(ValueError, match="unsupported PNG array shape"):
         encode_png(np.zeros(shape, dtype=np.uint8))

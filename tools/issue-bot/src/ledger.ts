@@ -149,6 +149,45 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       .map((r) => JSON.parse(r.data) as Job)
       .filter((j) => !["done", "held"].includes(j.state));
   }
+  /** Read-only management export of an issue's latest job; never returns stage capabilities. */
+  async export(issue: number) {
+    const job = this.ctx.storage.sql
+      .exec<{ data: string }>(
+        "SELECT data FROM jobs WHERE issue=? ORDER BY created DESC,rowid DESC LIMIT 1",
+        issue,
+      )
+      .toArray()
+      .map((r) => JSON.parse(r.data) as Job)[0];
+    if (!job) return null;
+    const stages = this.ctx.storage.sql
+      .exec<{ data: string }>("SELECT data FROM stages")
+      .toArray()
+      .map((r) => JSON.parse(r.data) as Stage)
+      .filter((s) => s.request.jobId === job.id)
+      .sort((a, b) => a.started - b.started)
+      .map((s) => ({
+        kind: s.request.kind,
+        started: s.started,
+        failure: s.failure,
+        launchError: s.launchError ?? null,
+        result: s.output?.result ?? null,
+        files: s.output?.files.map((f) => f.path) ?? [],
+      }));
+    return {
+      id: job.id,
+      issue: job.issue,
+      state: job.state,
+      plan: job.plan,
+      planApproved: job.approvedPlan !== "",
+      feedback: job.feedback,
+      files: job.files,
+      summary: job.summary,
+      checks: job.checks,
+      published: job.published,
+      costMicros: await this.costs(issue),
+      stages,
+    };
+  }
   async queueState() {
     return {
       owner: this.owner(),
@@ -600,10 +639,15 @@ export class IssueLedger extends DurableObject<IssueEnv> {
         r.status === "CONFIRMED" &&
         r.serious &&
         r.evidence.length > 0 &&
-        r.limitations.length === 0 &&
         !job.duplicate;
+      // Triage limitations are disclosed, not disqualifying: the plan review, code
+      // review (which requires zero limitations), CI and a human merge gate the fix.
       // The persisted legacy flag records an existing fix PR, not a duplicate issue.
-      const status = job.duplicate ? "FIX_PROPOSED" : r.status;
+      const status = job.duplicate
+        ? "FIX_PROPOSED"
+        : serious
+          ? "FIXING"
+          : r.status;
       this.notice(job, status, r.summary, [...r.evidence, ...r.limitations]);
       job.next = serious ? "plan" : null;
       if (!serious) job.state = "done";
@@ -613,10 +657,16 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       job.plan = r.plan;
       job.next = "plan_review";
     } else if (kind === "plan_review") {
-      if (approve) {
+      // Unlike code review, the plan-review policy never asks for zero limitations;
+      // they are caveats for implementation, not objections. Findings still revise.
+      if (r.status === "APPROVE" && r.findings.length === 0) {
         job.approvedPlan = await digest(s.request.plan);
+        job.feedback = r.limitations.join("\n");
         job.next = "implement";
-      } else if (r.status === "REQUEST_CHANGES" && ++job.planRounds < 3) {
+      } else if (
+        ["REQUEST_CHANGES", "APPROVE"].includes(r.status) &&
+        ++job.planRounds < 3
+      ) {
         job.feedback = [...r.findings, ...r.limitations].join("\n");
         job.next = "plan";
       } else return this.hold(id, "plan_review_not_approved");

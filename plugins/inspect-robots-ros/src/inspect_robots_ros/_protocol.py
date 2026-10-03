@@ -35,10 +35,15 @@ class PublishedMessage:
 
 @dataclass(frozen=True)
 class ServiceResponse:
-    """A service reply correlated to a prior ``call_service`` operation."""
+    """A service reply correlated to a prior ``call_service`` operation.
+
+    ``values`` is the response object on success. On failure rosbridge sends
+    the error text as a bare string instead, so a ``result=False`` reply may
+    carry a ``str``.
+    """
 
     request_id: str
-    values: JsonObject
+    values: JsonObject | str
     result: bool
 
 
@@ -147,12 +152,19 @@ def parse_incoming(message: Mapping[str, Any]) -> IncomingMessage | None:
         return PublishedMessage(topic=topic, msg=msg)
     if op == "service_response":
         request_id = _required_str(message, "id")
-        values = _required_object(message, "values")
         result = message.get("result")
         if not isinstance(result, bool):
             raise RosbridgeError(
                 "invalid_frame", "service_response field 'result' must be a boolean"
             )
+        # rosbridge reports a failed call (e.g. a missing service) with the
+        # exception text as a string in "values", not a JSON object.
+        raw_values = message.get("values")
+        values: JsonObject | str = (
+            raw_values
+            if not result and isinstance(raw_values, str)
+            else _required_object(message, "values")
+        )
         return ServiceResponse(request_id=request_id, values=values, result=result)
     if op == "status":
         level = _required_str(message, "level")

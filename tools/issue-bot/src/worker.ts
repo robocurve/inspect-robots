@@ -259,19 +259,11 @@ export async function tick(env: IssueEnv, id: string) {
       await ledger.refreshUnstarted(id, current);
       job = (await ledger.job(id))!;
     }
-    const activeStage = job.stage ? await ledger.stage(job.stage) : null;
-    // Read-only triage can finish on its recorded immutable base. Never carry
-    // stale evidence into planning, implementation, or publication of a fix.
-    // A launch retry replaces a consumed triage stage and keeps the same exemption.
-    const triaging =
-      job.next === "triage" ||
-      (activeStage?.request.kind === "triage" && !activeStage.consumed);
-    if (
-      current.state !== "open" ||
-      current.revision !== job.issue.revision ||
-      (current.base !== job.issue.base && !triaging)
-    ) {
-      await ledger.hold(id, "issue_or_base_changed");
+    // Every stage runs on the base pinned at admission, even after main advances:
+    // a busy main would otherwise stop every multi-stage fix. The publisher opens
+    // the PR on that base; GitHub mergeability and CI judge it against newer main.
+    if (current.state !== "open" || current.revision !== job.issue.revision) {
+      await ledger.hold(id, "issue_changed");
       if (job.stage) {
         const s = await ledger.stage(job.stage);
         if (s && !s.cleaned) {
@@ -372,19 +364,31 @@ export async function deliver(env: IssueEnv) {
 }
 export class IssueWorkflow extends WorkflowEntrypoint<
   IssueEnv,
-  { id?: string; issue?: number; inspect?: boolean; requestId?: string }
+  {
+    id?: string;
+    issue?: number;
+    inspect?: boolean;
+    export?: number;
+    requestId?: string;
+  }
 > {
   async run(
     event: WorkflowEvent<{
       id?: string;
       issue?: number;
       inspect?: boolean;
+      export?: number;
       requestId?: string;
     }>,
     step: WorkflowStep,
   ) {
     const ledger = this.env.LEDGER.getByName("coordinator");
     if (event.payload.inspect) return ledger.queueState();
+    if (event.payload.export !== undefined) {
+      if (!Number.isSafeInteger(event.payload.export))
+        throw new Error("invalid_issue");
+      return ledger.export(event.payload.export);
+    }
     const id =
       event.payload.id ??
       (await step.do("enqueue management trial", () =>

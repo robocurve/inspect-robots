@@ -25,7 +25,13 @@ from inspect_robots.errors import EmbodimentFault
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import operator_scorer
-from inspect_robots.session import _ESC_GRACE_S, _NOTES_PROMPT, _PROMPT, OperatorSession
+from inspect_robots.session import (
+    _ESC_GRACE_S,
+    _NOTES_PROMPT,
+    _PROMPT,
+    OperatorSession,
+    _clip_tail,
+)
 
 
 class _RecordingConsole(OperatorConsole):
@@ -2074,3 +2080,15 @@ def test_atexit_restore_stops_a_live_pump() -> None:
     finally:
         session.end_trial()
     assert len(restores) == 1
+
+
+def test_clip_tail() -> None:
+    assert _clip_tail("hello", 10) == "hello"
+    assert _clip_tail("hello", 5) == "hello"
+    assert _clip_tail("hello", 3) == "llo"
+    assert _clip_tail("hello", 0) == ""
+    assert _clip_tail("hello", -1) == ""
+    assert _clip_tail("hello", -5) == ""
+    assert _clip_tail("", 5) == ""
+    assert _clip_tail("", 0) == ""
+    assert _clip_tail("", -2) == ""

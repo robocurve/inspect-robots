@@ -188,6 +188,15 @@ def test_parse_value_scalars() -> None:
     assert parse_value("42") == 42
     assert parse_value("2.5") == 2.5
     assert parse_value("hello") == "hello"
+    assert parse_value("'none'") == "none"
+    assert parse_value('"true"') == "true"
+    assert parse_value("nan") == "nan"
+    assert parse_value("NaN") == "NaN"
+    assert parse_value("inf") == "inf"
+    assert parse_value("-inf") == "-inf"
+    assert parse_value("+inf") == "+inf"
+    assert parse_value("infinity") == "infinity"
+    assert parse_value("-infinity") == "-infinity"
 
 
 _SIM_CONFIG = """
@@ -310,6 +319,30 @@ def test_set_default_validates_and_round_trips_rerun_save(tmp_path: Path) -> Non
         set_default(env, "rerun_save", "sometimes")
     set_default(env, "rerun_save", "false")
     assert load_defaults(env).rerun_save is False
+
+
+def test_set_default_validates_and_round_trips_max_steps(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    with pytest.raises(SystemExit, match="max_steps must be an integer >= 1"):
+        set_default(env, "max_steps", "0")
+    set_default(env, "max_steps", "350")
+    assert load_defaults(env).max_steps == 350
+
+
+def test_set_default_validates_and_round_trips_rerun_port(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    with pytest.raises(SystemExit, match="rerun_port must be an integer in 1-65535"):
+        set_default(env, "rerun_port", "99999")
+    set_default(env, "rerun_port", "9876")
+    assert load_defaults(env).rerun_port == 9876
+
+
+def test_set_default_validates_boolean_keys(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    with pytest.raises(SystemExit, match="rerun must be true or false"):
+        set_default(env, "rerun", "maybe")
+    set_default(env, "rerun", "true")
+    assert load_defaults(env).rerun is True
 
 
 def test_config_rerun_port_parses_int(tmp_path: Path) -> None:

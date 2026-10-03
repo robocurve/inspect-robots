@@ -30,8 +30,10 @@ def encode_png(image: npt.NDArray[Any]) -> bytes:
         arr = arr[:, :, np.newaxis]
     if arr.ndim != 3 or arr.shape[2] not in _COLOR_TYPE_BY_CHANNELS:
         raise ValueError(f"unsupported PNG array shape {arr.shape}")
-    arr = np.ascontiguousarray(arr)
     height, width, channels = arr.shape
+    if height == 0 or width == 0:
+        raise ValueError(f"unsupported PNG array shape {arr.shape}; width and height must be > 0")
+    arr = np.ascontiguousarray(arr)
     color_type = _COLOR_TYPE_BY_CHANNELS[channels]
     header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
     raw = b"".join(b"\x00" + arr[row].tobytes() for row in range(height))

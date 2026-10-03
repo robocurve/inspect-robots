@@ -194,6 +194,57 @@ describe("durable issue coordinator", () => {
       );
     }
   });
+  it("sends a serious confirmed bug to planning despite disclosed triage limitations", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(
+      l,
+      id,
+      output("CONFIRMED", {
+        result: result("CONFIRMED", {
+          limitations: ["Full-suite and cross-platform checks were not run."],
+        }),
+      }),
+    );
+    expect((await l.job(id))?.state).toBe("running");
+    expect((await l.job(id))?.next).toBe("plan");
+    const notice = (await l.outbox())[0].publication;
+    expect(notice.status).toBe("FIXING");
+    expect(notice.details).toContain(
+      "Full-suite and cross-platform checks were not run.",
+    );
+  });
+  it("passes plan-review limitations to implementation and revises on findings", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(l, id, output("CONFIRMED"));
+    await run(l, id, output("PLAN"));
+    await run(
+      l,
+      id,
+      output("APPROVE", {
+        result: result("APPROVE", { findings: ["Cover the two-epoch case."] }),
+      }),
+    );
+    expect((await l.job(id))?.next).toBe("plan");
+    expect((await l.job(id))?.feedback).toBe("Cover the two-epoch case.");
+    await run(l, id, output("PLAN"));
+    await run(
+      l,
+      id,
+      output("APPROVE", {
+        result: result("APPROVE", {
+          limitations: ["Hardware behaviour was not exercised."],
+        }),
+      }),
+    );
+    expect((await l.job(id))?.next).toBe("implement");
+    expect((await l.job(id))?.feedback).toBe(
+      "Hardware behaviour was not exercised.",
+    );
+  });
   it("deduplicates concurrent explicit retries of one issue", async () => {
     const l = ledger();
     const ids = await Promise.all([
@@ -380,8 +431,8 @@ describe("queue base freshness", () => {
     expect((await l.outbox())[0].publication.issue.base).toBe(issue.base);
     expect(runner.start).toHaveBeenCalledOnce();
   });
-  it("cannot plan a serious fix using triage from an outdated base", async () => {
-    const { l, id, current, runner, e } = await fixture();
+  it("plans a serious fix on its pinned base after main advances", async () => {
+    const { l, issue, id, current, runner, e } = await fixture();
     await tick(e, id);
     const stage = (await l.stage((await l.job(id))!.stage!))!;
     current.base = "c".repeat(40);
@@ -392,11 +443,18 @@ describe("queue base freshness", () => {
     await tick(e, id);
     expect((await l.job(id))?.next).toBe("plan");
     await tick(e, id);
-    expect((await l.job(id))?.state).toBe("held");
-    expect(runner.start).toHaveBeenCalledOnce();
-    expect((await l.outbox()).map((x) => x.publication.status)).toContain(
-      "REQUIRE_REVIEWER",
-    );
+    expect((await l.job(id))?.state).toBe("running");
+    expect(runner.start).toHaveBeenCalledTimes(2);
+    expect(
+      (
+        runner.start.mock.calls[1] as unknown as [
+          { kind: string; base: string },
+        ]
+      )[0],
+    ).toMatchObject({ kind: "plan", base: issue.base });
+    expect((await l.outbox()).map((x) => x.publication.status)).toEqual([
+      "FIXING",
+    ]);
   });
   it.each([false, true])(
     "still holds edited issues (already started: %s)",
@@ -412,6 +470,38 @@ describe("queue base freshness", () => {
       expect((await l.queueState()).owner).toBeNull();
     },
   );
+});
+describe("management export", () => {
+  it("returns the latest job's plan, files and stage results without capabilities", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(l, id, output("CONFIRMED"));
+    await run(l, id, output("PLAN"));
+    await run(l, id, output("APPROVE"));
+    const files = [
+      { path: "src/test.py", content: "fixed\n", mode: "100644" as const },
+    ];
+    await run(l, id, output("IMPLEMENTED", { files }));
+    const exported = (await l.export(snapshot.number))!;
+    expect(exported.id).toBe(id);
+    expect(exported.planApproved).toBe(true);
+    expect(exported.files).toEqual(files);
+    expect(exported.stages.map((s) => s.kind)).toEqual([
+      "triage",
+      "plan",
+      "plan_review",
+      "implement",
+    ]);
+    expect(exported.stages[3].files).toEqual(["src/test.py"]);
+    const text = JSON.stringify(exported);
+    for (const stageId of [(await l.job(id))!.stage!]) {
+      const stage = (await l.stage(stageId))!;
+      expect(text).not.toContain(stage.request.token);
+      expect(text).not.toContain(stage.request.checkpointToken);
+    }
+    expect(await l.export(9999)).toBeNull();
+  });
 });
 describe("stage launch failures", () => {
   function fixture(start: () => Promise<void>, phase = "not_started") {

@@ -18,7 +18,8 @@ barrier against bot merges into main.
 
 | Status | Meaning and owner |
 | --- | --- |
-| CONFIRMED | Concrete evidence establishes the bug; Jay owns judgment. Serious, bounded, reproducible defects enter the fix workflow. |
+| FIXING | A confirmed serious defect entered the plan, implementation and independent review workflow; no action needed yet. Triage and plan-review limitations are listed and passed on but do not block the fix; code review still requires none. |
+| CONFIRMED | Concrete evidence establishes the bug, but it was not judged serious, so no automatic fix was started; Jay owns judgment. |
 | NEEDS_INFO | Ask the actual issue author for specific missing evidence. Deleted/bot authors fall back to Jay. |
 | NOT_REPRODUCED | Explain the actual checks and limits; tag Jay. |
 | DUPLICATE | Another issue reports the same bug; cite that issue and tag Jay. |
@@ -56,10 +57,14 @@ container destruction succeeds. Comment delivery, including stopped-work
 notices, uses a durable outbox.
 
 Input is pinned to a main commit when the issue reaches the front of the queue,
-and to semantic issue title/body/state. Triage already running can finish on
-its recorded commit after main advances. The bot's comments do not invalidate
-that input. An issue edit stops triage; a main change stops subsequent fix
-stages instead of silently rebasing an approved artifact. Duplicate
+and to semantic issue title/body/state. Every stage, including planning,
+implementation and review, runs on that recorded commit after main advances,
+and the fix PR is committed on it; nothing is silently rebased. Publishing
+requires the pinned commit to remain in main's history (`stale_base` otherwise),
+and a PR GitHub reports as conflicting holds with `merge_conflict` instead of
+waiting for CI that never runs; that draft PR stays open, so close it before
+requesting `/triage` again or the new run stops at the competing-fix check. The bot's comments do not invalidate that input.
+An issue edit or closure stops the workflow (`issue_changed`). Duplicate
 checks run at intake and again before publishing/readying a fix. No backlog is
 automatically imported.
 
@@ -118,7 +123,9 @@ New `issues.opened` events trigger triage. Only Jay's immutable GitHub user ID
 can request `/triage` in an issue comment. Explicit retries share the original
 issue budget and cannot duplicate an active issue job. A management-only
 Cloudflare workflow payload `{"issue":401}` can test a Jay-authored existing
-issue; `{"inspect":true}` reports saved state without model spending or posting.
+issue; `{"inspect":true}` reports saved state without model spending or posting. `{"export":491}`
+returns that issue's latest job (plan, changed files, review findings and stage
+results, never stage capabilities) so a held fix can be recovered by hand.
 
 Set `ENABLED=false` to stop new stage admission and provider requests. Existing
 result cleanup and pending public notices can still be reconciled. An expired

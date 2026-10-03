@@ -128,10 +128,35 @@ and resolve by name in `eval()` / the CLI.
 1. Branch from `main`.
 2. Make the change with tests and docs (keep coverage at 100%).
 3. Ensure all gates pass — the pre-commit/pre-push hooks run them for you.
-4. Add a `CHANGELOG.md` entry under "Unreleased".
+4. Add a changelog fragment: `changelog.d/<issue>.<type>.md`, or
+   `changelog.d/+<slug>.<type>.md` if there is no issue (slug: lowercase
+   letters, digits, hyphens). `<type>` is `added`, `changed`, `deprecated`,
+   `removed`, `fixed` or `security`. See `changelog.d/README.md`. Do not edit
+   `CHANGELOG.md`; that is how PRs stopped conflicting with each other.
 5. Open a PR describing the motivation and approach. CI re-runs lint, strict
    typing, the test matrix, and the 100% coverage gate as **required, blocking
    checks** before the PR can merge.
 
 By contributing you agree your contributions are licensed under the project's
 [MIT license](LICENSE).
+
+## Releasing (maintainers)
+
+Releases are dispatched from Actions (Release, Run workflow, pick
+patch/minor/major). Compile the changelog in a PR first:
+
+1. Work out the version the workflow will tag: the latest `v*` tag plus the
+   bump you will pick (`git tag --list 'v*' --sort=-v:refname | head -1`).
+2. Preview with `uv run towncrier build --draft --version X.Y.Z`, then run
+   `uv run towncrier build --version X.Y.Z --yes`. This writes
+   `## [X.Y.Z] - <date>` into `CHANGELOG.md` and deletes the compiled
+   fragments. Commit both in a PR (the plugin version-bump PR, if there is one).
+3. After it merges, dispatch the release with the same bump.
+
+Fragments merged after step 2, or a skipped changelog PR, are not lost: those
+entries are listed under a later version. towncrier's output uses tight lists
+and indents wrapped lines; leave that as is.
+
+Before merging a PR that still edits `CHANGELOG.md` (opened before fragments),
+move its entry into a `changelog.d/` fragment on the PR branch and drop the
+`CHANGELOG.md` change, whether or not it conflicts.
