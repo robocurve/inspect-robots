@@ -260,6 +260,15 @@ def test_frame_store_sanitizes_without_collisions(tmp_path: Path) -> None:
     assert Path(a.path).exists() and Path(b.path).exists()
 
 
+def test_frame_store_rejects_invalid_step(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    img = np.zeros((2, 2, 3), dtype=np.uint8)
+    bad_steps: tuple[Any, ...] = (-1, -10, True, False, "0", 1.5)
+    for bad in bad_steps:
+        with pytest.raises(ValueError, match="step t must be an integer >= 0"):
+            store.put("trial1", bad, "cam", img)
+
+
 def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     store = FrameStore(str(tmp_path / "frames"))
     record = _run(ScriptedPolicy(), CubePickEmbodiment(), frame_store=store)

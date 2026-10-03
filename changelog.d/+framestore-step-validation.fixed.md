@@ -1,0 +1,1 @@
+**Core:** Validate step index `t` in `FrameStore.put` to require a non-negative integer, preventing negative formatting (`-00001`) from failing stream discovery regex and getting dropped during video export.

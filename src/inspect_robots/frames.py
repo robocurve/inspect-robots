@@ -56,6 +56,8 @@ class FrameStore:
 
     def put(self, trial_id: str, t: int, camera: str, image: npt.NDArray[np.uint8]) -> FrameRef:
         """Persist one camera frame and return its lightweight reference."""
+        if not isinstance(t, int) or isinstance(t, bool) or t < 0:
+            raise ValueError(f"step t must be an integer >= 0, got {t!r}")
         path = self.root / f"{_safe(trial_id)}_{_safe(camera)}_{t:06d}.npy"
         np.save(path, image)
         self.count += 1
