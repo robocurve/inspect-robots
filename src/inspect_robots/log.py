@@ -24,13 +24,27 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+import numpy as np
+
+
+def _numpy_scalar_to_python(value: object) -> object:
+    # By kind, as json_log._sanitize does: .item() would turn ns datetimes into bare ints.
+    if isinstance(value, np.bool_):
+        return bool(value)
+    # Kind "i"/"u" only: timedelta64 subclasses np.integer but int() would drop its unit.
+    if isinstance(value, np.integer) and value.dtype.kind in "iu":
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
 
 def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """Deep-copy each JSON-encodable value and omit values encoding rejects."""
+    """Deep-copy each JSON-encodable value (NumPy numbers as Python ones); omit the rest."""
     safe: dict[str, Any] = {}
     for key, value in metadata.items():
         try:
-            safe[key] = json.loads(json.dumps(value))
+            safe[key] = json.loads(json.dumps(value, default=_numpy_scalar_to_python))
         except (TypeError, ValueError, OverflowError):
             continue
     return safe
