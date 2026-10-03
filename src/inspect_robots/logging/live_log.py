@@ -39,7 +39,7 @@ class _LiveScene:
     scene_id: str
     status: str = "success"
     error: str | None = None
-    epochs: list[dict[str, float]] = field(default_factory=list)
+    epochs: list[dict[str, float | None]] = field(default_factory=list)
     operator_judgements: list[str | None] = field(default_factory=list)
     judgement_sources: list[str | None] = field(default_factory=list)
     operator_notes: list[str | None] = field(default_factory=list)

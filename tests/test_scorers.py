@@ -15,8 +15,10 @@ from inspect_robots.scorer import (
     min_distance_to_goal,
     operator_scorer,
     reached_goal_state,
+    reduce_mean,
     reduce_scores,
     success_at_end,
+    value_to_float,
 )
 from inspect_robots.types import Action, Observation, StepResult
 
@@ -115,6 +117,31 @@ def test_mean_over_nonnumeric_string_raises() -> None:
     scores = [Score(value="left"), Score(value="right")]
     with pytest.raises(TypeError, match="non-numeric"):
         reduce_scores("mean", scores)
+
+
+def test_abstention_stays_none_instead_of_counting_as_zero() -> None:
+    assert value_to_float(None) is None
+    assert value_to_float(False) == 0.0
+
+
+def test_reducers_skip_abstained_epochs() -> None:
+    scores = [Score(value=True), Score(value=None), Score(value=False)]
+    assert reduce_scores("mean", scores).value == 0.5
+    assert reduce_scores("min", scores).value == 0.0
+    categorical = [Score(value=None), Score(value=None), Score(value="a")]
+    assert reduce_scores("mode", categorical).value == "a"
+    assert reduce_scores("pass_at_2", scores).value == pytest.approx(1.0)
+
+
+def test_all_abstained_epochs_reduce_to_an_abstention() -> None:
+    assert reduce_scores("mean", [Score(value=None), Score(value=None)]).value is None
+    with pytest.raises(ValueError, match="unknown epoch reducer"):
+        reduce_scores("nope", [Score(value=None)])
+
+
+def test_numeric_reducer_called_directly_on_an_abstention_raises() -> None:
+    with pytest.raises(TypeError, match="abstained"):
+        reduce_mean([Score(value=None)])
 
 
 def test_pass_at_k() -> None:

@@ -277,6 +277,56 @@ def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
         assert "each agent turn, notes, and operator/voice input, updating live" in out
 
 
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_eval_and_eval_set_forward_provenance_flags(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+
+    captured_kwargs: dict[str, object] = {}
+    log = _step_limit_log(task="cubepick-reach", reasons=("success",))
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        captured_kwargs.update(kwargs)
+        return [log]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        captured_kwargs.update(kwargs)
+        return True, [log]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(
+        [
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+            "--environment-id",
+            "test-env-123",
+            "--environment-revision",
+            "rev-sha-abc",
+            "--policy-checkpoint",
+            "ckpt-v1.0",
+        ]
+    )
+
+    assert main(argv) == 0
+    assert captured_kwargs["environment_id"] == "test-env-123"
+    assert captured_kwargs["environment_revision"] == "rev-sha-abc"
+    assert captured_kwargs["policy_checkpoint"] == "ckpt-v1.0"
+
+
 @pytest.mark.parametrize(
     ("env", "platform", "expected"),
     [
@@ -334,11 +384,49 @@ def test_live_view_tip_uses_local_and_headless_variants_with_quoted_log_dir(
     )
     remote = capsys.readouterr().out
     assert f"inspect-robots view {shlex.quote(str(log_dir))} --serve --host 0.0.0.0" in remote
-    assert "open http://[2001:db8::10]:8300/" in remote
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "192.0.2.2 50123 192.0.2.10 22", "DISPLAY": ":0"},
+    )
+    assert "open http://192.0.2.10:8300/" in capsys.readouterr().out
 
     monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
     cli._announce_live_view(args, resolved, {"SSH_CONNECTION": "malformed"})
     assert "open http://robot-host:8300/" in capsys.readouterr().out
+
+
+def test_live_view_tip_never_points_at_an_ipv6_address_the_ipv4_server_cannot_accept(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The tip pairs its URL with `view --serve --host 0.0.0.0`, and that
+    # ThreadingHTTPServer listens on IPv4 only: an SSH session that arrived
+    # over IPv6 must not be sent to http://[<its IPv6 address>]:8300/.
+    args = cli.build_parser().parse_args(
+        ["run", "--task", "cubepick-reach", "--policy", "agent", "--embodiment", "cubepick"]
+    )
+    resolved = cli._ResolvedComponents(
+        None,
+        "agent",
+        "cli",
+        None,
+        "arm",
+        "cli",
+        None,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr("socket.gethostname", lambda: "robot-host")
+
+    cli._announce_live_view(
+        args,
+        resolved,
+        {"SSH_CONNECTION": "2001:db8::2 50123 2001:db8::10 22", "DISPLAY": ":0"},
+    )
+    remote = capsys.readouterr().out
+    assert "--serve --host 0.0.0.0" in remote
+    assert "2001:db8::10" not in remote
+    assert "open http://robot-host:8300/" in remote
 
 
 @pytest.mark.parametrize("command", ["run", "eval-set"])
@@ -1547,7 +1635,7 @@ def test_eval_set_summary_formats_none_metric_as_na(
     log = _step_limit_log(task="unscored_task")
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_eval_set_summary(True, [log], "logs")
     out = capsys.readouterr().out
@@ -1824,7 +1912,7 @@ def _directory_view_log(
     created: str,
     instruction: str = "pick up the cube",
     status: str = "success",
-    metrics: dict[str, float] | None = None,
+    metrics: dict[str, float | None] | None = None,
     errored_trials: int = 0,
 ) -> EvalLog:
     log = _step_limit_log(reasons=("success",))
@@ -1896,7 +1984,7 @@ def test_view_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -2418,7 +2506,7 @@ def test_view_directory_includes_log_with_sanitized_null_metric(
     logs.mkdir()
     log = _directory_view_log(
         created="2026-07-30T12:00:00Z",
-        metrics={"min_distance_to_goal": None},  # type: ignore[dict-item]
+        metrics={"min_distance_to_goal": None},
     )
     _write_log(log, logs, "null-metric.json")
 
@@ -3634,7 +3722,7 @@ def test_inspect_renders_null_metric_from_sanitized_non_finite_score(
     log = _step_limit_log(reasons=("success",))
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"min_distance_to_goal": None}),
     )
     path = _write_log(log, tmp_path, "null-metric.json")
 
@@ -4065,7 +4153,7 @@ def test_run_summary_formats_none_metric_as_na(
     log = _transcript_log()
     log = dataclasses.replace(
         log,
-        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),  # type: ignore[dict-item]
+        results=dataclasses.replace(log.results, metrics={"custom_metric": None}),
     )
     cli._print_run_summary(log, "run.json", is_adhoc=False)
     out = capsys.readouterr().out
@@ -8207,3 +8295,29 @@ def test_config_show_displays_the_grader_default(
     out = capsys.readouterr().out
     assert "grader" in out
     assert "vlm" in out
+
+
+def test_inspect_and_view_show_abstention_counts_beside_metrics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A metric averaged over judged trials only must show how many abstained."""
+    log = _step_limit_log(reasons=("success",))
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(
+            log.results,
+            metrics={"judged": 0.5, "other": 1.0},
+            abstentions={"judged": 3},
+        ),
+    )
+    path = _write_log(log, tmp_path, "abstained.json")
+
+    assert main(["inspect", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "judged: 0.5 (3 abstained)" in out
+    assert "other: 1\n" in out
+
+    assert main(["view", str(path)]) == 0
+    document = path.with_suffix(".html").read_text(encoding="utf-8")
+    assert '<div class="stat-name">judged (3 abstained)</div>' in document
+    assert '<div class="stat-name">other</div>' in document
