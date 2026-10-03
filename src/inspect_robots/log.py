@@ -181,7 +181,19 @@ class EvalLog:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the complete log to nested dictionaries and sequences."""
-        return asdict(self)
+        data = asdict(self)
+        for sample in data.get("samples", []):
+            init_seed = sample.pop("init_seed", None)
+            trial_seeds = sample.pop("trial_seeds", ())
+            prov: dict[str, Any] = {}
+            if init_seed is not None:
+                prov["init_seed"] = init_seed
+            if trial_seeds:
+                prov["trial_seeds"] = list(trial_seeds)
+            if prov:
+                metadata = sample.setdefault("scene_metadata", {})
+                metadata["_inspect_seeds"] = prov
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalLog:
@@ -192,8 +204,27 @@ class EvalLog:
                 f"this Inspect Robots reads version {SCHEMA_VERSION}"
             )
         samples = []
-        for raw in data["samples"]:
+        for raw in data.get("samples", ()):
             sample = dict(raw)
+            metadata = dict(sample.get("scene_metadata", {}))
+            prov = metadata.pop("_inspect_seeds", None)
+            if isinstance(prov, dict):
+                sample["scene_metadata"] = metadata
+                init_seed = prov.get("init_seed")
+                trial_seeds = tuple(prov.get("trial_seeds", ()))
+            else:
+                init_seed = None
+                trial_seeds = ()
+            # Top-level fallback or override if explicitly provided
+            if "init_seed" in sample:
+                init_seed = sample.pop("init_seed")
+            else:
+                sample.pop("init_seed", None)
+            if "trial_seeds" in sample:
+                raw_trial_seeds = sample.pop("trial_seeds")
+                trial_seeds = tuple(raw_trial_seeds) if raw_trial_seeds is not None else ()
+            else:
+                sample.pop("trial_seeds", None)
             # JSON has no tuple type: coerce the sequence fields it deserializes
             # as lists back into tuples so a read-back log is genuinely immutable
             # too, not just one freshly returned by eval(). ``.get`` covers a log
@@ -208,8 +239,8 @@ class EvalLog:
             sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
-            sample["init_seed"] = sample.get("init_seed")
-            sample["trial_seeds"] = tuple(sample.get("trial_seeds", ()))
+            sample["init_seed"] = init_seed
+            sample["trial_seeds"] = trial_seeds
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],
