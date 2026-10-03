@@ -9,7 +9,7 @@ const reasons = {
   uninspectable_diff: ['GitHub omitted a required text diff, and the file could not be verified as empty.', 'Inspect the omitted diff and resolve the coverage gap before rerunning.'],
   binary_file: ['A required file contains binary data that the text reviewer cannot inspect.', 'Arrange a manual review of the binary change and resolve the inspection gap.'],
   review_too_large: ['The PR exceeds the reviewer’s file-count or total-context limit.', 'Add bounded handling for this PR’s size or review it manually.'],
-  context_too_large: ['The review context exceeds the 200,000-token limit.', 'Reduce duplicated review context or review the PR manually.'],
+  context_too_large: ['The review context exceeds the reviewer’s size limit.', 'Reduce duplicated review context or review the PR manually.'],
   insufficient_run_budget: ['A fresh review needs at least $2 of remaining allowance; this revision has less.', 'The service did not start a sandbox or make a model call. Review manually or explicitly authorize a budget adjustment before retrying.'],
   contributor_budget_exhausted: ['This contributor has used their $20 monthly review allowance across their PRs.', 'The service did not start a sandbox or make a model call. Review manually; the allowance resets at the start of the next UTC month.'],
   budget_exhausted: ['The remaining review budget cannot cover another model call.', 'Check the per-head, per-PR and monthly spending limits before requesting another run.'],
