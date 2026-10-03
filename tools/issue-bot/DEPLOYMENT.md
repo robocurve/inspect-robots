@@ -126,3 +126,27 @@ version `baecba13-51b9-470f-8933-3675095b4664` contains the repair. Publisher an
 runner were not changed. Backlog scope is issues 7, 236, 263, 303, 332, 354, 355,
 370, 396, 407, and 408; the completed #401 trial is excluded. Recovery uses
 request ID `backlog-queue-repair-20260921` without resetting prior spending.
+
+## Launch-failure handling and serious-bug fix gate
+
+On 2026-10-03 (UTC), deployed main `d9a9c61e`, which contains #458 (launch
+failures recorded, never-started stages detected after five minutes and replaced
+once when the model was never reached) and #526 (triage and plan-review
+limitations no longer block a serious confirmed bug from the fix workflow;
+`FIXING` notices). The motivating incident was #480: a 2026-09-24 stage spent only
+the $0.10 container allowance and surfaced 45 minutes later as `stage_timeout`.
+
+The predeployment `{"inspect":true}` workflow reported no slot owner, no jobs and
+an empty outbox. Deployment order was coordinator, runner, then publisher, so the
+publisher's new `CONFIRMED` wording never pairs with the old coordinator gate.
+The first coordinator deploy uploaded the script but returned
+`workflows.api.error.internal_server` while updating triggers; an immediate
+redeploy succeeded.
+
+- Coordinator: `24e377cf-9ccc-43b8-96a0-fa7aac4d8984`
+- Runner: `e6dfb53d-cbbd-4438-b4f7-42fe903918da` (image unchanged; existing remote image reused)
+- Publisher: `c474ae70-efde-4599-b223-d7b5115ad02a`
+
+Health returned `{"ok":true,"enabled":true}` and an unsigned `/webhook` POST
+returned HTTP 401. Issue #480 was re-requested with `/triage` as the first live
+fix-workflow trial.
