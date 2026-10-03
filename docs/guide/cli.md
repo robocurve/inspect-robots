@@ -43,7 +43,9 @@ Resolved in order (first hit wins):
 
 The config file itself is selected in this order: `--config PATH`,
 `$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
-`HOME`. Use a separate file for each rig without changing the config home for
+`HOME`. Native Windows shells usually set neither, so there the path falls back
+to `%APPDATA%\inspect-robots\config.ini`, then
+`%USERPROFILE%\.config\inspect-robots\config.ini`. Use a separate file for each rig without changing the config home for
 the whole process:
 
 ```bash
