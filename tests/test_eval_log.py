@@ -120,6 +120,14 @@ def test_results_without_errored_trials_reads_with_default() -> None:
     assert log.results.errored_trials == 0
 
 
+def test_eval_log_from_dict_without_samples_defaults_to_empty_tuple() -> None:
+    """Logs without a samples key must deserialize with samples as an empty tuple."""
+    data = _golden_log().to_dict()
+    del data["samples"]
+    log = EvalLog.from_dict(data)
+    assert log.samples == ()
+
+
 def test_golden_log_reads_back(tmp_path: Path) -> None:
     # A log written today must remain readable: persist, then read.
     path = tmp_path / "golden.json"
