@@ -6,8 +6,10 @@ import configparser
 import math
 import os
 import re
+import shutil
 import struct
 import sys
+import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1752,11 +1754,16 @@ def run_setup(
         managed_policy_args=managed_policy_args,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    if path.is_file():
-        path.replace(path.with_name(path.name + ".bak"))
-    tmp.replace(path)
+    bak = path.with_name(path.name + ".bak")
+    tmp = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        if path.is_file():
+            shutil.copy2(path, bak)
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
     print(_paint(f"Wrote {path}", _GREEN, out), file=out)
     # Repeat the plugin reminder where it cannot scroll away: the per-prompt
     # warning is easy to miss while Enter-accepting the suggestions.

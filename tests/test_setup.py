@@ -2137,6 +2137,65 @@ def test_run_setup_existing_valid_config_supplies_prompt_defaults_and_backup(
     assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == old
 
 
+def test_run_setup_retains_active_config_and_cleans_tmp_if_replacement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    old = (
+        "[defaults]\n"
+        "policy = old-policy\n"
+        "embodiment = old-body\n"
+        "scorer = old-scorer\n"
+        "max_steps = 88\n"
+        "rerun = false\n"
+        "store_frames = false\n"
+    )
+    path.write_text(old, encoding="utf-8")
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", ""])
+
+    orig_replace = Path.replace
+
+    def _fault_replace(self: Path, target: Path | str) -> Path:
+        target_path = Path(target)
+        if target_path == path:
+            raise OSError("simulated publish failure")
+        return orig_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _fault_replace)
+
+    with pytest.raises(OSError, match="simulated publish failure"):
+        run_setup(
+            {"XDG_CONFIG_HOME": str(tmp_path)},
+            input_fn=input_fn,
+            out=io.StringIO(),
+            interactive=True,
+            by_id_dir=tmp_path / "none-id",
+            by_path_dir=tmp_path / "none-path",
+        )
+
+    # Active config remains intact and readable
+    assert path.is_file()
+    assert path.read_text(encoding="utf-8") == old
+    # Staging temp files are cleaned up
+    assert list(path.parent.glob("*.tmp*")) == []
+
+    # A subsequent healthy setup updates active config and keeps previous in .bak
+    monkeypatch.undo()
+    input_fn2, _ = _scripted_input(["new-policy", "", "", "", "", "", ""])
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path)},
+        input_fn=input_fn2,
+        out=io.StringIO(),
+        interactive=True,
+        by_id_dir=tmp_path / "none-id",
+        by_path_dir=tmp_path / "none-path",
+    )
+    assert result == 0
+    assert "policy = new-policy" in path.read_text(encoding="utf-8")
+    assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == old
+
+
 @pytest.mark.parametrize("answer", ["y", ""])
 def test_run_setup_repairs_malformed_config_and_backs_it_up(tmp_path: Path, answer: str) -> None:
     path = _config_path(tmp_path)
