@@ -43,7 +43,9 @@ Resolved in order (first hit wins):
 
 The config file itself is selected in this order: `--config PATH`,
 `$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
-`HOME`. Use a separate file for each rig without changing the config home for
+`HOME`. Native Windows shells usually set neither, so there the path falls back
+to `%APPDATA%\inspect-robots\config.ini`, then
+`%USERPROFILE%\.config\inspect-robots\config.ini`. Use a separate file for each rig without changing the config home for
 the whole process:
 
 ```bash
@@ -696,8 +698,8 @@ inspect-robots video logs/adhoc_xxxx.json
 
 ```text
 fps: 10 (control_hz from log)
-wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
-wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~right_cam.mp4 (1200 frames)
 wrote 2/2 streams
 ```
 

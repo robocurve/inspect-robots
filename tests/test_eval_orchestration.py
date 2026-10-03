@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,53 @@ def _task(*, epochs: int | Epochs = 1, max_steps: int = 60, scorer: object = Non
         max_steps=max_steps,
         epochs=epochs,
     )
+
+
+@pytest.mark.parametrize("collision", [True, False])
+def test_eval_preserves_distinct_scene_camera_reset_frames(tmp_path: Path, collision: bool) -> None:
+    identities = (
+        [("pick", "top-e0_rgb", 11), ("pick-e0_top", "rgb", 22)]
+        if collision
+        else [("first", "top", 11), ("second", "rgb", 22)]
+    )
+    images = {scene: (camera, value) for scene, camera, value in identities}
+
+    class ResetCameraWorld(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            obs = super().reset(scene, seed=seed)
+            camera, value = images[scene.id]
+            return replace(obs, images={camera: np.full((2, 3, 3), value, dtype=np.uint8)})
+
+        def step(self, action: Action) -> StepResult:
+            result = super().step(action)
+            return replace(result, observation=replace(result.observation, images={}))
+
+    sink = _RecordingSink()
+    task = Task(
+        name="frame-identities",
+        scenes=[Scene(id=scene, instruction="reach", init_seed=0) for scene, _, _ in identities],
+        scorer=success_at_end(),
+        max_steps=1,
+    )
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        ResetCameraWorld(),
+        sinks=[sink],
+        log_dir=str(tmp_path),
+        store_frames=True,
+    )
+    assert log.status == "success"
+    assert log.results.total_trials == 2
+    assert log.stats.frames_dir is not None
+    assert len(list(Path(log.stats.frames_dir).glob("*.npy"))) == 2
+    assert len(sink.records) == 2
+    for record, (_, camera, value) in zip(sink.records, identities, strict=True):
+        refs = record.steps[0].image_refs
+        assert refs is not None
+        np.testing.assert_array_equal(
+            refs[camera].load(), np.full((2, 3, 3), value, dtype=np.uint8)
+        )
 
 
 class _RecordingSink(NullSink):
@@ -1151,6 +1199,27 @@ def test_unknown_reducer_fails_fast_as_config_error(tmp_path: Path) -> None:
     task = _task(epochs=Epochs(count=2, reducer="bogus"))
     with pytest.raises(ConfigError, match="unknown epoch reducer"):
         eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+
+
+def test_pass_at_k_above_planned_epochs_fails_before_rollout(tmp_path: Path) -> None:
+    class _NoRollout(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            raise AssertionError("rollout must not start")
+
+    task = _task(epochs=Epochs(count=1, reducer="pass_at_2"))
+    with pytest.raises(ConfigError, match=r"needs at least 2 epochs, but the task plans 1"):
+        eval(task, ScriptedPolicy(), _NoRollout(), log_dir=str(tmp_path))
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_pass_at_k_equal_to_planned_epochs_runs(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=Epochs(count=2, reducer="pass_at_2"), max_steps=5),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
 
 
 def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) -> None:

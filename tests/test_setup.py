@@ -2074,7 +2074,10 @@ def test_run_setup_without_config_home_raises() -> None:
 
     with pytest.raises(
         SystemExit,
-        match=r"^cannot locate a config home: set \$XDG_CONFIG_HOME or \$HOME$",
+        match=(
+            r"^cannot locate a config home: "
+            r"set \$XDG_CONFIG_HOME, \$HOME or \(on Windows\) %APPDATA%$"
+        ),
     ):
         run_setup({}, input_fn=input_fn, out=io.StringIO(), interactive=True)
 
