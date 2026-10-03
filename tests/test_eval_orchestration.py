@@ -1153,6 +1153,27 @@ def test_unknown_reducer_fails_fast_as_config_error(tmp_path: Path) -> None:
         eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
 
 
+def test_pass_at_k_above_planned_epochs_fails_before_rollout(tmp_path: Path) -> None:
+    class _NoRollout(CubePickEmbodiment):
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            raise AssertionError("rollout must not start")
+
+    task = _task(epochs=Epochs(count=1, reducer="pass_at_2"))
+    with pytest.raises(ConfigError, match=r"needs at least 2 epochs, but the task plans 1"):
+        eval(task, ScriptedPolicy(), _NoRollout(), log_dir=str(tmp_path))
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_pass_at_k_equal_to_planned_epochs_runs(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=Epochs(count=2, reducer="pass_at_2"), max_steps=5),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+
+
 def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) -> None:
     # A PolicyError raised outside the rollout internals (no record attached)
     # still yields a scored-as-error trial rather than a crash.
