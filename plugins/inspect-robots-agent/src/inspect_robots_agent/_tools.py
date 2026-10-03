@@ -318,10 +318,14 @@ class Toolset:
             return ToolResult(error=f"unknown tool {call.name!r}; available: {available}")
         return self._move(arguments, observation)
 
-    def residual(
-        self, target: npt.NDArray[np.float64], observation: Observation
-    ) -> tuple[str, float] | None:
-        """Return the largest finite target offset, or ``None`` when it cannot be measured."""
+    def shortfall(
+        self, target: npt.NDArray[np.float64], observation: Observation, tolerance: float
+    ) -> list[tuple[str, float, float]] | None:
+        """Every dimension more than ``tolerance`` off target, as ``(label, requested, reached)``.
+
+        Largest offset first; an empty list means the target was reached. ``None`` when the
+        readback cannot be measured (no state key, wrong shape, or non-finite values).
+        """
         if self._state_key is None:
             return None
         raw_state = observation.state.get(self._state_key)
@@ -341,8 +345,11 @@ class Toolset:
             return None
         if difference.shape != state.shape or not bool(np.all(np.isfinite(difference))):
             return None
-        index = int(np.argmax(difference))
-        return self._labels[index], float(difference[index])
+        order = sorted(
+            (i for i in range(len(difference)) if difference[i] > tolerance),
+            key=lambda i: -float(difference[i]),
+        )
+        return [(self._labels[i], float(target[i]), float(state[i])) for i in order]
 
     def _current_state(self, observation: Observation) -> npt.NDArray[np.float64]:
         if self._state_key is None:
