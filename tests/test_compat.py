@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.compat import assert_compatible, check_compatibility, remap_observation
+from inspect_robots.compat import (
+    assert_compatible,
+    check_compatibility,
+    check_remap_collisions,
+    remap_observation,
+)
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import CompatibilityError, ConfigError
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
@@ -454,3 +459,10 @@ def test_preflight_accepts_camera_remapping_with_explicit_identity() -> None:
     )
     report = assert_compatible(policy, emb, remap={"primary": "top", "top": "top"})
     assert report.ok
+
+
+def test_check_remap_collisions_none_or_empty() -> None:
+    """check_remap_collisions is a no-op when remap is None or empty."""
+    obs_space = ObservationSpace()
+    check_remap_collisions(obs_space, None)
+    check_remap_collisions(obs_space, {})

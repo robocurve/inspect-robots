@@ -2506,3 +2506,59 @@ def test_eval_runtime_collision_on_terminal_observation(tmp_path: Path) -> None:
     assert log.samples[0].status == "error"
     assert log.samples[0].epochs[0] == {}
     assert list(tmp_path.glob("*.json"))
+
+
+def test_eval_handles_initial_observation_remap_collision_in_reset(tmp_path: Path) -> None:
+    """When embodiment.reset() returns observation keys that collide under remap,
+    rollout records failure at step -1 and eval writes an error log."""
+
+    class _ResetCollisionPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(
+                name="reset_coll_policy",
+                action_space=_BOX,
+                observation_space=ObservationSpace(state_keys=frozenset({"target_pos"})),
+            )
+            self.config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, obs: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0], dtype=np.float64))])
+
+    class _ResetCollisionEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(
+                self.info,
+                observation_space=ObservationSpace(state_keys=frozenset({"eef_pos"})),
+            )
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return Observation(
+                images={},
+                state={"eef_pos": np.array([0.1, 0.1]), "target_pos": np.array([0.8, 0.8])},
+                image_times={},
+            )
+
+    task = Task(
+        name="reset_coll_task",
+        scenes=[Scene(id="s0", instruction="x")],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+
+    (log,) = eval(
+        task,
+        _ResetCollisionPolicy(),
+        _ResetCollisionEmbodiment(),
+        remap={"target_pos": "eef_pos"},
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error is not None and "ConfigError" in log.error
+    assert log.samples[0].status == "error"
+    assert log.samples[0].epochs[0] == {}
+    assert list(tmp_path.glob("*.json"))
