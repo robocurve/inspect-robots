@@ -2196,6 +2196,41 @@ def test_run_setup_retains_active_config_and_cleans_tmp_if_replacement_fails(
     assert path.with_name("config.ini.bak").read_text(encoding="utf-8") == old
 
 
+def test_run_setup_cleans_tmp_if_backup_replacement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    old = "[defaults]\npolicy = old-policy\n"
+    path.write_text(old, encoding="utf-8")
+    bak = path.with_name("config.ini.bak")
+    input_fn, _ = _scripted_input(["", "", "", "", "", "", ""])
+
+    orig_replace = Path.replace
+
+    def _fault_replace(self: Path, target: Path | str) -> Path:
+        target_path = Path(target)
+        if target_path == bak:
+            raise OSError("simulated backup replace failure")
+        return orig_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _fault_replace)
+
+    with pytest.raises(OSError, match="simulated backup replace failure"):
+        run_setup(
+            {"XDG_CONFIG_HOME": str(tmp_path)},
+            input_fn=input_fn,
+            out=io.StringIO(),
+            interactive=True,
+            by_id_dir=tmp_path / "none-id",
+            by_path_dir=tmp_path / "none-path",
+        )
+
+    assert path.is_file()
+    assert path.read_text(encoding="utf-8") == old
+    assert list(path.parent.glob("*.tmp*")) == []
+
+
 def test_run_setup_symlinked_backup_preserves_external_target(tmp_path: Path) -> None:
     """When config.ini.bak exists as a symlink to an external file, refreshing the backup
     must replace the symlink itself without modifying the external target file."""

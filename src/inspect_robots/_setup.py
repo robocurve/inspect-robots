@@ -1765,10 +1765,8 @@ def run_setup(
             bak_tmp.replace(bak)
         tmp.replace(path)
     finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-        if bak_tmp.exists():
-            bak_tmp.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+        bak_tmp.unlink(missing_ok=True)
     print(_paint(f"Wrote {path}", _GREEN, out), file=out)
     # Repeat the plugin reminder where it cannot scroll away: the per-prompt
     # warning is easy to miss while Enter-accepting the suggestions.
