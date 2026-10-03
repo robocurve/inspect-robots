@@ -1441,6 +1441,14 @@ def test_transcript_strips_images_and_preserves_text_and_tools() -> None:
 def test_transcript_is_deeply_isolated_in_both_directions() -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="reach"))
+    # Add a structured message with list parts and tool_calls
+    policy._messages.append(
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "thinking"}],
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "move"}}],
+        }
+    )
     first = policy.transcript()
     assert first is not None
 
@@ -1449,6 +1457,15 @@ def test_transcript_is_deeply_isolated_in_both_directions() -> None:
 
     policy._messages[1]["content"] = "changed live state"
     assert first[1]["content"] == "Goal: reach"
+
+    assert isinstance(first[2]["content"], list)
+    first[2]["content"][0]["text"] = "mutated text"
+    orig_content = policy._messages[2]["content"]
+    assert isinstance(orig_content, list)
+    assert orig_content[0]["text"] == "thinking"
+
+    first[2]["tool_calls"][0]["id"] = "mutated_id"
+    assert policy._messages[2]["tool_calls"][0]["id"] == "call_1"
 
 
 def test_transcript_delta_tracks_new_sanitized_messages_and_reset() -> None:
