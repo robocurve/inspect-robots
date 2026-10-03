@@ -87,7 +87,8 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
   while later tasks run.
 - **Once per grader object, outcome cached.** `_VLMGrader` caches the
   preflight outcome: passed or warned (no further requests), or the raised
-  `ConfigError`, which every later `preflight()` call re-raises. So the CLI,
+  `ConfigError`, which every later `preflight()` call re-raises. A cached
+  "warned" outcome does not print the warning again. So the CLI,
   `eval_set` and each per-task `eval()` make at most one request per grader,
   and a caller that catches the error and calls `eval()` again with the same
   grader is still stopped.
@@ -121,9 +122,12 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
 
 `_VLMGrader.grade` keeps its "never raise after a rollout" contract, but no
 longer leaves the record unchanged on failure. In its existing `except
-Exception` branch it sets `record.metadata["grading_error"]` to a bounded
-string (`f"{type(exc).__name__}: {exc}"`, first 500 characters) and keeps the
-stderr note. Successful grading never sets the key. Trials adopted from a
+Exception` branch it sets `record.metadata["grading_error"]` to a one-line
+reason, capped at 500 characters: for a `ConfigError`, the first line of
+`str(exc)` (dropping the `fix:` line and the class name, e.g.
+`grading request failed with HTTP 400: {...}`); for any other exception,
+`f"{type(exc).__name__}: {first line of str(exc)}"`. It keeps the stderr
+note. Successful grading never sets the key. Trials adopted from a
 console verdict or a definitive termination are unchanged.
 
 `TrialRecord.metadata` already persists into `SceneResult` per-trial metadata
@@ -160,7 +164,10 @@ not lost (just `N of M trial(s) ungraded`, no leading separator, when the
 existing `error` is empty, e.g. some cancelled runs).
 
 The CLI already prints a failed run's `error` and exits nonzero, and `eval_set`
-already reports a task with `status == "error"` as failed.
+already reports a task with `status == "error"` as failed. The `eval-set`
+summary row (`_print_eval_set_summary`, `cli.py:~1886`) currently shows
+metrics *or* the error; an ungraded task still has metrics, so print the error
+next to the metrics whenever `log.status != "success"` and `log.error` is set.
 
 ### 6. What is dropped from the original #472
 
@@ -184,8 +191,11 @@ lines 176, 191 and 436).
   grader failure (abstention).
 - `docs/guide/scoring.md`: one sentence linking ungraded VLM trials to
   abstention.
-- Docstrings: `Grader` protocol (optional idempotent `preflight()`,
-  grading_error marker), `_VLMGrader.grade`, `vlm_grader`,
+- Docstrings and comments: the `Grader` protocol docstring's "leaving the
+  record unchanged" (`grader.py:36-37`) becomes "leaving the judgement unset;
+  it may record `metadata["grading_error"]`", plus the optional idempotent
+  `preflight()`; the inline comment at `grader.py:278-279` ("must leave the
+  record unchanged, marker included") is rewritten; `_VLMGrader.grade`, `vlm_grader`,
   `_OperatorScorer`/`operator_scorer`, and the `eval()`/`eval_set()`
   docstrings (preflight before rollouts; ungraded trials fail the run).
 - `src/inspect_robots/CLAUDE.md` module map (around line 19): grading failures
@@ -207,6 +217,7 @@ tests/test_vlm_grader.py             # preflight + grading_error tests
 tests/test_eval_orchestration.py     # run status, abstention, eval_set preflight once
 tests/test_scorers.py                # operator scorer abstention
 tests/test_grader_config.py          # existing http_post doubles see the preflight request
+tests/test_chatwire.py               # new transport and HTTPError-read branches
 src/inspect_robots/CLAUDE.md         # module map wording
 docs/guide/cli.md, docs/guide/scoring.md
 changelog.d/+grader-preflight.added.md
@@ -227,6 +238,13 @@ Test conventions:
   or to filter it out with a small shared helper.
 - CLI preflight tests cannot pass `http_post` through `-G`; they monkeypatch
   `inspect_robots._chatwire._urllib_post` (looked up at call time).
+- The real `_urllib_post` branches are covered in `tests/test_chatwire.py` by
+  monkeypatching `urllib.request.urlopen` (pattern at
+  `tests/test_chatwire.py:58-78`): one test each for `TimeoutError` from
+  `response.read()`, `http.client.RemoteDisconnected`, and `exc.read()`
+  raising `IncompleteRead` inside the `HTTPError` branch, asserting the class
+  (`_ChatTransportError` / `_ChatHTTPError`), `status`, and the
+  `chat request failed:` prefix.
 
 
 - CLI: `run` and `eval-set` with a preflight 400 exit nonzero with the guided
@@ -248,8 +266,13 @@ Test conventions:
   `abstentions` counts it; the run ends `status == "error"` with the
   `n of m trial(s) ungraded` message; later trials still run and grade.
 - A halted run with ungraded trials keeps the halt message with
-  `; N of M trial(s) ungraded` appended; `pass_at_k` over abstained epochs
-  degrades to the existing reducer-failure error plus the count.
+  `; N of M trial(s) ungraded` appended; `pass_at_k` with partial abstention (k=2 over
+  3 epochs, 2 ungraded) degrades to the existing reducer-failure error plus
+  the count.
+- The exact run error string for an HTTP 400 mid-run is
+  `1 of N trial(s) ungraded: grader failed (grading request failed with HTTP 400: ...)`,
+  single line, no class name, no `fix:` line.
+- `eval-set` CLI summary prints the ungraded error next to the metrics.
 - Unchanged paths: a skipped human verdict and a no-grader run still score
   `False`; a definitive termination is adopted without a request; a more
   specific run error is not overwritten.
