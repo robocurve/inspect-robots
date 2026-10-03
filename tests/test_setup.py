@@ -4335,6 +4335,14 @@ def test_number_constraint_renders_bound_and_none_arms(slot: NumberSlot, expecte
     assert _number_constraint(slot) == expected
 
 
+def test_acceptable_number_rejects_non_finite_floats() -> None:
+    from inspect_robots._setup import _acceptable_number
+
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("nan"))
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("inf"))
+    assert not _acceptable_number(UNBOUNDED_NUMBER, float("-inf"))
+
+
 def test_run_setup_none_default_displays_and_writes_canonical_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
