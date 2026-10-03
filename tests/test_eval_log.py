@@ -616,3 +616,106 @@ def test_eval_populates_provenance_from_kwargs_and_info(tmp_path: Path) -> None:
     assert logs2[0].eval.environment_id == "emb-env"
     assert logs2[0].eval.environment_revision == "emb-rev"
     assert logs2[0].eval.policy_checkpoint == "pol-ckpt"
+
+
+def test_eval_set_populates_provenance_from_kwargs_and_info(tmp_path: Path) -> None:
+    """eval_set() forwards explicit provenance kwargs or derives from embodiment/policy info."""
+    from dataclasses import replace
+
+    from inspect_robots import eval_set
+    from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+    from inspect_robots.scorer import success_at_end
+
+    task = Task(
+        name="prov_task",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=2,
+    )
+
+    # 1. From explicit kwargs
+    ok, logs = eval_set(
+        [task],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path / "set_run1"),
+        environment_id="sim-env-1",
+        environment_revision="git-sha-1",
+        policy_checkpoint="hf://org/model@v1",
+    )
+    assert ok is True
+    assert logs[0].eval.environment_id == "sim-env-1"
+    assert logs[0].eval.environment_revision == "git-sha-1"
+    assert logs[0].eval.policy_checkpoint == "hf://org/model@v1"
+
+    # 2. Derived from info objects when kwargs are None
+    emb = CubePickEmbodiment()
+    emb.info = replace(emb.info, environment_id="emb-env", environment_revision="emb-rev")
+    pol = ScriptedPolicy()
+    pol.info = replace(pol.info, checkpoint="pol-ckpt")
+
+    ok2, logs2 = eval_set([task], pol, emb, log_dir=str(tmp_path / "set_run2"))
+    assert ok2 is True
+    assert logs2[0].eval.environment_id == "emb-env"
+    assert logs2[0].eval.environment_revision == "emb-rev"
+    assert logs2[0].eval.policy_checkpoint == "pol-ckpt"
+
+
+def test_eval_set_and_error_log_for_populates_provenance_on_task_error(tmp_path: Path) -> None:
+    """_error_log_for and eval_set error logs retain provenance metadata."""
+    from dataclasses import replace
+
+    from inspect_robots import eval_set
+    from inspect_robots.eval import _error_log_for
+    from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+
+    emb = CubePickEmbodiment()
+    emb.info = replace(emb.info, environment_id="emb-env", environment_revision="emb-rev")
+    pol = ScriptedPolicy()
+    pol.info = replace(pol.info, checkpoint="pol-ckpt")
+
+    # Direct _error_log_for with explicit kwargs
+    err_log = _error_log_for(
+        "broken_task",
+        pol,
+        emb,
+        seed=42,
+        exc=RuntimeError("test error"),
+        environment_id="custom-env",
+        environment_revision="custom-rev",
+        policy_checkpoint="custom-ckpt",
+    )
+    assert err_log.status == "error"
+    assert err_log.eval.environment_id == "custom-env"
+    assert err_log.eval.environment_revision == "custom-rev"
+    assert err_log.eval.policy_checkpoint == "custom-ckpt"
+
+    # Direct _error_log_for deriving from component info
+    err_log_derived = _error_log_for(
+        "broken_task",
+        pol,
+        emb,
+        seed=42,
+        exc=RuntimeError("test error"),
+    )
+    assert err_log_derived.status == "error"
+    assert err_log_derived.eval.environment_id == "emb-env"
+    assert err_log_derived.eval.environment_revision == "emb-rev"
+    assert err_log_derived.eval.policy_checkpoint == "pol-ckpt"
+
+    # eval_set catching task setup / compatibility error and generating error log with provenance
+    ok, logs = eval_set(
+        ["nonexistent_task"],
+        pol,
+        emb,
+        log_dir=str(tmp_path / "err_set"),
+        environment_id="explicit-env",
+        environment_revision="explicit-rev",
+        policy_checkpoint="explicit-ckpt",
+    )
+    assert ok is False
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].eval.environment_id == "explicit-env"
+    assert logs[0].eval.environment_revision == "explicit-rev"
+    assert logs[0].eval.policy_checkpoint == "explicit-ckpt"

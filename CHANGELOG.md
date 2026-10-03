@@ -9,7 +9,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- **Agent plugin:** Support `service_tier` on the Responses wire, including
+- **Agent plugin (0.28.0):** Accept `-P service_tier=ultrafast` on the Responses wire
+  for OpenAI Ultrafast mode, with a mock-embodiment example for API testing.
+
+- **Agent plugin (0.28.0):** Support `service_tier` on the Responses wire, including
   `-P service_tier=fast` for OpenAI Fast mode, with validation and saved configuration.
 
 - **Core:** Optional `bind_task(envelope)` policy hook called before rollouts with
@@ -18,7 +21,7 @@ All notable changes to this project are documented here. The format is based on
 - **Agent plugin (0.27.0):** Surface environment step budget in system prompt and
   per-observation step count ([#407](https://github.com/robocurve/inspect-robots/issues/407)).
 
-- **Agent plugin (0.27.0):** Configure LLM retry attempts and backoff from the
+- **Agent plugin (0.28.0):** Configure LLM retry attempts and backoff from the
   policy, honor provider `Retry-After` delays on HTTP wires, and record the
   effective settings in evaluation logs ([#441](https://github.com/robocurve/inspect-robots/issues/441)).
 
@@ -57,8 +60,17 @@ All notable changes to this project are documented here. The format is based on
   logs to prevent `TypeError` serialization crashes on eval completion
   ([#492](https://github.com/robocurve/inspect-robots/issues/492)).
 
+- **CLI:** Terminate the `ffmpeg` subprocess, close stdin, wait for exit, and unlink partial output if video encoding is interrupted by an escaping exception (e.g. `KeyboardInterrupt`, `MemoryError`) ([#508](https://github.com/robocurve/inspect-robots/issues/508)).
+
 - **Core:** Treat a failed Git working-tree status check as unknown provenance
   instead of recording the bare commit SHA as clean ([#473](https://github.com/robocurve/inspect-robots/issues/473)).
+- **Core:** a scorer can abstain with `Score(value=None)`. The value used to
+  crash `value_to_float`, so the only workaround was `0.0`, which reads as a
+  failed trial. Abstained epochs are now recorded as `null`, left out by the
+  epoch reducers and the metric mean, and a scorer that abstained everywhere
+  reports a `null` metric. `EvalResults.abstentions` counts abstained trials
+  per scorer, and `inspect` and `view` show the count beside each metric
+  ([#436](https://github.com/robocurve/inspect-robots/issues/436)).
 
 - **CaP-X plugin (0.3.1):** Clamp motion targets and interpolated actions to
   the embodiment action bounds.
