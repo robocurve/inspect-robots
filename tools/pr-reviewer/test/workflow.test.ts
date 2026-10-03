@@ -7,7 +7,7 @@ import type { Job } from '../src/common';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const job: Job = { id: 'run-1', pr: 9, head, base, scope: '', status: 'running', result: null, notified: 0, created: 1 };
-const pr = { number: 9, head: { sha: head }, base: { sha: base }, state: 'open', draft: false, changed_files: 1, title: 'Fix boundary', body: '', user: { login: 'author' } };
+const pr = { number: 9, head: { sha: head }, base: { sha: base }, state: 'open', draft: false, changed_files: 1, title: 'Fix boundary', body: '', user: { login: 'author', id: 4242 } };
 function setup() {
   const ledger = env.LEDGER.getByName(crypto.randomUUID());
   const read = vi.fn(async (p: string) => {
@@ -92,6 +92,35 @@ describe('Codex review lifecycle', () => {
     expect((await runReview(s.config as any, job, s.step)).verdict).toBe('APPROVE');
     expect(await s.ledger.session(capability)).toBeNull();
     expect(await s.ledger.remaining(`9-${head}`, 9)).toBe(4_900_000);
+  });
+  it('declines a run once the PR author has used their monthly allowance', async () => {
+    const s = setup(); await s.ledger.register(job); await s.ledger.claimReviewSlot(job.id);
+    await s.ledger.recordAuthor(9, 4242);
+    await s.ledger.recordAuthor(8, 4242);
+    for (const rev of ['c', 'd', 'e']) await s.ledger.reserve(`other-pr-${rev}`, `8-${rev.repeat(40)}`, 8, 5_000_000);
+    await s.ledger.reserve('earlier-run', `9-${base}`, 9, 3_500_000);
+    await expect(runReview(s.config as any, job, s.step)).rejects.toThrow('contributor_budget_exhausted');
+    expect(s.config.RUNNER.start).not.toHaveBeenCalled();
+  });
+  it('keys the author allowance by user ID, so a renamed account keeps its spending', async () => {
+    const s = setup();
+    await s.ledger.recordAuthor(8, 4242);
+    for (const rev of ['c', 'd', 'e']) await s.ledger.reserve(`before-rename-${rev}`, `8-${rev.repeat(40)}`, 8, 5_000_000);
+    const read = s.read.getMockImplementation()!;
+    s.read.mockImplementation(async p => p === '/pulls/9' ? JSON.stringify({ ...pr, user: { login: 'renamed-author', id: 4242 } }) : read(p));
+    await handleWebhook(await webhook({ ...repo, action: 'opened', number: 9 }, 'pull_request'), s.config);
+    expect(await s.ledger.remaining(`9-${head}`, 9)).toBe(5_000_000);
+    await s.ledger.reserve('after-rename', `9-${base}`, 9, 4_000_000);
+    expect(await s.ledger.remaining(`9-${head}`, 9)).toBe(1_000_000);
+  });
+  it('records the PR author when a webhook enqueues a review', async () => {
+    const s = setup();
+    await handleWebhook(await webhook({ ...repo, action: 'opened', number: 9 }, 'pull_request'), s.config);
+    for (const rev of ['c', 'd', 'e']) await s.ledger.reserve(`author-spend-${rev}`, `9-${rev.repeat(40)}`, 9, 5_000_000);
+    await s.ledger.recordAuthor(8, 4242);
+    expect(await s.ledger.remaining(`8-${head}`, 8)).toBe(5_000_000);
+    await s.ledger.reserve('author-spend-2', `8-${base}`, 8, 4_000_000);
+    expect(await s.ledger.remaining(`8-${head}`, 8)).toBe(1_000_000);
   });
   it('declines an underfunded rerun without starting a sandbox or spending more', async () => {
     const s = setup(); await s.ledger.register(job); await s.ledger.claimReviewSlot(job.id);

@@ -7,7 +7,7 @@ export const JAY_ID = 42904912;
 export const CHECK_NAME = 'Independent PR review';
 export const MODEL = 'gpt-6-astra';
 export const SHA = /^[a-f0-9]{40}$/;
-export const LIMITS = { review: 5_000_000, pr: 15_000_000, month: 200_000_000, warn: 160_000_000 };
+export const LIMITS = { review: 5_000_000, pr: 15_000_000, author: 20_000_000, month: 200_000_000, warn: 160_000_000 };
 export function monthlyReviewLimit(pr: number, month: string): number {
   // Jay authorized $5 extra on 2026-09-30 (UTC), then transferred the unused
   // $3.93072 from PR 512 to release PR 513. Deployment PR caps total $5.
@@ -47,7 +47,7 @@ export function renderCost(value: unknown): string {
 export const ExecutionRecords = z.array(z.object({ revision: z.string().regex(/^[a-f0-9]{40}$/), command: z.string().max(12000), exitCode: z.number().int().nullable(), limit: z.string().nullable() })).max(100);
 export const RunOutput = z.object({ exitCode: z.number().int(), failure: z.string().max(100).nullable().optional(), review: z.unknown(), executions: ExecutionRecords.default([]) });
 export type Execution = { token: string; checkpointToken: string; sandbox: string; started: number; mergeBase: string };
-export type Snapshot = { number: number; head: string; base: string; title: string; body: string; draft: boolean; state: string; author: string };
+export type Snapshot = { number: number; head: string; base: string; title: string; body: string; draft: boolean; state: string; author: string; authorId?: number };
 export type Job = { id: string; pr: number; head: string; base: string; scope: string; status: string; result: string | null; notified: number; created: number };
 
 export function validateReview(value: unknown): Review {
@@ -65,7 +65,7 @@ export function validateReview(value: unknown): Review {
 }
 
 export function snapshot(pr: Record<string, any>): Snapshot {
-  const result = { number: pr.number, head: pr.head?.sha, base: pr.base?.sha, title: pr.title ?? '', body: pr.body ?? '', draft: !!pr.draft, state: pr.state, author: pr.user?.login ?? '' };
+  const result = { number: pr.number, head: pr.head?.sha, base: pr.base?.sha, title: pr.title ?? '', body: pr.body ?? '', draft: !!pr.draft, state: pr.state, author: pr.user?.login ?? '', authorId: Number.isSafeInteger(pr.user?.id) && pr.user.id > 0 ? pr.user.id : undefined };
   if (!Number.isSafeInteger(result.number) || result.number < 1 || !SHA.test(result.head) || !SHA.test(result.base)) throw new Error('invalid_snapshot');
   return result;
 }
