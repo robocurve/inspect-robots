@@ -974,7 +974,14 @@ def _run_eval(
         samples=tuple(scene_results),
         error=error,
     )
-    bus.on_eval_end(log)
+    try:
+        bus.on_eval_end(log)
+    except Exception as exc:
+        # A failed final write must not swallow the user's Ctrl-C: eval_set
+        # would otherwise treat the OSError as a task error and continue.
+        if cancelled_exc is not None:
+            raise cancelled_exc from exc
+        raise
     survivor_warning = _survivor_warning(log)
     if survivor_warning is not None:
         warnings.warn(survivor_warning, UserWarning, stacklevel=3)

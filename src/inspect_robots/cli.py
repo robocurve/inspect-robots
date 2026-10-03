@@ -1855,8 +1855,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         try:
             # A failing unlink (read-only remount, full disk) must not skip the
             # close chain below or replace the run's real exception.
-            # Keep the snapshot only when the canonical write failed: then it is
-            # the only record of the run. Otherwise (success, Ctrl-C) remove it.
+            # Keep the snapshot only when a canonical write failed (including a
+            # Ctrl-C during that write): then it is the only record of the run.
+            # Otherwise (success, or Ctrl-C before the final write) remove it.
+            # write_failed is sticky across eval_set tasks, so a later task's
+            # half-written snapshot may also be kept; harmless, never lost.
             if live_sink is not None and live_sink.path is not None and not sink.write_failed:
                 with suppress(OSError):
                     live_sink.path.unlink(missing_ok=True)
@@ -2015,8 +2018,11 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # releasing it, exactly once, after every task has run.
         try:
             # A failing unlink must not skip the close chain (see _cmd_run).
-            # Keep the snapshot only when the canonical write failed: then it is
-            # the only record of the run. Otherwise (success, Ctrl-C) remove it.
+            # Keep the snapshot only when a canonical write failed (including a
+            # Ctrl-C during that write): then it is the only record of the run.
+            # Otherwise (success, or Ctrl-C before the final write) remove it.
+            # write_failed is sticky across eval_set tasks, so a later task's
+            # half-written snapshot may also be kept; harmless, never lost.
             if live_sink is not None and live_sink.path is not None and not sink.write_failed:
                 with suppress(OSError):
                     live_sink.path.unlink(missing_ok=True)

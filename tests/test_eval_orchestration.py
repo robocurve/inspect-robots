@@ -2159,3 +2159,23 @@ def test_eval_set_keeps_the_snapshot_of_a_task_whose_final_write_failed(
     assert len(seen) == 2 and seen[0] != seen[1]
     assert seen[0].exists()  # task 1's snapshot survives task 2
     assert not seen[1].exists()  # task 2 wrote its log, so its snapshot is gone
+
+
+def test_ctrl_c_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run whose log write also fails still raises the interrupt."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    with pytest.raises(KeyboardInterrupt) as info:
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt()),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert isinstance(info.value.__cause__, OSError)
