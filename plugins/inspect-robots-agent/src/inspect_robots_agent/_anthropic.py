@@ -457,7 +457,7 @@ def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "name": tool["function"]["name"],
             "description": tool["function"].get("description", ""),
-            "input_schema": tool["function"]["parameters"],
+            "input_schema": tool["function"].get("parameters") or {"type": "object"},
         }
         for tool in tools
     ]

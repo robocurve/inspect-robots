@@ -8460,3 +8460,57 @@ def test_inspect_and_view_show_abstention_counts_beside_metrics(
     document = path.with_suffix(".html").read_text(encoding="utf-8")
     assert '<div class="stat-name">judged (3 abstained)</div>' in document
     assert '<div class="stat-name">other</div>' in document
+
+
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_vlm_preflight_rejection_exits_before_any_component_is_built(
+    _hermetic_defaults: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    """Plan 0085: a rejected grader stops the CLI before the robot is touched."""
+    import inspect_robots._chatwire as chatwire
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(
+        chatwire, "_urllib_post", lambda url, headers, body: (400, b'{"error": "bad effort"}')
+    )
+
+    def no_components(*args: object, **kwargs: object) -> object:
+        raise AssertionError("components resolved despite a rejected preflight")
+
+    monkeypatch.setattr(cli, "_resolve_components", no_components)
+    log_dir = tmp_path / "logs"
+    head = (
+        _run_adhoc_args(log_dir)
+        if command == "run"
+        else ["eval-set", "cubepick-reach", "--log-dir", str(log_dir)]
+    )
+    with pytest.raises(SystemExit) as info:
+        main([*head, "--grader", "vlm", "-G", "model=judge", "-G", "effort=none"])
+
+    message = str(info.value.code)
+    assert message.startswith(
+        'grading preflight request failed with HTTP 400: {"error": "bad effort"}'
+    )
+    assert message.count("fix:") == 1
+    assert "Traceback" not in capsys.readouterr().err
+    assert not log_dir.exists()
+
+
+def test_eval_set_summary_shows_why_a_run_with_metrics_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="graded")
+    log = dataclasses.replace(
+        log,
+        status="error",
+        error="1 of 3 trial(s) ungraded: grader failed (HTTP 400)",
+        results=dataclasses.replace(log.results, metrics={"operator": 1.0}),
+    )
+    cli._print_eval_set_summary(False, [log], "logs")
+    out = capsys.readouterr().out
+    assert "operator=1  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))" in out

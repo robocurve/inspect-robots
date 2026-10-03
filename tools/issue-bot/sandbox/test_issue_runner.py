@@ -82,9 +82,14 @@ class RunnerTest(unittest.TestCase):
             "tests/a.key",
             ".github/workflows/test.yml",
             "tools/issue-bot/a.ts",
+            "changelog.d/.hidden.md",
+            "CHANGELOG.md",
         ):
             with self.subTest(path=path):
                 self.assertFalse(runner.safe_change(path))
+        for path in ("changelog.d/491.fixed.md", "changelog.d/+frame-identity.fixed.md"):
+            with self.subTest(path=path):
+                self.assertTrue(runner.safe_change(path))
         (self.work / "pyproject.toml").write_text("malicious")
         with self.assertRaisesRegex(ValueError, "unsafe_artifact_path"):
             runner.capture_changes(self.base, self.work)

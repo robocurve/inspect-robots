@@ -92,6 +92,19 @@ def _grading_hook(
     return grader.grade, grader
 
 
+def _preflight_grader(grader: Grader | None) -> None:
+    """Run the grader's optional ``preflight()`` hook before any rollout.
+
+    Duck-typed like ``config()`` so graders without it still satisfy the
+    protocol. The hook raises ``ConfigError`` when every trial would be
+    rejected; it is idempotent, so the CLI, ``eval_set`` and ``eval`` may all
+    call it.
+    """
+    hook = getattr(grader, "preflight", None)
+    if callable(hook):
+        hook()
+
+
 def _grader_identity(grader: Grader | None) -> tuple[str | None, dict[str, Any]]:
     """Return the grader's registry name and effective config for the eval spec.
 
@@ -376,7 +389,12 @@ def eval(
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
-    [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
+    [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer
+    or a grader whose ``preflight()`` request is rejected (checked before any
+    string component is resolved). A trial the grader tried and failed to
+    grade is scored as an abstention by the ``operator`` scorer, and the run
+    then ends with ``status == "error"`` and an "N of M trial(s) ungraded"
+    message.
     """
     if not isinstance(fail_on_error, bool) and not (
         isinstance(fail_on_error, (int, float))
@@ -390,6 +408,9 @@ def eval(
     from inspect_robots.registry import resolve
 
     before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
+    # Before resolving string components: a grader that would reject every
+    # trial must fail before any robot connection is opened (plan 0085).
+    _preflight_grader(resolved_grader)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -546,6 +567,9 @@ def _run_eval(
     error: str | None = None
     error_count = 0
     errored_trials = 0
+    graded_attempts = 0
+    ungraded_trials = 0
+    first_grading_error: str | None = None
     abstentions: dict[str, int] = {}
 
     halted = False
@@ -682,6 +706,12 @@ def _run_eval(
                                             stacklevel=2,
                                         )
                         before_scoring(record, scene)
+                        graded_attempts += 1
+                        grading_error = record.metadata.get("grading_error")
+                        if grading_error and record.operator_judgement is None:
+                            ungraded_trials += 1
+                            if first_grading_error is None:
+                                first_grading_error = str(grading_error)
                     epoch_values: dict[str, float | None] = {}
                     for scorer in scorers:
                         try:
@@ -819,6 +849,18 @@ def _run_eval(
         # total failure (issue #73).
         status = "error"
         error = f"all {total_trials} trial(s) errored; nothing was scored"
+
+    if ungraded_trials:
+        # The grader tried and failed on these trials (plan 0085). They abstain
+        # rather than score as failures, but a run with ungraded trials must
+        # never read as a clean success. A more specific error keeps its
+        # message and gains the count.
+        count = f"{ungraded_trials} of {graded_attempts} trial(s) ungraded"
+        if status == "success":
+            status = "error"
+            error = f"{count}: grader failed ({first_grading_error})"
+        else:
+            error = "; ".join(part for part in (error, count) if part)
 
     metrics: dict[str, float | None] = {}
     for scorer in scorers:
@@ -990,7 +1032,9 @@ def eval_set(
 
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
     hook, not both) and are resolved once here, so every task shares the same
-    grader instance.
+    grader instance. Its optional ``preflight()`` runs once before the first
+    task; a rejection raises ``ConfigError`` out of ``eval_set`` instead of
+    becoming a per-task error log.
 
     Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
     sink must reset its per-run state in ``on_eval_start`` and tolerate one
@@ -1004,6 +1048,9 @@ def eval_set(
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
     if not task_list:
         raise ConfigError("eval_set() requires at least one task; got an empty sequence")
+    # Outside the per-task try below: a rejected preflight must stop the whole
+    # set, not become the first task's error log while later tasks run.
+    _preflight_grader(resolved_grader)
     logs: list[EvalLog] = []
     for task in task_list:
         try:
