@@ -1,0 +1,1 @@
+**Setup wizard:** camera setup preserves physical device identities across unplug-rescan events, preventing duplicate camera assignment warnings or misassignments ([#268](https://github.com/robocurve/inspect-robots/pull/268)).
