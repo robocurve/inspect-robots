@@ -10,13 +10,13 @@ import pytest
 from inspect_robots import eval
 from inspect_robots.compat import assert_compatible, check_compatibility
 from inspect_robots.embodiment import EmbodimentInfo
-from inspect_robots.errors import CompatibilityError
+from inspect_robots.errors import CompatibilityError, ConfigError
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.mock.policies import _ACTION_SPACE
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import success_at_end
-from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
+from inspect_robots.spaces import ActionSemantics, Box, CameraSpec, ObservationSpace
 from inspect_robots.task import Task
 from inspect_robots.types import Action, ActionChunk, Observation
 
@@ -322,3 +322,60 @@ def test_assert_compatible_returns_report_when_ok() -> None:
     rep = assert_compatible(ScriptedPolicy(), CubePickEmbodiment())
     assert rep.ok
     rep.raise_for_errors()
+
+
+def test_assert_compatible_raises_config_error_on_state_collision() -> None:
+    """Preflight remap collision on state keys must raise ConfigError before rollout."""
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(state_keys=frozenset({"cube_pos"})),
+        )
+    )
+    with pytest.raises(ConfigError, match="key collision in state remap"):
+        assert_compatible(policy, CubePickEmbodiment(), remap={"cube_pos": "eef_pos"})
+
+
+def test_assert_compatible_raises_config_error_on_camera_collision() -> None:
+    """Preflight remap collision on camera keys must raise ConfigError before rollout."""
+    emb = CubePickEmbodiment()
+    emb.info = replace(
+        emb.info,
+        observation_space=ObservationSpace(
+            cameras=(
+                CameraSpec(name="camera_0", height=32, width=32, channels=3),
+                CameraSpec(name="base_rgb", height=32, width=32, channels=3),
+            ),
+            state_keys=frozenset({"eef_pos"}),
+        ),
+    )
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="p",
+            action_space=_ACTION_SPACE,
+            observation_space=ObservationSpace(
+                cameras=(CameraSpec(name="base_rgb", height=32, width=32, channels=3),)
+            ),
+        )
+    )
+    with pytest.raises(ConfigError, match="key collision in camera remap"):
+        assert_compatible(policy, emb, remap={"base_rgb": "camera_0"})
+
+
+def test_remap_observation_unit() -> None:
+    """remap_observation correctly remaps images, state, and image_times."""
+    from inspect_robots.compat import remap_observation
+
+    obs = Observation(
+        images={"cam0": np.zeros((2, 2, 3), dtype=np.uint8)},
+        state={"eef_pos": np.array([1.0, 2.0])},
+        image_times={"cam0": 1.23},
+    )
+    remapped = remap_observation(obs, {"base_rgb": "cam0", "ee": "eef_pos"})
+    assert "base_rgb" in remapped.images
+    assert "cam0" not in remapped.images
+    assert "ee" in remapped.state
+    assert "eef_pos" not in remapped.state
+    assert "base_rgb" in remapped.image_times
+    assert remapped.image_times["base_rgb"] == 1.23

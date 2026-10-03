@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from inspect_robots.approver import Approver
+from inspect_robots.compat import remap_observation
 from inspect_robots.controller import _INFER_KEY, Controller
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
@@ -258,6 +259,7 @@ def rollout(
     sink: LogSink,
     frame_store: FrameStore | None = None,
     operator_input: OperatorInput | None = None,
+    remap: Mapping[str, str] | None = None,
 ) -> TrialRecord:
     """Run a single trial and return its record.
 
@@ -309,6 +311,12 @@ def rollout(
             raise
         except Exception as exc:
             raise _record_failure(record, EmbodimentFault(str(exc)), -1) from exc
+
+        try:
+            policy_obs = remap_observation(obs, remap)
+        except InspectRobotsError as exc:
+            _record_failure(record, exc, -1)
+            raise
 
         if operator_input is not None:
             try:
@@ -373,11 +381,11 @@ def rollout(
                 break
 
             try:
-                policy_extra = {**obs.extra, "env_step": t, "approvals": tail_approvals}
+                policy_extra = {**policy_obs.extra, "env_step": t, "approvals": tail_approvals}
                 if operator_input is not None:
                     policy_extra["operator_messages"] = tail_operator_msgs
                 obs_with_extra = replace(
-                    obs,
+                    policy_obs,
                     extra=policy_extra,
                 )
                 action = controller.next_action(policy, obs_with_extra, t, store)
@@ -508,6 +516,12 @@ def rollout(
             )
             t += 1
 
+            try:
+                next_policy_obs = remap_observation(result.observation, remap)
+            except InspectRobotsError as exc:
+                _record_failure(record, exc, t)
+                raise
+
             if result.terminated:
                 record.terminated = True
                 record.termination_reason = result.termination_reason
@@ -524,6 +538,7 @@ def rollout(
                 record.termination_reason = stop_reason
                 break
             obs = result.observation
+            policy_obs = next_policy_obs
             obs_rec = result_obs_rec
             refs = result_refs
         else:
