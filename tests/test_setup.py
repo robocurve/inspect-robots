@@ -1505,6 +1505,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     )
     output = out.getvalue()
     assert f"Found 3 camera device(s) under {by_id}:" in output
+    assert "could not confirm which nodes are color cameras" in output
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
     assert 'Next: inspect-robots "place the fork on the plate"' in output
@@ -1569,6 +1570,7 @@ def test_run_setup_lists_race_loser_camera_and_selects_it_by_number(
     assert f"right_cam_device = {d405}" in text
     assert "Found 2 camera device(s)" in out.getvalue()
     assert "no usable by-id entry" in out.getvalue()
+    assert "could not confirm which nodes are color cameras" not in out.getvalue()
     assert any("top camera" in prompt and "'p'" in prompt for prompt in prompts)
 
 
@@ -1715,6 +1717,33 @@ def test_run_setup_healthy_rig_prompts_and_config_unchanged(
     )
     assert "no usable by-id entry" not in out.getvalue()
     assert all("'p'" not in prompt for prompt in prompts if "camera" in prompt)
+
+
+def test_run_setup_device_slot_camera_warns_when_probe_is_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("inspection_camera", "v4l2", "inspection camera"),),
+    )
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+    pending = [*_slot_defaults(), "", "1"]
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=lambda _prompt: pending.pop(0),
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    assert result == 0
+    assert f"inspection_camera = {devices[0]}" in _config_path(tmp_path).read_text(encoding="utf-8")
+    assert "could not confirm which nodes are color cameras" in out.getvalue()
 
 
 def test_run_setup_device_slot_camera_uses_inventory(
