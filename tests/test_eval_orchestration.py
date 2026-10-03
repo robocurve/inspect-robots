@@ -2080,5 +2080,6 @@ def test_failed_final_log_write_is_not_reported_as_success(
             ScriptedPolicy(),
             CubePickEmbodiment(),
             sinks=[JsonLogSink(str(tmp_path)), recorder],
+            log_dir=str(tmp_path),
         )
     assert recorder.records  # the other sink still received the run
