@@ -1818,3 +1818,54 @@ def test_policy_base_bind_task_noop() -> None:
 
     pol = _ConcretePolicy()
     pol.bind_task(TaskEnvelope(name="t", max_steps=10))
+
+
+def test_eval_isolates_failing_sink_and_preserves_logs_and_other_sinks(tmp_path: Path) -> None:
+    """A failing custom sink does not abort eval or prevent other sinks from logging."""
+
+    class _CrashingSink(NullSink):
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            raise RuntimeError("on_eval_start crashed")
+
+        def on_trial_start(self, scene_id: str, epoch: int) -> None:
+            raise RuntimeError("on_trial_start crashed")
+
+        def log_step(
+            self, t: int, observation: Observation, action: Action, result: StepResult
+        ) -> None:
+            raise RuntimeError("log_step crashed")
+
+        def on_trial_end(self, record: TrialRecord) -> None:
+            raise RuntimeError("on_trial_end crashed")
+
+        def on_eval_end(self, log: EvalLog) -> None:
+            raise RuntimeError("on_eval_end crashed")
+
+    surviving = _RecordingSink()
+    json_sink = JsonLogSink(str(tmp_path))
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        (log,) = eval(
+            _task(max_steps=2),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[_CrashingSink(), surviving, json_sink],
+            log_dir=str(tmp_path),
+        )
+
+    assert log.status == "success"
+    assert len(surviving.records) == 1
+    assert len(surviving.records[0].steps) >= 1
+    # Verify json_sink wrote the final log successfully and it can be reloaded
+    written_logs = list(tmp_path.glob("*.json"))
+    assert len(written_logs) == 1
+    reloaded = read_eval_log(str(written_logs[0]))
+    assert reloaded.status == "success"
+
+    # Verify that warnings for _CrashingSink were raised
+    sink_warnings = [str(w.message) for w in recorded if "_CrashingSink" in str(w.message)]
+    assert any("on_eval_start() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_trial_start() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("log_step() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_trial_end() failed with RuntimeError" in msg for msg in sink_warnings)
+    assert any("on_eval_end() failed with RuntimeError" in msg for msg in sink_warnings)

@@ -56,6 +56,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Core:** Isolate exceptions in `_Broadcast` sink fan-out so a failing `LogSink` warns instead of crashing evaluation or preventing other sinks from receiving lifecycle hooks ([#511](https://github.com/robocurve/inspect-robots/issues/511)).
+
 - **Core:** a run in which no scene completed cleanly now warns instead of
   passing silently (survivor bias,
   [#440](https://github.com/robocurve/inspect-robots/issues/440)). Its status is

@@ -214,9 +214,22 @@ class _Broadcast:
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
 
+    @staticmethod
+    def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> None:
+        try:
+            fn(*args)
+        except Exception as exc:
+            sink_name = type(sink).__name__ if sink is not None else "LogSink"
+            warnings.warn(
+                f"LogSink {sink_name}.{method_name}() failed with {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         for hook in self._policy_message_hooks:
-            hook(t, messages)
+            sink = getattr(hook, "__self__", None)
+            self._safe_call(sink, "log_policy_messages", hook, t, messages)
 
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Offer the resolved spaces to sinks that declare a bind_spaces hook.
@@ -227,43 +240,43 @@ class _Broadcast:
         for sink in self._sinks:
             hook = getattr(sink, "bind_spaces", None)
             if callable(hook):
-                hook(action_space, observation_space)
+                self._safe_call(sink, "bind_spaces", hook, action_space, observation_space)
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Offer the run's frame directory to sinks that declare the optional hook."""
         for sink in self._sinks:
             hook = getattr(sink, "bind_frames_dir", None)
             if callable(hook):
-                hook(frames_dir)
+                self._safe_call(sink, "bind_frames_dir", hook, frames_dir)
 
     def bind_scenes(self, scenes: Sequence[Scene]) -> None:
         """Offer the run's scenes to sinks that declare the optional hook."""
         for sink in self._sinks:
             hook = getattr(sink, "bind_scenes", None)
             if callable(hook):
-                hook(scenes)
+                self._safe_call(sink, "bind_scenes", hook, scenes)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         for s in self._sinks:
-            s.on_eval_start(spec)
+            self._safe_call(s, "on_eval_start", s.on_eval_start, spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
         for s in self._sinks:
-            s.on_trial_start(scene_id, epoch)
+            self._safe_call(s, "on_trial_start", s.on_trial_start, scene_id, epoch)
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
         for s in self._sinks:
-            s.log_step(t, observation, action, result)
+            self._safe_call(s, "log_step", s.log_step, t, observation, action, result)
 
     def on_trial_end(self, record: TrialRecord) -> None:
         for s in self._sinks:
-            s.on_trial_end(record)
+            self._safe_call(s, "on_trial_end", s.on_trial_end, record)
 
     def on_eval_end(self, log: EvalLog) -> None:
         for s in self._sinks:
-            s.on_eval_end(log)
+            self._safe_call(s, "on_eval_end", s.on_eval_end, log)
 
 
 def _survivor_warning(log: EvalLog) -> str | None:
