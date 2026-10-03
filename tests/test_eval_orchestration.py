@@ -21,7 +21,7 @@ from inspect_robots.errors import (
     SafetyAbort,
     _CancelledTrial,
 )
-from inspect_robots.eval import _git_commit
+from inspect_robots.eval import _Broadcast, _git_commit
 from inspect_robots.log import EvalLog, EvalSpec
 from inspect_robots.logging.json_log import JsonLogSink
 from inspect_robots.logging.sink import NullSink
@@ -1341,6 +1341,165 @@ def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
             log_dir=str(tmp_path),
             before_scoring=bad_hook,
         )
+
+
+class _AbortSink(NullSink):
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def on_eval_end(self, log: EvalLog) -> None:
+        self.events.append("end")
+
+    def on_eval_error(self, error: BaseException) -> None:
+        self.events.append(f"error:{type(error).__name__}: {error}")
+
+
+def test_escaping_error_offers_sinks_abort_cleanup(tmp_path: Path) -> None:
+    sink = _AbortSink()
+
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise RuntimeError("hook exploded")
+
+    with pytest.raises(RuntimeError, match="hook exploded"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            # NullSink has no on_eval_error and is skipped.
+            sinks=[NullSink(), sink],
+            before_scoring=bad_hook,
+        )
+
+    assert sink.events == ["error:RuntimeError: hook exploded"]
+
+
+def test_successful_eval_never_calls_on_eval_error(tmp_path: Path) -> None:
+    sink = _AbortSink()
+    eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+    assert sink.events == ["end"]
+
+
+def test_failed_critical_final_write_still_offers_cleanup(tmp_path: Path) -> None:
+    class _CriticalSink(NullSink):
+        critical = True
+
+        def on_eval_end(self, log: EvalLog) -> None:
+            raise OSError("disk full")
+
+    sink = _AbortSink()
+    with pytest.raises(OSError, match="disk full"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            sinks=[sink, _CriticalSink()],
+        )
+
+    assert sink.events == ["end", "error:OSError: disk full"]
+
+
+def test_only_sinks_offered_startup_get_abort_cleanup(tmp_path: Path) -> None:
+    class _InterruptedStartSink(_AbortSink):
+        def on_eval_start(self, spec: EvalSpec) -> None:
+            raise KeyboardInterrupt("ctrl-c during startup")
+
+    started = _InterruptedStartSink()
+    never_started = _AbortSink()
+    with pytest.raises(KeyboardInterrupt):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            sinks=[started, never_started],
+        )
+
+    assert started.events == ["error:KeyboardInterrupt: ctrl-c during startup"]
+    assert never_started.events == []
+
+
+def test_failing_abort_cleanup_warns_without_masking_the_error(tmp_path: Path) -> None:
+    class _FailingCleanupSink(NullSink):
+        def on_eval_error(self, error: BaseException) -> None:
+            raise KeyboardInterrupt("cleanup interrupted")
+
+    later = _AbortSink()
+
+    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+        raise RuntimeError("hook exploded")
+
+    with (
+        pytest.warns(RuntimeWarning, match="on_eval_error\\(\\) failed.*cleanup interrupted"),
+        pytest.raises(RuntimeError, match="hook exploded"),
+    ):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(tmp_path),
+            sinks=[_FailingCleanupSink(), later],
+            before_scoring=bad_hook,
+        )
+
+    assert later.events == ["error:RuntimeError: hook exploded"]
+
+
+def test_abort_cleanup_survives_warnings_as_errors_and_runs_once() -> None:
+    class _FailingCleanupSink(NullSink):
+        calls = 0
+
+        def on_eval_error(self, error: BaseException) -> None:
+            type(self).calls += 1
+            raise RuntimeError("cleanup exploded")
+
+    bus = _Broadcast([_FailingCleanupSink()])
+    bus.on_eval_start(
+        EvalSpec(task="t", policy="p", embodiment="e", created="now", inspect_robots_version="0")
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        bus.on_eval_error(RuntimeError("eval exploded"))
+        bus.on_eval_error(RuntimeError("eval exploded again"))
+
+    assert _FailingCleanupSink.calls == 1
+
+
+def test_raising_hook_lookup_keeps_the_original_error_and_later_sinks() -> None:
+    class _RaisingLookupSink(NullSink):
+        @property
+        def on_eval_error(self) -> object:
+            raise RuntimeError("lookup exploded")
+
+    later = _AbortSink()
+    bus = _Broadcast([_RaisingLookupSink(), later])
+    bus.on_eval_start(
+        EvalSpec(task="t", policy="p", embodiment="e", created="now", inspect_robots_version="0")
+    )
+    interrupt = KeyboardInterrupt("ctrl-c")
+    with pytest.warns(RuntimeWarning, match="lookup exploded"):
+        bus.on_eval_error(interrupt)
+
+    assert later.events == ["error:KeyboardInterrupt: ctrl-c"]
+
+
+def test_failing_sink_setup_still_closes_owned_embodiment(tmp_path: Path) -> None:
+    class _RaisingSetupSink(NullSink):
+        @property
+        def log_policy_messages(self) -> object:
+            raise RuntimeError("setup exploded")
+
+    _CLOSED.clear()
+    with pytest.raises(RuntimeError, match="setup exploded"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            "closable-cubepick",
+            log_dir=str(tmp_path),
+            sinks=[_RaisingSetupSink()],
+        )
+    assert _CLOSED == ["closed"]
 
 
 def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> None:
