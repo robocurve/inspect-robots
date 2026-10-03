@@ -696,8 +696,8 @@ inspect-robots video logs/adhoc_xxxx.json
 
 ```text
 fps: 10 (control_hz from log)
-wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
-wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~right_cam.mp4 (1200 frames)
 wrote 2/2 streams
 ```
 

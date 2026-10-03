@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import glob
 import html
 import json
 import math
@@ -20,7 +21,12 @@ import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
-from inspect_robots.frames import _frame_filename, _parse_frame_filename, _safe
+from inspect_robots.frames import (
+    _encode_component,
+    _frame_filename,
+    _parse_frame_filename,
+    _safe,
+)
 from inspect_robots.log import EvalLog, SceneResult
 
 _STATUS_DISPLAY = {"started": "running", "success": "completed"}
@@ -1336,17 +1342,17 @@ def _trial_camera_streams(
     marker = f"{_safe(trial_prefix)}_"
     replaced: set[str] = set()
     legacy_frames: list[tuple[str, int, Path]] = []
-    # Never interpolate raw identifiers into a glob expression.
-    for path in sorted(frames_dir.glob("*.npy")):
-        if path.name.startswith("~"):
-            identity = _parse_frame_filename(path.name)
-            if identity is not None and identity[0] == trial_prefix:
-                _, camera, step = identity
-                streams.setdefault(camera, []).append((step, path))
-                replaced.add(f"{marker}{_safe(camera)}_{step:06d}.npy")
-            continue
-        if not path.name.startswith(marker):
-            continue
+    # Glob only this trial's files: canonical names mean a matching encoded
+    # prefix is the same trial, so a run's other trials are never parsed.
+    # Prefixes are escaped; raw identifiers never reach a glob expression.
+    versioned = glob.escape(f"~f1~{_encode_component(trial_prefix)}~")
+    for path in sorted(frames_dir.glob(f"{versioned}*.npy")):
+        identity = _parse_frame_filename(path.name)
+        if identity is not None and identity[0] == trial_prefix:
+            _, camera, step = identity
+            streams.setdefault(camera, []).append((step, path))
+            replaced.add(f"{marker}{_safe(camera)}_{step:06d}.npy")
+    for path in sorted(frames_dir.glob(f"{glob.escape(marker)}*.npy")):
         remainder = path.name[len(marker) :]
         match = _CAMERA_FRAME_RE.fullmatch(remainder)
         if match is None:
