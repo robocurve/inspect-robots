@@ -226,6 +226,9 @@ class _Broadcast:
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        # Critical sinks (the canonical log) are served first, so a failed
+        # final write is known before any sink discards its own record.
+        self._ordered = sorted(sinks, key=lambda s: not getattr(s, "critical", False))
         policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
         for sink in sinks:
             hook = getattr(sink, "log_policy_messages", None)
@@ -277,13 +280,21 @@ class _Broadcast:
         sinks marked ``discards_on_eval_end`` (the live snapshot, which deletes
         itself) are skipped so the only surviving record of the run is kept.
         """
-        ordered = sorted(self._sinks, key=lambda s: not getattr(s, "critical", False))
         failure: Exception | None = None
-        for s in ordered:
+        for s in self._ordered:
             hook: Any = getattr(s, method_name, None)
             if optional and not callable(hook):
                 continue
-            if failure is not None and getattr(s, "discards_on_eval_end", False):
+            if (
+                failure is not None
+                and method_name == "on_eval_end"
+                and getattr(s, "discards_on_eval_end", False)
+            ):
+                # Keep the record; tell the sink so a later run does not
+                # delete it either (eval_set reuses sinks across tasks).
+                retain = getattr(s, "retain_snapshot", None)
+                if callable(retain):
+                    retain()
                 continue
             try:
                 self._safe_call(s, method_name, hook, *args)

@@ -81,8 +81,9 @@ class JsonLogSink:
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.path: Path | None = None
-        # Set when the final write raised: callers keep the live snapshot and
-        # must not advertise ``path`` (it is only set after a successful write).
+        # True once any final write on this instance raised (sticky across
+        # eval_set tasks): callers keep the live snapshot. ``path`` is the last
+        # successful write and is cleared when a write starts.
         self.write_failed = False
 
     def on_eval_start(self, spec: EvalSpec) -> None:
@@ -105,6 +106,7 @@ class JsonLogSink:
 
     def on_eval_end(self, log: EvalLog) -> None:
         """Atomically serialize the final log, then expose its path."""
+        self.path = None
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
             filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"

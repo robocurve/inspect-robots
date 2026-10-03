@@ -2118,3 +2118,44 @@ def test_live_snapshot_survives_a_failed_final_write(
             log_dir=str(tmp_path),
         )
     assert live.path is not None and live.path.exists()
+
+
+def test_eval_set_keeps_the_snapshot_of_a_task_whose_final_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later task must not delete an earlier task's only surviving record."""
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    real_write = JsonLogSink.on_eval_end
+    calls = {"n": 0}
+
+    def first_write_fails(self: JsonLogSink, log: EvalLog) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            self.write_failed = True
+            raise OSError("No space left on device")
+        real_write(self, log)
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", first_write_fails)
+    live = LiveLogSink(str(tmp_path))
+    seen: list[Path] = []
+    real_start = LiveLogSink.on_eval_start
+
+    def record_start(self: LiveLogSink, spec: EvalSpec) -> None:
+        real_start(self, spec)
+        assert self.path is not None
+        seen.append(self.path)
+
+    monkeypatch.setattr(LiveLogSink, "on_eval_start", record_start)
+    ok, logs = eval_set(
+        [_task(), _task()],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[live, JsonLogSink(str(tmp_path))],
+        log_dir=str(tmp_path),
+    )
+    assert not ok
+    assert [log.status for log in logs] == ["error", "success"]
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert seen[0].exists()  # task 1's snapshot survives task 2
+    assert not seen[1].exists()  # task 2 wrote its log, so its snapshot is gone

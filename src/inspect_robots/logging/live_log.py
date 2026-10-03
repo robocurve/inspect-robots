@@ -247,6 +247,14 @@ class LiveLogSink:
         except Exception as exc:
             self._disable(exc)
 
+    def retain_snapshot(self) -> None:
+        """Keep the current snapshot: the canonical log failed to write.
+
+        Marks the run finished without deleting the file, so the next
+        ``on_eval_start`` (another ``eval_set`` task) leaves it in place.
+        """
+        self._finished = True
+
     def on_eval_end(self, log: EvalLog) -> None:
         """Remove the transient snapshot after the canonical sink writes the final log."""
         try:
