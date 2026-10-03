@@ -731,9 +731,14 @@ def test_one_line_falls_back_to_the_class_name() -> None:
     assert _one_line(ConfigError("fix: only guidance")) == "ConfigError"
 
 
-def test_preflight_rejects_a_base_url_without_a_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "base_url", ["api.example/v1", "htps://api.example/v1", "https:///v1", "http://x.test:abc/v1"]
+)
+def test_preflight_rejects_a_malformed_base_url(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
     monkeypatch.setenv("VLM_TEST_KEY", "secret")
-    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url="api.example/v1")
+    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url=base_url)
     with pytest.raises(ConfigError, match=r"invalid URL") as first:
         grader.preflight()
     with pytest.raises(ConfigError) as again:

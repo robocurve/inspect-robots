@@ -287,8 +287,24 @@ def test_unreadable_http_error_body_keeps_its_status(monkeypatch: pytest.MonkeyP
     assert info.value.status == 404
 
 
-def test_malformed_url_is_a_plain_config_error_not_a_transport_error() -> None:
-    """A base URL without a scheme is configuration: it must not look like an outage."""
-    with pytest.raises(ConfigError, match=r"invalid URL 'api.example/v1/chat/completions'") as info:
-        _urllib_post("api.example/v1/chat/completions", {}, b"{}")
+@pytest.mark.parametrize(
+    ("url", "problem"),
+    [
+        ("api.example/v1", "the scheme must be http or https"),
+        ("htps://api.example/v1", "the scheme must be http or https"),
+        ("ftp://x.test/v1", "the scheme must be http or https"),
+        ("https:///v1", "no host given"),
+        ("http://x .test/v1", "whitespace or control characters"),
+        ("http://x.test/v 1", "whitespace or control characters"),
+        ("http://x.test:abc/v1", "Port could not be cast"),
+        ("http://[::1/v1", "Invalid IPv6 URL"),
+    ],
+)
+def test_malformed_url_is_a_plain_config_error_not_a_transport_error(
+    url: str, problem: str
+) -> None:
+    """A URL that can never work is configuration: it must not look like an outage."""
+    with pytest.raises(ConfigError, match="invalid URL") as info:
+        _urllib_post(url, {}, b"{}")
     assert type(info.value) is ConfigError
+    assert problem in str(info.value)

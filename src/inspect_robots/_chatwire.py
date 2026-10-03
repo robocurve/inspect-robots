@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.client
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from typing import Any, cast
@@ -51,16 +52,44 @@ def _response_excerpt(body: bytes) -> str:
     return (text or "(empty response body)")[:_RESPONSE_EXCERPT_LIMIT]
 
 
+def _check_url(url: str) -> None:
+    """Reject a URL that can never work, so it reads as configuration, not an outage.
+
+    urllib only discovers a bad scheme, a missing host, a bad port or embedded
+    whitespace while opening the connection, where it looks like a transport
+    failure. Checking first keeps a typo such as ``htps://`` from being
+    mistaken for a network blip (plan 0085).
+    """
+    problem = None
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as exc:  # e.g. an unbalanced IPv6 bracket
+        parts = None
+        problem = str(exc)
+    if parts is None:
+        pass
+    elif parts.scheme not in ("http", "https"):
+        problem = "the scheme must be http or https"
+    elif not parts.hostname:
+        problem = "no host given"
+    elif any(ch.isspace() or ord(ch) < 32 for ch in url):
+        problem = "it contains whitespace or control characters"
+    else:
+        try:
+            parts.port  # noqa: B018 - raises ValueError for a bad port
+        except ValueError as exc:
+            problem = str(exc)
+    if problem is not None:
+        raise ConfigError(
+            f"chat request failed: invalid URL {url!r}: {problem}.\n"
+            "fix: check the base URL (e.g. https://api.example.com/v1)"
+        )
+
+
 def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
     """Send one blocking HTTP POST and preserve HTTP error bodies for guided failures."""
-    try:
-        request = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
-    except ValueError as exc:
-        # A malformed URL (e.g. no https://) is configuration, not an outage.
-        raise ConfigError(
-            f"chat request failed: invalid URL {url!r}: {exc}.\n"
-            "fix: check the base URL (include https://)"
-        ) from exc
+    _check_url(url)
+    request = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=120.0) as response:
             return int(response.status), response.read()
