@@ -180,3 +180,7 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - `npm run types` (no changes), `tsc --noEmit` and all 97 Workers/SQLite tests passed on the merged branch.
 - Reviewer: `cc98cf1a-7763-4590-ba50-ba0e5dfb5dcb` (previous `ed77d94f-dbc5-4b6a-b1bb-06cad773c02d`). Runner and publisher unchanged. `/health` reports policy 3, advisory, enabled.
 - Existing charges, per-head, per-PR and $200 monthly caps are unchanged. Authors are recorded from the next webhook for each PR onward.
+
+## Lifetime cap raise for PRs 404 and 514: 2026-10-03
+
+- The maintainer asked for fresh reviews of #404 and #514, which had $1.656 and $1.262 left under the $15 PR lifetime cap (below the $2 admission floor). Raised only those two PRs to $20 lifetime via `REVIEW_PR_LIMITS_JSON`. Per-head ($5), per-author ($20/month) and monthly ($200) caps are unchanged; existing charges remain.
