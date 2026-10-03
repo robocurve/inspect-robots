@@ -2133,6 +2133,123 @@ def test_sink_raising_safety_abort_or_embodiment_fault_in_log_step_halts_eval(
     assert log.samples[0].scene_id == "s0"
 
 
+def test_failed_final_log_write_is_not_reported_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sink isolation (#511) must not swallow a lost canonical eval log."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    recorder = _RecordingSink()
+    with pytest.raises(OSError, match="No space left on device"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path)), recorder],
+            log_dir=str(tmp_path),
+        )
+    assert recorder.records  # the other sink still received the run
+
+
+def test_json_log_sink_records_a_failed_write_and_never_advertises_its_path(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a file where the log directory should be", encoding="utf-8")
+    sink = JsonLogSink(str(blocker))
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path / "ok"))
+    with pytest.raises(OSError):
+        sink.on_eval_end(log)
+    assert sink.write_failed is True
+    assert sink.path is None
+
+
+def test_live_snapshot_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        self.write_failed = True
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    live = LiveLogSink(str(tmp_path))
+    with pytest.raises(OSError):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[live, JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert live.path is not None and live.path.exists()
+
+
+def test_eval_set_keeps_the_snapshot_of_a_task_whose_final_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later task must not delete an earlier task's only surviving record."""
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    real_write = JsonLogSink.on_eval_end
+    calls = {"n": 0}
+
+    def first_write_fails(self: JsonLogSink, log: EvalLog) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            self.write_failed = True
+            raise OSError("No space left on device")
+        real_write(self, log)
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", first_write_fails)
+    live = LiveLogSink(str(tmp_path))
+    seen: list[Path] = []
+    real_start = LiveLogSink.on_eval_start
+
+    def record_start(self: LiveLogSink, spec: EvalSpec) -> None:
+        real_start(self, spec)
+        assert self.path is not None
+        seen.append(self.path)
+
+    monkeypatch.setattr(LiveLogSink, "on_eval_start", record_start)
+    ok, logs = eval_set(
+        [_task(), _task()],
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        sinks=[live, JsonLogSink(str(tmp_path))],
+        log_dir=str(tmp_path),
+    )
+    assert not ok
+    assert [log.status for log in logs] == ["error", "success"]
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert seen[0].exists()  # task 1's snapshot survives task 2
+    assert not seen[1].exists()  # task 2 wrote its log, so its snapshot is gone
+
+
+def test_ctrl_c_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled run whose log write also fails still raises the interrupt."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    with pytest.raises(KeyboardInterrupt) as info:
+        eval(
+            _task(),
+            _InterruptingPolicy(KeyboardInterrupt()),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert isinstance(info.value.__cause__, OSError)
+
+
 def test_eval_rejects_duplicate_scorer_names(tmp_path: Path) -> None:
     from inspect_robots.scorer import reached_goal_state
 

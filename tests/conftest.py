@@ -29,6 +29,17 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _enable_plugin_autoload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear a developer's exported plugin-autoload opt-out for every test.
+
+    Discovery tests assume entry points load; an inherited
+    ``INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD`` would make them depend on the
+    machine. Tests of the opt-out set it explicitly.
+    """
+    monkeypatch.delenv("INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep a repo-root ``.env`` out of ``os.environ`` during CLI tests.
 

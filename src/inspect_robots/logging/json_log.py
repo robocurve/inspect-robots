@@ -74,9 +74,17 @@ class JsonLogSink:
     sink only writes the final log (``path`` holds where it landed).
     """
 
+    # The canonical eval log: a failure to write it must surface, not be
+    # downgraded to a warning by the sink fan-out (eval._Broadcast).
+    critical = True
+
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.path: Path | None = None
+        # True once any final write on this instance raised (sticky across
+        # eval_set tasks): callers keep the live snapshot. ``path`` is the last
+        # successful write and is cleared when a write starts.
+        self.write_failed = False
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Defer output until the final immutable log is available."""
@@ -97,13 +105,19 @@ class JsonLogSink:
         return None
 
     def on_eval_end(self, log: EvalLog) -> None:
-        """Atomically serialize the final log and expose its path."""
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
-        self.path = self.log_dir / filename
-        tmp = self.path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        """Atomically serialize the final log, then expose its path."""
+        self.path = None
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
+            target = self.log_dir / filename
+            tmp = target.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            self.write_failed = True
+            raise
+        self.path = target
