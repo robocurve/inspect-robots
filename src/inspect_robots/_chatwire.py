@@ -9,7 +9,8 @@ is retried once with the cap under that key. A caller-supplied reasoning
 effort rides on both sends as ``reasoning_effort`` and is omitted from the
 body entirely when unset. Errors are raised as guided
 ``ConfigError``s whose prefix and fix hint the caller labels for its own
-command surface.
+command surface. A completion explicitly stopped at its output token limit is
+rejected instead of returning partial content as a successful answer.
 """
 
 from __future__ import annotations
@@ -109,7 +110,16 @@ def chat_completion(
     try:
         payload = cast(dict[str, Any], json.loads(response_body))
         choices = cast(list[Any], payload["choices"])
-        message = cast(dict[str, Any], choices[0]["message"])
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise TypeError
+        if choice.get("finish_reason") == "length":
+            raise ConfigError(
+                f"{what} endpoint returned an incomplete reply (finish_reason='length').\n"
+                "fix: reduce the requested output or use an endpoint/model that allows a longer "
+                "completion"
+            )
+        message = cast(dict[str, Any], choice["message"])
         content = message["content"]
         if not isinstance(content, str):
             raise TypeError

@@ -27,6 +27,31 @@ def test_chat_completion_parses_a_reply() -> None:
     assert chat_completion("https://x.test/v1", "k", "m", [], http_post=post) == "hello"
 
 
+def test_chat_completion_rejects_an_explicitly_truncated_reply() -> None:
+    reply = b'{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}'
+
+    with pytest.raises(ConfigError, match=r"incomplete.*finish_reason.*length.*\nfix:"):
+        chat_completion("https://x.test/v1", "k", "m", [], http_post=_post(200, reply))
+
+
+@pytest.mark.parametrize(
+    ("has_finish_reason", "finish_reason"),
+    [(False, None), (True, None), (True, "stop")],
+    ids=["missing", "null", "stop"],
+)
+def test_chat_completion_accepts_null_or_normal_finish_reason(
+    has_finish_reason: bool, finish_reason: str | None
+) -> None:
+    choice: dict[str, object] = {"message": {"content": "complete"}}
+    if has_finish_reason:
+        choice["finish_reason"] = finish_reason
+    reply = json.dumps({"choices": [choice]}).encode()
+
+    assert chat_completion("https://x.test/v1", "k", "m", [], http_post=_post(200, reply)) == (
+        "complete"
+    )
+
+
 def test_non_2xx_uses_the_callers_labels() -> None:
     with pytest.raises(ConfigError, match=r"grading request failed with HTTP 500.*\nfix: use -G"):
         chat_completion(

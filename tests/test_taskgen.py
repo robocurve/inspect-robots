@@ -258,6 +258,45 @@ def test_reply_contract_failures_include_bounded_excerpt(
     assert "x" * 501 not in message
 
 
+def test_truncated_task_generation_reply_has_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial generated task cannot become a Scene when the provider hit its token limit."""
+    monkeypatch.setenv("TASKGEN_KEY", "secret")
+
+    def truncated_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
+        return (
+            200,
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {
+                                "content": "TASK: Reach the green cube.\nRUBRIC:\nTouch it."
+                            },
+                        }
+                    ]
+                }
+            ).encode(),
+        )
+
+    with pytest.raises(ConfigError) as exc_info:
+        generate_scene(
+            CubePickEmbodiment(),
+            model="vision-model",
+            api_key_env="TASKGEN_KEY",
+            http_post=truncated_post,
+        )
+
+    message = _assert_fix(exc_info)
+    assert "task generation endpoint returned an incomplete reply" in message
+    assert "finish_reason='length'" in message
+    assert "check model=, base_url=" in message
+    assert "$TASKGEN_KEY" in message
+    assert message.count("fix:") == 1
+
+
 def test_inline_rubric_is_joined_to_following_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     scene, _captured = _generate(
         monkeypatch,

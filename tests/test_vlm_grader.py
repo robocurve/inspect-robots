@@ -142,6 +142,32 @@ def test_vlm_grader_requires_model_and_key(monkeypatch: pytest.MonkeyPatch) -> N
         vlm_grader("m", api_key_env="VLM_MISSING_KEY")
 
 
+def test_vlm_grader_leaves_an_explicitly_truncated_reply_ungraded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    post = _CapturePost()
+    post.response = (
+        200,
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "looks done\nGRADE: success"},
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    grader = _vlm(post, monkeypatch)
+    record = _framed_record()
+
+    grader.grade(record, _scene())
+
+    assert record.operator_judgement is None
+    assert "incomplete" in capsys.readouterr().err
+
+
 def test_vlm_grader_rejects_a_useless_camera_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLM_TEST_KEY", "secret")
     for bad in (0, -1, 2.5, True):
