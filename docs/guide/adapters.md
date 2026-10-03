@@ -112,9 +112,13 @@ OPTION_SLOTS = (
 ```
 
 Each slot is one yes/no question in the setup wizard. Its `arg` is the
-`[embodiment.args]` key written as `true` or `false`. On re-runs, the carried
-config value is the suggested answer. A declaration is skipped when its `arg`
-collides with a device slot, a camera key, or an earlier option declaration.
+`[embodiment.args]` key written as `true` or `false`. An optional
+`suggest: Callable[[Mapping[str, str]], bool]` callback can dynamically
+compute the suggested default from carried `[embodiment.args]` (e.g.
+`suggest=lambda args: "geom" in args` for a `collision_guardrail` option).
+On re-runs, any carried explicit config value takes top precedence. A declaration
+is skipped when its `arg` collides with a device slot, a camera key, or an
+earlier option declaration.
 
 ## Declare number slots
 
