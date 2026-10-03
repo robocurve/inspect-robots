@@ -266,7 +266,7 @@ def test_broadcast_isolates_exceptions_across_all_lifecycle_hooks() -> None:
             self.calls.append("on_eval_end")
 
     healthy = _HealthySink()
-    broadcast = _Broadcast([_ExplodingSink(), healthy])  # type: ignore[list-item]
+    broadcast = _Broadcast([_ExplodingSink(), healthy])
 
     with pytest.warns(RuntimeWarning) as recorded:
         broadcast.bind_spaces(None, None)  # type: ignore[arg-type]
@@ -309,3 +309,23 @@ def test_broadcast_does_not_catch_keyboard_interrupt_or_system_exit() -> None:
     broadcast_exit = _Broadcast([_ExitSink()])
     with pytest.raises(SystemExit):
         broadcast_exit.on_trial_end(None)  # type: ignore[arg-type]
+
+
+def test_broadcast_does_not_catch_safety_abort_or_embodiment_fault() -> None:
+    from inspect_robots.errors import EmbodimentFault, SafetyAbort
+
+    class _SafetySink(NullSink):
+        def on_trial_start(self, *args: Any) -> None:
+            raise SafetyAbort("e-stop triggered")
+
+    broadcast = _Broadcast([_SafetySink()])
+    with pytest.raises(SafetyAbort, match="e-stop triggered"):
+        broadcast.on_trial_start("s0", 0)
+
+    class _FaultSink(NullSink):
+        def log_step(self, *args: Any) -> None:
+            raise EmbodimentFault("hardware fault")
+
+    broadcast_fault = _Broadcast([_FaultSink()])
+    with pytest.raises(EmbodimentFault, match="hardware fault"):
+        broadcast_fault.log_step(0, None, None, None)  # type: ignore[arg-type]

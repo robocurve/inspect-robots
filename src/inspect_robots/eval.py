@@ -218,6 +218,8 @@ class _Broadcast:
     def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> None:
         try:
             fn(*args)
+        except (SafetyAbort, EmbodimentFault):
+            raise
         except Exception as exc:
             sink_name = type(sink).__name__ if sink is not None else "LogSink"
             warnings.warn(
