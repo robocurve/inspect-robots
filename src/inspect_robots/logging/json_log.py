@@ -74,6 +74,10 @@ class JsonLogSink:
     sink only writes the final log (``path`` holds where it landed).
     """
 
+    # The canonical eval log: a failure to write it must surface, not be
+    # downgraded to a warning by the sink fan-out (eval._Broadcast).
+    critical = True
+
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.path: Path | None = None

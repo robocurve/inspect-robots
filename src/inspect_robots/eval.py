@@ -213,6 +213,14 @@ def _git_commit() -> str | None:
     return commit
 
 
+class _CriticalSinkError(Exception):
+    """Carry a critical sink's failure past the remaining sinks' fan-out."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 class _Broadcast:
     """Fan a sink lifecycle out to several sinks, preserving hook order."""
 
@@ -224,27 +232,66 @@ class _Broadcast:
             if callable(hook):
                 policy_message_hooks.append(hook)
         self._policy_message_hooks = policy_message_hooks
+        # Transcript hooks that raised this trial: skipped until the next
+        # on_trial_start, preserving plan 0020's per-trial failure latch.
+        self._failed_message_hooks: set[int] = set()
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
 
     @staticmethod
-    def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> None:
+    def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> bool:
+        """Call one sink hook, isolating its failure; return whether it succeeded.
+
+        A failing sink warns instead of aborting the eval or starving the other
+        sinks (#511), unless it declares ``critical = True`` (the canonical
+        ``JsonLogSink``): then the error is re-raised once every sink has been
+        offered the hook, so a lost eval log is never reported as success.
+        """
         try:
             fn(*args)
         except (SafetyAbort, EmbodimentFault):
             raise
         except Exception as exc:
+            if getattr(sink, "critical", False):
+                raise _CriticalSinkError(exc) from exc
             sink_name = type(sink).__name__ if sink is not None else "LogSink"
             warnings.warn(
                 f"LogSink {sink_name}.{method_name}() failed with {type(exc).__name__}: {exc}",
                 RuntimeWarning,
                 stacklevel=3,
             )
+            return False
+        return True
+
+    def _fan_out(self, method_name: str, *args: Any, optional: bool = False) -> None:
+        """Offer one hook to every sink, then surface a critical sink's failure.
+
+        ``optional`` hooks are duck-typed: sinks without a callable attribute
+        of that name are skipped.
+        """
+        critical: _CriticalSinkError | None = None
+        for s in self._sinks:
+            hook: Any = getattr(s, method_name, None)
+            if optional and not callable(hook):
+                continue
+            try:
+                self._safe_call(s, method_name, hook, *args)
+            except _CriticalSinkError as exc:
+                critical = critical or exc
+        if critical is not None:
+            raise critical.original from None
 
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
-        for hook in self._policy_message_hooks:
+        for index, hook in enumerate(self._policy_message_hooks):
+            if index in self._failed_message_hooks:
+                continue
             sink = getattr(hook, "__self__", None)
-            self._safe_call(sink, "log_policy_messages", hook, t, messages)
+            try:
+                ok = self._safe_call(sink, "log_policy_messages", hook, t, messages)
+            except _CriticalSinkError as exc:
+                raise exc.original from None
+            if not ok:
+                self._failed_message_hooks.add(index)
 
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Offer the resolved spaces to sinks that declare a bind_spaces hook.
@@ -252,46 +299,33 @@ class _Broadcast:
         Duck-typed like ``log_policy_messages``: sinks without the attribute
         are unaffected, so the sink Protocol is unchanged.
         """
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_spaces", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_spaces", hook, action_space, observation_space)
+        self._fan_out("bind_spaces", action_space, observation_space, optional=True)
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Offer the run's frame directory to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_frames_dir", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_frames_dir", hook, frames_dir)
+        self._fan_out("bind_frames_dir", frames_dir, optional=True)
 
     def bind_scenes(self, scenes: Sequence[Scene]) -> None:
         """Offer the run's scenes to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_scenes", None)
-            if callable(hook):
-                self._safe_call(sink, "bind_scenes", hook, scenes)
+        self._fan_out("bind_scenes", scenes, optional=True)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_eval_start", s.on_eval_start, spec)
+        self._fan_out("on_eval_start", spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_trial_start", s.on_trial_start, scene_id, epoch)
+        self._failed_message_hooks.clear()
+        self._fan_out("on_trial_start", scene_id, epoch)
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "log_step", s.log_step, t, observation, action, result)
+        self._fan_out("log_step", t, observation, action, result)
 
     def on_trial_end(self, record: TrialRecord) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_trial_end", s.on_trial_end, record)
+        self._fan_out("on_trial_end", record)
 
     def on_eval_end(self, log: EvalLog) -> None:
-        for s in self._sinks:
-            self._safe_call(s, "on_eval_end", s.on_eval_end, log)
+        self._fan_out("on_eval_end", log)
 
 
 def _survivor_warning(log: EvalLog) -> str | None:

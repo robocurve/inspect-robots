@@ -2062,3 +2062,23 @@ def test_sink_raising_safety_abort_or_embodiment_fault_in_log_step_halts_eval(
     assert signal_cls.__name__ in (log.error or "")
     assert len(log.samples) == 1
     assert log.samples[0].scene_id == "s0"
+
+
+def test_failed_final_log_write_is_not_reported_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sink isolation (#511) must not swallow a lost canonical eval log."""
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    recorder = _RecordingSink()
+    with pytest.raises(OSError, match="No space left on device"):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[JsonLogSink(str(tmp_path)), recorder],
+        )
+    assert recorder.records  # the other sink still received the run
