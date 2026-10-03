@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -10,7 +11,13 @@ from email.message import Message
 
 import pytest
 
-from inspect_robots._chatwire import HttpPost, _urllib_post, chat_completion
+from inspect_robots._chatwire import (
+    HttpPost,
+    _ChatHTTPError,
+    _ChatTransportError,
+    _urllib_post,
+    chat_completion,
+)
 from inspect_robots.errors import ConfigError
 
 
@@ -222,3 +229,59 @@ def test_non_string_effort_is_serialized_verbatim(falsy_or_numeric: float) -> No
     chat_completion("https://x.test/v1", "k", "m", [], effort=falsy_or_numeric, http_post=post)
 
     assert json.loads(calls[0][2])["reasoning_effort"] == falsy_or_numeric
+
+
+class _BodyRaises:
+    """A urlopen response whose body read fails mid-stream."""
+
+    status = 200
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def __enter__(self) -> _BodyRaises:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [TimeoutError("timed out"), http.client.RemoteDisconnected("closed")],
+)
+def test_urllib_post_wraps_read_timeouts_and_dropped_connections(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    """Failures that are not URLError are still transport errors, not raw exceptions."""
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        if isinstance(exc, TimeoutError):
+            return _BodyRaises(exc)
+        raise exc
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(_ChatTransportError, match=r"^chat request failed: "):
+        _urllib_post("https://x.test", {}, b"{}")
+
+
+def test_unreadable_http_error_body_keeps_its_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx whose body cannot be read is still a rejected request with its status."""
+
+    class _Broken(io.BytesIO):
+        def read(self, *args: object) -> bytes:
+            raise http.client.IncompleteRead(b"")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> object:
+        raise urllib.error.HTTPError(request.full_url, 404, "missing", Message(), _Broken())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert _urllib_post("https://x.test", {}, b"{}") == (404, b"")
+    with pytest.raises(_ChatHTTPError, match=r"HTTP 404: \(empty response body\)") as info:
+        chat_completion("https://x.test/v1", "k", "m", [])
+    assert info.value.status == 404

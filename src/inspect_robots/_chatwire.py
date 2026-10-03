@@ -14,6 +14,7 @@ command surface.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -29,6 +30,22 @@ _RESPONSE_EXCERPT_LIMIT = 500
 _TOKEN_CAP = 8192
 
 
+class _ChatHTTPError(ConfigError):
+    """The endpoint answered with a non-2xx status, kept in ``status``.
+
+    Still a ``ConfigError``, so existing callers behave as before; callers that
+    must tell a rejected request (4xx) from an outage (5xx) read ``status``.
+    """
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _ChatTransportError(ConfigError):
+    """The request never got an HTTP answer (DNS, refused, timeout, dropped)."""
+
+
 def _response_excerpt(body: bytes) -> str:
     text = body.decode("utf-8", errors="replace").strip()
     return (text or "(empty response body)")[:_RESPONSE_EXCERPT_LIMIT]
@@ -41,10 +58,23 @@ def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[
         with urllib.request.urlopen(request, timeout=120.0) as response:
             return int(response.status), response.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        try:
+            body = exc.read()
+        except (OSError, http.client.HTTPException):
+            # Keep the status: a 4xx with an unreadable body is still a
+            # rejected request, not a transport failure.
+            body = b""
+        return exc.code, body
     except urllib.error.URLError as exc:
-        raise ConfigError(
+        raise _ChatTransportError(
             f"chat request failed: {exc.reason}.\n"
+            "fix: check the base URL and network connectivity, then retry"
+        ) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # A read timeout or dropped connection arrives here rather than as a
+        # URLError; it is still a transport failure, not a request problem.
+        raise _ChatTransportError(
+            f"chat request failed: {type(exc).__name__}: {exc}.\n"
             "fix: check the base URL and network connectivity, then retry"
         ) from exc
 
@@ -101,9 +131,10 @@ def chat_completion(
             post, url, headers, model, messages, "max_completion_tokens", effort
         )
     if not 200 <= status < 300:
-        raise ConfigError(
+        raise _ChatHTTPError(
             f"{what} request failed with HTTP {status}: {_response_excerpt(response_body)}\n"
-            f"fix: {fix_hint}"
+            f"fix: {fix_hint}",
+            status,
         )
 
     try:

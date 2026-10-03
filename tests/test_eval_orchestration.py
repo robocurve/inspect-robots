@@ -1818,3 +1818,132 @@ def test_policy_base_bind_task_noop() -> None:
 
     pol = _ConcretePolicy()
     pol.bind_task(TaskEnvelope(name="t", max_steps=10))
+
+
+class _UngradedGrader:
+    """A grader that tries and fails on the listed epochs (plan 0085)."""
+
+    name = "flaky-judge"
+
+    def __init__(self, epochs: set[int], *, also_judge: bool = False) -> None:
+        self.epochs = epochs
+        self.also_judge = also_judge
+
+    def grade(self, record: TrialRecord, scene: Scene) -> None:
+        if record.epoch in self.epochs:
+            record.metadata["grading_error"] = "grading request failed with HTTP 400: nope"
+            if self.also_judge:
+                record.operator_judgement = "success"
+        else:
+            record.operator_judgement = "success"
+
+
+def test_ungraded_trials_abstain_and_fail_the_run_without_stopping(tmp_path: Path) -> None:
+    task = _task(epochs=3, scorer=operator_scorer())
+    (log,) = eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({1}),
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error == (
+        "1 of 3 trial(s) ungraded: grader failed (grading request failed with HTTP 400: nope)"
+    )
+    assert log.samples[0].epochs == ({"operator": 1.0}, {"operator": None}, {"operator": 1.0})
+    assert log.results.metrics == {"operator": 1.0}
+    assert log.results.abstentions == {"operator": 1}
+    assert log.samples[0].trial_metadata[1]["grading_error"].startswith("grading request failed")
+
+
+def test_a_recorded_judgement_wins_over_a_grading_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=2, scorer=operator_scorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0}, also_judge=True),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+    assert log.results.abstentions == {}
+
+
+def test_ungraded_count_is_appended_to_a_more_specific_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=2, scorer=operator_scorer()),
+        _BoomOnSecondEpochPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0}),
+        fail_on_error=True,
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    assert log.error is not None
+    assert log.error.startswith("fail_on_error threshold exceeded")
+    assert log.error.endswith("; 1 of 1 trial(s) ungraded")
+
+
+def test_pass_at_k_with_partial_abstention_keeps_the_reducer_error(tmp_path: Path) -> None:
+    (log,) = eval(
+        _task(epochs=Epochs(count=3, reducer="pass_at_2"), scorer=operator_scorer()),
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        grader=_UngradedGrader({0, 1}),
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "error"
+    assert log.error is not None
+    assert "reducer 'pass_at_2' failed" in log.error
+    assert log.error.endswith("; 2 of 3 trial(s) ungraded")
+
+
+class _RejectingPreflightGrader(_UngradedGrader):
+    """A grader whose preflight rejects, as a misconfigured VLM grader would."""
+
+    def __init__(self) -> None:
+        super().__init__(set())
+        self.preflights = 0
+
+    def preflight(self) -> None:
+        self.preflights += 1
+        raise ConfigError("grading preflight request failed with HTTP 400: bad effort")
+
+
+class _ResetCountingEmbodiment(CubePickEmbodiment):
+    resets = 0
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        type(self).resets += 1
+        return super().reset(scene, seed=seed)
+
+
+def test_preflight_rejection_stops_eval_before_any_rollout(tmp_path: Path) -> None:
+    _ResetCountingEmbodiment.resets = 0
+    grader = _RejectingPreflightGrader()
+    with pytest.raises(ConfigError, match="preflight request failed"):
+        eval(
+            _task(scorer=operator_scorer()),
+            ScriptedPolicy(),
+            _ResetCountingEmbodiment(),
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+    assert _ResetCountingEmbodiment.resets == 0
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_preflight_rejection_stops_eval_set_before_the_first_task(tmp_path: Path) -> None:
+    _ResetCountingEmbodiment.resets = 0
+    grader = _RejectingPreflightGrader()
+    with pytest.raises(ConfigError, match="preflight request failed"):
+        eval_set(
+            [_task(scorer=operator_scorer()), _task(scorer=operator_scorer())],
+            ScriptedPolicy(),
+            _ResetCountingEmbodiment(),
+            grader=grader,
+            log_dir=str(tmp_path),
+        )
+    assert grader.preflights == 1
+    assert _ResetCountingEmbodiment.resets == 0

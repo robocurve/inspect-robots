@@ -53,7 +53,9 @@ subclasses so callers can tell them apart without parsing prose:
   `RemoteDisconnected`), which today escape as raw exceptions. Handler order:
   `HTTPError` first, then `URLError`, then `OSError`/`HTTPException` (`URLError`
   subclasses `OSError`). `exc.read()` inside the `HTTPError` branch can itself
-  raise `OSError` or `http.client.IncompleteRead`; that is wrapped too. New
+  raise `OSError` or `http.client.IncompleteRead`; then the branch returns
+  `(exc.code, b"")`, so the status still becomes a `_ChatHTTPError` and a 4xx
+  keeps its meaning. New
   messages keep the `chat request failed:` prefix so taskgen's rewording regex
   (`taskgen.py:221-232`) still applies.
 
@@ -104,6 +106,9 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
   model without image input is rejected here rather than on every trial. The
   reply's content is not validated; a 2xx with a parseable reply passes.
 - Outcomes:
+  - The preflight passes its own `fix_hint` naming `-G` flags, and the raised
+    error flattens the original message (dropping its `fix:` line), so the user
+    sees exactly one `fix:` line.
   - `_ChatHTTPError` with `400 <= status < 500`, except 408 and 429: raise
     `ConfigError` with the
     original message plus the requested effort (when explicit) and
@@ -123,10 +128,11 @@ behaves exactly as before. Malformed 2xx replies keep raising plain
 `_VLMGrader.grade` keeps its "never raise after a rollout" contract, but no
 longer leaves the record unchanged on failure. In its existing `except
 Exception` branch it sets `record.metadata["grading_error"]` to a one-line
-reason, capped at 500 characters: for a `ConfigError`, the first line of
-`str(exc)` (dropping the `fix:` line and the class name, e.g.
-`grading request failed with HTTP 400: {...}`); for any other exception,
-`f"{type(exc).__name__}: {first line of str(exc)}"`. It keeps the stderr
+reason, capped at 500 characters: `str(exc)` with its `fix:` lines dropped and
+all whitespace collapsed (provider error bodies are often pretty-printed
+JSON), e.g. `grading request failed with HTTP 400: { "error": ... }`; for an
+exception that is not a `ConfigError`, prefixed with its class name. The same
+flattening applies to the preflight warning and error. It keeps the stderr
 note. Successful grading never sets the key. Trials adopted from a
 console verdict or a definitive termination are unchanged.
 
@@ -150,7 +156,10 @@ trials only and the count is shown beside the metric in `inspect` and `view`.
 ### 5. Failing the run
 
 In `_run_eval`, after `before_scoring(record, scene)` returns, count trials
-whose record carries `grading_error`, and keep the first reason. After all
+whose record carries `grading_error` **and** has no `operator_judgement`
+(matching when the scorer abstains), and keep the first reason. Scene-level
+status is deliberately left `success`: the trials ran and were scored (as
+abstentions); the run-level error carries the count. After all
 scenes, when the run would otherwise end with `status == "success"` and at
 least one trial is ungraded, set `status = "error"` and
 `error = f"{n} of {graded_attempts} trial(s) ungraded: grader failed ({first_reason})"`,
