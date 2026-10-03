@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import inspect_robots._chatwire as chatwire_module
+from inspect_robots import eval as run_eval
 from inspect_robots._chatwire import _urllib_post, chat_completion
 from inspect_robots._summarize import (
     _TRANSCRIPT_CHAR_BUDGET,
@@ -25,7 +26,19 @@ from inspect_robots._summarize import (
 )
 from inspect_robots.cli import build_parser, main
 from inspect_robots.errors import ConfigError
-from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
+from inspect_robots.log import (
+    EvalLog,
+    EvalResults,
+    EvalSpec,
+    EvalStats,
+    SceneResult,
+    read_eval_log,
+)
+from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.rollout import TrialRecord
+from inspect_robots.scene import Scene
+from inspect_robots.scorer import Score
+from inspect_robots.task import Task
 
 
 def _eval_log() -> EvalLog:
@@ -202,6 +215,7 @@ def test_digest_is_stable_and_covers_each_trial(log_path: Path) -> None:
         "- Policy: agent",
         "- Embodiment: arm",
         "- Status: error",
+        "- Error: one trial failed",
         "- Model: test-model",
         "",
         "## Trials",
@@ -280,6 +294,63 @@ def test_digest_handles_old_parallel_fields_and_defensive_transcript_values() ->
     assert "- Model:" not in digest
     assert "outcome: no reason recorded" in digest
     assert "4 messages; 3 tool calls; last assistant note: none" in digest
+
+
+def test_digest_reports_partial_scoring_error_once(tmp_path: Path) -> None:
+    # Issue #493: a scorer failing beside a healthy one leaves every epoch
+    # scored, so the saved diagnostic used to vanish from the digest.
+    class _GoodScorer:
+        name = "good_score"
+
+        def __call__(self, record: TrialRecord, target: object) -> Score:
+            return Score(value=1.0)
+
+    class _BadScorer:
+        name = "bad_score"
+
+        def __call__(self, record: TrialRecord, target: object) -> Score:
+            raise RuntimeError("synthetic scorer exploded after rollout")
+
+    task = Task(
+        name="partial",
+        scenes=[Scene(id="one", instruction="reach", init_seed=0)],
+        scorer=[_GoodScorer(), _BadScorer()],
+        max_steps=60,
+    )
+    run_eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        store_frames=False,
+        store_actions=False,
+    )
+    (path,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(path))
+
+    digest = build_digest(log, load_transcripts(log, path))
+
+    failure = "scorer 'bad_score' failed: synthetic scorer exploded after rollout"
+    assert digest.count("synthetic scorer exploded after rollout") == 1
+    assert f"## Scene errors\n- `one`: {failure}\n" in digest
+    rows = digest.splitlines()
+    (trial_row,) = [row for row in rows if row.startswith("- `one` epoch 0: outcome")]
+    assert "error:" not in trial_row  # the cumulative scene error is not pinned to an epoch
+
+
+def test_digest_output_has_no_error_text_when_none_is_recorded(log_path: Path) -> None:
+    log = _eval_log()
+    clean = replace(
+        log,
+        error=None,
+        samples=tuple(replace(scene, status="success", error=None) for scene in log.samples),
+    )
+
+    digest = build_digest(clean, load_transcripts(clean, log_path))
+
+    assert "- Error:" not in digest
+    assert "## Scene errors" not in digest
+    assert "error:" not in digest
 
 
 def test_build_messages_fixes_headings_and_keeps_truncated_tail() -> None:

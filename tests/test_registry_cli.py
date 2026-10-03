@@ -277,6 +277,56 @@ def test_cli_live_sink_order_flag_eval_set_threading_and_agent_tip(
         assert "each agent turn, notes, and operator/voice input, updating live" in out
 
 
+@pytest.mark.parametrize("command", ["run", "eval-set"])
+def test_cli_eval_and_eval_set_forward_provenance_flags(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect_robots
+
+    captured_kwargs: dict[str, object] = {}
+    log = _step_limit_log(task="cubepick-reach", reasons=("success",))
+
+    def fake_eval(*args: object, **kwargs: object) -> list[EvalLog]:
+        del args
+        captured_kwargs.update(kwargs)
+        return [log]
+
+    def fake_eval_set(*args: object, **kwargs: object) -> tuple[bool, list[EvalLog]]:
+        del args
+        captured_kwargs.update(kwargs)
+        return True, [log]
+
+    monkeypatch.setattr(inspect_robots, "eval", fake_eval)
+    monkeypatch.setattr(inspect_robots, "eval_set", fake_eval_set)
+
+    argv = (
+        ["run", "--task", "cubepick-reach"] if command == "run" else ["eval-set", "cubepick-reach"]
+    )
+    argv.extend(
+        [
+            "--policy",
+            "scripted",
+            "--embodiment",
+            "cubepick",
+            "--log-dir",
+            str(tmp_path),
+            "--environment-id",
+            "test-env-123",
+            "--environment-revision",
+            "rev-sha-abc",
+            "--policy-checkpoint",
+            "ckpt-v1.0",
+        ]
+    )
+
+    assert main(argv) == 0
+    assert captured_kwargs["environment_id"] == "test-env-123"
+    assert captured_kwargs["environment_revision"] == "rev-sha-abc"
+    assert captured_kwargs["policy_checkpoint"] == "ckpt-v1.0"
+
+
 @pytest.mark.parametrize(
     ("env", "platform", "expected"),
     [

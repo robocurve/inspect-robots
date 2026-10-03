@@ -268,6 +268,21 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         help="per-step change limit for the default guardrails, in the action "
         "space's native units (default: derived from the space's bounds)",
     )
+    parser.add_argument(
+        "--environment-id",
+        default=None,
+        help="environment identifier recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--environment-revision",
+        default=None,
+        help="environment revision or commit hash recorded in evaluation metadata",
+    )
+    parser.add_argument(
+        "--policy-checkpoint",
+        default=None,
+        help="policy model checkpoint path, hash, or revision recorded in evaluation metadata",
+    )
 
 
 def _port_number(text: str) -> int:
@@ -1796,6 +1811,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ),
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             if sink.path is not None and sink.path.exists():
@@ -1937,6 +1955,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
                 retry_attempts=args.retry_attempts,
                 operator_input=operator_input,
                 grader=grader,
+                environment_id=args.environment_id,
+                environment_revision=args.environment_revision,
+                policy_checkpoint=args.policy_checkpoint,
             )
         except KeyboardInterrupt:
             # eval_set writes one log per task; eval() persists a cancelled log

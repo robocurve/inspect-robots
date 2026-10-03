@@ -656,7 +656,9 @@ def test_optional_request_fields_are_omitted_when_unset() -> None:
     assert "service_tier" not in bodies[0]
 
 
-@pytest.mark.parametrize("service_tier", ["auto", "default", "flex", "priority", "fast"])
+@pytest.mark.parametrize(
+    "service_tier", ["auto", "default", "flex", "priority", "fast", "ultrafast"]
+)
 def test_service_tier_is_sent_on_every_retry_and_captured(
     service_tier: str, tmp_path: Path
 ) -> None:
@@ -1074,7 +1076,9 @@ def test_close_closes_underlying_http_client() -> None:
     assert client._http.is_closed
 
 
-@pytest.mark.parametrize("service_tier", [None, "auto", "default", "flex", "priority", "fast"])
+@pytest.mark.parametrize(
+    "service_tier", [None, "auto", "default", "flex", "priority", "fast", "ultrafast"]
+)
 def test_policy_uses_responses_wire_through_act_and_records_config(
     service_tier: str | None,
 ) -> None:
@@ -1123,13 +1127,14 @@ def test_policy_rejects_invalid_service_tier(service_tier: Any) -> None:
 
 
 @pytest.mark.parametrize("wire", ["chat", "messages", "anthropic", "gemini-live", "interactions"])
-def test_policy_rejects_service_tier_on_other_wires(wire: str) -> None:
+@pytest.mark.parametrize("service_tier", ["fast", "ultrafast"])
+def test_policy_rejects_service_tier_on_other_wires(wire: str, service_tier: str) -> None:
     with pytest.raises(ConfigError, match="service_tier is only supported on wire='responses'"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",
             wire=wire,
-            service_tier="fast",
+            service_tier=service_tier,
             env={},
         )
 

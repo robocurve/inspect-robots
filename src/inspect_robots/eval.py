@@ -852,6 +852,15 @@ def _component_name(component: Policy | Embodiment) -> str:
         return type(component).__name__
 
 
+def _safe_info_attr(component: object, attr: str) -> str | None:
+    try:
+        info = getattr(component, "info", None)
+        value = getattr(info, attr, None)
+        return str(value) if value is not None else None
+    except Exception:
+        return None
+
+
 def _error_log_for(
     task: Task | str,
     policy: Policy | str,
@@ -859,6 +868,9 @@ def _error_log_for(
     *,
     seed: int | None,
     exc: Exception,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> EvalLog:
     """Describe a task failure that occurred before or outside log production."""
     now = _now_iso()
@@ -875,6 +887,20 @@ def _error_log_for(
             seed=seed,
             max_steps=None if isinstance(task, str) else task.max_steps,
             max_seconds=None if isinstance(task, str) else task.max_seconds,
+            environment_id=environment_id
+            or (
+                _safe_info_attr(embodiment, "environment_id")
+                if not isinstance(embodiment, str)
+                else None
+            ),
+            environment_revision=environment_revision
+            or (
+                _safe_info_attr(embodiment, "environment_revision")
+                if not isinstance(embodiment, str)
+                else None
+            ),
+            policy_checkpoint=policy_checkpoint
+            or (_safe_info_attr(policy, "checkpoint") if not isinstance(policy, str) else None),
         ),
         results=EvalResults(total_scenes=0, total_trials=0),
         stats=EvalStats(
@@ -906,6 +932,9 @@ def eval_set(
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
     retry_attempts: int = 0,
+    environment_id: str | None = None,
+    environment_revision: str | None = None,
+    policy_checkpoint: str | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
@@ -966,6 +995,9 @@ def eval_set(
                     # would leave every eval_set log with no grader recorded.
                     grader=resolved_grader,
                     before_scoring=None if resolved_grader is not None else before_scoring,
+                    environment_id=environment_id,
+                    environment_revision=environment_revision,
+                    policy_checkpoint=policy_checkpoint,
                 )
             )
         except (SafetyAbort, EmbodimentFault):
@@ -978,6 +1010,9 @@ def eval_set(
                     embodiment,
                     seed=seed,
                     exc=exc,
+                    environment_id=environment_id,
+                    environment_revision=environment_revision,
+                    policy_checkpoint=policy_checkpoint,
                 )
             )
     success = all(log.status == "success" for log in logs)
