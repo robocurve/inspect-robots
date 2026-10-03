@@ -81,6 +81,9 @@ class JsonLogSink:
     def __init__(self, log_dir: str):
         self.log_dir = Path(log_dir)
         self.path: Path | None = None
+        # Set when the final write raised: callers keep the live snapshot and
+        # must not advertise ``path`` (it is only set after a successful write).
+        self.write_failed = False
 
     def on_eval_start(self, spec: EvalSpec) -> None:
         """Defer output until the final immutable log is available."""
@@ -101,13 +104,18 @@ class JsonLogSink:
         return None
 
     def on_eval_end(self, log: EvalLog) -> None:
-        """Atomically serialize the final log and expose its path."""
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
-        self.path = self.log_dir / filename
-        tmp = self.path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        """Atomically serialize the final log, then expose its path."""
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{_slug(log.eval.task)}_{uuid.uuid4().hex[:8]}.json"
+            target = self.log_dir / filename
+            tmp = target.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(_sanitize(log.to_dict()), fh, indent=2, sort_keys=True, allow_nan=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            self.write_failed = True
+            raise
+        self.path = target

@@ -390,5 +390,38 @@ def test_critical_sink_failures_surface_after_other_sinks_are_served() -> None:
         bus.bind_scenes([_SCENE])
     assert other.bound == ["scenes"]
 
-    with pytest.raises(RuntimeError, match="critical transcript failure"):
+    # Transcript hooks are never critical: they warn and latch like any sink.
+    with pytest.warns(RuntimeWarning, match="critical transcript failure"):
         bus.log_policy_messages(0, [])
+
+
+class _SecondCriticalSink(NullSink):
+    critical = True
+
+    def on_eval_end(self, log: Any) -> None:
+        raise OSError("second disk full")
+
+
+class _DiscardingSink(NullSink):
+    """Stands in for the live snapshot, which deletes itself at eval end."""
+
+    discards_on_eval_end = True
+
+    def __init__(self) -> None:
+        self.ended = 0
+
+    def on_eval_end(self, log: Any) -> None:
+        self.ended += 1
+
+
+def test_failed_canonical_write_keeps_discarding_sinks_and_warns_on_more_failures() -> None:
+    discarding, other = _DiscardingSink(), _BindRecordingSink()
+    # Critical sinks run first whatever their list position.
+    bus = _Broadcast([discarding, other, _CriticalSink(), _SecondCriticalSink()])
+    with (
+        pytest.warns(RuntimeWarning, match="also failed with OSError: second disk full"),
+        pytest.raises(OSError, match=r"^disk full$"),
+    ):
+        bus.on_eval_end(object())  # type: ignore[arg-type]
+    assert discarding.ended == 0  # the only surviving record is kept
+    assert other.ended == 1

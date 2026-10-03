@@ -2083,3 +2083,38 @@ def test_failed_final_log_write_is_not_reported_as_success(
             log_dir=str(tmp_path),
         )
     assert recorder.records  # the other sink still received the run
+
+
+def test_json_log_sink_records_a_failed_write_and_never_advertises_its_path(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a file where the log directory should be", encoding="utf-8")
+    sink = JsonLogSink(str(blocker))
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path / "ok"))
+    with pytest.raises(OSError):
+        sink.on_eval_end(log)
+    assert sink.write_failed is True
+    assert sink.path is None
+
+
+def test_live_snapshot_survives_a_failed_final_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots.logging.live_log import LiveLogSink
+
+    def failing_write(self: JsonLogSink, log: EvalLog) -> None:
+        self.write_failed = True
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(JsonLogSink, "on_eval_end", failing_write)
+    live = LiveLogSink(str(tmp_path))
+    with pytest.raises(OSError):
+        eval(
+            _task(),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            sinks=[live, JsonLogSink(str(tmp_path))],
+            log_dir=str(tmp_path),
+        )
+    assert live.path is not None and live.path.exists()

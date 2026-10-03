@@ -239,7 +239,13 @@ class _Broadcast:
             self.log_policy_messages = self._fan_policy_messages
 
     @staticmethod
-    def _safe_call(sink: Any, method_name: str, fn: Callable[..., Any], *args: Any) -> bool:
+    def _safe_call(
+        sink: Any,
+        method_name: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        may_be_critical: bool = True,
+    ) -> bool:
         """Call one sink hook, isolating its failure; return whether it succeeded.
 
         A failing sink warns instead of aborting the eval or starving the other
@@ -252,7 +258,7 @@ class _Broadcast:
         except (SafetyAbort, EmbodimentFault):
             raise
         except Exception as exc:
-            if getattr(sink, "critical", False):
+            if may_be_critical and getattr(sink, "critical", False):
                 raise _CriticalSinkError(exc) from exc
             sink_name = type(sink).__name__ if sink is not None else "LogSink"
             warnings.warn(
@@ -267,29 +273,43 @@ class _Broadcast:
         """Offer one hook to every sink, then surface a critical sink's failure.
 
         ``optional`` hooks are duck-typed: sinks without a callable attribute
-        of that name are skipped.
+        of that name are skipped. Critical sinks run first; if one fails,
+        sinks marked ``discards_on_eval_end`` (the live snapshot, which deletes
+        itself) are skipped so the only surviving record of the run is kept.
         """
-        critical: _CriticalSinkError | None = None
-        for s in self._sinks:
+        ordered = sorted(self._sinks, key=lambda s: not getattr(s, "critical", False))
+        failure: Exception | None = None
+        for s in ordered:
             hook: Any = getattr(s, method_name, None)
             if optional and not callable(hook):
+                continue
+            if failure is not None and getattr(s, "discards_on_eval_end", False):
                 continue
             try:
                 self._safe_call(s, method_name, hook, *args)
             except _CriticalSinkError as exc:
-                critical = critical or exc
-        if critical is not None:
-            raise critical.original from None
+                if failure is None:
+                    failure = exc.original
+                else:
+                    warnings.warn(
+                        f"LogSink {type(s).__name__}.{method_name}() also failed with "
+                        f"{type(exc.original).__name__}: {exc.original}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        if failure is not None:
+            raise failure
 
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
         for index, hook in enumerate(self._policy_message_hooks):
             if index in self._failed_message_hooks:
                 continue
             sink = getattr(hook, "__self__", None)
-            try:
-                ok = self._safe_call(sink, "log_policy_messages", hook, t, messages)
-            except _CriticalSinkError as exc:
-                raise exc.original from None
+            # Never critical: rollout downgrades transcript errors to "streaming
+            # off" anyway, so a failing hook just warns and latches for the trial.
+            ok = self._safe_call(
+                sink, "log_policy_messages", hook, t, messages, may_be_critical=False
+            )
             if not ok:
                 self._failed_message_hooks.add(index)
 

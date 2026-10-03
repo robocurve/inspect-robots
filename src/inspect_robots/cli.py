@@ -1855,7 +1855,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         try:
             # A failing unlink (read-only remount, full disk) must not skip the
             # close chain below or replace the run's real exception.
-            if live_sink is not None and live_sink.path is not None:
+            # Keep the snapshot only when the canonical write failed: then it is
+            # the only record of the run. Otherwise (success, Ctrl-C) remove it.
+            if live_sink is not None and live_sink.path is not None and not sink.write_failed:
                 with suppress(OSError):
                     live_sink.path.unlink(missing_ok=True)
         finally:
@@ -2013,7 +2015,9 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         # releasing it, exactly once, after every task has run.
         try:
             # A failing unlink must not skip the close chain (see _cmd_run).
-            if live_sink is not None and live_sink.path is not None:
+            # Keep the snapshot only when the canonical write failed: then it is
+            # the only record of the run. Otherwise (success, Ctrl-C) remove it.
+            if live_sink is not None and live_sink.path is not None and not sink.write_failed:
                 with suppress(OSError):
                     live_sink.path.unlink(missing_ok=True)
         finally:

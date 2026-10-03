@@ -59,6 +59,10 @@ class LiveLogSink:
     a successful run because ``on_eval_end`` removes the live snapshot.
     """
 
+    # on_eval_end deletes the snapshot; the sink fan-out skips it when the
+    # canonical log failed to write, so the run's only record survives.
+    discards_on_eval_end = True
+
     def __init__(
         self,
         log_dir: str,
