@@ -172,7 +172,7 @@ export function validateFiles(input: unknown): FileChange[] {
   let size = 0;
   for (const file of files) {
     if (
-      !/^(src|tests|plugins|docs|examples|plans)\/[A-Za-z0-9_./-]+$/.test(
+      !/^(src|tests|plugins|docs|examples|plans|changelog\.d)\/[A-Za-z0-9_.+/-]+$/.test(
         file.path,
       ) ||
       file.path
