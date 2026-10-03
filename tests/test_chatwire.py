@@ -285,3 +285,10 @@ def test_unreadable_http_error_body_keeps_its_status(monkeypatch: pytest.MonkeyP
     with pytest.raises(_ChatHTTPError, match=r"HTTP 404: \(empty response body\)") as info:
         chat_completion("https://x.test/v1", "k", "m", [])
     assert info.value.status == 404
+
+
+def test_malformed_url_is_a_plain_config_error_not_a_transport_error() -> None:
+    """A base URL without a scheme is configuration: it must not look like an outage."""
+    with pytest.raises(ConfigError, match=r"invalid URL 'api.example/v1/chat/completions'") as info:
+        _urllib_post("api.example/v1/chat/completions", {}, b"{}")
+    assert type(info.value) is ConfigError

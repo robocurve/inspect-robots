@@ -212,8 +212,9 @@ or API key or an unreadable rubric file fails when the grader is built. Then a
 **preflight** check sends one small grading request (a short prompt and a
 64x64 test image) with the exact model, endpoint and effort, before the policy
 loads or the robot connects. If the endpoint rejects it (HTTP 4xx: an unknown
-model, a bad key, an unsupported `effort`, a model without image input), the
-run exits with the provider's message. An outage at that moment (HTTP 5xx,
+model, a bad key, an unsupported `effort`, a model without image input), or
+the base URL is malformed or not an OpenAI-compatible endpoint, the run exits
+with the message. An outage at that moment (HTTP 5xx,
 408, 429, or a network failure) only prints a warning, so a brief blip does not
 cost the session.
 

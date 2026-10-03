@@ -53,7 +53,14 @@ def _response_excerpt(body: bytes) -> str:
 
 def _urllib_post(url: str, headers: dict[str, str], body_bytes: bytes) -> tuple[int, bytes]:
     """Send one blocking HTTP POST and preserve HTTP error bodies for guided failures."""
-    request = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+    try:
+        request = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+    except ValueError as exc:
+        # A malformed URL (e.g. no https://) is configuration, not an outage.
+        raise ConfigError(
+            f"chat request failed: invalid URL {url!r}: {exc}.\n"
+            "fix: check the base URL (include https://)"
+        ) from exc
     try:
         with urllib.request.urlopen(request, timeout=120.0) as response:
             return int(response.status), response.read()

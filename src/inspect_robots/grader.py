@@ -189,10 +189,11 @@ class _VLMGrader:
 
         Uses the exact model, endpoint and effort of real grading calls, with a
         64x64 image so a model without image input fails here rather than on
-        every trial. A 4xx answer (other than 408/429) means every trial would
-        be rejected, so it raises ``ConfigError`` before the robot moves. An
-        outage (5xx, 408, 429, transport failure, anything unexpected) only
-        warns: trials may still end up ungraded, which the run then reports.
+        every trial. A 4xx answer (other than 408/429), a malformed URL, or a
+        reply that is not OpenAI-compatible means every trial would fail, so it
+        raises ``ConfigError`` before the robot moves. An outage (5xx, 408,
+        429, transport failure, anything unexpected) only warns: trials may
+        still end up ungraded, which the run then reports.
         The outcome is cached, so repeated calls cost nothing.
         """
         if isinstance(self._preflight_outcome, ConfigError):
@@ -416,7 +417,7 @@ def vlm_grader(
             raise ConfigError(
                 "the vlm grader effort must be a level name or number, got ''.\n"
                 "fix: omit -G effort= for the provider default, or pass -G effort=none "
-                "for minimum reasoning"
+                'to send "none"'
             )
         resolved_effort = "none" if effort is None else effort
     if not model:

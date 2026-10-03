@@ -729,3 +729,13 @@ def test_one_line_falls_back_to_the_class_name() -> None:
     from inspect_robots.grader import _one_line
 
     assert _one_line(ConfigError("fix: only guidance")) == "ConfigError"
+
+
+def test_preflight_rejects_a_base_url_without_a_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url="api.example/v1")
+    with pytest.raises(ConfigError, match=r"invalid URL") as first:
+        grader.preflight()
+    with pytest.raises(ConfigError) as again:
+        grader.preflight()
+    assert again.value is first.value
