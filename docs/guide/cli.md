@@ -506,6 +506,40 @@ as they do for `run`, to every matched task — there is no per-task `-T` in
 this release. The embodiment is resolved once for the whole set, not once per
 task, so a real robot is not reconnected between tasks.
 
+### Parallel simulation tasks
+
+Use `--max-workers N --no-prompt` for independent simulation tasks that spend
+significant time waiting for inference or in native code:
+
+```bash
+inspect-robots eval-set 'my-sim-benchmark/*' --policy scripted \
+  --embodiment cubepick --max-workers 4 --no-prompt
+```
+
+The default is `--max-workers 1`, with the shared lifecycle described above.
+With more workers, each task constructs and closes its own policy and simulated
+embodiment, builds its own grader, guardrails and sinks, and applies the same
+configuration and `-P`/`-E` options. Factories must return fresh instances that
+can run concurrently without sharing a device or simulator session. Results
+are printed in task order, although tasks may finish in a different order.
+Real embodiments and `--voice` are unsupported in parallel mode.
+
+At most N tasks are in flight. An escaping halt or Ctrl-C stops admission of
+further tasks and waits for active tasks to finish and release their resources.
+Cleanup failures are reported as warnings without replacing the original halt.
+Completed logs remain on disk. A blocked backend call can therefore delay
+shutdown; this mode does not forcibly interrupt threads. Threads do not speed
+up CPU-bound Python code, and separate policy instances may increase memory use.
+
+The Python API accepts `eval_set(task_names, "policy", "embodiment", max_workers=N)`.
+For parallel runs, tasks and components (including an optional grader) must be
+registered names. Live task/component objects, custom sinks, controllers,
+approvers, operator input and pre-scoring hooks are rejected to avoid sharing
+mutable state between tasks. Custom configuration can be supplied by registered
+factories. Each task preflights its grader before opening its components, and a
+grading configuration error stops task admission. Log schemas and per-trial
+seed derivation are unchanged.
+
 `--speak` and `-S` are run-only options and are not accepted by `eval-set`.
 
 Rather than one full summary per task, the CLI prints the resolved
