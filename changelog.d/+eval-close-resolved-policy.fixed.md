@@ -1,0 +1,1 @@
+- **Core:** Close string-resolved and CLI-invoked policies in finally block during evaluation teardown.
