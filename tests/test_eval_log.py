@@ -8,12 +8,14 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from inspect_robots import eval_set, read_eval_log
 from inspect_robots._html import render_html
 from inspect_robots._summarize import TrialTranscript, build_digest
 from inspect_robots.errors import EmbodimentFault, SafetyAbort
+from inspect_robots.eval import _json_safe_trial_metadata
 from inspect_robots.log import (
     SCHEMA_VERSION,
     EvalLog,
@@ -24,6 +26,7 @@ from inspect_robots.log import (
     _json_safe_scene_metadata,
 )
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Epochs, Task
@@ -101,6 +104,30 @@ def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
         "rubric": "touch the cube",
         "nested": {"thresholds": [1, 2]},
     }
+    nested["thresholds"].append(3)
+    assert safe["nested"] == {"thresholds": [1, 2]}
+
+
+def test_json_safe_trial_metadata_filters_and_deep_copies() -> None:
+    """Retain JSON-safe values and NumPy scalars while omitting unencodable values."""
+    nested = {"thresholds": [1, 2]}
+    metadata = {
+        "valid_key": 42,
+        "nested": nested,
+        "contact_ids": {1, 2},
+        "adapter_object": object(),
+        "np_int": np.int64(7),
+        "np_float": np.float32(3.14),
+    }
+
+    safe = _json_safe_trial_metadata(metadata)
+
+    assert safe["valid_key"] == 42
+    assert safe["nested"] == {"thresholds": [1, 2]}
+    assert "contact_ids" not in safe
+    assert "adapter_object" not in safe
+    assert safe["np_int"] == 7
+    assert safe["np_float"] == pytest.approx(3.14, rel=1e-3)
     nested["thresholds"].append(3)
     assert safe["nested"] == {"thresholds": [1, 2]}
 
@@ -359,6 +386,31 @@ def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
     assert log.samples[0].scene_metadata["nested"] == {"thresholds": [1, 2]}
     written = read_eval_log(str(next(tmp_path.glob("*.json"))))
     assert written.samples[0].scene_metadata == log.samples[0].scene_metadata
+
+
+def test_eval_persists_only_json_safe_trial_metadata(tmp_path: Path) -> None:
+    from inspect_robots import eval
+
+    class SetMetadataPolicy(ScriptedPolicy):
+        def on_trial_end(self, record: TrialRecord, log_dir: str | None, run_id: str) -> None:
+            record.metadata["contact_ids"] = {1, 2}
+            record.metadata["valid_key"] = 42
+
+    task = Task(
+        name="trial_metadata",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    logs = eval(task, SetMetadataPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert logs[0].status == "success"
+    assert logs[0].samples[0].trial_metadata[0]["valid_key"] == 42
+    assert "contact_ids" not in logs[0].samples[0].trial_metadata[0]
+
+    written = read_eval_log(str(next(tmp_path.glob("*.json"))))
+    assert written.samples[0].trial_metadata[0]["valid_key"] == 42
+    assert "contact_ids" not in written.samples[0].trial_metadata[0]
 
 
 def test_store_frames_writes_side_cars(tmp_path: Path) -> None:

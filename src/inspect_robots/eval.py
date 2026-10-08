@@ -9,6 +9,7 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -16,7 +17,7 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,7 @@ from inspect_robots.log import (
     SceneResult,
     _json_safe_scene_metadata,
 )
+from inspect_robots.logging.json_log import _sanitize
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
@@ -65,6 +67,19 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
+
+
+def _json_safe_trial_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain JSON-encodable and NumPy-scalar trial metadata while omitting unencodable values."""
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        try:
+            clean = _sanitize(value)
+            json.dumps(clean)
+            safe[key] = copy.deepcopy(value)
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            continue
+    return safe
 
 
 def _grading_hook(
@@ -871,7 +886,7 @@ def _run_eval(
                     if actions_path is not None:
                         record.metadata["actions"] = actions_path
 
-                trial_metadatas.append(record.metadata)
+                trial_metadatas.append(_json_safe_trial_metadata(record.metadata))
                 termination_reasons.append(record.termination_reason)
                 operator_messages.append(
                     tuple(
