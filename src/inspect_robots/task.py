@@ -16,6 +16,10 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Scorer
 
+# How far, in ULPs, a seconds-times-hz product may sit from an integer and still
+# count as that integer when resolving a step budget.
+_STEP_ROUNDING_ULPS = 16
+
 
 @dataclass(frozen=True)
 class Epochs:
@@ -176,6 +180,16 @@ class Task:
                 f"Task {self.name!r}: max_seconds={self.max_seconds!r} at "
                 f"control_hz={control_hz!r} does not yield a finite step budget"
             )
-        # Both factors are positive, so the mathematical ceiling is at least
-        # one even if their binary-float product underflows to 0.0.
-        return TaskEnvelope(name=self.name, max_steps=max(1, math.ceil(raw_steps)))
+        # A product within a few ULPs of an integer is that integer: 1.1 * 50.0
+        # is 55.00000000000001, which a bare ceil() turned into a 56th step.
+        # The tolerance is in ULPs of the product, so it absorbs rounding
+        # residue from literal or computed inputs (1.1 + 2.2, 1 / 0.06) but
+        # never a fractional step the float can actually represent.
+        nearest = round(raw_steps)
+        if abs(raw_steps - nearest) <= _STEP_ROUNDING_ULPS * math.ulp(nearest):
+            steps = nearest
+        else:
+            steps = math.ceil(raw_steps)
+        # Both factors are positive, so the ceiling is at least one step even
+        # where their binary-float product would underflow to 0.0.
+        return TaskEnvelope(name=self.name, max_steps=max(1, steps))

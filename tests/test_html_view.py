@@ -261,6 +261,15 @@ def test_refresh_and_pending_output_are_opt_in() -> None:
     assert "trial 1 pending" in static_started
 
 
+def test_index_back_link_is_opt_in_and_escaped() -> None:
+    standalone = render_html(_log(), title="standalone")
+    linked = render_html(_log(), title="linked", index_href='runs/"index".html')
+
+    assert "back-link" not in standalone.split("</style>", 1)[1]
+    assert '<a class="back-link" href="runs/&quot;index&quot;.html">&larr; All runs</a>' in linked
+    assert linked.index('back-link" href') < linked.index("<h1>")
+
+
 def test_absent_optional_fields_and_empty_scene_sequences_are_omitted() -> None:
     log = _log()
     spec = dataclasses.replace(

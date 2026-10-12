@@ -2190,6 +2190,7 @@ def _render_log_page(
     atomic: bool = False,
     no_video: bool = False,
     serve_pass: bool = False,
+    index_href: str | None = None,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -2210,6 +2211,7 @@ def _render_log_page(
         refresh_seconds=refresh_seconds,
         no_video=no_video,
         serve_pass=serve_pass,
+        index_href=index_href,
     )
     if atomic and out_path is not None:
         return _write_html_atomic(document, out_path)
@@ -2417,6 +2419,8 @@ def _render_view_directory(
                     atomic=log.status == "started",
                     no_video=args.no_video,
                     serve_pass=args.serve,
+                    # Pages sit beside index.html in out_dir.
+                    index_href="index.html",
                 )
                 if log.status != "started":
                     # Started pages re-render every pass by design (plan 0058);

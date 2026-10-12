@@ -2189,6 +2189,7 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         refresh_seconds: int | None = None,
         no_video: bool = False,
         serve_pass: bool = False,
+        index_href: str | None = None,
     ) -> str:
         del (
             log,
@@ -2199,6 +2200,7 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
             refresh_seconds,
             no_video,
             serve_pass,
+            index_href,
         )
         assert log_path == path
         received.append(frames_budget_bytes)
@@ -2248,6 +2250,7 @@ def test_view_live_frames_budget_matrix(
         refresh_seconds: int | None,
         no_video: bool,
         serve_pass: bool,
+        index_href: str | None = None,
     ) -> str:
         del (
             rendered_log,
@@ -2257,6 +2260,7 @@ def test_view_live_frames_budget_matrix(
             frames_budget_bytes,
             no_video,
             serve_pass,
+            index_href,
         )
         received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
         return "<html></html>"
@@ -2519,6 +2523,18 @@ def test_view_exit_code_reports_artifact_production_not_eval_status(
     capsys.readouterr()
 
 
+def test_view_single_log_has_no_index_back_link(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_transcript_log(), tmp_path, "run.json")
+    out = tmp_path / "run.html"
+
+    assert main(["view", str(path), "-o", str(out)]) == 0
+    capsys.readouterr()
+
+    assert '<a class="back-link"' not in out.read_text(encoding="utf-8")
+
+
 def test_view_directory_end_to_end_and_unreadable_log(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2549,6 +2565,8 @@ def test_view_directory_end_to_end_and_unreadable_log(
     index = (html_dir / "index.html").read_text(encoding="utf-8")
     assert index.index("newer.json") < index.index("older.json")
     assert 'href="newer.html"' in index and 'href="older.html"' in index
+    page = (html_dir / "newer.html").read_text(encoding="utf-8")
+    assert '<a class="back-link" href="index.html">' in page
     assert "foreign.json" in index and "unreadable:" in index
     assert out.out.startswith(f"index: {html_dir / 'index.html'} (3 logs, 2 pages, ")
     assert "[1/3] rendering foreign.json" not in out.err
@@ -2674,6 +2692,7 @@ def test_view_directory_incremental_mtime_and_force(
         refresh_seconds: int | None = None,
         no_video: bool = False,
         serve_pass: bool = False,
+        index_href: str | None = None,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -2687,6 +2706,7 @@ def test_view_directory_incremental_mtime_and_force(
             refresh_seconds=refresh_seconds,
             no_video=no_video,
             serve_pass=serve_pass,
+            index_href=index_href,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)

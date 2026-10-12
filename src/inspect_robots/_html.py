@@ -354,6 +354,11 @@ main { width: min(1120px, calc(100% - 32px)); margin: 0 auto 64px; }
 header { border-bottom: 1px solid var(--line); background: var(--panel); }
 .header-inner { width: min(1120px, calc(100% - 32px)); margin: auto; padding: 28px 0 22px; }
 .header-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.back-link {
+  display: inline-block; margin-bottom: 10px; color: var(--muted);
+  font-size: 13px; text-decoration: none;
+}
+.back-link:hover, .back-link:focus-visible { color: var(--text); text-decoration: underline; }
 h1 { margin: 0; font-size: 24px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 h2 { margin: 0; font-size: 18px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 h3 { margin: 24px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
@@ -1643,8 +1648,13 @@ def render_html(
     no_video: bool = False,
     serve_pass: bool = False,
     video_budget_bytes: int = _VIDEO_BUDGET_BYTES,
+    index_href: str | None = None,
 ) -> str:
-    """Return one self-contained HTML document describing the complete evaluation log."""
+    """Return one self-contained HTML document describing the complete evaluation log.
+
+    ``index_href`` adds a back link to a run index at that relative URL; leave it
+    ``None`` for a standalone report that has no index beside it.
+    """
     git = (
         'git <span class="chip">unknown</span>'
         if log.eval.git_commit is None
@@ -1771,6 +1781,11 @@ def render_html(
                 break
         if last_update is not None:
             break
+    back_link = (
+        ""
+        if index_href is None
+        else f'<a class="back-link" href="{_escape(index_href)}">&larr; All runs</a>'
+    )
     running_banner = ""
     if refresh_seconds is not None:
         update = "" if last_update is None else f" · last update {_escape(last_update)}"
@@ -1790,6 +1805,7 @@ def render_html(
 </head>
 <body>
 <header><div class="header-inner">
+  {back_link}
   <div class="header-top"><h1>{_escape(log.eval.task)}</h1>{_status_badge(log.status)}</div>
   <div class="meta"><span>{_escape(log.eval.created)}</span>
   {meta_tail}</div>

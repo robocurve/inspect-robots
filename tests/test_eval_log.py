@@ -8,6 +8,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from inspect_robots import eval_set, read_eval_log
@@ -103,6 +104,51 @@ def test_json_safe_scene_metadata_filters_and_deep_copies() -> None:
     }
     nested["thresholds"].append(3)
     assert safe["nested"] == {"thresholds": [1, 2]}
+
+
+def test_json_safe_scene_metadata_keeps_numpy_scalars() -> None:
+    """NumPy scalars are numbers, not adapter objects: convert rather than drop."""
+    metadata = {
+        "count": np.int64(3),
+        "flag": np.bool_(True),
+        "ratio": np.float32(0.5),
+        "precise": np.longdouble(1.5),
+        "nested": {"ids": [np.int64(1), np.int64(2)]},
+        "adapter_object": object(),
+    }
+
+    safe = _json_safe_scene_metadata(metadata)
+
+    assert safe == {
+        "count": 3,
+        "flag": True,
+        "ratio": 0.5,
+        "precise": 1.5,
+        "nested": {"ids": [1, 2]},
+    }
+    assert type(safe["count"]) is int
+    assert type(safe["flag"]) is bool
+    assert type(safe["ratio"]) is float
+    assert type(safe["precise"]) is float
+
+
+def test_json_safe_scene_metadata_drops_numpy_scalars_that_are_not_plain_numbers() -> None:
+    # Only bool/integer/floating scalars convert; the rest are dropped like any
+    # unencodable value. In particular .item() would keep an ns-precision
+    # datetime64 as a meaningless bare int.
+    metadata = {
+        "phase": np.complex128(1 + 2j),
+        "stamp": np.datetime64("2026-01-01"),
+        "stamp_ns": np.datetime64("2026-01-01T00:00:00.000000000"),
+        # timedelta64 subclasses np.integer; equal durations must be treated alike
+        # whatever their precision, and never kept as a unit-less int.
+        "elapsed_us": np.timedelta64(1000, "us"),
+        "elapsed_ns": np.timedelta64(1000, "ns"),
+        "nested": {"elapsed_ns": np.timedelta64(5, "ns"), "ids": [np.timedelta64(5, "us")]},
+        "count": np.int64(3),
+    }
+
+    assert _json_safe_scene_metadata(metadata) == {"count": 3}
 
 
 def test_eval_log_round_trips_through_dict() -> None:
@@ -320,6 +366,33 @@ def test_atomic_write_leaves_no_tmp(tmp_path: Path) -> None:
     eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
     assert list(tmp_path.glob("*.json"))
     assert not list(tmp_path.glob("*.tmp"))  # atomic temp+rename left nothing behind
+
+
+def test_eval_persists_numpy_scene_metadata(tmp_path: Path) -> None:
+    # Benchmarks often randomize scene parameters with NumPy (rng.integers
+    # returns np.int64); those values must reach the saved log, not vanish.
+    from inspect_robots import eval
+
+    task = Task(
+        name="metadata",
+        scenes=[
+            Scene(
+                id="s0",
+                instruction="reach",
+                init_seed=0,
+                metadata={"n_objects": np.int64(3), "occluded": np.bool_(False)},
+            )
+        ],
+        scorer=success_at_end(),
+        max_steps=60,
+    )
+
+    log = eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))[0]
+
+    expected = {"n_objects": 3, "occluded": False}
+    assert log.samples[0].scene_metadata == expected
+    written = read_eval_log(str(next(tmp_path.glob("*.json"))))
+    assert written.samples[0].scene_metadata == expected
 
 
 def test_eval_persists_only_json_safe_scene_metadata(tmp_path: Path) -> None:
