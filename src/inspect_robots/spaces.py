@@ -94,6 +94,11 @@ class Box:
     semantics: ActionSemantics | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.shape, tuple):
+            raise ValueError(f"Box shape must be a tuple of positive integers; got {self.shape!r}")
+        for d in self.shape:
+            if not isinstance(d, int) or isinstance(d, bool) or d <= 0:
+                raise ValueError(f"Box shape dimensions must be integers > 0; got {self.shape!r}")
         for name, bound in (("low", self.low), ("high", self.high)):
             if bound is not None and tuple(bound.shape) != self.shape:
                 raise ValueError(
@@ -142,6 +147,17 @@ class CameraSpec:
     width: int
     channels: int = 3
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError(f"CameraSpec name must be a non-empty string; got {self.name!r}")
+        for attr, val in (
+            ("height", self.height),
+            ("width", self.width),
+            ("channels", self.channels),
+        ):
+            if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                raise ValueError(f"CameraSpec {attr} must be an integer > 0; got {val!r}")
+
 
 # Canonical proprioception keys and their conventional units. Adapters are
 # encouraged to use these names/units so cross-embodiment compatibility checks on
@@ -166,12 +182,32 @@ class StateField:
     unit: str = ""
     dtype: str = "float64"
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, str) or not self.key.strip():
+            raise ValueError(f"StateField key must be a non-empty string; got {self.key!r}")
+        if not isinstance(self.shape, tuple):
+            raise ValueError(
+                f"StateField shape must be a tuple of positive ints; got {self.shape!r}"
+            )
+        for d in self.shape:
+            if not isinstance(d, int) or isinstance(d, bool) or d <= 0:
+                raise ValueError(
+                    f"StateField shape dimensions must be integers > 0; got {self.shape!r}"
+                )
+
 
 @dataclass(frozen=True)
 class StateSpec:
     """A richer description of an embodiment's proprioception than a bare key set."""
 
     fields: tuple[StateField, ...] = ()
+
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for item in self.fields:
+            if item.key in seen:
+                raise ValueError(f"StateSpec has duplicate field key {item.key!r}")
+            seen.add(item.key)
 
     @property
     def keys(self) -> frozenset[str]:
@@ -193,6 +229,11 @@ class ObservationSpace:
     state: StateSpec | None = None
 
     def __post_init__(self) -> None:
+        seen_cameras: set[str] = set()
+        for cam in self.cameras:
+            if cam.name in seen_cameras:
+                raise ValueError(f"ObservationSpace has duplicate camera name {cam.name!r}")
+            seen_cameras.add(cam.name)
         # If a rich StateSpec is given, keep state_keys consistent with it.
         if self.state is not None:
             if not self.state_keys:

@@ -43,7 +43,9 @@ Resolved in order (first hit wins):
 
 The config file itself is selected in this order: `--config PATH`,
 `$INSPECT_ROBOTS_CONFIG`, then the path derived from `XDG_CONFIG_HOME` or
-`HOME`. Use a separate file for each rig without changing the config home for
+`HOME`. Native Windows shells usually set neither, so there the path falls back
+to `%APPDATA%\inspect-robots\config.ini`, then
+`%USERPROFILE%\.config\inspect-robots\config.ini`. Use a separate file for each rig without changing the config home for
 the whole process:
 
 ```bash
@@ -150,8 +152,11 @@ suppresses the operator grader specifically (combining it with an explicit
 `--grader operator` is an error, and a config-set `grader = operator` is
 downgraded with a stderr note whenever the run cannot actually be attended).
 A custom grader named in config or `--grader` runs regardless of TTY-ness,
-which is what the builtin `vlm` autograder relies on. An unjudged trial
-honestly scores as failure with "no operator judgement recorded".
+which is what the builtin `vlm` autograder relies on. A trial left without a
+judgement (the operator typed `skip`, or no grader ran) honestly scores as
+failure with "no operator judgement recorded". A trial the grader tried and
+failed to judge is different: the `operator` scorer abstains on it (see
+below).
 
 ### Automated grading: `--grader vlm`
 
@@ -173,9 +178,9 @@ mutually exclusive with `rubric`), `base_url` (default
 `https://api.anthropic.com/v1`), `api_key_env` (default `ANTHROPIC_API_KEY`),
 `max_cameras` (frames per phase, default 4), and `effort` (sent to the
 endpoint as `reasoning_effort`: leave it out for the provider default;
-`effort=none` requests the minimum, it does not mean unset; a value the
-endpoint rejects leaves trials ungraded with a stderr note, like any grader
-wire failure). Without a rubric the grader
+`effort=none` sends the literal `"none"`, it does not mean unset; a value the
+endpoint rejects stops the run at the preflight check described below).
+Without a rubric the grader
 uses a strict default: success only if the frames show the instruction
 completed, failure when the outcome is ambiguous or not visible. A scene that
 carries its own rubric at `scene.metadata["rubric"]` (what `--auto-task`
@@ -188,7 +193,7 @@ so a saved log says which model judged, against which rubric, at which effort.
 The values are the resolved ones: a `rubric_file` is recorded as the text that
 was read from it, an omitted rubric as the default that replaced it, and
 `effort` as the value sent on the wire (`null` when the field was omitted and
-the provider default applied, `"none"` when the minimum was requested). The
+the provider default applied, `"none"` when `effort=none` was given). The
 rubric recorded there is the run-level one, since a scene carrying its own is
 already persisted with that scene. The API key is never recorded.
 
@@ -204,10 +209,25 @@ model = claude-sonnet-5
 rubric_file = ~/rigs/stacking-rubric.md
 ```
 
-Configuration problems (a missing model or API key, an unreadable rubric
-file) stop the run before the robot moves. After a rollout the grader never
-crashes the run: transport failures or an unparseable reply leave the trial
-ungraded with a stderr note. A trial the embodiment already terminated with a
+Configuration problems stop the run before the robot moves. A missing model
+or API key or an unreadable rubric file fails when the grader is built. Then a
+**preflight** check sends one small grading request (a short prompt and a
+64x64 test image) with the exact model, endpoint and effort, before the policy
+loads or the robot connects. If the endpoint rejects it (HTTP 4xx: an unknown
+model, a bad key, an unsupported `effort`, a model without image input), or
+the base URL is malformed or not an OpenAI-compatible endpoint, the run exits
+with the message. An outage at that moment (HTTP 5xx,
+408, 429, or a network failure) only prints a warning, so a brief blip does not
+cost the session.
+
+After a rollout the grader never stops the run. If grading a trial fails
+(transport error, rejected request, unparseable reply), the trial is left
+ungraded and its reason is recorded in the trial's metadata as
+`grading_error`. The `operator` scorer then **abstains** on it instead of
+scoring a failure, so the metric covers graded trials only and `inspect` shows
+the abstention count beside it. The run still finishes every trial, then ends
+with status `error` and a message such as
+`3 of 20 trial(s) ungraded: grader failed (grading request failed with HTTP 500: ...)`. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
 the console, is adopted without spending a model call. The log records which
 path produced each verdict in `judgement_sources`.
@@ -346,7 +366,7 @@ rig; replace the three camera paths with your rig's V4L2 color nodes
 mkdir -p ~/.config/inspect-robots && cat > ~/.config/inspect-robots/config.ini <<'EOF'
 [defaults]
 policy = molmoact2        # from the inspect-robots-yam plugin
-embodiment = yam_arms     # same plugin; cameras configured below
+embodiment = yam_arms     # from the inspect-robots-yam plugin; cameras configured below
 scorer = success_at_end
 max_steps = 1200          # 120 s at 10 Hz
 rerun = true              # live viewer of cameras/state/actions each run
@@ -433,7 +453,7 @@ grader when a verdict is needed. Both are persisted in the eval log.
 Repeat `-A key=value` to pass generator arguments. Common arguments are
 `model`, `instructions`, `instructions_file`, `base_url`, `api_key_env`,
 `max_cameras`, `scene_id`, and `effort` (sent as `reasoning_effort`: leave
-it out for the provider default; `effort=none` requests the minimum, it
+it out for the provider default; `effort=none` sends the literal `"none"`, it
 does not mean unset; an invalid value fails before rollout). Values use the
 same bool/int/float/None/string parsing as the component argument flags:
 
@@ -485,6 +505,40 @@ matches nothing is an error listing every registered task. `--policy` and
 as they do for `run`, to every matched task — there is no per-task `-T` in
 this release. The embodiment is resolved once for the whole set, not once per
 task, so a real robot is not reconnected between tasks.
+
+### Parallel simulation tasks
+
+Use `--max-workers N --no-prompt` for independent simulation tasks that spend
+significant time waiting for inference or in native code:
+
+```bash
+inspect-robots eval-set 'my-sim-benchmark/*' --policy scripted \
+  --embodiment cubepick --max-workers 4 --no-prompt
+```
+
+The default is `--max-workers 1`, with the shared lifecycle described above.
+With more workers, each task constructs and closes its own policy and simulated
+embodiment, builds its own grader, guardrails and sinks, and applies the same
+configuration and `-P`/`-E` options. Factories must return fresh instances that
+can run concurrently without sharing a device or simulator session. Results
+are printed in task order, although tasks may finish in a different order.
+Real embodiments and `--voice` are unsupported in parallel mode.
+
+At most N tasks are in flight. An escaping halt or Ctrl-C stops admission of
+further tasks and waits for active tasks to finish and release their resources.
+Cleanup failures are reported as warnings without replacing the original halt.
+Completed logs remain on disk. A blocked backend call can therefore delay
+shutdown; this mode does not forcibly interrupt threads. Threads do not speed
+up CPU-bound Python code, and separate policy instances may increase memory use.
+
+The Python API accepts `eval_set(task_names, "policy", "embodiment", max_workers=N)`.
+For parallel runs, tasks and components (including an optional grader) must be
+registered names. Live task/component objects, custom sinks, controllers,
+approvers, operator input and pre-scoring hooks are rejected to avoid sharing
+mutable state between tasks. Custom configuration can be supplied by registered
+factories. Each task preflights its grader before opening its components, and a
+grading configuration error stops task admission. Log schemas and per-trial
+seed derivation are unchanged.
 
 `--speak` and `-S` are run-only options and are not accepted by `eval-set`.
 
@@ -586,6 +640,11 @@ The default endpoint is `https://api.anthropic.com/v1`, and the default API key
 variable is `ANTHROPIC_API_KEY`. Override them with `--base-url URL` and
 `--api-key-env VAR` for another compatible provider.
 
+The request carries every trial's transcript tail (up to 24,000 characters
+each) with no overall limit, so a run with many trials can exceed the model's
+context window and be rejected by the provider. For very large runs, use the
+offline digest or a model with a larger context.
+
 ### Retry with learning
 
 The learnings file exists to be fed back in. The
@@ -673,8 +732,8 @@ inspect-robots video logs/adhoc_xxxx.json
 
 ```text
 fps: 10 (control_hz from log)
-wrote logs/frames/20260715_184213/scene-0-e0_left_cam.mp4 (1200 frames)
-wrote logs/frames/20260715_184213/scene-0-e0_right_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~left_cam.mp4 (1200 frames)
+wrote logs/frames/20260715_184213/~f1~scene-0-e0~right_cam.mp4 (1200 frames)
 wrote 2/2 streams
 ```
 

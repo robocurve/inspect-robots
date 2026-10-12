@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from inspect_robots._chatwire import HttpPost, chat_completion
+from inspect_robots._chatwire import HttpPost, _ChatHTTPError, chat_completion
 from inspect_robots.errors import ConfigError
 
 if TYPE_CHECKING:
@@ -35,7 +35,17 @@ class Grader(Protocol):
     or cancelled trials) and may mutate the record: set
     ``operator_judgement``/``operator_note`` and append an operator event.
     It must tolerate being unable to grade (e.g. no judge available) by
-    leaving the record unchanged rather than raising.
+    leaving the judgement unset rather than raising. A grader that *tried* and
+    failed should record why in ``record.metadata["grading_error"]``: the
+    ``operator`` scorer then abstains on the trial instead of scoring it as a
+    failure, and the run ends with ``status == "error"`` naming the count.
+
+    A grader may also define an optional ``preflight()`` method, duck-typed
+    like ``config()``. It is called before any rollout (by the CLI before the
+    robot is touched, and by ``eval()`` and ``eval_set()``) and should raise
+    ``ConfigError`` when the grader can already tell it will reject every
+    trial. It must be idempotent and cheap to call repeatedly: cache the
+    outcome, as the builtin ``vlm`` grader does.
     """
 
     name: str
@@ -149,6 +159,9 @@ class _VLMGrader:
         self._max_cameras = max_cameras
         self._http_post = http_post
         self._effort = effort
+        # Preflight outcome: None until attempted, then True (passed or only
+        # warned) or the ConfigError to re-raise on every later call.
+        self._preflight_outcome: bool | ConfigError | None = None
 
     def config(self) -> dict[str, Any]:
         """Report the configuration that actually governs each grading call.
@@ -158,7 +171,7 @@ class _VLMGrader:
         constructor's input: ``rubric`` already has the default substituted
         and any ``rubric_file`` read, and ``effort`` is the normalized value
         that rides the request (``None`` omits ``reasoning_effort`` so the
-        provider default applies, ``"none"`` asks for the minimum). ``rubric``
+        provider default applies, ``"none"`` is sent verbatim). ``rubric``
         is the run-level fallback only, since ``_rubric_for`` lets a scene's
         own ``metadata["rubric"]`` win for that scene. The API key is
         deliberately absent: a log is not a place for a credential.
@@ -170,6 +183,74 @@ class _VLMGrader:
             "max_cameras": self._max_cameras,
             "effort": self._effort,
         }
+
+    def preflight(self) -> None:
+        """Send one tiny grading request before any rollout; raise on a rejection.
+
+        Uses the exact model, endpoint and effort of real grading calls, with a
+        64x64 image so a model without image input fails here rather than on
+        every trial. A 4xx answer (other than 408/429), a malformed URL, or a
+        reply that is not OpenAI-compatible means every trial would fail, so it
+        raises ``ConfigError`` before the robot moves. An outage (5xx, 408,
+        429, transport failure, anything unexpected) only warns: trials may
+        still end up ungraded, which the run then reports.
+        The outcome is cached, so repeated calls cost nothing.
+        """
+        if isinstance(self._preflight_outcome, ConfigError):
+            raise self._preflight_outcome
+        if self._preflight_outcome is not None:
+            return
+        import numpy as np
+
+        from inspect_robots._pngenc import png_data_url
+
+        image = np.full((64, 64, 3), 128, dtype=np.uint8)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _PREFLIGHT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": png_data_url(image)}},
+                ],
+            }
+        ]
+        try:
+            chat_completion(
+                self._base_url,
+                self._api_key,
+                self._model,
+                messages,
+                what="grading preflight",
+                fix_hint="check -G model, -G effort, -G base_url and the API key",
+                http_post=self._http_post,
+                effort=self._effort,
+            )
+        except _ChatHTTPError as exc:
+            if 400 <= exc.status < 500 and exc.status not in _TRANSIENT_STATUSES:
+                effort = "" if self._effort is None else f" with effort={self._effort!r}"
+                error = ConfigError(
+                    f"{_one_line(exc)}\n"
+                    f"The vlm grader's test request{effort} was rejected before any rollout.\n"
+                    "fix: check -G model, -G effort, the API key, and that the model "
+                    "accepts images"
+                )
+                self._preflight_outcome = error
+                raise error from exc
+            self._warn_preflight(exc)
+        except ConfigError as exc:
+            if type(exc) is ConfigError:  # malformed 2xx reply: not OpenAI-compatible
+                self._preflight_outcome = exc
+                raise
+            self._warn_preflight(exc)
+        except Exception as exc:  # an injected transport may raise anything
+            self._warn_preflight(exc)
+        self._preflight_outcome = True
+
+    def _warn_preflight(self, exc: Exception) -> None:
+        print(
+            f"vlm grader preflight: {_one_line(exc)}; continuing, trials may end up ungraded",
+            file=sys.stderr,
+        )
 
     def _rubric_for(self, scene: Scene) -> str:
         """Prefer a generated per-scene rubric over the run-level one.
@@ -213,8 +294,11 @@ class _VLMGrader:
 
         Adopts an existing console verdict or a definitive embodiment
         termination without spending a model call. Any failure after the
-        rollout (frames, transport, parsing) prints one stderr note and
-        leaves the record unchanged; grading never crashes a finished run.
+        rollout (frames, transport, parsing) prints one stderr note, leaves
+        the judgement unset and records a one-line reason in
+        ``record.metadata["grading_error"]``; grading never crashes a finished
+        run. The ``operator`` scorer abstains on such a trial and the run ends
+        with ``status == "error"`` naming how many trials went ungraded.
         """
         from inspect_robots.session import _DEFINITIVE_REASONS
         from inspect_robots.transcript import operator_event
@@ -258,11 +342,15 @@ class _VLMGrader:
                 raise ConfigError(f"no GRADE line in the reply: {reply.strip()[:200]!r}")
         except Exception as exc:  # post-rollout, degrading beats crashing the run
             print(f"vlm grader: {exc}; trial left ungraded", file=sys.stderr)
+            reason = _one_line(exc)
+            if not isinstance(exc, ConfigError):
+                reason = f"{type(exc).__name__}: {reason}"
+            record.metadata["grading_error"] = reason[:_GRADING_ERROR_LIMIT]
             return
         judgement = str(matches[-1]).lower()
         note = reply.strip()[:_NOTE_CHAR_LIMIT]
-        # Written only alongside a verdict: a degraded (ungraded) trial must
-        # leave the record unchanged, marker included.
+        # Written only alongside a verdict: an ungraded trial carries only
+        # metadata["grading_error"], never the parked-frames marker.
         if parked:
             record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
@@ -270,6 +358,24 @@ class _VLMGrader:
         record.events.append(
             operator_event(t=len(record.steps), verdict=judgement, source="vlm", note=note)
         )
+
+
+_PREFLIGHT_PROMPT = (
+    "Connectivity check before grading robot trials. Reply with exactly one line: GRADE: success"
+)
+_TRANSIENT_STATUSES = frozenset({408, 429})
+_GRADING_ERROR_LIMIT = 500
+
+
+def _one_line(exc: Exception) -> str:
+    """Flatten an error message to one line, dropping ``fix:`` guidance lines.
+
+    Provider error bodies are often pretty-printed JSON, so keeping only the
+    first line would leave just ``{``; whitespace is collapsed instead.
+    """
+    kept = [line for line in str(exc).splitlines() if not line.strip().startswith("fix:")]
+    text = " ".join(" ".join(kept).split())
+    return text or type(exc).__name__
 
 
 class _Unset:
@@ -294,12 +400,14 @@ def vlm_grader(
 
     Configuration fails fast here (missing model, unreadable rubric file,
     unset API key, empty effort) so a misconfigured run stops before any
-    rollout; after the rollout its ``grade`` only ever degrades to an
-    ungraded trial, so an effort value the endpoint rejects surfaces as a
-    per-trial stderr note, not a raise. ``effort`` rides each grading
-    request as ``reasoning_effort``: leaving it unset omits the field for
-    the provider default, ``None`` (``-G effort=none``) requests the
-    minimum, and any other value passes through verbatim. The judgement
+    rollout, and ``preflight()`` sends one test request before the robot
+    moves so an endpoint that rejects the model, key or effort (HTTP 4xx)
+    stops the run there too. After a rollout ``grade`` never raises: a
+    failed trial is left ungraded with its reason recorded, the ``operator``
+    scorer abstains on it, and the run ends in error. ``effort`` rides each
+    grading request as ``reasoning_effort``: leaving it unset omits the field
+    for the provider default, ``None`` (``-G effort=none``) sends ``"none"``
+    verbatim, and any other value passes through verbatim. The judgement
     lands on the same record fields the operator grader writes, so the
     ``operator`` scorer reads it unchanged.
     """
@@ -309,7 +417,7 @@ def vlm_grader(
             raise ConfigError(
                 "the vlm grader effort must be a level name or number, got ''.\n"
                 "fix: omit -G effort= for the provider default, or pass -G effort=none "
-                "for minimum reasoning"
+                'to send "none"'
             )
         resolved_effort = "none" if effort is None else effort
     if not model:

@@ -95,7 +95,7 @@ _V4L2_COLOR_FOURCCS = frozenset(
 
 _DEFAULT_COMMENTS: dict[str, str] = {
     "policy": "from the inspect-robots-yam plugin",
-    "embodiment": "same plugin; cameras configured below",
+    "embodiment": "from the inspect-robots-yam plugin; cameras configured below",
     "max_steps": "120 s at 10 Hz",
     "rerun": "live viewer of cameras/state/actions each run",
     "store_frames": "save each run's camera frames under logs/frames/",
@@ -265,6 +265,17 @@ def _print_camera_listing(devices: list[str], directory: Path, out: IO[str]) -> 
     print(f"Found {len(devices)} camera device(s) under {directory}:", file=out)
     for number, device in enumerate(devices, start=1):
         print(f"  {number}. {Path(device).name}", file=out)
+
+
+def _print_unverified_camera_hint(devices: list[str], out: IO[str]) -> None:
+    """Say when the listing is the unfiltered fallback because no node probed color-capable."""
+    if not devices:
+        return
+    message = (
+        "could not confirm which nodes are color cameras (probe inconclusive), "
+        "so every device is listed; some may be metadata-only nodes"
+    )
+    print(_paint(message, _YELLOW, out), file=out)
 
 
 def _print_camera_path_hint(
@@ -760,6 +771,7 @@ def _camera_section(
     if inventory:
         _print_camera_name_hint(inventory, active_is_by_id, out)
     else:
+        _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
         _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
     while True:
@@ -908,6 +920,7 @@ def _device_section(
                 if inventory:
                     _print_camera_name_hint(inventory, active_is_by_id, out)
                 else:
+                    _print_unverified_camera_hint(by_id_devices or by_path_devices, out)
                     _print_camera_path_hint(by_id_devices, by_path_devices, active_is_by_id, out)
 
         identify: Callable[[bool], str | None]
@@ -1500,8 +1513,8 @@ def _render_config(
         # an existing config passes free-text validation and survives Enter.
         value = defaults[key].replace("\n", "\n\t")
         line = f"{key} = {value}"
-        if comment := _DEFAULT_COMMENTS.get(key):
-            line = f"{line:<26}# {comment}" if len(line) < 26 else f"{line}  # {comment}"
+        if defaults[key] == SUGGESTED[key] and (comment := _DEFAULT_COMMENTS.get(key)):
+            line = f"{line:<25} # {comment}"
         default_lines.append(line)
     for key, value in carried.get("defaults", {}).items():
         if key not in SUGGESTED:
@@ -1567,7 +1580,9 @@ def run_setup(
 
     path = config_path(env)
     if path is None:
-        raise SystemExit("cannot locate a config home: set $XDG_CONFIG_HOME or $HOME")
+        raise SystemExit(
+            "cannot locate a config home: set $XDG_CONFIG_HOME, $HOME or (on Windows) %APPDATA%"
+        )
 
     print(f"{_paint('inspect-robots setup', _BOLD, out)} — writes {path}", file=out)
     print(

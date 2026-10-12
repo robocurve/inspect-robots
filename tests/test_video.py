@@ -29,6 +29,7 @@ from inspect_robots._video import (
     resolve_frames_dir,
 )
 from inspect_robots.cli import main
+from inspect_robots.frames import FrameStore
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats, SceneResult
 
 # --------------------------------------------------------------------------- #
@@ -214,6 +215,33 @@ def test_discovery_groups_sorts_and_scopes_to_npy(tmp_path: Path) -> None:
     assert [t for t, _ in streams["a_left_cam"]] == [2, 10, 1000000]
     assert [p.name for p in strays] == ["notes.npy"]
     assert count_frames(tmp_path) == 4
+
+
+def test_versioned_streams_preserve_colliding_legacy_prefixes_and_numeric_steps(
+    tmp_path: Path, fake_popen: type[_FakePopen]
+) -> None:
+    store = FrameStore(str(tmp_path))
+    expected: dict[str, list[int]] = {}
+    for trial, camera, value in [("pick-e0", "top-e0_rgb", 11), ("pick-e0_top-e0", "rgb", 22)]:
+        for step in [1000000, 2, 10]:
+            ref = store.put(trial, step, camera, np.full((_H, _W, 3), value, dtype=np.uint8))
+            prefix = Path(ref.path).stem.rsplit("_", 1)[0]
+            expected[prefix] = [2, 10, 1000000]
+    _write_frames(tmp_path, "legacy_rgb", [_rgb(0)])
+    streams, strays = discover_streams(tmp_path)
+    assert not strays
+    assert len(streams) == 3
+    assert [step for step, _ in streams["legacy_rgb"]] == [0]
+    for prefix, steps in expected.items():
+        assert [step for step, _ in streams[prefix]] == steps
+        pixels = [int(np.load(path)[0, 0, 0]) for _, path in streams[prefix]]
+        assert pixels in [[11, 11, 11], [22, 22, 22]]
+        result = encode_stream(streams[prefix], tmp_path / f"{prefix}.mp4", 10, "/fake/ffmpeg")
+        assert result == StreamResult(piped=3, skipped_empty=0, error=None)
+        assert bytes(fake_popen.calls[-1].stdin.piped) == b"".join(
+            np.load(path).tobytes() for _, path in streams[prefix]
+        )
+    assert len(fake_popen.calls) == 2
 
 
 def test_frames_dir_resolution_as_is_fallback_miss_and_backslashes(tmp_path: Path) -> None:

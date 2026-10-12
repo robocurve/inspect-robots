@@ -149,6 +149,45 @@ export class IssueLedger extends DurableObject<IssueEnv> {
       .map((r) => JSON.parse(r.data) as Job)
       .filter((j) => !["done", "held"].includes(j.state));
   }
+  /** Read-only management export of an issue's latest job; never returns stage capabilities. */
+  async export(issue: number) {
+    const job = this.ctx.storage.sql
+      .exec<{ data: string }>(
+        "SELECT data FROM jobs WHERE issue=? ORDER BY created DESC,rowid DESC LIMIT 1",
+        issue,
+      )
+      .toArray()
+      .map((r) => JSON.parse(r.data) as Job)[0];
+    if (!job) return null;
+    const stages = this.ctx.storage.sql
+      .exec<{ data: string }>("SELECT data FROM stages")
+      .toArray()
+      .map((r) => JSON.parse(r.data) as Stage)
+      .filter((s) => s.request.jobId === job.id)
+      .sort((a, b) => a.started - b.started)
+      .map((s) => ({
+        kind: s.request.kind,
+        started: s.started,
+        failure: s.failure,
+        launchError: s.launchError ?? null,
+        result: s.output?.result ?? null,
+        files: s.output?.files.map((f) => f.path) ?? [],
+      }));
+    return {
+      id: job.id,
+      issue: job.issue,
+      state: job.state,
+      plan: job.plan,
+      planApproved: job.approvedPlan !== "",
+      feedback: job.feedback,
+      files: job.files,
+      summary: job.summary,
+      checks: job.checks,
+      published: job.published,
+      costMicros: await this.costs(issue),
+      stages,
+    };
+  }
   async queueState() {
     return {
       owner: this.owner(),

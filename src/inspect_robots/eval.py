@@ -50,7 +50,13 @@ from inspect_robots.log import (
 from inspect_robots.policy import Policy
 from inspect_robots.rollout import TrialRecord, derive_seed, rollout
 from inspect_robots.scene import Scene
-from inspect_robots.scorer import Score, get_reducer, reduce_scores, value_to_float
+from inspect_robots.scorer import (
+    Score,
+    get_reducer,
+    reduce_scores,
+    reducer_min_epochs,
+    value_to_float,
+)
 from inspect_robots.task import Task
 from inspect_robots.transcript import judgement_source
 
@@ -90,6 +96,19 @@ def _grading_hook(
             f"grade(record, scene) method); got {type(grader).__name__}"
         )
     return grader.grade, grader
+
+
+def _preflight_grader(grader: Grader | None) -> None:
+    """Run the grader's optional ``preflight()`` hook before any rollout.
+
+    Duck-typed like ``config()`` so graders without it still satisfy the
+    protocol. The hook raises ``ConfigError`` when every trial would be
+    rejected; it is idempotent, so the CLI, ``eval_set`` and ``eval`` may all
+    call it.
+    """
+    hook = getattr(grader, "preflight", None)
+    if callable(hook):
+        hook()
 
 
 def _grader_identity(grader: Grader | None) -> tuple[str | None, dict[str, Any]]:
@@ -200,23 +219,116 @@ def _git_commit() -> str | None:
     return commit
 
 
+class _CriticalSinkError(Exception):
+    """Carry a critical sink's failure past the remaining sinks' fan-out."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original
+
+
 class _Broadcast:
     """Fan a sink lifecycle out to several sinks, preserving hook order."""
 
     def __init__(self, sinks: list[LogSink]):
         self._sinks = sinks
+        # Critical sinks (the canonical log) are served first, so a failed
+        # final write is known before any sink discards its own record.
+        self._ordered = sorted(sinks, key=lambda s: not getattr(s, "critical", False))
         policy_message_hooks: list[Callable[[int, Sequence[Any]], None]] = []
         for sink in sinks:
             hook = getattr(sink, "log_policy_messages", None)
             if callable(hook):
                 policy_message_hooks.append(hook)
         self._policy_message_hooks = policy_message_hooks
+        # Transcript hooks that raised this trial: skipped until the next
+        # on_trial_start, preserving plan 0020's per-trial failure latch.
+        self._failed_message_hooks: set[int] = set()
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
 
+    @staticmethod
+    def _safe_call(
+        sink: Any,
+        method_name: str,
+        fn: Callable[..., Any],
+        *args: Any,
+        may_be_critical: bool = True,
+    ) -> bool:
+        """Call one sink hook, isolating its failure; return whether it succeeded.
+
+        A failing sink warns instead of aborting the eval or starving the other
+        sinks (#511), unless it declares ``critical = True`` (the canonical
+        ``JsonLogSink``): then the error is re-raised once every sink has been
+        offered the hook, so a lost eval log is never reported as success.
+        """
+        try:
+            fn(*args)
+        except (SafetyAbort, EmbodimentFault):
+            raise
+        except Exception as exc:
+            if may_be_critical and getattr(sink, "critical", False):
+                raise _CriticalSinkError(exc) from exc
+            sink_name = type(sink).__name__ if sink is not None else "LogSink"
+            warnings.warn(
+                f"LogSink {sink_name}.{method_name}() failed with {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return False
+        return True
+
+    def _fan_out(self, method_name: str, *args: Any, optional: bool = False) -> None:
+        """Offer one hook to every sink, then surface a critical sink's failure.
+
+        ``optional`` hooks are duck-typed: sinks without a callable attribute
+        of that name are skipped. Critical sinks run first; if one fails,
+        sinks marked ``discards_on_eval_end`` (the live snapshot, which deletes
+        itself) are skipped so the only surviving record of the run is kept.
+        """
+        failure: Exception | None = None
+        for s in self._ordered:
+            hook: Any = getattr(s, method_name, None)
+            if optional and not callable(hook):
+                continue
+            if (
+                failure is not None
+                and method_name == "on_eval_end"
+                and getattr(s, "discards_on_eval_end", False)
+            ):
+                # Keep the record; tell the sink so a later run does not
+                # delete it either (eval_set reuses sinks across tasks).
+                retain = getattr(s, "retain_snapshot", None)
+                if callable(retain):
+                    retain()
+                continue
+            try:
+                self._safe_call(s, method_name, hook, *args)
+            except _CriticalSinkError as exc:
+                if failure is None:
+                    failure = exc.original
+                else:
+                    warnings.warn(
+                        f"LogSink {type(s).__name__}.{method_name}() also failed with "
+                        f"{type(exc.original).__name__}: {exc.original}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        if failure is not None:
+            raise failure
+
     def _fan_policy_messages(self, t: int, messages: Sequence[Any]) -> None:
-        for hook in self._policy_message_hooks:
-            hook(t, messages)
+        for index, hook in enumerate(self._policy_message_hooks):
+            if index in self._failed_message_hooks:
+                continue
+            sink = getattr(hook, "__self__", None)
+            # Never critical: rollout downgrades transcript errors to "streaming
+            # off" anyway, so a failing hook just warns and latches for the trial.
+            ok = self._safe_call(
+                sink, "log_policy_messages", hook, t, messages, may_be_critical=False
+            )
+            if not ok:
+                self._failed_message_hooks.add(index)
 
     def bind_spaces(self, action_space: Box, observation_space: ObservationSpace) -> None:
         """Offer the resolved spaces to sinks that declare a bind_spaces hook.
@@ -224,46 +336,33 @@ class _Broadcast:
         Duck-typed like ``log_policy_messages``: sinks without the attribute
         are unaffected, so the sink Protocol is unchanged.
         """
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_spaces", None)
-            if callable(hook):
-                hook(action_space, observation_space)
+        self._fan_out("bind_spaces", action_space, observation_space, optional=True)
 
     def bind_frames_dir(self, frames_dir: str | None) -> None:
         """Offer the run's frame directory to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_frames_dir", None)
-            if callable(hook):
-                hook(frames_dir)
+        self._fan_out("bind_frames_dir", frames_dir, optional=True)
 
     def bind_scenes(self, scenes: Sequence[Scene]) -> None:
         """Offer the run's scenes to sinks that declare the optional hook."""
-        for sink in self._sinks:
-            hook = getattr(sink, "bind_scenes", None)
-            if callable(hook):
-                hook(scenes)
+        self._fan_out("bind_scenes", scenes, optional=True)
 
     def on_eval_start(self, spec: EvalSpec) -> None:
-        for s in self._sinks:
-            s.on_eval_start(spec)
+        self._fan_out("on_eval_start", spec)
 
     def on_trial_start(self, scene_id: str, epoch: int) -> None:
-        for s in self._sinks:
-            s.on_trial_start(scene_id, epoch)
+        self._failed_message_hooks.clear()
+        self._fan_out("on_trial_start", scene_id, epoch)
 
     def log_step(
         self, t: int, observation: Observation, action: Action, result: StepResult
     ) -> None:
-        for s in self._sinks:
-            s.log_step(t, observation, action, result)
+        self._fan_out("log_step", t, observation, action, result)
 
     def on_trial_end(self, record: TrialRecord) -> None:
-        for s in self._sinks:
-            s.on_trial_end(record)
+        self._fan_out("on_trial_end", record)
 
     def on_eval_end(self, log: EvalLog) -> None:
-        for s in self._sinks:
-            s.on_eval_end(log)
+        self._fan_out("on_eval_end", log)
 
 
 def _survivor_warning(log: EvalLog) -> str | None:
@@ -376,7 +475,13 @@ def eval(
 
     Raises [`CompatibilityError`][inspect_robots.errors.CompatibilityError] (fail fast, before any
     rollout) if the policy and embodiment are incompatible, and
-    [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer.
+    [`ConfigError`][inspect_robots.errors.ConfigError] for an invalid epoch reducer
+    (including ``pass_at_<k>`` with fewer than ``k`` planned epochs) or a
+    grader whose ``preflight()`` request is rejected (checked before any
+    string component is resolved). A trial the grader tried and failed to
+    grade is scored as an abstention by the ``operator`` scorer, and the run
+    then ends with ``status == "error"`` and an "N of M trial(s) ungraded"
+    message.
     """
     if not isinstance(fail_on_error, bool) and not (
         isinstance(fail_on_error, (int, float))
@@ -390,6 +495,9 @@ def eval(
     from inspect_robots.registry import resolve
 
     before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
+    # Before resolving string components: a grader that would reject every
+    # trial must fail before any robot connection is opened (plan 0085).
+    _preflight_grader(resolved_grader)
     owns_embodiment = isinstance(embodiment, str)
     task = cast(Task, resolve("task", task)) if isinstance(task, str) else task
     policy = cast(Policy, resolve("policy", policy)) if isinstance(policy, str) else policy
@@ -486,6 +594,14 @@ def _run_eval(
         get_reducer(epoch_spec.reducer)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    # A reducer that needs more epochs than planned can never succeed; say so
+    # before spending robot time. Abstentions are still checked at scoring.
+    min_epochs = reducer_min_epochs(epoch_spec.reducer)
+    if epoch_spec.count < min_epochs:
+        raise ConfigError(
+            f"epoch reducer {epoch_spec.reducer!r} needs at least {min_epochs} epochs, "
+            f"but the task plans {epoch_spec.count}; raise Epochs.count or lower k"
+        )
 
     if seed is None:
         # Draw and record a real seed so the run stays reproducible after the
@@ -546,6 +662,9 @@ def _run_eval(
     error: str | None = None
     error_count = 0
     errored_trials = 0
+    graded_attempts = 0
+    ungraded_trials = 0
+    first_grading_error: str | None = None
     abstentions: dict[str, int] = {}
 
     halted = False
@@ -682,6 +801,12 @@ def _run_eval(
                                             stacklevel=2,
                                         )
                         before_scoring(record, scene)
+                        graded_attempts += 1
+                        grading_error = record.metadata.get("grading_error")
+                        if grading_error and record.operator_judgement is None:
+                            ungraded_trials += 1
+                            if first_grading_error is None:
+                                first_grading_error = str(grading_error)
                     epoch_values: dict[str, float | None] = {}
                     for scorer in scorers:
                         try:
@@ -820,6 +945,18 @@ def _run_eval(
         status = "error"
         error = f"all {total_trials} trial(s) errored; nothing was scored"
 
+    if ungraded_trials:
+        # The grader tried and failed on these trials (plan 0085). They abstain
+        # rather than score as failures, but a run with ungraded trials must
+        # never read as a clean success. A more specific error keeps its
+        # message and gains the count.
+        count = f"{ungraded_trials} of {graded_attempts} trial(s) ungraded"
+        if status == "success":
+            status = "error"
+            error = f"{count}: grader failed ({first_grading_error})"
+        else:
+            error = "; ".join(part for part in (error, count) if part)
+
     metrics: dict[str, float | None] = {}
     for scorer in scorers:
         vals = [sr.reduced[scorer.name] for sr in scene_results if scorer.name in sr.reduced]
@@ -852,7 +989,14 @@ def _run_eval(
         samples=tuple(scene_results),
         error=error,
     )
-    bus.on_eval_end(log)
+    try:
+        bus.on_eval_end(log)
+    except Exception as exc:
+        # A failed final write must not swallow the user's Ctrl-C: eval_set
+        # would otherwise treat the OSError as a task error and continue.
+        if cancelled_exc is not None:
+            raise cancelled_exc from exc
+        raise
     survivor_warning = _survivor_warning(log)
     if survivor_warning is not None:
         warnings.warn(survivor_warning, UserWarning, stacklevel=3)
@@ -964,6 +1108,7 @@ def eval_set(
     before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
     grader: Grader | str | None = None,
     retry_attempts: int = 0,
+    max_workers: int = 1,
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
@@ -989,21 +1134,118 @@ def eval_set(
     ``store_actions`` follows ``eval()``'s default-on action side-car contract.
 
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
-    hook, not both) and are resolved once here, so every task shares the same
-    grader instance.
+    hook, not both). Sequential runs resolve the grader once and share it;
+    its optional ``preflight()`` runs before the first task and a rejection
+    propagates instead of becoming a per-task error log. Parallel runs
+    construct and preflight a grader per task before opening its components;
+    grading configuration errors also propagate and stop task admission.
 
     Caller-supplied ``sinks`` are reused across the set's sequential runs. Each
     sink must reset its per-run state in ``on_eval_start`` and tolerate one
     complete lifecycle per task.
 
+    ``max_workers > 1`` runs independent simulated tasks in threads. Tasks,
+    policy, embodiment and optional grader must be registered names whose
+    factories return fresh instances safe to run concurrently. Caller-owned
+    sinks, controllers, approvers and hooks are rejected. Each task owns its
+    resources and logs; returned logs retain input order. An escaping halt or
+    interrupt stops admission and waits for active tasks to finish and close.
+    Threads do not accelerate CPU-bound Python code or interrupt blocked calls.
+
     Resumption of a partially-completed run (skipping already-finished scenes via
     a stable run id) is reserved for a follow-up: ``retry_attempts`` is accepted
     now so callers don't get retrofitted, but is not yet honored.
     """
-    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
+    from inspect_robots._parallel import (
+        HaltPreservingExitStack,
+        run_parallel,
+        validate_max_workers,
+    )
+
+    validate_max_workers(max_workers)
     task_list = [tasks] if isinstance(tasks, Task | str) else list(tasks)
+    if max_workers > 1:
+        if not (
+            all(isinstance(task, str) for task in task_list)
+            and isinstance(policy, str)
+            and isinstance(embodiment, str)
+            and (grader is None or isinstance(grader, str))
+        ):
+            raise ConfigError(
+                "parallel eval_set requires registered task, policy, embodiment "
+                "and grader names; live objects cannot be shared"
+            )
+        if any(
+            value is not None
+            for value in (sinks, controller, approver, operator_input, before_scoring)
+        ):
+            raise ConfigError(
+                "parallel eval_set does not accept shared sinks, controller, "
+                "approver, operator_input or before_scoring"
+            )
+        from inspect_robots.registry import registered, resolve
+
+        registered("task")  # Finish plugin discovery before workers access the registry.
+
+        def run_task(task: Task | str) -> list[EvalLog]:
+            # Configuration rejection must escape the per-task error handler
+            # and occur before opening components, as in sequential eval_set.
+            _, task_grader = _grading_hook(grader, None)
+            _preflight_grader(task_grader)
+            try:
+                with HaltPreservingExitStack() as resources:
+                    task_policy = cast(Policy, resolve("policy", policy))
+                    close_policy = getattr(task_policy, "close", None)
+                    if callable(close_policy):
+                        resources.callback(close_policy)
+                    task_embodiment = cast(Embodiment, resolve("embodiment", embodiment))
+                    resources.callback(task_embodiment.close)
+                    if not task_embodiment.info.is_simulated:
+                        raise ConfigError("parallel eval_set requires a simulated embodiment")
+                    return eval(
+                        task,
+                        task_policy,
+                        task_embodiment,
+                        log_dir=log_dir,
+                        seed=seed,
+                        fail_on_error=fail_on_error,
+                        remap=remap,
+                        store_frames=store_frames,
+                        store_actions=store_actions,
+                        grader=task_grader,
+                        environment_id=environment_id,
+                        environment_revision=environment_revision,
+                        policy_checkpoint=policy_checkpoint,
+                    )
+            except (SafetyAbort, EmbodimentFault):
+                raise
+            except Exception as exc:
+                return [
+                    _error_log_for(
+                        task,
+                        policy,
+                        embodiment,
+                        seed=seed,
+                        exc=exc,
+                        environment_id=environment_id,
+                        environment_revision=environment_revision,
+                        policy_checkpoint=policy_checkpoint,
+                    )
+                ]
+
+        if not task_list:
+            raise ConfigError("eval_set() requires at least one task; got an empty sequence")
+        parallel_logs = [
+            log for result in run_parallel(task_list, run_task, max_workers) for log in result
+        ]
+        return all(log.status == "success" for log in parallel_logs), parallel_logs
+
+    before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
     if not task_list:
         raise ConfigError("eval_set() requires at least one task; got an empty sequence")
+    # Outside the per-task try below: a rejected preflight must stop the whole
+    # set, not become the first task's error log while later tasks run.
+    _preflight_grader(resolved_grader)
     logs: list[EvalLog] = []
     for task in task_list:
         try:

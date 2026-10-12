@@ -159,3 +159,11 @@ def test_unknown_reducer_raises() -> None:
 def test_vlm_scorer_stub_points_at_the_vlm_grader() -> None:
     with pytest.raises(NotImplementedError, match=r"'vlm' grader \(--grader vlm\)"):
         VLMScorer()(_record([], success=False), None)
+
+
+def test_builtin_scorers_custom_name() -> None:
+    assert success_at_end(name="custom_success").name == "custom_success"
+    assert episode_length(name="custom_len").name == "custom_len"
+    assert min_distance_to_goal(name="custom_dist").name == "custom_dist"
+    assert reached_goal_state(0.05, name="custom_reached").name == "custom_reached"
+    assert operator_scorer(name="custom_op").name == "custom_op"

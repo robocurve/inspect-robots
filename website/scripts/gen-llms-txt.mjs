@@ -10,6 +10,8 @@ const description =
 
 const guideFiles = [
   'guide/quickstart.md',
+  'guide/examples.md',
+  'guide/rig-reference.md',
   'guide/concepts.md',
   'guide/writing-a-benchmark.md',
   'guide/policies-and-embodiments.md',

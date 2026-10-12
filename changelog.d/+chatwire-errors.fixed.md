@@ -1,0 +1,1 @@
+**Core:** the shared chat client behind `summarize`, `--auto-task` and the `vlm` grader validates the base URL before connecting, and reports read timeouts, dropped connections, malformed URLs and invalid API keys as guided configuration errors instead of raw exceptions. An invalid key is never echoed in the message.

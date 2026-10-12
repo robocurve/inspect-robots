@@ -55,6 +55,24 @@ in `eval()` and the CLI.
 This is how the ecosystem stays decoupled: this repository is the framework;
 specific simulators, VLA weights, and benchmarks live in their own packages.
 
+### Turning off plugin autoloading
+
+Discovery imports every installed entry point the first time components are
+listed or resolved. To stop that, set `INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD`
+to any non-empty value:
+
+```bash
+INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD=1 inspect-robots list
+```
+
+Only in-tree builtins and components registered by hand (with the decorators
+above) then resolve. Any non-empty value counts, so `=0` also disables
+autoloading, as with pytest's `PYTEST_DISABLE_PLUGIN_AUTOLOAD`. The variable is
+read on each lookup, so clearing it later in the same process re-enables
+discovery. Use it for locked-down or reproducibility-sensitive runs; it is not
+a security boundary, since an installed package can still run code when
+something imports it.
+
 ### Reading user defaults
 
 Plugin CLIs can read the configuration written by `inspect-robots setup`

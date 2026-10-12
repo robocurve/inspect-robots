@@ -208,6 +208,14 @@ def test_rewind_reference_uses_the_limiter_store_key() -> None:
     assert np.array_equal(reference, np.array([0.3, 0.4]))
 
 
+def test_rewind_reference_rejects_non_finite_pose() -> None:
+    store: dict[str, object] = {}
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("nan"), 0.0]))
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitApprover.rewind_reference(store, np.array([float("inf"), 0.0]))
+
+
 def test_substitution_rewinds_the_next_delta_reference() -> None:
     held = Action(data=np.array([0.0, 0.0]))
 
@@ -448,6 +456,17 @@ def test_nan_raises_safety_abort_in_both_branches() -> None:
             approver.review(Action(data=np.array([float("nan"), 0.0])), {})
 
 
+@pytest.mark.parametrize("space", [_abs_space(), _delta_space()])
+def test_inf_raises_safety_abort_in_both_branches(space: Box) -> None:
+    approver = DeltaLimitApprover(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([float("inf"), 0.0])), store)
+
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        approver.review(Action(data=np.array([0.0, float("-inf")])), store)
+
+
 @pytest.mark.parametrize("name", ["", "line\nbreak", "line\rbreak"])
 def test_guardrail_contribution_rejects_invalid_display_names(name: str) -> None:
     with pytest.raises(ValueError, match="display names"):
@@ -463,6 +482,12 @@ def test_guardrail_contribution_requires_callable_review() -> None:
         GuardrailContribution(approvers=(("broken", broken),))
 
 
+def test_guardrail_contribution_valid() -> None:
+    contrib = GuardrailContribution(approvers=(("auto", AutoApprover()),))
+    assert len(contrib.approvers) == 1
+    assert contrib.warnings == ()
+
+
 def test_chain_runs_approvers_in_order() -> None:
     space = _delta_space()
     chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.05))
@@ -471,3 +496,15 @@ def test_chain_runs_approvers_in_order() -> None:
     assert np.allclose(out.data, [0.05, 0.05])
     inside = Action(data=np.array([0.01, 0.01]))
     assert chain.review(inside, {}) is inside  # identity survives the chain
+
+
+def test_chain_approver_requires_callable_review() -> None:
+    class _NotAnApprover:
+        review = "not callable"
+
+    broken: Any = _NotAnApprover()
+    with pytest.raises(ValueError, match="callable review"):
+        ChainApprover(broken)
+
+    with pytest.raises(ValueError, match="callable review"):
+        ChainApprover(None)  # type: ignore[arg-type]

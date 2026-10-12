@@ -56,6 +56,29 @@ def test_action_dim_mismatch_is_error() -> None:
     assert any(i.code == "action_dim" for i in report.errors)
 
 
+def test_action_shape_mismatch_with_equal_dim_is_error() -> None:
+    policy = _StubPolicy(
+        PolicyInfo(
+            name="matrix-actions",
+            action_space=Box(
+                shape=(2, 3),
+                semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"),
+            ),
+        )
+    )
+    embodiment = CubePickEmbodiment()
+    embodiment.info = replace(
+        embodiment.info,
+        action_space=Box(
+            shape=(6,),
+            semantics=ActionSemantics(control_mode="eef_delta_pos", frame="world"),
+        ),
+    )
+    report = check_compatibility(policy, embodiment)
+    assert not report.ok
+    assert any(i.code == "action_shape" for i in report.errors)
+
+
 def test_control_mode_mismatch_is_error() -> None:
     policy = _StubPolicy(
         PolicyInfo(
@@ -210,3 +233,92 @@ def test_eval_fails_fast_on_incompatible(tmp_path: object) -> None:
     )
     with pytest.raises(CompatibilityError):
         eval(task, policy, CubePickEmbodiment(), log_dir=str(tmp_path))
+
+
+def test_action_semantics_unknown_and_mismatches() -> None:
+    # 1. Action semantics missing on policy
+    pol_no_sem = _StubPolicy(PolicyInfo(name="no-sem", action_space=Box(shape=(3,))))
+    emb = CubePickEmbodiment()
+    emb.info = replace(
+        emb.info,
+        action_space=Box(shape=(3,), semantics=ActionSemantics(control_mode="eef_delta_pos")),
+    )
+    rep = check_compatibility(pol_no_sem, emb)
+    assert rep.ok
+    assert any(w.code == "action_semantics_unknown" for w in rep.warnings)
+
+    # 2. Rotation representation mismatch
+    pol_rot = _StubPolicy(
+        PolicyInfo(
+            name="rot-quat",
+            action_space=Box(
+                shape=(3,),
+                semantics=ActionSemantics(control_mode="eef_delta_pos", rotation_repr="quat_xyzw"),
+            ),
+        )
+    )
+    rep_rot = check_compatibility(pol_rot, emb)
+    assert not rep_rot.ok
+    assert any(e.code == "rotation_repr" for e in rep_rot.errors)
+
+    # 3. Gripper and frame warnings
+    pol_grip = _StubPolicy(
+        PolicyInfo(
+            name="grip-binary",
+            action_space=Box(
+                shape=(3,),
+                semantics=ActionSemantics(
+                    control_mode="eef_delta_pos",
+                    rotation_repr="none",
+                    gripper="binary",
+                    frame="camera",
+                ),
+            ),
+        )
+    )
+    emb_grip = CubePickEmbodiment()
+    emb_grip.info = replace(
+        emb_grip.info,
+        action_space=Box(
+            shape=(3,),
+            semantics=ActionSemantics(
+                control_mode="eef_delta_pos",
+                rotation_repr="none",
+                gripper="none",
+                frame="base",
+            ),
+        ),
+    )
+    rep_grip = check_compatibility(pol_grip, emb_grip)
+    assert rep_grip.ok
+    assert any(w.code == "gripper" for w in rep_grip.warnings)
+    assert any(w.code == "frame" for w in rep_grip.warnings)
+
+
+def test_control_rate_warning() -> None:
+    pol = _StubPolicy(PolicyInfo(name="p", action_space=_ACTION_SPACE, control_hz=20.0))
+    emb = CubePickEmbodiment()
+    emb.info = replace(emb.info, control_hz=10.0)
+    rep = check_compatibility(pol, emb)
+    assert rep.ok
+    assert any(w.code == "control_rate" for w in rep.warnings)
+
+
+def test_scene_setup_unsupported_error() -> None:
+    emb = CubePickEmbodiment()
+    emb.info = replace(emb.info, supported_setups=frozenset({"tabletop"}))
+    task = Task(
+        name="overhead-task",
+        scenes=[Scene(id="s1", instruction="do it", setup="conveyor")],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+    rep = check_compatibility(ScriptedPolicy(), emb, task)
+    assert not rep.ok
+    assert any(e.code == "scene_setup" for e in rep.errors)
+
+
+def test_assert_compatible_returns_report_when_ok() -> None:
+    rep = assert_compatible(ScriptedPolicy(), CubePickEmbodiment())
+    assert rep.ok
+    rep.raise_for_errors()

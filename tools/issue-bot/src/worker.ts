@@ -364,19 +364,31 @@ export async function deliver(env: IssueEnv) {
 }
 export class IssueWorkflow extends WorkflowEntrypoint<
   IssueEnv,
-  { id?: string; issue?: number; inspect?: boolean; requestId?: string }
+  {
+    id?: string;
+    issue?: number;
+    inspect?: boolean;
+    export?: number;
+    requestId?: string;
+  }
 > {
   async run(
     event: WorkflowEvent<{
       id?: string;
       issue?: number;
       inspect?: boolean;
+      export?: number;
       requestId?: string;
     }>,
     step: WorkflowStep,
   ) {
     const ledger = this.env.LEDGER.getByName("coordinator");
     if (event.payload.inspect) return ledger.queueState();
+    if (event.payload.export !== undefined) {
+      if (!Number.isSafeInteger(event.payload.export))
+        throw new Error("invalid_issue");
+      return ledger.export(event.payload.export);
+    }
     const id =
       event.payload.id ??
       (await step.do("enqueue management trial", () =>

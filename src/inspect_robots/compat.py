@@ -70,6 +70,14 @@ def _check_action_spaces(policy_box: Box, emb_box: Box, issues: list[CompatIssue
                 f"policy emits {policy_box.dim}-D actions but embodiment expects {emb_box.dim}-D",
             )
         )
+    elif policy_box.shape != emb_box.shape:
+        issues.append(
+            CompatIssue(
+                "error",
+                "action_shape",
+                f"policy action shape {policy_box.shape} != embodiment {emb_box.shape}",
+            )
+        )
     ps, es = policy_box.semantics, emb_box.semantics
     if ps is None or es is None:
         issues.append(

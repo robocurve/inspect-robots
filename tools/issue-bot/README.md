@@ -123,7 +123,9 @@ New `issues.opened` events trigger triage. Only Jay's immutable GitHub user ID
 can request `/triage` in an issue comment. Explicit retries share the original
 issue budget and cannot duplicate an active issue job. A management-only
 Cloudflare workflow payload `{"issue":401}` can test a Jay-authored existing
-issue; `{"inspect":true}` reports saved state without model spending or posting.
+issue; `{"inspect":true}` reports saved state without model spending or posting. `{"export":491}`
+returns that issue's latest job (plan, changed files, review findings and stage
+results, never stage capabilities) so a held fix can be recovered by hand.
 
 Set `ENABLED=false` to stop new stage admission and provider requests. Existing
 result cleanup and pending public notices can still be reconciled. An expired

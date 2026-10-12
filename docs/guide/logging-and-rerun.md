@@ -225,13 +225,33 @@ transcript observation to the stored frame. `inspect-robots view` performs
 this step join internally, embedding only an exact match and otherwise leaving
 the placeholder in place.
 
-`FrameStore` sanitizes trial and camera names before building
-`{trial}_{camera}_{t:06d}.npy`. When the sanitizer rewrites a name, use
-`StepRecord.image_refs` for the pre-action observation,
+`FrameStore` writes `~f1~{E(trial)}~{E(camera)}_{t:06d}.npy`, with separate,
+reversible trial and camera components. `E` retains lowercase ASCII letters,
+digits, dots, underscores and hyphens. All other UTF-8 bytes (including uppercase
+letters, percent signs, tildes and path separators) become uppercase `%HH`
+escapes. Distinct identities cannot overwrite each other through ambiguous
+underscore boundaries or case folding. Rewriting the same trial, camera and
+step still replaces that frame. Step numbers above 999999 remain supported.
+
+Use `StepRecord.image_refs` for the pre-action observation,
 `StepRecord.result_image_refs` for the post-action observation, and
 `FrameRef.path` as the authoritative file mapping instead of assembling paths
-from transcript labels or step indices. The `view` command performs its join
-internally with the same sanitizer and an exact-match-or-degrade contract.
+from transcript labels or step indices. The `view` command tries the versioned
+name first. If it is absent or exceeds filesystem path limits, the viewer tries
+exactly the legacy `{safe(trial)}_{safe(camera)}_{t:06d}.npy` name using the old
+sanitizer. A present but corrupt, unreadable or unsupported versioned frame
+leaves a placeholder; it does not substitute a stale legacy frame. Mixed-format
+stream discovery prefers versioned frames over corresponding legacy files at
+the same step. Legacy names cannot recover identities or pixels already lost
+through the old ambiguous mapping.
+
+Encoding expands some identifiers. New writes that exceed the filesystem's
+component or full-path limit raise its `OSError` (`ENAMETOOLONG` or the native
+equivalent), without incrementing the store's count, changing existing frames,
+or retrying an ambiguous legacy name. Use shorter identifiers, or a shorter
+storage root for full-path limits. Identifiers are never truncated or hashed.
+Existing legacy frames remain readable when their legacy paths fit, even if
+their versioned paths would exceed the limit.
 
 ## Wire capture
 

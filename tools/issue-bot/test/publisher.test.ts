@@ -360,10 +360,20 @@ describe("trusted issue publication", () => {
       "src/.env",
       "src/AGENTS.md",
       "plugins/x/pyproject.toml",
+      "changelog.d/.hidden.md",
+      "changelog.d/../CHANGELOG.md",
+      "CHANGELOG.md",
     ])
       expect(() =>
         validateFiles([{ path, content: "x", mode: "100644" }]),
       ).toThrow();
+    for (const path of [
+      "changelog.d/491.fixed.md",
+      "changelog.d/+frame-identity.fixed.md",
+    ])
+      expect(
+        validateFiles([{ path, content: "x", mode: "100644" }]),
+      ).toHaveLength(1);
     expect(() => validateFiles([input.files[0], input.files[0]])).toThrow();
     expect(allowedRead("/issues/401/comments?per_page=100")).toBe(true);
     expect(allowedRead("/pulls/455/merge")).toBe(false);

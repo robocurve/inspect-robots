@@ -164,6 +164,16 @@ def get_reducer(name: str) -> Reducer:
     raise ValueError(f"unknown epoch reducer {name!r}; known: {sorted(_REDUCERS)} or 'pass_at_<k>'")
 
 
+def reducer_min_epochs(name: str) -> int:
+    """Return the fewest epochs the named reducer can reduce (``k`` for ``pass_at_<k>``).
+
+    Assumes ``name`` already resolved via :func:`get_reducer`.
+    """
+    if name.startswith("pass_at_") and name not in _REDUCERS:
+        return int(name[len("pass_at_") :])
+    return 1
+
+
 def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
     """Apply the named epoch reducer to one scene's scores.
 
@@ -197,9 +207,9 @@ class _SuccessAtEnd:
         )
 
 
-def success_at_end() -> Scorer:
+def success_at_end(*, name: str = "success_at_end") -> Scorer:
     """Score 1.0 iff the episode terminated with reason ``"success"``."""
-    return _SuccessAtEnd()
+    return _SuccessAtEnd(name=name)
 
 
 @dataclass(frozen=True)
@@ -210,9 +220,9 @@ class _EpisodeLength:
         return Score(value=len(record.steps))
 
 
-def episode_length() -> Scorer:
+def episode_length(*, name: str = "episode_length") -> Scorer:
     """Score = number of environment steps taken."""
-    return _EpisodeLength()
+    return _EpisodeLength(name=name)
 
 
 def _distances(record: TrialRecord) -> list[float]:
@@ -230,9 +240,9 @@ class _MinDistanceToGoal:
         return Score(value=min(dists))
 
 
-def min_distance_to_goal() -> Scorer:
+def min_distance_to_goal(*, name: str = "min_distance_to_goal") -> Scorer:
     """Score = the closest the effector got to the goal (lower is better)."""
-    return _MinDistanceToGoal()
+    return _MinDistanceToGoal(name=name)
 
 
 @dataclass(frozen=True)
@@ -246,9 +256,9 @@ class _ReachedGoalState:
         return Score(value=reached, explanation=f"min_distance <= {self.threshold}")
 
 
-def reached_goal_state(threshold: float = 0.05) -> Scorer:
+def reached_goal_state(threshold: float = 0.05, *, name: str = "reached_goal_state") -> Scorer:
     """Success iff the effector came within ``threshold`` of the goal."""
-    return _ReachedGoalState(threshold=threshold)
+    return _ReachedGoalState(threshold=threshold, name=name)
 
 
 # Recognized affirmative operator verdicts (case-insensitive).
@@ -277,6 +287,11 @@ class _OperatorScorer:
         # this scorer only READS it, so scoring stays reproducible from a log.
         verdict = record.operator_judgement
         if verdict is None:
+            grading_error = record.metadata.get("grading_error")
+            if grading_error:
+                # The grader tried and failed: abstain rather than score a
+                # robot failure that never happened (plan 0085).
+                return Score(value=None, explanation=f"ungraded: grader failed: {grading_error}")
             return Score(value=False, explanation="no operator judgement recorded")
         return Score(
             value=is_affirmative_verdict(verdict),
@@ -284,9 +299,15 @@ class _OperatorScorer:
         )
 
 
-def operator_scorer() -> Scorer:
-    """Score from the human operator's recorded success judgement (R6)."""
-    return _OperatorScorer()
+def operator_scorer(*, name: str = "operator") -> Scorer:
+    """Score from the recorded success judgement (R6).
+
+    A trial with no judgement scores as failure, except when the grader
+    recorded ``metadata["grading_error"]``: then the scorer abstains
+    (``Score(value=None)``), so a grading outage is excluded from the metric
+    instead of counting as robot failures.
+    """
+    return _OperatorScorer(name=name)
 
 
 class VLMScorer:

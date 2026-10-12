@@ -45,6 +45,10 @@ reduces to `null`, and a metric averages only the scenes that have a value
 (`null` when none do). Reports show an abstention as `n/a`, and
 `EvalResults.abstentions` counts abstained trials per scorer so each metric's
 denominator stays visible: `inspect` and `view` print it beside the metric.
+The `operator` scorer abstains on a trial the grader tried and failed to judge
+(it carries `grading_error` in its metadata), so a grading outage is left out
+of the metric instead of counting as robot failures; the run then ends in
+error (see "Automated grading" in the CLI guide).
 
 ## Epochs and reducers
 

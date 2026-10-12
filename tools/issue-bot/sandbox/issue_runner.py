@@ -44,7 +44,8 @@ ROLES = {
     "implement": (
         "Implement the approved plan in /workspace/issue/work only. Address all code review "
         "feedback. Preserve supported contracts; add regression tests and run relevant checks. "
-        "Changes must stay under src, tests, plugins, docs, examples or plans. Do not edit "
+        "Changes must stay under src, tests, plugins, docs, examples, plans or changelog.d; "
+        "add a changelog.d fragment as changelog.d/README.md describes. Do not edit "
         "credentials, automation, hidden files, AGENTS.md, CLAUDE.md, package manifests or locks. "
         "Return IMPLEMENTED with actual checks and limitations, or REQUIRE_REVIEWER. "
         "The trusted launcher captures the cumulative diff; do not encode file content in JSON."
@@ -78,7 +79,9 @@ COMMON_POLICY = (
 def safe_change(path):
     """Keep publication restrictions aligned with contracts.validateFiles."""
     return bool(
-        re.fullmatch(r"(?:src|tests|plugins|docs|examples|plans)/[A-Za-z0-9_./-]+", path)
+        re.fullmatch(
+            r"(?:src|tests|plugins|docs|examples|plans|changelog\.d)/[A-Za-z0-9_.+/-]+", path
+        )
         and len(path) <= 300
         and all(p and p not in (".", "..") and not p.startswith(".") for p in path.split("/"))
         and not re.search(

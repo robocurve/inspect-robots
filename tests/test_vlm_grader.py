@@ -13,7 +13,7 @@ from inspect_robots import eval as ir_eval
 from inspect_robots._pngenc import png_data_url
 from inspect_robots.errors import ConfigError
 from inspect_robots.frames import FrameStore
-from inspect_robots.grader import Grader, vlm_grader
+from inspect_robots.grader import _PREFLIGHT_PROMPT, Grader, vlm_grader
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
 from inspect_robots.rollout import StepRecord, TrialRecord
@@ -53,9 +53,15 @@ class _CapturePost:
         content = json.dumps({"choices": [{"message": {"content": reply}}]})
         self.response: tuple[int, bytes] = (200, content.encode())
         self.requests: list[dict[str, object]] = []
+        self.preflights = 0
 
     def __call__(self, url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
-        self.requests.append({"url": url, "headers": headers, "body": json.loads(body)})
+        payload = json.loads(body)
+        # eval() preflights the grader once; keep it out of ``requests``.
+        if payload["messages"][0]["content"][0]["text"] == _PREFLIGHT_PROMPT:
+            self.preflights += 1
+        else:
+            self.requests.append({"url": url, "headers": headers, "body": payload})
         return self.response
 
     def message_parts(self) -> list[dict[str, object]]:
@@ -125,6 +131,7 @@ def test_eval_records_vlm_and_embodiment_judgement_sources(
         len(sample.judgement_sources) == len(sample.termination_reasons) for sample in log.samples
     )
     assert len(post.requests) == 2
+    assert post.preflights == 1
 
 
 def test_vlm_grader_registry_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,3 +590,166 @@ def test_endpoint_rejection_of_effort_degrades_to_ungraded(
 
     assert record.operator_judgement is None
     assert "grading request failed with HTTP 400" in capsys.readouterr().err
+
+
+class _SeqPost:
+    """An HttpPost double answering each request from a queue of (status, body)."""
+
+    def __init__(self, *responses: tuple[int, bytes] | Exception) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+        self.bodies: list[dict[str, object]] = []
+
+    def __call__(self, url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+        del url, headers
+        self.calls += 1
+        self.bodies.append(json.loads(body))
+        reply = self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+_OK = (200, json.dumps({"choices": [{"message": {"content": "GRADE: success"}}]}).encode())
+_PRETTY_400 = (400, b'{\n  "error": {\n    "message": "unsupported reasoning_effort"\n  }\n}')
+
+
+def _seq_vlm(post: _SeqPost, monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> Grader:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    return vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", http_post=post, **kwargs)  # type: ignore[arg-type]
+
+
+def test_preflight_sends_one_image_request_with_the_exact_effort_and_caches_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _SeqPost(_OK)
+    grader = _seq_vlm(post, monkeypatch, effort=None)
+
+    grader.preflight()  # type: ignore[attr-defined]
+    grader.preflight()  # type: ignore[attr-defined]
+
+    assert post.calls == 1
+    body = post.bodies[0]
+    assert body["model"] == "judge-model"
+    assert body["reasoning_effort"] == "none"
+    parts = body["messages"][0]["content"]  # type: ignore[index]
+    assert parts[0]["text"] == _PREFLIGHT_PROMPT
+    assert parts[1]["type"] == "image_url"
+
+
+def test_preflight_rejection_raises_one_fix_line_and_is_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _SeqPost(_PRETTY_400)
+    grader = _seq_vlm(post, monkeypatch, effort="none")
+
+    with pytest.raises(ConfigError) as first:
+        grader.preflight()  # type: ignore[attr-defined]
+    message = str(first.value)
+    assert message.startswith(
+        'grading preflight request failed with HTTP 400: { "error": { "message": '
+        '"unsupported reasoning_effort" } }'
+    )
+    assert "with effort='none' was rejected before any rollout" in message
+    assert message.count("fix:") == 1
+    with pytest.raises(ConfigError) as again:
+        grader.preflight()  # type: ignore[attr-defined]
+    assert again.value is first.value
+    assert post.calls == 1
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        (500, b"upstream down"),
+        (429, b"slow down"),
+        (408, b"timeout"),
+        TimeoutError("read timed out"),
+    ],
+)
+def test_preflight_outage_warns_once_and_lets_the_run_proceed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reply: tuple[int, bytes] | Exception,
+) -> None:
+    post = _SeqPost(reply)
+    grader = _seq_vlm(post, monkeypatch)
+
+    grader.preflight()  # type: ignore[attr-defined]
+    grader.preflight()  # type: ignore[attr-defined]
+
+    assert post.calls == 1
+    err = capsys.readouterr().err
+    assert err.count("vlm grader preflight:") == 1
+    assert "continuing, trials may end up ungraded" in err
+
+
+def test_preflight_transport_error_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    from inspect_robots._chatwire import _ChatTransportError
+
+    post = _SeqPost(_ChatTransportError("chat request failed: offline.\nfix: retry"))
+    _seq_vlm(post, monkeypatch).preflight()  # type: ignore[attr-defined]
+    assert post.calls == 1
+
+
+def test_preflight_malformed_reply_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    post = _SeqPost((200, b"not json"))
+    with pytest.raises(ConfigError, match=r"malformed reply"):
+        _seq_vlm(post, monkeypatch).preflight()  # type: ignore[attr-defined]
+
+
+def test_failed_grading_records_a_flattened_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _SeqPost(_PRETTY_400)
+    grader = _seq_vlm(post, monkeypatch)
+    record = _framed_record(final={"top": np.zeros((4, 4, 3), dtype=np.uint8)})
+
+    grader.grade(record, _scene())
+
+    assert record.operator_judgement is None
+    assert record.metadata["grading_error"] == (
+        'grading request failed with HTTP 400: { "error": { "message": '
+        '"unsupported reasoning_effort" } }'
+    )
+    assert "graded_frames" not in record.metadata
+
+
+def test_failed_grading_names_a_non_config_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    post = _SeqPost(RuntimeError("boom\nsecond line"))
+    grader = _seq_vlm(post, monkeypatch)
+    record = _framed_record(final={"top": np.zeros((4, 4, 3), dtype=np.uint8)})
+
+    grader.grade(record, _scene())
+
+    assert record.metadata["grading_error"] == "RuntimeError: boom second line"
+
+
+def test_one_line_falls_back_to_the_class_name() -> None:
+    from inspect_robots.grader import _one_line
+
+    assert _one_line(ConfigError("fix: only guidance")) == "ConfigError"
+
+
+@pytest.mark.parametrize(
+    "base_url", ["api.example/v1", "htps://api.example/v1", "https:///v1", "http://x.test:abc/v1"]
+)
+def test_preflight_rejects_a_malformed_base_url(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "secret")
+    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url=base_url)
+    with pytest.raises(ConfigError, match=r"invalid URL") as first:
+        grader.preflight()
+    with pytest.raises(ConfigError) as again:
+        grader.preflight()
+    assert again.value is first.value
+
+
+def test_preflight_rejects_an_api_key_with_a_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLM_TEST_KEY", "sk-ok\n")
+    grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url="http://127.0.0.1:1/v1")
+    with pytest.raises(ConfigError, match=r"invalid request"):
+        grader.preflight()

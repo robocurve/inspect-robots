@@ -471,6 +471,38 @@ describe("queue base freshness", () => {
     },
   );
 });
+describe("management export", () => {
+  it("returns the latest job's plan, files and stage results without capabilities", async () => {
+    const l = ledger(),
+      id = await l.register(snapshot, "", false);
+    await l.claim(id);
+    await run(l, id, output("CONFIRMED"));
+    await run(l, id, output("PLAN"));
+    await run(l, id, output("APPROVE"));
+    const files = [
+      { path: "src/test.py", content: "fixed\n", mode: "100644" as const },
+    ];
+    await run(l, id, output("IMPLEMENTED", { files }));
+    const exported = (await l.export(snapshot.number))!;
+    expect(exported.id).toBe(id);
+    expect(exported.planApproved).toBe(true);
+    expect(exported.files).toEqual(files);
+    expect(exported.stages.map((s) => s.kind)).toEqual([
+      "triage",
+      "plan",
+      "plan_review",
+      "implement",
+    ]);
+    expect(exported.stages[3].files).toEqual(["src/test.py"]);
+    const text = JSON.stringify(exported);
+    for (const stageId of [(await l.job(id))!.stage!]) {
+      const stage = (await l.stage(stageId))!;
+      expect(text).not.toContain(stage.request.token);
+      expect(text).not.toContain(stage.request.checkpointToken);
+    }
+    expect(await l.export(9999)).toBeNull();
+  });
+});
 describe("stage launch failures", () => {
   function fixture(start: () => Promise<void>, phase = "not_started") {
     const l = ledger();

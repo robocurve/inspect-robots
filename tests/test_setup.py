@@ -1376,6 +1376,30 @@ def test_read_raw_config_returns_unicode_decode_error_text(tmp_path: Path) -> No
     assert "utf-8" in result
 
 
+def test_render_config_drops_comments_on_replaced_values() -> None:
+    """Replaced values lose the comment that described the suggested one.
+
+    The policy/embodiment/max_steps comments name yam's plugin and step
+    budget; left on a core builtin they assert something untrue about the
+    user's own config file.
+    """
+    rendered = _render_config(
+        dict(SUGGESTED) | {"policy": "scripted", "embodiment": "cubepick", "max_steps": "80"},
+        {},
+        {},
+    )
+
+    assert rendered == (
+        "[defaults]\n"
+        "policy = scripted\n"
+        "embodiment = cubepick\n"
+        "scorer = success_at_end\n"
+        "max_steps = 80\n"
+        "rerun = true              # live viewer of cameras/state/actions each run\n"
+        "store_frames = true       # save each run's camera frames under logs/frames/\n"
+    )
+
+
 def test_render_config_matches_readme_quickstart_block() -> None:
     rendered = _render_config(
         dict(SUGGESTED),
@@ -1390,7 +1414,7 @@ def test_render_config_matches_readme_quickstart_block() -> None:
     assert rendered == (
         "[defaults]\n"
         "policy = molmoact2        # from the inspect-robots-yam plugin\n"
-        "embodiment = yam_arms     # same plugin; cameras configured below\n"
+        "embodiment = yam_arms     # from the inspect-robots-yam plugin; cameras configured below\n"
         "scorer = success_at_end\n"
         "max_steps = 1200          # 120 s at 10 Hz\n"
         "rerun = true              # live viewer of cameras/state/actions each run\n"
@@ -1505,6 +1529,7 @@ def test_run_setup_defaults_and_numbered_cameras_write_golden_config(tmp_path: P
     )
     output = out.getvalue()
     assert f"Found 3 camera device(s) under {by_id}:" in output
+    assert "could not confirm which nodes are color cameras" in output
     assert f"  1. {Path(devices[0]).name}" in output
     assert f"Wrote {path}" in output
     assert 'Next: inspect-robots "place the fork on the plate"' in output
@@ -1569,6 +1594,7 @@ def test_run_setup_lists_race_loser_camera_and_selects_it_by_number(
     assert f"right_cam_device = {d405}" in text
     assert "Found 2 camera device(s)" in out.getvalue()
     assert "no usable by-id entry" in out.getvalue()
+    assert "could not confirm which nodes are color cameras" not in out.getvalue()
     assert any("top camera" in prompt and "'p'" in prompt for prompt in prompts)
 
 
@@ -1715,6 +1741,33 @@ def test_run_setup_healthy_rig_prompts_and_config_unchanged(
     )
     assert "no usable by-id entry" not in out.getvalue()
     assert all("'p'" not in prompt for prompt in prompts if "camera" in prompt)
+
+
+def test_run_setup_device_slot_camera_warns_when_probe_is_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_device_slots(
+        monkeypatch,
+        (DeviceSlot("inspection_camera", "v4l2", "inspection camera"),),
+    )
+    by_id = tmp_path / "by-id"
+    devices = _make_devices(by_id)
+    monkeypatch.setattr("inspect_robots._setup._v4l2_color_capture", lambda _path: None)
+    pending = [*_slot_defaults(), "", "1"]
+    out = io.StringIO()
+
+    result = run_setup(
+        {"XDG_CONFIG_HOME": str(tmp_path), "DISPLAY": ":0"},
+        input_fn=lambda _prompt: pending.pop(0),
+        out=out,
+        interactive=True,
+        by_id_dir=by_id,
+        by_path_dir=tmp_path / "missing-by-path",
+    )
+
+    assert result == 0
+    assert f"inspection_camera = {devices[0]}" in _config_path(tmp_path).read_text(encoding="utf-8")
+    assert "could not confirm which nodes are color cameras" in out.getvalue()
 
 
 def test_run_setup_device_slot_camera_uses_inventory(
@@ -2021,7 +2074,10 @@ def test_run_setup_without_config_home_raises() -> None:
 
     with pytest.raises(
         SystemExit,
-        match=r"^cannot locate a config home: set \$XDG_CONFIG_HOME or \$HOME$",
+        match=(
+            r"^cannot locate a config home: "
+            r"set \$XDG_CONFIG_HOME, \$HOME or \(on Windows\) %APPDATA%$"
+        ),
     ):
         run_setup({}, input_fn=input_fn, out=io.StringIO(), interactive=True)
 
@@ -3420,19 +3476,6 @@ def test_run_setup_marks_undetected_current_camera_defaults(tmp_path: Path) -> N
         in out.getvalue()
         for device in current_devices
     )
-
-
-def test_render_config_comment_at_exact_boundary_never_glues(tmp_path: Path) -> None:
-    policy = "policy-with-17chr"  # "policy = " + 17 chars == 26, the pad width
-    assert len(f"policy = {policy}") == 26
-    path = tmp_path / "config.ini"
-    path.write_text(_render_config({"policy": policy}, {}, {}), encoding="utf-8")
-
-    carried = _read_raw_config(path)
-
-    assert not isinstance(carried, str)
-    assert carried["defaults"]["policy"] == policy
-    assert f"policy = {policy}  # " in path.read_text(encoding="utf-8")
 
 
 def test_run_setup_multiline_prompted_default_still_parses(tmp_path: Path) -> None:

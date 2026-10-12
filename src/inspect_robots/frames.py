@@ -14,11 +14,41 @@ import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 import numpy as np
 import numpy.typing as npt
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_FRAME_NAME_RE = re.compile(r"~f1~([^~]*)~([^~]*)_(-?[0-9]+)\.npy")
+
+
+def _encode_component(name: str) -> str:
+    """Encode UTF-8 without delimiter or case-insensitive filesystem aliases."""
+    return "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789._-" else f"%{byte:02X}"
+        for byte in name.encode("utf-8")
+    )
+
+
+def _frame_filename(trial_id: str, camera: str, t: int) -> str:
+    """Map the complete frame identity to a reversible, flat, versioned name."""
+    return f"~f1~{_encode_component(trial_id)}~{_encode_component(camera)}_{t:06d}.npy"
+
+
+def _parse_frame_filename(name: str) -> tuple[str, str, int] | None:
+    """Decode only canonical versioned filenames; never guess legacy boundaries."""
+    match = _FRAME_NAME_RE.fullmatch(name)
+    if match is None:
+        return None
+    try:
+        trial_id, camera = (unquote_to_bytes(part).decode("utf-8") for part in match.group(1, 2))
+        t = int(match.group(3))
+    except ValueError:
+        return None
+    if _frame_filename(trial_id, camera, t) != name:
+        return None
+    return trial_id, camera, t
 
 
 def _safe(name: str) -> str:
@@ -56,7 +86,7 @@ class FrameStore:
 
     def put(self, trial_id: str, t: int, camera: str, image: npt.NDArray[np.uint8]) -> FrameRef:
         """Persist one camera frame and return its lightweight reference."""
-        path = self.root / f"{_safe(trial_id)}_{_safe(camera)}_{t:06d}.npy"
+        path = self.root / _frame_filename(trial_id, camera, t)
         np.save(path, image)
         self.count += 1
         return FrameRef(camera=camera, t=t, path=str(path))

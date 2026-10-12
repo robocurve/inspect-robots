@@ -1574,3 +1574,30 @@ def test_act_marks_the_eviction_anchor_on_the_anthropic_wire() -> None:
     assert stub_blocks[-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in stub_blocks[0]
     assert b"cache_anchor" not in requests[-1].content
+
+
+def test_translate_tools_handles_missing_and_none_parameters() -> None:
+    from inspect_robots_agent._anthropic import _translate_tools
+
+    tools = [
+        {"type": "function", "function": {"name": "no_params"}},
+        {"type": "function", "function": {"name": "none_params", "parameters": None}},
+        {
+            "type": "function",
+            "function": {
+                "name": "with_params",
+                "description": "has params",
+                "parameters": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+        },
+    ]
+    translated = _translate_tools(tools)
+    assert translated == [
+        {"name": "no_params", "description": "", "input_schema": {"type": "object"}},
+        {"name": "none_params", "description": "", "input_schema": {"type": "object"}},
+        {
+            "name": "with_params",
+            "description": "has params",
+            "input_schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+        },
+    ]

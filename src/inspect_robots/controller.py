@@ -15,6 +15,7 @@ then re-infers (``replan_interval=None`` ⇒ play the whole chunk before replann
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections import deque
 from dataclasses import replace
@@ -47,8 +48,12 @@ class DefaultController:
     """Open-loop chunk execution with periodic replanning."""
 
     def __init__(self, replan_interval: int | None = None):
-        if replan_interval is not None and replan_interval < 1:
-            raise ValueError("replan_interval must be >= 1 or None")
+        if replan_interval is not None and (
+            not isinstance(replan_interval, int)
+            or isinstance(replan_interval, bool)
+            or replan_interval < 1
+        ):
+            raise ValueError("replan_interval must be an integer >= 1 or None")
         self.replan_interval = replan_interval
 
     def next_action(
@@ -58,6 +63,10 @@ class DefaultController:
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
         if not buffer:
             chunk = policy.act(observation)
+            if not chunk.actions:
+                from inspect_robots.errors import PolicyError
+
+                raise PolicyError(f"policy {policy.info.name!r} returned an empty ActionChunk")
             take = self.replan_interval or len(chunk)
             taken = list(chunk.actions)[:take]
             buffer.extend(taken)
@@ -129,8 +138,8 @@ class EnsemblingController:
     """
 
     def __init__(self, action_space: Box, m: float = 0.1):
-        if m < 0:
-            raise ValueError("m must be >= 0")
+        if isinstance(m, bool) or not math.isfinite(m) or m < 0:
+            raise ValueError("m must be a finite number >= 0")
         self.action_space = action_space
         self.m = m
         sem = action_space.semantics

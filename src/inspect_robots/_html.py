@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import errno
+import glob
 import html
 import json
 import math
@@ -19,7 +21,12 @@ import numpy.typing as npt
 
 from inspect_robots._pngenc import png_data_url
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
-from inspect_robots.frames import _safe
+from inspect_robots.frames import (
+    _encode_component,
+    _frame_filename,
+    _parse_frame_filename,
+    _safe,
+)
 from inspect_robots.log import EvalLog, SceneResult
 
 _STATUS_DISPLAY = {"started": "running", "success": "completed"}
@@ -230,7 +237,7 @@ class _FrameReference:
 
 @dataclass(frozen=True)
 class _FrameContext:
-    """The filesystem correlation state for one trial transcript."""
+    """Correlate a transcript using its original, unsanitized trial prefix."""
 
     frames_dir: Path
     trial_prefix: str
@@ -347,6 +354,11 @@ main { width: min(1120px, calc(100% - 32px)); margin: 0 auto 64px; }
 header { border-bottom: 1px solid var(--line); background: var(--panel); }
 .header-inner { width: min(1120px, calc(100% - 32px)); margin: auto; padding: 28px 0 22px; }
 .header-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.back-link {
+  display: inline-block; margin-bottom: 10px; color: var(--muted);
+  font-size: 13px; text-decoration: none;
+}
+.back-link:hover, .back-link:focus-visible { color: var(--text); text-decoration: underline; }
 h1 { margin: 0; font-size: 24px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 h2 { margin: 0; font-size: 18px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 h3 { margin: 24px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
@@ -682,11 +694,23 @@ def _load_frame(frame_ctx: _FrameContext, name: str, step: int) -> npt.NDArray[n
     """Load one exact-match stored frame, degrading every invalid artifact to ``None``."""
     if frame_ctx.budget.truncated:
         return None
-    path = frame_ctx.frames_dir / f"{frame_ctx.trial_prefix}_{_safe(name)}_{step:06d}.npy"
-    if not path.exists():
-        return None
+    path = frame_ctx.frames_dir / _frame_filename(frame_ctx.trial_prefix, name, step)
     try:
-        array = cast("npt.NDArray[Any]", np.load(path, allow_pickle=False))
+        try:
+            array = cast("npt.NDArray[Any]", np.load(path, allow_pickle=False))
+        except OSError as exc:
+            # No exists/stat probe: even probing an overlong encoded path can
+            # raise. Only absence or filesystem length limits permit legacy.
+            if not (
+                isinstance(exc, FileNotFoundError)
+                or exc.errno == errno.ENAMETOOLONG
+                or getattr(exc, "winerror", None) == 206
+            ):
+                raise
+            legacy = f"{_safe(frame_ctx.trial_prefix)}_{_safe(name)}_{step:06d}.npy"
+            array = cast(
+                "npt.NDArray[Any]", np.load(frame_ctx.frames_dir / legacy, allow_pickle=False)
+            )
         if array.dtype != np.uint8 or array.size == 0:
             return None
         if not (array.ndim == 2 or (array.ndim == 3 and array.shape[2] in {1, 3, 4})):
@@ -1028,7 +1052,7 @@ def _trial_frame_context(
         return None
     return _FrameContext(
         frame_ctx.frames_dir,
-        _safe(f"{scene_id}-e{trial}"),
+        f"{scene_id}-e{trial}",
         frame_ctx.budget,
         rendered,
     )
@@ -1039,7 +1063,7 @@ def _document_frame_references(log: EvalLog) -> tuple[_FrameReference, ...]:
     references: list[_FrameReference] = []
     for scene in log.samples:
         for trial, transcript in enumerate(scene.policy_transcripts):
-            references.extend(_frame_references(transcript, _safe(f"{scene.scene_id}-e{trial}")))
+            references.extend(_frame_references(transcript, f"{scene.scene_id}-e{trial}"))
     return tuple(references)
 
 
@@ -1075,7 +1099,7 @@ def _render_trial_transcript(
     operator_messages: Sequence[dict[str, Any]],
 ) -> tuple[str, tuple[dict[str, Any], ...], list[tuple[str, int]]]:
     """Render one trial and return its residual feedback and embedded frame keys."""
-    trial_prefix = _safe(f"{scene_id}-e{trial}")
+    trial_prefix = f"{scene_id}-e{trial}"
     rendered_frames: list[tuple[str, int]] = []
     trial_ctx = _trial_frame_context(frame_ctx, scene_id, trial, rendered_frames)
     if _is_chat_transcript(transcript):
@@ -1313,16 +1337,39 @@ def _render_trial_wire(
     )
 
 
-def _trial_camera_streams(frames_dir: Path, trial_prefix: str) -> dict[str, list[tuple[int, Path]]]:
-    """Enumerate one trial's camera streams by stripping its known filename prefix."""
+def _trial_camera_streams(
+    frames_dir: Path,
+    trial_prefix: str,
+    legacy_display_names: Mapping[str, str] | None = None,
+) -> dict[str, list[tuple[int, Path]]]:
+    """Discover exact versioned identities and merge legacy frames by safe label."""
     streams: dict[str, list[tuple[int, Path]]] = {}
-    marker = f"{trial_prefix}_"
-    for path in sorted(frames_dir.glob(f"{trial_prefix}_*.npy")):
+    marker = f"{_safe(trial_prefix)}_"
+    replaced: set[str] = set()
+    legacy_frames: list[tuple[str, int, Path]] = []
+    # Glob only this trial's files: canonical names mean a matching encoded
+    # prefix is the same trial, so a run's other trials are never parsed.
+    # Prefixes are escaped; raw identifiers never reach a glob expression.
+    versioned = glob.escape(f"~f1~{_encode_component(trial_prefix)}~")
+    for path in sorted(frames_dir.glob(f"{versioned}*.npy")):
+        identity = _parse_frame_filename(path.name)
+        if identity is not None and identity[0] == trial_prefix:
+            _, camera, step = identity
+            streams.setdefault(camera, []).append((step, path))
+            replaced.add(f"{marker}{_safe(camera)}_{step:06d}.npy")
+    for path in sorted(frames_dir.glob(f"{glob.escape(marker)}*.npy")):
         remainder = path.name[len(marker) :]
         match = _CAMERA_FRAME_RE.fullmatch(remainder)
         if match is None:
             continue
-        streams.setdefault(match.group(1), []).append((int(match.group(2)), path))
+        legacy_frames.append((match.group(1), int(match.group(2)), path))
+    display_names = {_safe(camera): camera for camera in streams}
+    display_names.update(legacy_display_names or {})
+    for camera, step, path in legacy_frames:
+        if path.name not in replaced:
+            # Remap legacy labels before merging; decoded names are identities,
+            # even when one happens to equal another camera's sanitized label.
+            streams.setdefault(display_names.get(camera, camera), []).append((step, path))
     for frames in streams.values():
         frames.sort()
     return dict(sorted(streams.items()))
@@ -1346,10 +1393,10 @@ def _render_trial_media(
     flipbook: dict[str, list[int]] = {}
     for camera, step in rendered_frames:
         flipbook.setdefault(camera, []).append(step)
-    display_names = {_safe(camera): camera for camera in flipbook}
-
     available_streams = (
-        _trial_camera_streams(frames_dir, trial_prefix)
+        _trial_camera_streams(
+            frames_dir, trial_prefix, {_safe(camera): camera for camera in flipbook}
+        )
         if context.enabled and frames_dir is not None
         else {}
     )
@@ -1363,15 +1410,11 @@ def _render_trial_media(
     ordered_streams = sorted(
         streams.items(),
         key=lambda item: (
-            rendered_order.get(display_names.get(item[0], item[0]), default_order),
+            rendered_order.get(item[0], default_order),
             item[0],
         ),
     )
-    fallback_cameras = tuple(
-        dict.fromkeys(
-            [display_names.get(key, key) for key, _frames in streams.items()] + list(flipbook)
-        )
-    )
+    fallback_cameras = tuple(dict.fromkeys([*streams, *flipbook]))
     if ordered_streams and not context.budget.truncated:
         from inspect_robots._video import _encode_composite_mp4
 
@@ -1387,7 +1430,7 @@ def _render_trial_media(
                 and context.budget.encoded + len(payload) > context.budget.limit
             ):
                 context.budget.encoded += len(payload)
-                camera_order = " · ".join(display_names.get(key, key) for key in survivors)
+                camera_order = " · ".join(survivors)
                 step_timeline = ",".join(str(step) for step in steps)
                 return (
                     f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
@@ -1549,7 +1592,7 @@ def _scene_section(
             messages,
         )
         residual.extend((trial, message) for message in unplaced)
-        trial_prefix = _safe(f"{scene.scene_id}-e{trial}")
+        trial_prefix = f"{scene.scene_id}-e{trial}"
         media = _render_trial_media(frames_dir, trial_prefix, rendered_frames, video_context)
         transcript_blocks.append(
             f'<details class="transcript"{" open" if open_transcript else ""}>'
@@ -1605,8 +1648,13 @@ def render_html(
     no_video: bool = False,
     serve_pass: bool = False,
     video_budget_bytes: int = _VIDEO_BUDGET_BYTES,
+    index_href: str | None = None,
 ) -> str:
-    """Return one self-contained HTML document describing the complete evaluation log."""
+    """Return one self-contained HTML document describing the complete evaluation log.
+
+    ``index_href`` adds a back link to a run index at that relative URL; leave it
+    ``None`` for a standalone report that has no index beside it.
+    """
     git = (
         'git <span class="chip">unknown</span>'
         if log.eval.git_commit is None
@@ -1733,6 +1781,11 @@ def render_html(
                 break
         if last_update is not None:
             break
+    back_link = (
+        ""
+        if index_href is None
+        else f'<a class="back-link" href="{_escape(index_href)}">&larr; All runs</a>'
+    )
     running_banner = ""
     if refresh_seconds is not None:
         update = "" if last_update is None else f" · last update {_escape(last_update)}"
@@ -1752,6 +1805,7 @@ def render_html(
 </head>
 <body>
 <header><div class="header-inner">
+  {back_link}
   <div class="header-top"><h1>{_escape(log.eval.task)}</h1>{_status_badge(log.status)}</div>
   <div class="meta"><span>{_escape(log.eval.created)}</span>
   {meta_tail}</div>

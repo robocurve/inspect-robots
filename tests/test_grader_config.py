@@ -14,7 +14,7 @@ import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots import eval_set as ir_eval_set
-from inspect_robots.grader import _DEFAULT_RUBRIC, Grader, vlm_grader
+from inspect_robots.grader import _DEFAULT_RUBRIC, _PREFLIGHT_PROMPT, Grader, vlm_grader
 from inspect_robots.log import read_eval_log
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.rollout import TrialRecord
@@ -32,10 +32,17 @@ class _CapturePost:
         content = json.dumps({"choices": [{"message": {"content": "GRADE: success"}}]})
         self.response: tuple[int, bytes] = (200, content.encode())
         self.bodies: list[dict[str, Any]] = []
+        self.preflights = 0
 
     def __call__(self, url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
         del url, headers
-        self.bodies.append(json.loads(body))
+        payload = json.loads(body)
+        # eval() preflights the grader once before any rollout; keep that
+        # request apart so assertions here stay about real grading calls.
+        if payload["messages"][0]["content"][0]["text"] == _PREFLIGHT_PROMPT:
+            self.preflights += 1
+        else:
+            self.bodies.append(payload)
         return self.response
 
 
@@ -92,8 +99,10 @@ def test_spec_records_the_grader_name_and_its_effective_config(
     assert log.eval.grader_config["model"] == "judge-model"
     assert log.eval.grader_config["base_url"] == "https://example.invalid/v1"
     assert log.eval.grader_config["max_cameras"] == 4
-    # The grader really did spend a call under exactly that model.
+    # The grader really did spend a call under exactly that model, after one
+    # preflight request.
     assert [body["model"] for body in post.bodies] == ["judge-model"]
+    assert post.preflights == 1
 
 
 def test_recorded_rubric_is_the_resolved_text_not_the_requested_file(
