@@ -1134,7 +1134,12 @@ def test_depth_off_preserves_pre_depth_observation_message() -> None:
         observation,
         extra={**observation.extra, "top_depth": depth_thunk},
     )
-    expected = _observation_content(observation, policy._state_labels)
+    assert policy._toolset is not None
+    expected = _observation_content(
+        observation,
+        policy._state_labels,
+        setpoint_lines=policy._toolset.setpoint_lines(observation),
+    )
 
     policy.act(observation)
 
@@ -1148,7 +1153,12 @@ def test_missing_depth_key_preserves_pre_depth_observation_message() -> None:
     policy.bind(_VisionAbsoluteEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="inspect rgb"))
     observation = _vision_observation(env_step=5)
-    expected = _observation_content(observation, policy._state_labels)
+    assert policy._toolset is not None
+    expected = _observation_content(
+        observation,
+        policy._state_labels,
+        setpoint_lines=policy._toolset.setpoint_lines(observation),
+    )
 
     policy.act(observation)
 
@@ -3137,3 +3147,33 @@ def test_motion_report_lines_render_after_the_approver_line_and_ignore_malformed
     ]
     for malformed in ({"motion_report": "nope"}, {"motion_report": {"lines": "nope"}}, {}):
         assert "motion report" not in _observation_content(Observation(extra=malformed))[0]["text"]
+
+
+def test_observations_carry_setpoint_lines_after_the_state_lines() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    policy.act(Observation(state={"q": np.array([0.0])}))
+    policy.act(Observation(state={"q": np.array([0.48])}))
+
+    first = script.requests[0]["messages"][-1]["content"][0]["text"].splitlines()
+    second = script.requests[1]["messages"][-1]["content"][0]["text"].splitlines()
+    assert first[1:3] == [
+        "state[q]: joint=0.0",
+        "setpoint: none yet; the first move starts from the readback.",
+    ]
+    assert second[1:4] == [
+        "state[q]: joint=0.48",
+        "setpoint: joint=0.5",
+        "readback minus setpoint: joint=-0.0200",
+    ]
+    assert _observation_content(Observation(), setpoint_lines=["setpoint: x=1"])[0]["text"] == (
+        "Current observation.\nsetpoint: x=1"
+    )

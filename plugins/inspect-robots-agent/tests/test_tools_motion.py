@@ -1535,3 +1535,45 @@ def test_stop_actions_resend_the_held_target_rather_than_the_measured_state(name
     assert after.chunk is not None
     assert np.array_equal(after.chunk.actions[0].data, np.array([0.2, 0.0]))
     assert after.chunk.actions[0].meta["request_stop"] is True
+
+
+# --- setpoint lines ------------------------------------------------------------
+
+
+def test_setpoint_lines_show_the_held_target_and_notable_offsets() -> None:
+    toolset = _two_dim_toolset()
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.2, 0.2])})) == [
+        "setpoint: none yet; the first move starts from the readback."
+    ]
+
+    toolset.execute(_call("move_joints", targets={"b": 0.6}), _obs({"q": np.array([0.2, 0.2])}))
+
+    # b sagged 2.1 cm below its setpoint; a is within noise.
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.204, 0.579])})) == [
+        "setpoint: a=0.2 b=0.6",
+        "readback minus setpoint: b=-0.0210",
+    ]
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.2, 0.6])})) == [
+        "setpoint: a=0.2 b=0.6",
+        "readback minus setpoint: none over 0.005.",
+    ]
+
+
+def test_setpoint_lines_skip_offsets_they_cannot_compute() -> None:
+    toolset = _two_dim_toolset()
+    toolset.execute(_call("move_joints", targets={"b": 0.6}), _obs({"q": np.array([0.2, 0.2])}))
+
+    assert toolset.setpoint_lines(Observation()) == ["setpoint: a=0.2 b=0.6"]
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.2])})) == ["setpoint: a=0.2 b=0.6"]
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.2, np.nan])})) == ["setpoint: a=0.2 b=0.6"]
+
+    toolset.start_trial()
+    assert toolset.setpoint_lines(_obs({"q": np.array([0.2, 0.6])})) == [
+        "setpoint: none yet; the first move starts from the readback."
+    ]
+
+
+def test_displacement_mode_has_no_setpoint_lines() -> None:
+    displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    displacement.execute(_call("move_by", deltas={"0": 0.05}), Observation())
+    assert displacement.setpoint_lines(Observation()) == []

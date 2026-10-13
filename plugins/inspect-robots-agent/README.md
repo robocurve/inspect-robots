@@ -182,6 +182,14 @@ The embodiment then plays the chunk at its native rate. In this case the speed
 and playout caps are step-count constructs, not wall-clock guarantees, and the
 tool result does not report seconds.
 
+Every observation in an absolute mode also prints the setpoint, the target
+each dimension is holding from the agent's commands, under the state line,
+followed by `readback minus setpoint:` for the dimensions that differ by
+0.005 or more (before the first move of a trial it says the next move starts
+from the readback). Gravity sag, drift on an idle arm, measurement scatter,
+and a gripper squeezing an object all show up there as offsets the agent can
+read instead of estimate, and the system prompt tells it so.
+
 After every move, the next observation narrates how much of the motion
 played and the readback's largest remaining offset from the requested target
 (or `Target reached.`), in every image mode. When the embodiment publishes a

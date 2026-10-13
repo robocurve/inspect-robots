@@ -18,7 +18,7 @@ import math
 import os
 import sys
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,7 +121,9 @@ _TARGET_REACHED_TOLERANCE = 1e-4
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
-proprioceptive state and camera images. Work toward the user's goal in \
+proprioceptive state and camera images, and after your first move the \
+setpoint your commands hold next to that readback, with the dimensions where \
+the two differ. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
 Every move tool call must include a `note`: in one or two sentences, say what \
 you observe in the current observation and why you chose this motion. The user \
@@ -138,7 +140,9 @@ known from the start. You have a budget of \
 
 _ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
-proprioceptive state. Camera images are not attached automatically; call \
+proprioceptive state, and after your first move the setpoint your commands \
+hold next to that readback, with the dimensions where the two differ. Camera \
+images are not attached automatically; call \
 `take_pic` to see them. A camera already shown for the current observation \
 cannot be re-taken until the robot moves. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
@@ -1038,6 +1042,7 @@ class LLMAgentPolicy(PolicyBase):
             reveal=reveal,
             narration=narration,
             depth=depth,
+            setpoint_lines=toolset.setpoint_lines(observation),
         )
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
@@ -1426,8 +1431,14 @@ def _observation_content(
     reveal: tuple[str, ...] | None = None,
     narration: str | None = None,
     depth: Mapping[str, Any] | None = None,
+    setpoint_lines: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
-    """State as readable text plus camera frames as inline PNG data URLs."""
+    """State as readable text plus camera frames as inline PNG data URLs.
+
+    ``setpoint_lines`` (from ``Toolset.setpoint_lines``) follow the state
+    lines so the readback and the setpoint it is compared against sit
+    together.
+    """
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
@@ -1436,6 +1447,7 @@ def _observation_content(
         remaining = max_steps - step
         lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
     lines.extend(_state_lines(observation, state_labels))
+    lines.extend(setpoint_lines)
     app_line = _approvals_line(observation)
     if app_line is not None:
         lines.append(app_line)

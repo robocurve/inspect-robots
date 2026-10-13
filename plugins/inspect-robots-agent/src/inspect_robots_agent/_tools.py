@@ -41,6 +41,8 @@ _MAX_DURATION_S = 10.0
 _BACKSTOP_STEP_FRAC = 0.05
 _DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
+#: Readback-minus-setpoint offsets below this are measurement noise, not listed.
+_SETPOINT_OFFSET_MIN = 5e-3
 _HINDSIGHT_DESCRIPTION = (
     "What do you know now that you wish you had known at the start of this episode? "
     "Concrete, transferable facts about this rig, task, or embodiment (camera mounting "
@@ -137,6 +139,44 @@ class Toolset:
     def state_labels(self) -> tuple[str, tuple[str, ...]] | None:
         """Return the state field and per-element labels selected at build time."""
         return self._state_labels
+
+    def setpoint_lines(self, observation: Observation) -> list[str]:
+        """Render the held setpoint under the readback, and the dimensions where they differ.
+
+        Absolute modes only: displacements have no setpoint. Before the first
+        move of a trial the line says so, since that move starts from the
+        readback. The offset line lists ``readback - setpoint`` per dimension,
+        omitting magnitudes under ``_SETPOINT_OFFSET_MIN`` as noise; it is
+        skipped when the readback cannot be compared (absent, misshapen, or
+        non-finite).
+        """
+        if not self._absolute:
+            return []
+        held = self._held_target
+        if held is None:
+            return ["setpoint: none yet; the first move starts from the readback."]
+        rounded = np.round(held, 4).tolist()
+        pairs = " ".join(
+            f"{label}={value}" for label, value in zip(self._labels, rounded, strict=True)
+        )
+        lines = [f"setpoint: {pairs}"]
+        raw_state = observation.state.get(self._state_key) if self._state_key else None
+        if raw_state is None:
+            return lines
+        state = np.asarray(raw_state, dtype=np.float64)
+        if state.shape != held.shape or not bool(np.all(np.isfinite(state))):
+            return lines
+        offsets = state - held
+        notable = [
+            f"{label}={offset:+.4f}"
+            for label, offset in zip(self._labels, offsets.tolist(), strict=True)
+            if abs(offset) >= _SETPOINT_OFFSET_MIN
+        ]
+        if notable:
+            lines.append("readback minus setpoint: " + " ".join(notable))
+        else:
+            lines.append(f"readback minus setpoint: none over {_SETPOINT_OFFSET_MIN:g}.")
+        return lines
 
     def start_trial(self) -> None:
         """Forget the held target so the next move starts from the measured state.
