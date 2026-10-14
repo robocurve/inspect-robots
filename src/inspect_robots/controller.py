@@ -91,10 +91,17 @@ class SmoothingController:
     """
 
     def __init__(self, inner: Controller, alpha: float = 0.5):
-        if not 0.0 < alpha <= 1.0:
+        if not isinstance(inner, Controller):
+            raise TypeError(f"inner must implement Controller, got {type(inner).__name__}")
+        if (
+            isinstance(alpha, bool)
+            or not isinstance(alpha, (int, float))
+            or not math.isfinite(alpha)
+            or not 0.0 < alpha <= 1.0
+        ):
             raise ValueError("alpha must be in (0, 1]")
         self.inner = inner
-        self.alpha = alpha
+        self.alpha = float(alpha)
         # Per instance, not per module: this is the one controller state written
         # destructively rather than appended to, so two smoothing layers in the
         # same chain would otherwise overwrite each other's previous action.
@@ -107,6 +114,13 @@ class SmoothingController:
         action = self.inner.next_action(policy, observation, t, store)
         raw = np.asarray(action.data, dtype=np.float64)
         prev = store.get(self._store_key)
+        if prev is not None and raw.shape != prev.shape:
+            from inspect_robots.errors import PolicyError
+
+            raise PolicyError(
+                f"action shape changed between steps: previous shape {prev.shape}, "
+                f"current shape {raw.shape}"
+            )
         smoothed = raw if prev is None else self.alpha * raw + (1 - self.alpha) * prev
         store[self._store_key] = smoothed
         return replace(action, data=smoothed)

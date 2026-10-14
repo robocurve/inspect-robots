@@ -71,10 +71,43 @@ def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
         ctrl.next_action(_EmptyChunkPolicy(), Observation(), 0, store)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("bad_alpha", [0.0, -0.5, 1.5, float("nan")])
-def test_smoothing_controller_rejects_invalid_alpha(bad_alpha: float) -> None:
+@pytest.mark.parametrize(
+    "bad_alpha",
+    [0.0, -0.5, 1.5, float("nan"), float("inf"), float("-inf"), True, False, "0.5", None],
+)
+def test_smoothing_controller_rejects_invalid_alpha(bad_alpha: Any) -> None:
     with pytest.raises(ValueError, match=r"alpha must be in \(0, 1\]"):
         SmoothingController(DefaultController(), alpha=bad_alpha)
+
+
+def test_smoothing_controller_rejects_invalid_inner() -> None:
+    with pytest.raises(TypeError, match="inner must implement Controller"):
+        SmoothingController("not-a-controller")  # type: ignore[arg-type]
+
+
+def test_smoothing_controller_rejects_action_shape_mismatch() -> None:
+    class _ShapeChangingPolicy:
+        info = PolicyInfo(
+            name="shape-change",
+            action_space=Box(shape=(2,), semantics=ActionSemantics("joint_delta")),
+        )
+        config = PolicyConfig()
+
+        def __init__(self) -> None:
+            self._step = 0
+
+        def act(self, obs: Observation) -> ActionChunk:
+            if self._step == 0:
+                self._step += 1
+                return ActionChunk(actions=[Action(data=np.zeros(2))])
+            return ActionChunk(actions=[Action(data=np.zeros(3))])
+
+    ctrl = SmoothingController(DefaultController())
+    store: dict[str, Any] = {}
+    policy = _ShapeChangingPolicy()
+    _ = ctrl.next_action(policy, Observation(), 0, store)  # type: ignore[arg-type]
+    with pytest.raises(PolicyError, match="action shape changed between steps"):
+        ctrl.next_action(policy, Observation(), 1, store)  # type: ignore[arg-type]
 
 
 def test_smoothing_controller_composes() -> None:
