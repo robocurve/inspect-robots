@@ -372,6 +372,16 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
             "control_hz",
             "control_hz is undeclared; agent motion durations fall back to 10 Hz step counting",
         )
+    elif (
+        isinstance(info.control_hz, bool)
+        or not isinstance(info.control_hz, (int, float))
+        or not math.isfinite(info.control_hz)
+        or info.control_hz <= 0
+    ):
+        error(
+            "control_hz",
+            f"control_hz must be a positive finite number, got {info.control_hz!r}",
+        )
 
     return ConformanceReport(embodiment=info.name, issues=tuple(issues))
 
