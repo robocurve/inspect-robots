@@ -147,6 +147,14 @@ The residual is the arrival check: a full step count alone does not prove the
 arm reached its target when an approver rewrote actions or a smoothing
 controller blended them.
 
+The same move status reaches the next observation after every motion, in both
+image modes, with or without a queued capture. When the target was missed it
+lists each axis that fell short as `requested -> reached` (largest first, three
+named) and reads the playout's approval record: the approver clamped steps to
+the action bounds, slowed them to its per-step limit, or changed nothing. The
+last case tells the model the target was inside the action bounds, so a stall
+came from somewhere else (contact, reach, or a limit inside the embodiment).
+
 Controller choice affects that report. `DefaultController` buffers
 `min(replan_interval, chunk_len)` actions, so a `replan_interval` shorter than
 the interpolation always reports partial playout; a chunk shorter than the

@@ -117,6 +117,8 @@ _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 # Native action units: 0.1 mm for eef_pos, 0.1 mrad for joints.
 _TARGET_REACHED_TOLERANCE = 1e-4
+#: Axes named in a missed-target status before the rest are summarized as a count.
+_SHORTFALL_AXES_SHOWN = 3
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
@@ -307,6 +309,15 @@ class _PendingCapture:
     """A capture request waiting for the observation produced after motion playout."""
 
     requested: tuple[str, ...] | None
+    issued_step: object
+    chunk_len: int
+    target: npt.NDArray[np.float64] | None
+
+
+@dataclass(frozen=True, eq=False)
+class _Motion:
+    """The last motion chunk handed to the rollout, narrated on the next observation."""
+
     issued_step: object
     chunk_len: int
     target: npt.NDArray[np.float64] | None
@@ -812,6 +823,7 @@ class LLMAgentPolicy(PolicyBase):
         self._calls_used = 0
         self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
+        self._motion: _Motion | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
 
@@ -888,6 +900,7 @@ class LLMAgentPolicy(PolicyBase):
         self._calls_used = 0
         self._usage_totals.clear()
         self._pending = None
+        self._motion = None
         self._revealed.clear()
 
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
@@ -960,6 +973,8 @@ class LLMAgentPolicy(PolicyBase):
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
+        motion = self._motion
+        self._motion = None
         if self._images == "on_demand":
             reveal = ()
             pending = self._pending
@@ -974,6 +989,8 @@ class LLMAgentPolicy(PolicyBase):
                 missing = tuple(name for name in requested if name not in observation.images)
                 self._revealed.update(reveal)
                 narration = self._pending_narration(pending, observation, missing)
+        if narration is None and motion is not None:
+            narration = self._motion_narration(motion, observation) or None
         observation_content = _observation_content(
             observation,
             self._state_labels,
@@ -1162,6 +1179,12 @@ class LLMAgentPolicy(PolicyBase):
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
                                 if stopped:
                                     self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
+                                else:
+                                    self._motion = _Motion(
+                                        issued_step=observation.extra.get("env_step"),
+                                        chunk_len=len(chunk),
+                                        target=target,
+                                    )
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture
@@ -1234,40 +1257,50 @@ class LLMAgentPolicy(PolicyBase):
         missing: tuple[str, ...],
     ) -> str:
         """Describe observed playout, residual, and any cameras missing at delivery."""
-        arriving_step = observation.extra.get("env_step")
-        if (
-            isinstance(pending.issued_step, int)
-            and isinstance(arriving_step, int)
-            and (advanced := arriving_step - pending.issued_step) > 0
-        ):
-            if advanced >= pending.chunk_len:
-                narration = (
-                    f"The motion finished playing ({pending.chunk_len} of "
-                    f"{pending.chunk_len} steps)."
-                )
-            else:
-                narration = (
-                    f"The motion played {advanced} of {pending.chunk_len} steps before "
-                    "this observation; it did not run to the end."
-                )
-        else:
-            narration = "These frames follow the motion."
-
-        toolset = self._toolset
-        if pending.target is not None and toolset is not None:
-            residual = toolset.residual(pending.target, observation)
-            if residual is not None:
-                label, magnitude = residual
-                if magnitude > _TARGET_REACHED_TOLERANCE:
-                    narration += (
-                        " Largest remaining offset from the requested target is "
-                        f"{magnitude:.4g} on {label}."
-                    )
-                else:
-                    narration += " Target reached."
+        motion = _Motion(pending.issued_step, pending.chunk_len, pending.target)
+        narration = self._motion_narration(motion, observation)
+        if not narration.startswith("The motion"):
+            narration = " ".join(filter(None, ("These frames follow the motion.", narration)))
         if missing:
             narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
+
+    def _motion_narration(self, motion: _Motion, observation: Observation) -> str:
+        """The previous motion's outcome: playout, then target reached or which axes fell short.
+
+        Empty when neither the playout nor the residual can be measured.
+        """
+        parts: list[str] = []
+        arriving_step = observation.extra.get("env_step")
+        if (
+            isinstance(motion.issued_step, int)
+            and isinstance(arriving_step, int)
+            and (advanced := arriving_step - motion.issued_step) > 0
+        ):
+            if advanced >= motion.chunk_len:
+                parts.append(
+                    f"The motion finished playing ({motion.chunk_len} of {motion.chunk_len} steps)."
+                )
+            else:
+                parts.append(
+                    f"The motion played {advanced} of {motion.chunk_len} steps before "
+                    "this observation; it did not run to the end."
+                )
+
+        toolset = self._toolset
+        if motion.target is not None and toolset is not None:
+            short = toolset.shortfall(motion.target, observation, _TARGET_REACHED_TOLERANCE)
+            if short:
+                label, requested, reached = short[0]
+                parts.append(
+                    "Largest remaining offset from the requested target is "
+                    f"{abs(requested - reached):.4g} on {label}."
+                )
+                parts.append(_shortfall_sentence(short))
+                parts.append(_clamp_sentence(observation))
+            elif short is not None:
+                parts.append("Target reached.")
+        return " ".join(part for part in parts if part)
 
     def _echo(self, text: str) -> None:
         if self._transcript_echo:
@@ -1303,6 +1336,42 @@ def _step_label(observation: Observation, max_steps: int | None = None) -> str:
     if max_steps is not None:
         return f"step {step}/{max_steps}"
     return f"step {step}"
+
+
+def _shortfall_sentence(short: list[tuple[str, float, float]]) -> str:
+    """``Requested vs reached: a 0.3 -> 0.25, ...`` for the axes that missed the target."""
+    shown = [
+        f"{label} {requested:.4g} -> {reached:.4g}"
+        for label, requested, reached in short[:_SHORTFALL_AXES_SHOWN]
+    ]
+    rest = len(short) - len(shown)
+    noun = "axis" if rest == 1 else "axes"
+    tail = f", and {rest} more {noun}" if rest else ""
+    return f"Requested vs reached: {', '.join(shown)}{tail}."
+
+
+def _clamp_sentence(observation: Observation) -> str:
+    """Whether an approver changed the motion that missed its target, from this playout's record.
+
+    Separates a target cut back to the action bounds from one the arm stopped short of on its
+    own, which the model otherwise has to guess from stalls. Empty when no record was delivered.
+    """
+    approvals = observation.extra.get("approvals")
+    if not isinstance(approvals, list):
+        return ""
+    flags = [str(a.get("detail") or "").split(", ") for a in approvals if isinstance(a, dict)]
+    clamped = sum(1 for f in flags if "clamped" in f)
+    slowed = sum(1 for f in flags if "delta_clamped" in f)
+    if clamped:
+        return f"The approver clamped {clamped} step(s) of this motion to the action bounds."
+    if slowed:
+        return (
+            f"The approver slowed {slowed} step(s) to its per-step limit, so the arm may still "
+            "be on its way."
+        )
+    if approvals:
+        return f"The approver modified {len(approvals)} step(s) of this motion."
+    return "No approver step changed this motion, and the target is inside the action bounds."
 
 
 def _approvals_line(observation: Observation) -> str | None:
