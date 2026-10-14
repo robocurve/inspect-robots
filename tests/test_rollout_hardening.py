@@ -423,6 +423,20 @@ def test_wrong_dim_action_attributed_to_policy() -> None:
     assert rec is not None and rec.status == "error"
 
 
+def test_wrong_shape_action_attributed_to_policy() -> None:
+    class _WrongShapePolicy(_WrongDimPolicy):
+        def act(self, observation: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.zeros((1, 2)))])
+
+    with pytest.raises(
+        PolicyError,
+        match=r"action shape \(1, 2\) but embodiment 'cubepick' expects \(2,\)",
+    ) as excinfo:
+        _run(_WrongShapePolicy(), CubePickEmbodiment())
+    rec = excinfo.value.record
+    assert rec is not None and rec.status == "error"
+
+
 class _BadDataPolicy(_WrongDimPolicy):
     def __init__(self, data: object) -> None:
         super().__init__()
@@ -506,6 +520,27 @@ def test_approver_introduced_wrong_dim_action_is_a_safety_abort() -> None:
         ),
     ):
         _run(ScriptedPolicy(), embodiment, approver=_WrongDimApprover())
+
+    step.assert_not_called()
+
+
+def test_approver_introduced_wrong_shape_action_is_a_safety_abort() -> None:
+    class _WrongShapeApprover:
+        def review(self, action: Action, store: dict[str, object]) -> Action:
+            del store
+            return replace(action, data=np.zeros((1, 2)))
+
+    embodiment = CubePickEmbodiment()
+    step = Mock(wraps=embodiment.step)
+
+    with (
+        patch.object(embodiment, "step", step),
+        pytest.raises(
+            SafetyAbort,
+            match=r"action shape \(1, 2\) but embodiment 'cubepick' expects \(2,\)",
+        ),
+    ):
+        _run(ScriptedPolicy(), embodiment, approver=_WrongShapeApprover())
 
     step.assert_not_called()
 
