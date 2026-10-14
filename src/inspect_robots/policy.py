@@ -14,6 +14,7 @@ convenience ABC with sane defaults.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -40,6 +41,32 @@ class PolicyConfig:
     replan_interval: int | None = None
     temperature: float | None = None
 
+    def __post_init__(self) -> None:
+        """Validate configuration invariants."""
+        if (
+            not isinstance(self.action_horizon, int)
+            or isinstance(self.action_horizon, bool)
+            or self.action_horizon < 1
+        ):
+            raise ValueError(f"action_horizon must be an integer >= 1, got {self.action_horizon!r}")
+        if self.replan_interval is not None and (
+            not isinstance(self.replan_interval, int)
+            or isinstance(self.replan_interval, bool)
+            or self.replan_interval < 1
+        ):
+            raise ValueError(
+                f"replan_interval must be an integer >= 1 or None, got {self.replan_interval!r}"
+            )
+        if self.temperature is not None and (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not math.isfinite(self.temperature)
+            or self.temperature < 0.0
+        ):
+            raise ValueError(
+                f"temperature must be a finite number >= 0.0 or None, got {self.temperature!r}"
+            )
+
 
 @dataclass(frozen=True)
 class PolicyInfo:
@@ -52,6 +79,31 @@ class PolicyInfo:
     control_hz: float | None = None
     # Policy checkpoint hash, revision, or identifier.
     checkpoint: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate policy metadata and spaces."""
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError(f"PolicyInfo name must be a non-empty string, got {self.name!r}")
+        if not isinstance(self.action_space, Box):
+            raise TypeError(f"action_space must be a Box, got {type(self.action_space).__name__}")
+        if not isinstance(self.observation_space, ObservationSpace):
+            raise TypeError(
+                f"observation_space must be an ObservationSpace, "
+                f"got {type(self.observation_space).__name__}"
+            )
+        if self.control_hz is not None and (
+            isinstance(self.control_hz, bool)
+            or not isinstance(self.control_hz, (int, float))
+            or not math.isfinite(self.control_hz)
+            or self.control_hz <= 0.0
+        ):
+            raise ValueError(
+                f"control_hz must be a positive finite number or None, got {self.control_hz!r}"
+            )
+        if self.checkpoint is not None and not isinstance(self.checkpoint, str):
+            raise TypeError(
+                f"checkpoint must be a string or None, got {type(self.checkpoint).__name__}"
+            )
 
 
 @runtime_checkable
