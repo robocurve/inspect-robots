@@ -1,0 +1,1 @@
+**Repo:** bumped locked dependencies to clear open Dependabot alerts: `anyio` 4.15.1 and `virtualenv` 21.14.7 in `uv.lock`, plus patched transitive npm packages (`shell-quote`, `undici`, `fast-uri`, `joi`, `brace-expansion` and others) for the docs website and issue bot. Added a security-only `.github/dependabot.yml`.
