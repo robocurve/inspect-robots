@@ -395,6 +395,39 @@ def test_displacement_explicit_multidimensional_max_delta_array() -> None:
     assert out.meta.get("delta_clamped") is True
 
 
+def test_refuses_displacement_empty_intersection_with_box_bounds() -> None:
+    # A space with positive lower bound: max_delta=0.2 intersects [-0.2, 0.2]
+    # with [0.5, 1.0], giving an empty intersection (low would exceed high).
+    positive_space = Box(
+        shape=(1,),
+        low=np.array([0.5]),
+        high=np.array([1.0]),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    with pytest.raises(ValueError, match="empty intersection"):
+        DeltaLimitApprover(positive_space, max_delta=0.2)
+
+    # A space with negative upper bound: [-1.0, -0.5] intersected with [-0.2, 0.2].
+    negative_space = Box(
+        shape=(1,),
+        low=np.array([-1.0]),
+        high=np.array([-0.5]),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    with pytest.raises(ValueError, match="empty intersection"):
+        DeltaLimitApprover(negative_space, max_delta=0.2)
+
+    # Multi-dimensional space where only one dimension has an empty intersection.
+    mixed_space = Box(
+        shape=(2,),
+        low=np.array([-0.5, 0.5]),
+        high=np.array([0.5, 1.0]),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    with pytest.raises(ValueError, match="empty intersection"):
+        DeltaLimitApprover(mixed_space, max_delta=0.2)
+
+
 def test_absolute_explicit_multidimensional_max_delta_array() -> None:
     shape = (2, 3)
     space = Box(
