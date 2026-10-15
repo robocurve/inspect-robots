@@ -17,7 +17,7 @@ import numpy.typing as npt
 
 from inspect_robots.errors import SafetyAbort
 from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box, RotationRepr
-from inspect_robots.types import Action
+from inspect_robots.types import Action, Observation
 
 
 @runtime_checkable
@@ -69,6 +69,41 @@ class AutoApprover:
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Pass the action through without modifying its identity."""
         return action
+
+
+@runtime_checkable
+class Perturber(Protocol):
+    """Transforms an observation before the policy sees it.
+
+    A symmetric input-side hook alongside [`Approver`][inspect_robots.approver.Approver]:
+    ``Approver`` gates actions on the way *out* to the embodiment; ``Perturber``
+    gates observations on the way *in* to the policy. It may return the
+    observation unchanged, return a modified copy (e.g. injecting sensor noise,
+    masking cameras, swapping the instruction), or raise to abort the trial.
+
+    The returned observation is what the policy receives. If the perturber
+    modifies the observation, the rollout records a ``perturbation`` event in
+    the trial transcript so the distortion is auditable. Returning the *same*
+    object (identity) means "no change" — the rollout uses identity to detect
+    whether to log an event, so a perturber that makes a no-op copy should
+    return the original object.
+
+    The ``store`` dict is the same trial-local state dict the approver chain
+    sees; perturbers may use it to track episode-level state such as a random
+    seed or a noise schedule.
+    """
+
+    def perturb(self, observation: Observation, store: dict[str, Any]) -> Observation:
+        """Return the observation to pass to the policy, or raise to abort the trial."""
+        ...
+
+
+class AutoPerturber:
+    """Pass every observation through unchanged (the identity default)."""
+
+    def perturb(self, observation: Observation, store: dict[str, Any]) -> Observation:
+        """Return the observation object unchanged."""
+        return observation
 
 
 class ClampApprover:
