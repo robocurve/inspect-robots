@@ -594,7 +594,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_doctor = sub.add_parser(
         "doctor",
-        help="check an installed embodiment's declared spaces for adapter conformance",
+        help="preflight configured components and check an installed embodiment for adapter "
+        "conformance",
     )
     p_doctor.add_argument("--embodiment", help="registered embodiment name (default: user config)")
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
@@ -2818,11 +2819,35 @@ def _cmd_video(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Preflight runtime requirements and conformance for an installed adapter.
+def _doctor_configured_components(
+    defaults: Defaults,
+) -> list[tuple[str, str, str, str | None]]:
+    """Return configured non-embodiment components for doctor preflight.
 
-    Purely declarative — the embodiment is constructed (adapters keep
-    constructors hardware-free by convention) but never reset or stepped.
+    To opt-out of using a grader, set the grader `name` to `"none"`.
+    Note: `"sim_embodiment"` breaks the key->registry name pairing
+    convention and resolves through the `embodiment` registry.
+    """
+    grader = None if defaults.grader == "none" else defaults.grader
+    candidates = (
+        ("policy", "policy", defaults.policy, defaults.policy_source),
+        ("sim_embodiment", "embodiment", defaults.sim_embodiment, defaults.sim_embodiment_source),
+        ("scorer", "scorer", defaults.scorer, None),
+        ("grader", "grader", grader, None),
+    )
+    components: list[tuple[str, str, str, str | None]] = []
+    for key, kind, name, source in candidates:
+        if name:
+            components.append((key, kind, name, source))
+    return components
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Preflight configured component resolution, runtime requirements, and conformance.
+
+    The preflight runs before the embodiment is constructed. Adapters keep
+    constructors hardware-free by convention, so doctor constructs the embodiment
+    for conformance checks but never resets or steps it.
     """
     from inspect_robots.conformance import (
         check_device_slots,
@@ -2832,6 +2857,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     from inspect_robots.registry import registered
 
     defaults = load_defaults(os.environ)
+    preflight_failed = False
+    for key, kind, component, component_source in _doctor_configured_components(defaults):
+        suffix = f" (from {component_source})" if component_source else ""
+        print(f"{key}: {component}{suffix}")
+        factories = registered(kind)
+        component_factory = factories.get(component)
+        if component_factory is None:
+            # Keep this wording aligned with registry.resolve so
+            # doctor and run commands report unresolved names
+            # consistently.
+            print(
+                f"  [error] resolution: no {kind} named {component!r}; "
+                f"available: {sorted(factories)}"
+            )
+            preflight_failed = True
+            continue
+        for module, remedy in missing_runtime_requirements(component_factory).items():
+            print(f"  [error] runtime-requirement: {module} missing → {remedy}")
+            preflight_failed = True
     name, source = _pick_component(
         "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
     )
@@ -2856,7 +2900,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 1 if not report.ok or missing or device_issues else 0
+    return 1 if not report.ok or missing or device_issues or preflight_failed else 0
 
 
 def _cmd_setup() -> int:

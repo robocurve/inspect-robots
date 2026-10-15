@@ -8061,6 +8061,106 @@ def test_doctor_closes_the_embodiment_it_constructs() -> None:
     assert closed == ["closed"]
 
 
+def test_doctor_reports_unresolved_policy_and_still_checks_embodiment(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = definitely-missing-doctor-policy\nembodiment = cubepick\n",
+    )
+    assert main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    finding = "[error] resolution: no policy named 'definitely-missing-doctor-policy'; available: ["
+    assert finding in out
+    assert "'scripted'" in out[out.index(finding) :].splitlines()[0]
+    assert "cubepick: conformant" in out
+
+
+def test_doctor_reports_every_unresolved_configured_name_together(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = no-such-policy\nembodiment = cubepick\n"
+        "sim_embodiment = no-such-sim\nscorer = no-such-scorer\ngrader = no-such-grader\n",
+    )
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "resolution: no policy named 'no-such-policy'; available: [" in out
+    assert "sim_embodiment: no-such-sim" in out
+    sim_finding = "resolution: no embodiment named 'no-such-sim'; available: ["
+    assert "'cubepick'" in out[out.index(sim_finding) :].splitlines()[0]
+    assert "resolution: no scorer named 'no-such-scorer'; available: [" in out
+    assert "resolution: no grader named 'no-such-grader'; available: [" in out
+
+
+def test_doctor_reports_unresolved_policy_before_unknown_embodiment_guided_exit(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(
+        _hermetic_defaults,
+        "[defaults]\npolicy = no-such-policy\nembodiment = no-such-embodiment\n",
+    )
+    with pytest.raises(SystemExit, match="no embodiment named 'no-such-embodiment'"):
+        main(["doctor"])
+    assert "resolution: no policy named 'no-such-policy'; available: [" in capsys.readouterr().out
+
+
+def test_doctor_reports_unresolved_policy_before_unset_embodiment_guided_exit(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\npolicy = no-such-policy\n")
+    with pytest.raises(SystemExit, match="no embodiment given"):
+        main(["doctor"])
+    assert "resolution: no policy named 'no-such-policy'; available: [" in capsys.readouterr().out
+
+
+def test_doctor_skips_grader_none_and_unset_kinds(
+    _hermetic_defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_config(_hermetic_defaults, "[defaults]\nembodiment = cubepick\ngrader = none\n")
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "policy:" not in out
+    assert "sim_embodiment:" not in out
+    assert "scorer:" not in out
+    assert "grader:" not in out
+
+
+def test_doctor_reports_missing_policy_runtime_requirement_before_construction(
+    _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from inspect_robots.errors import ConfigError
+
+    name = "missing-runtime-doctor-policy"
+
+    class _MissingRuntimePolicy(ScriptedPolicy):
+        RUNTIME_REQUIREMENTS: ClassVar[dict[str, str]] = {
+            "definitely_missing_policy_dep": "uv pip install policy-thing"
+        }
+
+    class _UnconstructableEmbodiment:
+        def __init__(self) -> None:
+            raise ConfigError("embodiment cannot construct itself")
+
+    monkeypatch.setitem(reg._FACTORIES["policy"], name, _MissingRuntimePolicy)
+    monkeypatch.setitem(
+        reg._FACTORIES["embodiment"],
+        "unconstructable-doctor-embodiment",
+        _UnconstructableEmbodiment,
+    )
+    _write_config(
+        _hermetic_defaults,
+        f"[defaults]\npolicy = {name}\nembodiment = unconstructable-doctor-embodiment\n",
+    )
+    with pytest.raises(SystemExit, match="embodiment cannot construct itself"):
+        main(["doctor"])
+    assert (
+        "[error] runtime-requirement: definitely_missing_policy_dep missing → "
+        "uv pip install policy-thing"
+    ) in capsys.readouterr().out
+
+
 # Plan 0049 / issue #320: a trial the policy ends via done()/give_up() must be
 # graded on every attended path, whatever the scorer.
 
