@@ -196,17 +196,29 @@ def _validated_effort(effort: object) -> str | float:
 
 def _sanitize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return an image-free deep copy suitable for persistence or visualization."""
-    sanitized = copy.deepcopy(messages)
-    for message in sanitized:
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        msg_copy: dict[str, Any] = {}
+        for key, val in message.items():
+            if key != "content":
+                msg_copy[key] = copy.deepcopy(val)
         content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for index, part in enumerate(content):
-            if isinstance(part, dict) and part.get("type") == "image_url":
-                content[index] = {
-                    "type": "text",
-                    "text": "[image omitted: streamed camera frame]",
-                }
+        if isinstance(content, list):
+            content_copy: list[Any] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    content_copy.append(
+                        {
+                            "type": "text",
+                            "text": "[image omitted: streamed camera frame]",
+                        }
+                    )
+                else:
+                    content_copy.append(copy.deepcopy(part))
+            msg_copy["content"] = content_copy
+        elif content is not None:
+            msg_copy["content"] = copy.deepcopy(content)
+        sanitized.append(msg_copy)
     return sanitized
 
 
