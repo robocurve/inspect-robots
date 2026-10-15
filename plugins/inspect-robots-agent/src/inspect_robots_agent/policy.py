@@ -814,6 +814,9 @@ class LLMAgentPolicy(PolicyBase):
         self._pending: _PendingCapture | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
+        # Track the last move target for stall detection in the next observation
+        self._last_move_target: npt.NDArray[np.float64] | None = None
+        self._last_move_steps: int = 0
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -974,6 +977,16 @@ class LLMAgentPolicy(PolicyBase):
                 missing = tuple(name for name in requested if name not in observation.images)
                 self._revealed.update(reveal)
                 narration = self._pending_narration(pending, observation, missing)
+
+        # Stall detection: check if the previous move reached its target
+        if self._last_move_target is not None and toolset is not None:
+            stall_info = self._check_stall(toolset, observation)
+            if stall_info:
+                narration = (narration + "\n" if narration else "") + stall_info
+            # Clear after checking so we don't report again
+            self._last_move_target = None
+            self._last_move_steps = 0
+
         observation_content = _observation_content(
             observation,
             self._state_labels,
@@ -1159,6 +1172,10 @@ class LLMAgentPolicy(PolicyBase):
                             if result.chunk is not None:
                                 chunk = result.chunk
                                 target = result.target
+                                # Store target and steps for stall detection in next observation
+                                if target is not None and not stopped:
+                                    self._last_move_target = target
+                                    self._last_move_steps = len(chunk.actions)
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
                                 if stopped:
                                     self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
@@ -1268,6 +1285,22 @@ class LLMAgentPolicy(PolicyBase):
         if missing:
             narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
+
+    def _check_stall(self, toolset: Toolset, observation: Observation) -> str | None:
+        """Check if the last move reached its target; return status line or None."""
+        if self._last_move_target is None:
+            return None
+        residual = toolset.residual(self._last_move_target, observation)
+        if residual is not None:
+            label, magnitude = residual
+            if magnitude > _TARGET_REACHED_TOLERANCE:
+                return (
+                    f"stalled after {self._last_move_steps} steps (reached {label}={magnitude:.4g})"
+                )
+            else:
+                return f"ok (target reached in {self._last_move_steps} steps)"
+        # Cannot measure residual (no proprioception)
+        return f"ok (completed {self._last_move_steps} steps)"
 
     def _echo(self, text: str) -> None:
         if self._transcript_echo:
