@@ -1,0 +1,1 @@
+**Eval:** unhandled exceptions from `rollout()` no longer crash the entire `eval()` session, retaining completed trials and writing the `EvalLog` with failure details attached ([#484](https://github.com/robocurve/inspect-robots/pull/484)).
