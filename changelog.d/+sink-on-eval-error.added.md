@@ -1,0 +1,1 @@
+**Core:** Sinks can define an optional `on_eval_error(error)` hook, called once when an exception escapes `eval()` after `on_eval_start`, giving them a cleanup point for an aborted run (for example closing a remote tracking run). A failing hook only warns, and the original exception is re-raised unchanged.

@@ -17,6 +17,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -244,6 +245,9 @@ class _Broadcast:
         # Transcript hooks that raised this trial: skipped until the next
         # on_trial_start, preserving plan 0020's per-trial failure latch.
         self._failed_message_hooks: set[int] = set()
+        # Sinks offered on_eval_start whose run has not completed on_eval_end:
+        # the ones an escaping eval error owes an on_eval_error cleanup call.
+        self._open_sinks: list[LogSink] = []
         if policy_message_hooks:
             self.log_policy_messages = self._fan_policy_messages
 
@@ -302,6 +306,10 @@ class _Broadcast:
                 if callable(retain):
                     retain()
                 continue
+            if method_name == "on_eval_start":
+                # Recorded before the call: a sink whose startup raised may
+                # still hold a half-open resource that needs cleanup.
+                self._open_sinks.append(s)
             try:
                 self._safe_call(s, method_name, hook, *args)
             except _CriticalSinkError as exc:
@@ -363,6 +371,33 @@ class _Broadcast:
 
     def on_eval_end(self, log: EvalLog) -> None:
         self._fan_out("on_eval_end", log)
+        self._open_sinks.clear()
+
+    def on_eval_error(self, error: BaseException) -> None:
+        """Offer abort cleanup to every open sink; never raise over ``error``.
+
+        Called by ``eval()`` when an exception escapes the run. Only sinks
+        offered ``on_eval_start`` and not yet past a completed ``on_eval_end``
+        are notified, each at most once. A failing hook only warns (even
+        ``BaseException``, and even when warnings are errors), so the original
+        exception always propagates unchanged.
+        """
+        open_sinks, self._open_sinks = self._open_sinks, []
+        for s in open_sinks:
+            try:
+                # Lookup is guarded too: a raising property must not replace
+                # the propagating error or starve the remaining sinks.
+                hook: Any = getattr(s, "on_eval_error", None)
+                if callable(hook):
+                    hook(error)
+            except BaseException as exc:
+                with suppress(BaseException):
+                    warnings.warn(
+                        f"LogSink {type(s).__name__}.on_eval_error() failed with "
+                        f"{type(exc).__name__}: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
 
 def _survivor_warning(log: EvalLog) -> str | None:
@@ -492,6 +527,7 @@ def eval(
             f"fail_on_error must be a boolean or finite float >= 0, got {fail_on_error!r}"
         )
 
+    from inspect_robots.logging.json_log import JsonLogSink
     from inspect_robots.registry import resolve
 
     before_scoring, resolved_grader = _grading_hook(grader, before_scoring)
@@ -506,13 +542,18 @@ def eval(
         if isinstance(embodiment, str)
         else embodiment
     )
+    bus: _Broadcast | None = None
     try:
+        # Built here rather than in _run_eval so an escaping error can still
+        # reach the sinks' optional on_eval_error cleanup hook, and inside the
+        # try so a failing sink setup still closes an owned embodiment.
+        bus = _Broadcast(sinks if sinks is not None else [JsonLogSink(log_dir)])
         return _run_eval(
             task,
             policy,
             embodiment,
             log_dir=log_dir,
-            sinks=sinks,
+            bus=bus,
             seed=seed,
             fail_on_error=fail_on_error,
             controller=controller,
@@ -527,6 +568,10 @@ def eval(
             environment_revision=environment_revision,
             policy_checkpoint=policy_checkpoint,
         )
+    except BaseException as exc:
+        if bus is not None:
+            bus.on_eval_error(exc)
+        raise
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
         # when the run halts, so a real robot never leaks its connection.
@@ -540,7 +585,7 @@ def _run_eval(
     embodiment: Embodiment,
     *,
     log_dir: str,
-    sinks: list[LogSink] | None,
+    bus: _Broadcast,
     seed: int | None,
     fail_on_error: bool | float,
     controller: Controller | None,
@@ -556,7 +601,6 @@ def _run_eval(
     policy_checkpoint: str | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
-    from inspect_robots.logging.json_log import JsonLogSink
     from inspect_robots.session import _DEFINITIVE_REASONS
     from inspect_robots.types import Observation
 
@@ -608,8 +652,6 @@ def _run_eval(
         # fact; None must not silently alias seed=0 (see derive_seed).
         seed = int.from_bytes(os.urandom(4), "little")
 
-    sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
-    bus = _Broadcast(sink_list)
     controller = controller or DefaultController(policy.config.replan_interval)
     approver = approver or AutoApprover()
 

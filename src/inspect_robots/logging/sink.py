@@ -26,6 +26,17 @@ A third duck-typed extension, ``bind_frames_dir(frames_dir)``, is called by
 or ``None`` when frame storage is off. A callable with this claimed name MUST
 accept that one-argument signature. It deliberately remains off ``LogSink`` and
 ``NullSink`` like the other optional extensions.
+
+A fourth duck-typed extension, ``on_eval_error(error)``, is called by ``eval()``
+when an exception escapes the run after ``on_eval_start`` was offered and
+before ``on_eval_end`` completed. It is the sink's one cleanup point for an
+aborted run (closing a remote run, flushing a buffer). It can follow a sink's
+own ``on_eval_end`` when a critical sink's final write failed, so the hook
+should be a no-op for a sink with nothing left open. The argument is the
+escaping ``BaseException``, which ``eval()`` re-raises unchanged afterwards: a
+failing hook only warns. A callable with this
+claimed name MUST accept that one-argument signature. Like the other optional
+extensions, it remains off ``LogSink`` and ``NullSink``.
 """
 
 from __future__ import annotations
