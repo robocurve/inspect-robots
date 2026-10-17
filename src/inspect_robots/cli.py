@@ -60,7 +60,7 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
-from inspect_robots import __version__
+from inspect_robots import __version__, _operator_end
 from inspect_robots._claims import DeviceClaim, claim_devices
 from inspect_robots._dotenv import init_dotenv
 from inspect_robots._html import (
@@ -1640,6 +1640,8 @@ def _announce_live_view(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    # Before any hardware opens; see _operator_end for the supervisor protocol.
+    _operator_end.install()
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
             "--rerun-port spawns a local viewer and --rerun-connect streams "
@@ -1954,6 +1956,10 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
     if args.max_workers > 1 and (not args.no_prompt or args.voice):
         raise SystemExit("--max-workers > 1 requires --no-prompt and does not support --voice")
+    # Before any hardware opens; see _operator_end for the supervisor protocol.
+    # Parallel trials run on worker threads, which ignore End, so they do not
+    # advertise it.
+    _operator_end.install(advertise=args.max_workers == 1)
     task_names = _match_tasks(args.tasks)
     defaults = load_defaults(os.environ)
     try:

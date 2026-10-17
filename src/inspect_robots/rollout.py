@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from inspect_robots import _operator_end
 from inspect_robots.approver import Approver
 from inspect_robots.controller import _INFER_KEY, Controller
 from inspect_robots.embodiment import Embodiment
@@ -291,6 +292,8 @@ def rollout(
     messages_hook: Any = getattr(sink, "log_policy_messages", None)
     stream_ok = callable(delta_hook) and callable(messages_hook)
     console_ok = operator_input is not None
+    if _operator_end.active():
+        _operator_end.begin_trial()
 
     try:
         t = -1
@@ -356,6 +359,7 @@ def rollout(
                 dict(message) for message in all_operator_msgs[last_operator_msgs_idx:]
             ]
 
+            _operator_end.check()
             if poll is not None and poll.end is not None:
                 record.terminated = True
                 record.termination_reason = OPERATOR_END
@@ -380,7 +384,10 @@ def rollout(
                     obs,
                     extra=policy_extra,
                 )
-                action = controller.next_action(policy, obs_with_extra, t, store)
+                # A signalled End interrupts a blocked policy call and discards
+                # any reply that arrives after it, so no late action executes.
+                with _operator_end.interruptible():
+                    action = controller.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -476,6 +483,7 @@ def rollout(
                     t,
                 )
 
+            _operator_end.check()
             try:
                 result: StepResult = embodiment.step(action)
             except InspectRobotsError as exc:
@@ -529,6 +537,14 @@ def rollout(
         else:
             record.truncated = True
             record.termination_reason = "max_steps"
+    except _operator_end.OperatorEndRequested:
+        # A signalled End is an ordinary operator end, not a cancellation: the
+        # record is scored and the embodiment's normal park/close path runs.
+        record.terminated = True
+        record.termination_reason = OPERATOR_END
+        record.metadata["operator_end_source"] = "signal"
+        # Only now: no further action can start, so the supervisor may trust it.
+        _operator_end.acknowledge()
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"
