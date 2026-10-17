@@ -81,8 +81,11 @@ def resolve_depth(observation: Observation) -> dict[str, npt.NDArray[np.float64]
         key = f"{name}_depth"
         if key not in observation.extra:
             continue
+        value = observation.extra[key]
+        if isinstance(value, str):
+            resolved[name] = value
+            continue
         try:
-            value = observation.extra[key]
             if callable(value):
                 value = value()
             depth = np.asarray(value, dtype=np.float64)

@@ -442,6 +442,8 @@ def eval(
 
     When ``store_frames`` is set, camera frames are streamed to
     ``<log_dir>/frames`` as binary side-cars (R5) rather than kept in memory.
+    Per-camera metric depth in ``extra["{camera}_depth"]`` is resolved once
+    and written as float32 under ``<log_dir>/frames/<run>/depth``.
 
     ``store_actions`` defaults to ``True`` and writes each trial's complete
     executed action sequence to ``<log_dir>/actions`` as an atomic JSONL
