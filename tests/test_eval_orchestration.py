@@ -31,7 +31,7 @@ from inspect_robots.registry import embodiment as embodiment_decorator
 from inspect_robots.rollout import TrialRecord
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
-from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
+from inspect_robots.spaces import ActionSemantics, Box, CameraSpec, ObservationSpace
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 
@@ -2299,3 +2299,266 @@ def test_eval_distinct_scorer_names_preserve_per_epoch_and_reduced_metrics(tmp_p
     assert log.samples[0].reduced["loose"] == 1.0
     assert log.results.metrics["strict"] == 0.0
     assert log.results.metrics["loose"] == 1.0
+
+
+def test_eval_remaps_observations_to_policy_keys(tmp_path: Path) -> None:
+    """eval(remap=...) delivers remapped keys to the policy while frames retain native names."""
+
+    class _AliasedPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(
+                name="aliased_policy",
+                action_space=_BOX,
+                observation_space=ObservationSpace(
+                    cameras=(CameraSpec(name="base_rgb", height=32, width=32, channels=3),),
+                    state_keys=frozenset({"ee"}),
+                ),
+            )
+            self.config = PolicyConfig()
+            self.received_observations: list[Observation] = []
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, obs: Observation) -> ActionChunk:
+            self.received_observations.append(obs)
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0], dtype=np.float64))])
+
+    policy = _AliasedPolicy()
+    embodiment = CubePickEmbodiment()
+
+    task = Task(
+        name="remap_task",
+        scenes=[Scene(id="s0", instruction="reach")],
+        scorer=success_at_end(),
+        max_steps=2,
+    )
+
+    (log,) = eval(
+        task,
+        policy,
+        embodiment,
+        remap={"base_rgb": "top", "ee": "eef_pos"},
+        store_frames=True,
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+    assert len(policy.received_observations) == 2
+    for obs in policy.received_observations:
+        # Policy receives remapped camera and state keys
+        assert "base_rgb" in obs.images
+        assert "top" not in obs.images
+        assert "ee" in obs.state
+        assert "eef_pos" not in obs.state
+        # Unmapped key passes through unchanged
+        assert "cube_pos" in obs.state
+
+    # Stored frames retain native camera names, not remapped policy keys
+    frames_dir = Path(log.stats.frames_dir) if log.stats.frames_dir else None
+    assert frames_dir is not None
+    stored_frame_files = list(frames_dir.glob("*.npy"))
+    assert len(stored_frame_files) >= 1
+    for frame_file in stored_frame_files:
+        assert "top" in frame_file.name
+        assert "base_rgb" not in frame_file.name
+
+
+def test_eval_runtime_collision_halts_eval_and_preserves_forensics(tmp_path: Path) -> None:
+    """A runtime collision halts the eval (even if fail_on_error=False) and preserves forensics."""
+
+    class _StepCollisionPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(
+                name="step_collision_policy",
+                action_space=_BOX,
+                observation_space=ObservationSpace(state_keys=frozenset({"target_pos"})),
+            )
+            self.config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, obs: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0], dtype=np.float64))])
+
+    class _CollidingEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resets = 0
+            # Preflight advertises only eef_pos,
+            # so remap={"target_pos": "eef_pos"} has no collisions
+            self.info = replace(
+                self.info,
+                observation_space=ObservationSpace(state_keys=frozenset({"eef_pos"})),
+            )
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.resets += 1
+            obs = super().reset(scene, seed=seed)
+            if self.resets > 1:
+                # Second scene should never be touched because first scene halted
+                return obs
+            # Step 0 observation is healthy (no collision)
+            return Observation(
+                images={},
+                state={"eef_pos": obs.state["eef_pos"]},
+                image_times={},
+            )
+
+        def step(self, action: Action) -> StepResult:
+            result = super().step(action)
+            # Step 1 introduces an unannounced state key colliding under
+            # remap={"target_pos": "eef_pos"}
+            colliding_obs = Observation(
+                images={},
+                state={"eef_pos": np.array([0.1, 0.1]), "target_pos": np.array([0.8, 0.8])},
+                image_times={},
+            )
+            return replace(result, observation=colliding_obs)
+
+    emb = _CollidingEmbodiment()
+    task = Task(
+        name="collision_task",
+        scenes=[Scene(id="s0", instruction="x"), Scene(id="s1", instruction="y")],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+
+    (log,) = eval(
+        task,
+        _StepCollisionPolicy(),
+        emb,
+        remap={"target_pos": "eef_pos"},
+        fail_on_error=False,
+        log_dir=str(tmp_path),
+    )
+
+    # Eval halts and classifies as ConfigError
+    assert log.status == "error"
+    assert log.error is not None and "ConfigError" in log.error
+    # Halted immediately; second scene was never reset
+    assert emb.resets == 1
+    assert log.results.total_trials == 1
+    # Failed trial is not scored
+    assert log.samples[0].epochs[0] == {}
+    # Forensic log reached disk
+    assert list(tmp_path.glob("*.json"))
+
+
+def test_eval_runtime_collision_on_terminal_observation(tmp_path: Path) -> None:
+    """A collision occurring on the terminal observation halts and preserves step history."""
+
+    class _TerminalCollisionPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(
+                name="terminal_collision_policy",
+                action_space=_BOX,
+                observation_space=ObservationSpace(state_keys=frozenset({"target_pos"})),
+            )
+            self.config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, obs: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0], dtype=np.float64))])
+
+    class _TerminalCollisionEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(
+                self.info,
+                observation_space=ObservationSpace(state_keys=frozenset({"eef_pos"})),
+            )
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            obs = super().reset(scene, seed=seed)
+            return Observation(images={}, state={"eef_pos": obs.state["eef_pos"]}, image_times={})
+
+        def step(self, action: Action) -> StepResult:
+            result = super().step(action)
+            # Make the first step terminate and inject colliding state
+            colliding_obs = Observation(
+                images={},
+                state={"eef_pos": np.array([0.1, 0.1]), "target_pos": np.array([0.8, 0.8])},
+                image_times={},
+            )
+            return replace(result, observation=colliding_obs, terminated=True)
+
+    emb = _TerminalCollisionEmbodiment()
+    task = Task(
+        name="term_task",
+        scenes=[Scene(id="s0", instruction="x")],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+
+    (log,) = eval(
+        task,
+        _TerminalCollisionPolicy(),
+        emb,
+        remap={"target_pos": "eef_pos"},
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error is not None and "ConfigError" in log.error
+    assert log.samples[0].status == "error"
+    assert log.samples[0].epochs[0] == {}
+    assert list(tmp_path.glob("*.json"))
+
+
+def test_eval_handles_initial_observation_remap_collision_in_reset(tmp_path: Path) -> None:
+    """When embodiment.reset() returns observation keys that collide under remap,
+    rollout records failure at step -1 and eval writes an error log."""
+
+    class _ResetCollisionPolicy:
+        def __init__(self) -> None:
+            self.info = PolicyInfo(
+                name="reset_coll_policy",
+                action_space=_BOX,
+                observation_space=ObservationSpace(state_keys=frozenset({"target_pos"})),
+            )
+            self.config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, obs: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0], dtype=np.float64))])
+
+    class _ResetCollisionEmbodiment(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = replace(
+                self.info,
+                observation_space=ObservationSpace(state_keys=frozenset({"eef_pos"})),
+            )
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            return Observation(
+                images={},
+                state={"eef_pos": np.array([0.1, 0.1]), "target_pos": np.array([0.8, 0.8])},
+                image_times={},
+            )
+
+    task = Task(
+        name="reset_coll_task",
+        scenes=[Scene(id="s0", instruction="x")],
+        scorer=success_at_end(),
+        max_steps=5,
+    )
+
+    (log,) = eval(
+        task,
+        _ResetCollisionPolicy(),
+        _ResetCollisionEmbodiment(),
+        remap={"target_pos": "eef_pos"},
+        log_dir=str(tmp_path),
+    )
+
+    assert log.status == "error"
+    assert log.error is not None and "ConfigError" in log.error
+    assert log.samples[0].status == "error"
+    assert log.samples[0].epochs[0] == {}
+    assert list(tmp_path.glob("*.json"))
