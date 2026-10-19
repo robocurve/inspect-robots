@@ -33,6 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
+relay = ["nemo-relay==0.10.3; python_version >= '3.11'"]
 
 # Entry-point discovery: an installed inspect-robots-agent appears in
 # `inspect-robots list policies` without being imported first. The registry
