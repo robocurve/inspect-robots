@@ -80,6 +80,14 @@ class ToolResult:
     target: npt.NDArray[np.float64] | None = None
 
 
+@dataclass
+class ToolDispatch:
+    """A tool result and the policy's final acceptance decision."""
+
+    result: ToolResult
+    rejected: bool
+
+
 class Toolset:
     """Schemas and execution for one embodiment, built via ``build_toolset``."""
 

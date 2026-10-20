@@ -9,6 +9,7 @@ import subprocess
 import sys
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from itertools import pairwise
 from pathlib import Path
@@ -24,6 +25,7 @@ from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
+from inspect_robots.types import Observation
 from inspect_robots_agent import LLMAgentPolicy
 
 
@@ -158,6 +160,83 @@ def test_capture_preserves_calls_transcripts_and_scores(tmp_path: Path) -> None:
     assert baseline.samples[0].termination_reasons == traced.samples[0].termination_reasons
     assert "relay" not in baseline.samples[0].trial_metadata[0]
     assert not (tmp_path / "off" / "relay").exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected", "response"),
+    [
+        ("absent", ["rejected"], "no camera images are available"),
+        ("repeated", ["accepted", "rejected"], "already shown for this observation"),
+        ("queued", ["accepted"], "queued: frames arrive with the next observation"),
+        ("queued_absent", ["rejected"], "no camera images are available"),
+        ("ignored", ["accepted"], "ignored: one tool call per turn"),
+    ],
+)
+def test_camera_outcomes_match_policy_decisions(
+    tmp_path: Path, case: str, expected: list[str], response: str
+) -> None:
+    pytest.importorskip("nemo_relay")
+    capture = _reply("take_pic", {"note": "private-camera-request"}, 0)
+    second = _reply("take_pic", {"note": "private-camera-request"}, 1)
+    done = _reply("done", {"summary": "finished"}, 2)
+    replies = [capture, done]
+    if case == "repeated":
+        replies = [capture, second, done]
+    elif case.startswith("queued"):
+        move = _reply("move_by", {"deltas": {"dx": 0.1, "dy": 0.1}, "note": "move"}, 3)
+        move["choices"][0]["message"]["tool_calls"].extend(
+            capture["choices"][0]["message"]["tool_calls"]
+        )
+        replies = [move, done]
+    elif case == "ignored":
+        capture["choices"][0]["message"]["tool_calls"].extend(
+            second["choices"][0]["message"]["tool_calls"]
+        )
+
+    class CameraWorld(CubePickEmbodiment):
+        def _observe(self, instruction: str | None) -> Observation:
+            observation = super()._observe(instruction)
+            return replace(observation, images={}) if "absent" in case else observation
+
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=replies[len(requests) - 1])
+
+    logs = []
+    for enabled in (False, True):
+        requests.clear()
+        policy = LLMAgentPolicy(
+            model="test/model",
+            base_url="http://provider.test/v1",
+            env={},
+            transport=httpx.MockTransport(respond),
+            images="on_demand",
+            relay=enabled,
+        )
+        task = Task(
+            name="camera-outcomes",
+            scenes=[Scene(id="scene", instruction="inspect the camera")],
+            scorer=success_at_end(),
+            max_steps=20,
+        )
+        (log,) = ir_eval(task, policy, CameraWorld(), seed=0, log_dir=str(tmp_path / str(enabled)))
+        assert log.status == "success"
+        assert len(requests) == len(replies)
+        logs.append(log)
+
+    baseline, traced = logs
+    assert baseline.results.metrics == traced.results.metrics
+    assert baseline.samples[0].policy_transcripts == traced.samples[0].policy_transcripts
+    assert response in json.dumps(traced.samples[0].policy_transcripts)
+    rows = _events(tmp_path / "True", traced)
+    captures = [row for row in rows if row["name"] == "take_pic" and row["scope_category"] == "end"]
+    assert [row["metadata"]["status"] for row in captures] == expected
+    assert [row["metadata"]["otel.status_code"] for row in captures] == [
+        "ERROR" if status == "rejected" else "OK" for status in expected
+    ]
+    assert "private-camera-request" not in json.dumps(rows)
 
 
 def test_provider_failure_closes_spans_without_retrying(tmp_path: Path) -> None:
@@ -452,6 +531,44 @@ def test_sdk_finish_failure_does_not_repeat_tool(
     receipt = traced.samples[0].trial_metadata[0]["relay"]
     assert receipt["status"] == "error"
     assert "private-export-error" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("stage", ["execute", "policy"])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_tool_exceptions_preserve_identity_and_close_span(
+    tmp_path: Path, stage: str, error_type: type[BaseException]
+) -> None:
+    pytest.importorskip("nemo_relay")
+    from inspect_robots_agent._llm import ToolCall
+    from inspect_robots_agent._relay import RelayTrace
+    from inspect_robots_agent._tools import ToolResult
+
+    error = error_type("private-dispatch-error")
+    calls = 0
+
+    def execute() -> ToolResult:
+        nonlocal calls
+        calls += 1
+        if stage == "execute":
+            raise error
+        return ToolResult()
+
+    trace = RelayTrace("test/model", "chat")
+    trace.begin(str(tmp_path), "run", "scene", 0)
+    with (
+        pytest.raises(error_type) as raised,
+        trace.tool_call(execute, ToolCall("call", "take_pic", "{}"), 0),
+    ):
+        raise error
+    receipt = trace.end("error", None)
+    assert raised.value is error
+    assert calls == 1
+    assert receipt["status"] == "captured"
+    rows = [json.loads(line) for line in (tmp_path / receipt["path"]).read_text().splitlines()]
+    end = next(r for r in rows if r["category"] == "tool" and r["scope_category"] == "end")
+    assert end["metadata"]["status"] == "error"
+    assert end["metadata"]["otel.status_code"] == "ERROR"
+    assert "private-dispatch-error" not in json.dumps(rows)
 
 
 def test_missing_extra_has_install_guidance(monkeypatch: pytest.MonkeyPatch) -> None:

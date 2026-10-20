@@ -16,7 +16,7 @@ import nemo_relay as relay
 
 from ._capture import _safe
 from ._llm import AssistantMessage, ToolCall
-from ._tools import ToolResult
+from ._tools import ToolDispatch, ToolResult
 
 _T = TypeVar("_T")
 _Handle = TypeVar("_Handle", relay.LLMHandle, relay.ToolHandle)
@@ -209,13 +209,14 @@ class RelayTrace:
 
         return self._observe(operation, start, finish, metadata)
 
+    @contextmanager
     def tool_call(
         self,
         operation: Callable[[], ToolResult],
         call: ToolCall,
         index: int | None,
-    ) -> ToolResult:
-        """Record dispatch acceptance, not physical motion completion."""
+    ) -> Iterator[ToolDispatch]:
+        """Finish after the policy decides acceptance, before physical motion."""
         metadata = {
             **self._metadata,
             "model_call_index": index,
@@ -223,25 +224,41 @@ class RelayTrace:
             "boundary": "tool_dispatch",
         }
 
-        def start() -> relay.ToolHandle:
-            return relay.tools.call(
-                call.name,
-                {},
-                handle=self._root,
-                tool_call_id=call.id,
-                metadata=metadata,
-            )
-
-        def finish(
-            handle: relay.ToolHandle, meta: dict[str, Any], result: ToolResult | None
-        ) -> None:
-            if result is not None:
-                meta["status"] = "rejected" if result.error is not None else "accepted"
-                meta["otel.status_code"] = "ERROR" if result.error is not None else "OK"
-                meta["action_chunk_returned"] = result.chunk is not None
-            relay.tools.call_end(handle, relay.ToolExecutionResult({}), metadata=meta)
-
-        return self._observe(operation, start, finish, metadata)
+        handle: relay.ToolHandle | None = None
+        if self._root is not None:
+            with self._capture_errors():
+                assert self._stack is not None
+                with relay.use_scope_stack(self._stack):
+                    handle = relay.tools.call(
+                        call.name,
+                        {},
+                        handle=self._root,
+                        tool_call_id=call.id,
+                        metadata=metadata,
+                    )
+        if handle is not None:
+            self._expected_events += 2
+        dispatch: ToolDispatch | None = None
+        try:
+            result = operation()
+            dispatch = ToolDispatch(result, rejected=result.error is not None)
+            yield dispatch
+        except BaseException as exc:
+            metadata.update(status="error", error_type=type(exc).__name__)
+            metadata["otel.status_code"] = "ERROR"
+            raise
+        finally:
+            if handle is not None:
+                if dispatch is not None and metadata.get("status") != "error":
+                    metadata["status"] = "rejected" if dispatch.rejected else "accepted"
+                    metadata["otel.status_code"] = "ERROR" if dispatch.rejected else "OK"
+                    metadata["action_chunk_returned"] = dispatch.result.chunk is not None
+                with self._capture_errors():
+                    assert self._stack is not None
+                    with relay.use_scope_stack(self._stack):
+                        relay.tools.call_end(
+                            handle, relay.ToolExecutionResult({}), metadata=metadata
+                        )
 
     def end(self, status: str, termination_reason: str | None) -> dict[str, Any]:
         """Close and drain this trial only, then return a portable capture receipt."""

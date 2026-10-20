@@ -429,9 +429,11 @@ imported by default; the base plugin still supports Python 3.10.
 
 Prompts, images, raw responses, tool arguments and exception messages are
 omitted. Identifiers and tool names remain visible. Native Inspect logs retain
-payloads and task scores. Tool acceptance precedes motion playout; it does not
-establish task success. Ignored tool requests have no dispatch span, and
-budget-forced stops carry `source=policy` without a model-call index.
+payloads and task scores. Dispatch outcomes include the policy's rejection of
+unavailable or already-shown camera frames. Tool acceptance precedes motion
+playout; it does not establish task success. Ignored tool requests have no
+dispatch span, and budget-forced stops carry `source=policy` without a
+model-call index.
 
 ATOF files live under `relay/<run>/<trial>/events.jsonl` in the log directory.
 Check `trial_metadata[epoch]["relay"]` for the path, expected/written event counts
