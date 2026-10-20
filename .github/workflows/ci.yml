@@ -384,8 +384,6 @@ jobs:
         run: >
           uv run --no-sync python -m pytest plugins/inspect-robots-agent/tests -q
           --cov=inspect_robots_agent --cov-report=term-missing --cov-fail-under=0
-      - name: Relay recovery demo (scripted provider, no network)
-        run: uv run --no-sync python examples/relay_agent.py --repeats 2
       - name: Verify agent without the optional Relay extra
         run: |
           uv sync --locked --python 3.11 --all-packages --extra dev

@@ -5,8 +5,12 @@ from __future__ import annotations
 import builtins
 import gc
 import json
+import subprocess
+import sys
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from itertools import pairwise
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -176,6 +180,74 @@ def test_export_setup_failure_preserves_policy_execution(tmp_path: Path) -> None
     assert log.samples[0].trial_metadata[0]["relay"]["status"] == "error"
 
 
+@pytest.mark.parametrize("failure", ["write", "close"])
+def test_file_failure_preserves_execution_and_reports_capture_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    baseline, _ = _run(tmp_path / "off", relay=False)
+    original = Path.open
+
+    class BrokenFile:
+        def __init__(self, file: Any) -> None:
+            self.file = file
+
+        def write(self, text: str) -> Any:
+            if failure == "write":
+                raise OSError("private-write-error")
+            return self.file.write(text)
+
+        def close(self) -> None:
+            self.file.close()
+            if failure == "close":
+                raise OSError("private-close-error")
+
+    def opened(path: Path, *args: Any, **kwargs: Any) -> Any:
+        file = original(path, *args, **kwargs)
+        return BrokenFile(file) if path.name == "events.jsonl" else file
+
+    monkeypatch.setattr(Path, "open", opened)
+    traced, calls = _run(tmp_path / "on")
+    assert calls == 3
+    assert traced.results.metrics == baseline.results.metrics
+    assert traced.samples[0].policy_transcripts == baseline.samples[0].policy_transcripts
+    receipt = traced.samples[0].trial_metadata[0]["relay"]
+    assert receipt["status"] == "error"
+    assert receipt["error_type"] == "OSError"
+    assert "private-" not in json.dumps(receipt)
+
+
+def test_reusing_trace_after_failed_capture_starts_cleanly(tmp_path: Path) -> None:
+    pytest.importorskip("nemo_relay")
+    from inspect_robots_agent._llm import AssistantMessage
+    from inspect_robots_agent._relay import RelayTrace
+
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / "relay").write_text("block capture directory")
+    trace = RelayTrace("test/model", "chat")
+    calls = 0
+
+    def complete() -> AssistantMessage:
+        nonlocal calls
+        calls += 1
+        return AssistantMessage(content="", tool_calls=[])
+
+    receipts = []
+    for name in ("failed", "recovered", "next"):
+        trace.begin(str(tmp_path / name), "run", name, 0)
+        trace.model_call(complete, 0)
+        receipts.append(trace.end("success", None))
+    assert calls == 3
+    assert [receipt["status"] for receipt in receipts] == ["error", "captured", "captured"]
+    for name, receipt in zip(("recovered", "next"), receipts[1:], strict=True):
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / name / receipt["path"]).read_text().splitlines()
+        ]
+        assert receipt["events_expected"] == receipt["events_written"] == len(rows) == 4
+        assert {row["metadata"]["scene_id"] for row in rows} == {name}
+
+
 def test_parallel_trials_do_not_capture_each_other(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(_run, tmp_path / str(i), scene=f"scene-{i}") for i in range(2)]
@@ -233,6 +305,132 @@ def test_reported_usage_is_exported(tmp_path: Path) -> None:
         )
         == 6
     )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_model_end_time_precedes_publication_backlog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    pytest.importorskip("nemo_relay")
+    from inspect_robots_agent import _relay
+    from inspect_robots_agent._llm import AssistantMessage
+
+    entered, release = Event(), Event()
+    original = _relay._Writer.write
+
+    def stalled(self: Any, event: Any) -> None:
+        if event.category == "agent" and event.scope_category == "start":
+            entered.set()
+            assert release.wait(5)
+        original(self, event)
+
+    def complete() -> AssistantMessage:
+        if fail:
+            raise RuntimeError("provider failure")
+        return AssistantMessage(content="", tool_calls=[])
+
+    monkeypatch.setattr(_relay._Writer, "write", stalled)
+    trace = _relay.RelayTrace("test/model", "chat")
+    trace.begin(str(tmp_path), "run", "scene", 0)
+    try:
+        assert entered.wait(2)
+        if fail:
+            with pytest.raises(RuntimeError, match="provider failure"):
+                trace.model_call(complete, 0)
+        else:
+            trace.model_call(complete, 0)
+        returned_at = datetime.now(timezone.utc)
+    finally:
+        release.set()
+        receipt = trace.end("error" if fail else "success", None)
+    assert receipt["status"] == "captured"
+    events = [json.loads(line) for line in (tmp_path / receipt["path"]).read_text().splitlines()]
+    model_end = next(r for r in events if r["category"] == "llm" and r["scope_category"] == "end")
+    assert datetime.fromisoformat(model_end["timestamp"]) <= returned_at
+
+
+@pytest.mark.parametrize("drop_start", [False, True])
+def test_dropped_sdk_events_report_incomplete_capture(tmp_path: Path, drop_start: bool) -> None:
+    sdk = pytest.importorskip("nemo_relay")
+    from inspect_robots_agent._llm import AssistantMessage
+    from inspect_robots_agent._relay import RelayTrace
+
+    def broken_sanitizer(event: Any, fields: Any) -> Any:
+        if event.category == "llm":
+            raise RuntimeError("private-sanitizer-error")
+        return fields
+
+    trace = RelayTrace("test/model", "chat")
+    trace.begin(str(tmp_path), "run", "scene", 0)
+    with sdk.use_scope_stack(trace._stack):
+        sdk.scope_local.register_scope_sanitize_end(trace._root, "broken", 1, broken_sanitizer)
+        if drop_start:
+            sdk.scope_local.register_scope_sanitize_start(
+                trace._root, "broken", 1, broken_sanitizer
+            )
+    calls = 0
+
+    def complete() -> AssistantMessage:
+        nonlocal calls
+        calls += 1
+        return AssistantMessage(content="", tool_calls=[])
+
+    try:
+        trace.model_call(complete, 0)
+    finally:
+        receipt = trace.end("success", None)
+    assert calls == 1
+    assert receipt["status"] == "error"
+    assert receipt["events_expected"] == 4
+    assert receipt["events_written"] == (2 if drop_start else 3)
+    assert "private-sanitizer-error" not in json.dumps(receipt)
+
+
+def test_demo_exports_inspect_run_through_relay_atif(tmp_path: Path) -> None:
+    pytest.importorskip("nemo_relay")
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/relay_agent.py",
+            "--log-dir",
+            str(tmp_path),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "incomplete" not in result.stderr
+    paths = list(tmp_path.glob("*/atif/*.json"))
+    assert len(paths) == 1
+    trajectory = json.loads(paths[0].read_text())
+    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == 14
+    assert trajectory["final_metrics"]["total_completion_tokens"] == 6
+    tools = [tool for step in trajectory["steps"] for tool in step.get("tool_calls", [])]
+    assert [tool["function_name"] for tool in tools] == ["unknown", "move_by"]
+    outcomes = [
+        item["extra"]["metadata"]["status"]
+        for step in trajectory["steps"]
+        for item in step.get("observation", {}).get("results", [])
+    ]
+    assert outcomes == ["rejected", "accepted"]
+    native = next(paths[0].parents[1].glob("inspect/*.json"))
+    log = json.loads(native.read_text())
+    receipt = log["samples"][0]["trial_metadata"][0]["relay"]
+    assert receipt["status"] == "captured"
+    assert log["results"]["metrics"] == {"success_at_end": 1.0}
+    events = [
+        json.loads(line) for line in (native.parent / receipt["path"]).read_text().splitlines()
+    ]
+    assert trajectory["extra"]["observed_events"] == events
+    assert len(events) == 10
+    timestamps = [datetime.fromisoformat(event["timestamp"]) for event in events]
+    assert all(first <= second for first, second in pairwise(timestamps))
+    assert "reach the cube" not in paths[0].read_text()
+    assert all(tool["arguments"] == {} for tool in tools)
 
 
 def test_sdk_finish_failure_does_not_repeat_tool(

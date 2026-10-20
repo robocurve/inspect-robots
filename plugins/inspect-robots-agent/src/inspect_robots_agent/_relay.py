@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, TypeVar
@@ -17,22 +19,9 @@ from ._llm import AssistantMessage, ToolCall
 from ._tools import ToolResult
 
 _T = TypeVar("_T")
+_Handle = TypeVar("_Handle", relay.LLMHandle, relay.ToolHandle)
 _LOG = logging.getLogger(__name__)
 _DRAIN_TIMEOUT_S = 1.0
-
-
-def _end_status(event: relay.Event, fields: relay.EventSanitizeFields) -> relay.EventSanitizeFields:
-    # Relay 0.10.3 overwrites manual LLM end status with OK. Correct it in the
-    # SDK's scope-local event pipeline, so all subscribers see the same status.
-    metadata = fields["metadata"]
-    if isinstance(metadata, dict) and metadata.get("status") in (
-        "error",
-        "rejected",
-        "cancelled",
-        "interrupted",
-    ):
-        return {**fields, "metadata": {**metadata, "otel.status_code": "ERROR"}}
-    return fields
 
 
 class _Writer:
@@ -45,6 +34,7 @@ class _Writer:
         self._closed = False
         self.drained = Event()
         self.error: str | None = None
+        self.events_written = 0
 
     def _failed(self, exc: Exception) -> None:
         if self.error is None:
@@ -61,6 +51,7 @@ class _Writer:
                 return
             try:
                 self._file.write(event.to_json() + "\n")
+                self.events_written += 1
             except Exception as exc:
                 self._failed(exc)
         if metadata.get("capture_terminal"):
@@ -103,6 +94,7 @@ class RelayTrace:
         self._name = ""
         self._path: str | None = None
         self._error: str | None = None
+        self._expected_events = 0
 
     def _failed(self, exc: Exception) -> None:
         # Exception messages may contain provider payloads or filesystem details.
@@ -110,12 +102,13 @@ class RelayTrace:
             self._error = type(exc).__name__
             _LOG.warning("Relay capture incomplete (%s)", self._error)
 
-    def _attempt(self, operation: Callable[[], _T]) -> _T | None:
+    @contextmanager
+    def _capture_errors(self) -> Iterator[None]:
+        """Suppress tracing failures without wrapping application execution."""
         try:
-            return operation()
+            yield
         except Exception as exc:
             self._failed(exc)
-            return None
 
     def begin(self, log_dir: str, run_id: str, scene_id: str, epoch: int) -> None:
         """Start an isolated trial; a writer failure does not stop the policy."""
@@ -123,6 +116,7 @@ class RelayTrace:
             self.end("interrupted", None)
         self._error = None
         self._writer = None
+        self._expected_events = 2  # trial start and end
         capture_id = uuid4().hex
         self._name = f"inspect-robots-{capture_id}"
         self._metadata = {
@@ -133,38 +127,35 @@ class RelayTrace:
         }
         self._path = f"relay/{_safe(run_id)}/{_safe(scene_id)}-e{epoch}-{capture_id}/events.jsonl"
 
-        def start() -> None:
+        with self._capture_errors():
             self._stack = relay.create_scope_stack()
-            assert self._path is not None
             path = Path(log_dir) / self._path
             path.parent.mkdir(parents=True, exist_ok=True)
             self._writer = _Writer(path, capture_id)
             self._finalizer = finalize(self, _abandon, self._name, self._writer)
             relay.subscribers.register(self._name, self._writer.write)
-            assert self._stack is not None
             with relay.use_scope_stack(self._stack):
                 self._root = relay.scope.push(
                     "inspect-robots.trial",
                     relay.ScopeType.Agent,
                     metadata=self._metadata,
                 )
-                relay.scope_local.register_scope_sanitize_end(
-                    self._root,
-                    "inspect-robots.status",
-                    0,
-                    _end_status,
-                )
-
-        self._attempt(start)
 
     def _observe(
         self,
         operation: Callable[[], _T],
-        start: Callable[[], Any],
-        finish: Callable[[Any, dict[str, Any], _T | None], None],
+        start: Callable[[], _Handle],
+        finish: Callable[[_Handle, dict[str, Any], _T | None], None],
         metadata: dict[str, Any],
     ) -> _T:
-        handle = self._attempt(start) if self._root is not None else None
+        handle: _Handle | None = None
+        if self._root is not None:
+            with self._capture_errors():
+                assert self._stack is not None
+                with relay.use_scope_stack(self._stack):
+                    handle = start()
+        if handle is not None:
+            self._expected_events += 2
         result: _T | None = None
         metadata["status"] = "success"
         try:
@@ -176,26 +167,30 @@ class RelayTrace:
             raise
         finally:
             if handle is not None:
-                self._attempt(lambda: finish(handle, metadata, result))
+                with self._capture_errors():
+                    assert self._stack is not None
+                    with relay.use_scope_stack(self._stack):
+                        finish(handle, metadata, result)
 
     def model_call(self, operation: Callable[[], AssistantMessage], index: int) -> AssistantMessage:
         """Trace one logical call, leaving provider retries in native wire capture."""
         metadata = {**self._metadata, "model_call_index": index, "wire": self._wire}
 
         def start() -> relay.LLMHandle:
-            assert self._stack is not None
-            with relay.use_scope_stack(self._stack):
-                return relay.llm.call(
-                    "provider.complete",
-                    relay.LLMRequest({}, {}),
-                    handle=self._root,
-                    model_name=self._model,
-                    metadata=metadata,
-                )
+            return relay.llm.call(
+                "provider.complete",
+                relay.LLMRequest({}, {}),
+                handle=self._root,
+                model_name=self._model,
+                metadata=metadata,
+            )
 
         def finish(
             handle: relay.LLMHandle, meta: dict[str, Any], result: AssistantMessage | None
         ) -> None:
+            # Capture completion before queued publication, so the model end
+            # cannot move past the next tool call when subscribers are slow.
+            ended_at = datetime.now(timezone.utc)
             usage = result.usage if result is not None else None
             normalized = {
                 target: usage[source]
@@ -208,9 +203,9 @@ class RelayTrace:
                 if usage is not None and source in usage
             }
             annotation = relay.AnnotatedLLMResponse(model=self._model, usage=normalized or None)
-            assert self._stack is not None
-            with relay.use_scope_stack(self._stack):
-                relay.llm.call_end(handle, {}, metadata=meta, annotated_response=annotation)
+            relay.llm.call_end(
+                handle, {}, metadata=meta, annotated_response=annotation, timestamp=ended_at
+            )
 
         return self._observe(operation, start, finish, metadata)
 
@@ -229,15 +224,13 @@ class RelayTrace:
         }
 
         def start() -> relay.ToolHandle:
-            assert self._stack is not None
-            with relay.use_scope_stack(self._stack):
-                return relay.tools.call(
-                    call.name,
-                    {},
-                    handle=self._root,
-                    tool_call_id=call.id,
-                    metadata=metadata,
-                )
+            return relay.tools.call(
+                call.name,
+                {},
+                handle=self._root,
+                tool_call_id=call.id,
+                metadata=metadata,
+            )
 
         def finish(
             handle: relay.ToolHandle, meta: dict[str, Any], result: ToolResult | None
@@ -246,40 +239,40 @@ class RelayTrace:
                 meta["status"] = "rejected" if result.error is not None else "accepted"
                 meta["otel.status_code"] = "ERROR" if result.error is not None else "OK"
                 meta["action_chunk_returned"] = result.chunk is not None
-            assert self._stack is not None
-            with relay.use_scope_stack(self._stack):
-                relay.tools.call_end(handle, relay.ToolExecutionResult({}), metadata=meta)
+            relay.tools.call_end(handle, relay.ToolExecutionResult({}), metadata=meta)
 
         return self._observe(operation, start, finish, metadata)
 
     def end(self, status: str, termination_reason: str | None) -> dict[str, Any]:
         """Close and drain this trial only, then return a portable capture receipt."""
 
-        def finish() -> None:
-            assert self._stack is not None
-            with relay.use_scope_stack(self._stack):
-                assert self._root is not None
-                relay.scope.pop(
-                    self._root,
-                    metadata={
-                        **self._metadata,
-                        "status": status,
-                        "otel.status_code": "OK" if status == "success" else "ERROR",
-                        "termination_reason": termination_reason,
-                        "capture_terminal": True,
-                    },
-                )
-
-        if self._root is not None:
-            self._attempt(finish)
-        elif self._writer is not None:
-            Thread(target=self._writer.close, daemon=True, name="relay-capture-close").start()
+        with self._capture_errors():
+            if self._root is not None:
+                assert self._stack is not None
+                with relay.use_scope_stack(self._stack):
+                    relay.scope.pop(
+                        self._root,
+                        metadata={
+                            **self._metadata,
+                            "status": status,
+                            "otel.status_code": "OK" if status == "success" else "ERROR",
+                            "termination_reason": termination_reason,
+                            "capture_terminal": True,
+                        },
+                    )
+            elif self._writer is not None:
+                Thread(target=self._writer.close, daemon=True, name="relay-capture-close").start()
         if self._writer is not None:
             writer = self._writer
             if not writer.drained.wait(_DRAIN_TIMEOUT_S):
                 self._failed(TimeoutError())
-            self._attempt(lambda: _abandon(self._name, writer))
+            with self._capture_errors():
+                _abandon(self._name, writer)
             self._error = self._error or writer.error
+            # SDK sanitizers can clear correlation metadata asynchronously.
+            # A terminal event alone does not establish that every span arrived.
+            if writer.events_written != self._expected_events:
+                self._failed(RuntimeError("Relay event count mismatch"))
         if self._finalizer is not None:
             self._finalizer.detach()
             self._finalizer = None
@@ -289,6 +282,10 @@ class RelayTrace:
             "status": "error" if self._error else "captured",
             "path": self._path,
         }
+        if self._writer is not None:
+            receipt.update(
+                events_expected=self._expected_events, events_written=self._writer.events_written
+            )
         if self._error:
             receipt["error_type"] = self._error
         return receipt

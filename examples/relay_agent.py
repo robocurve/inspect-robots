@@ -1,33 +1,32 @@
-"""Run a no-key Relay demonstration with a scripted provider and the CubePick world.
+"""Export one scripted CubePick trial through Relay's ATIF consumer.
 
 Install with ``uv sync --all-packages --extra dev --extra relay --python 3.11``.
-Run with ``uv run --no-sync python examples/relay_agent.py --repeats 10``.
-This measures instrumentation behavior, not model quality or hardware safety.
+Run with ``uv run --no-sync python examples/relay_agent.py``.
+No model API key or robot hardware is needed.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
-import statistics
-import time
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import httpx
 import numpy as np
 from inspect_robots_agent import LLMAgentPolicy
 
-from inspect_robots import eval
+from inspect_robots import EvalLog, eval
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
 
 
-def run(path: Path, enabled: bool) -> tuple[Any, int, float]:
+def run(path: Path) -> EvalLog:
     """Reject one unknown tool, then reach the cube from the observation's state."""
     calls = 0
 
@@ -72,7 +71,7 @@ def run(path: Path, enabled: bool) -> tuple[Any, int, float]:
         base_url="http://demo.invalid/v1",
         env={},
         transport=httpx.MockTransport(respond),
-        relay=enabled,
+        relay=True,
     )
     task = Task(
         name="relay-recovery",
@@ -86,52 +85,56 @@ def run(path: Path, enabled: bool) -> tuple[Any, int, float]:
         scorer=success_at_end(),
         max_steps=20,
     )
-    start = time.perf_counter()
     (log,) = eval(task, policy, CubePickEmbodiment(), seed=0, log_dir=str(path))
-    return log, calls, time.perf_counter() - start
+    return log
+
+
+async def export_atif(path: Path) -> None:
+    """Consume a real Inspect event stream with Relay's local ATIF exporter."""
+    from nemo_relay import observability, plugin
+
+    config = plugin.PluginConfig(
+        components=[
+            observability.ComponentSpec(
+                observability.ObservabilityConfig(
+                    atif=observability.AtifConfig(
+                        enabled=True,
+                        agent_name="inspect-robots-agent",
+                        agent_version=version("inspect-robots-agent"),
+                        model_name="scripted-demo",
+                        output_directory=str(path / "atif"),
+                    ),
+                ),
+            ),
+        ],
+    )
+    async with plugin.activate(config):
+        # Keep the plugin's event loop available while the synchronous eval
+        # waits for its local capture subscriber to drain.
+        log = await asyncio.to_thread(run, path / "inspect")
+        assert log.samples[0].trial_metadata[0]["relay"]["status"] == "captured"
+    # Closing the plugin flushes the consumer before we inspect its output.
+    (trajectory_path,) = (path / "atif").glob("*.json")
+    trajectory = json.loads(trajectory_path.read_text())
+    outcomes = [
+        (result["extra"]["event_name"], result["extra"]["metadata"]["status"])
+        for step in trajectory["steps"]
+        for result in step.get("observation", {}).get("results", [])
+    ]
+    assert outcomes == [("unknown", "rejected"), ("move_by", "accepted")]
+    assert log.results.metrics == {"success_at_end": 1.0}
+    print(f"Relay ATIF consumer: {trajectory_path}")
+    print(f"  dispatch outcomes: {outcomes}")
+    print(f"  token metrics: {trajectory['final_metrics']}")
+    print(f"  independent Inspect score: {log.results.metrics}")
 
 
 def main() -> None:
-    """Compare paired trials and print the last trace's tool outcomes."""
+    """Write native Inspect evidence and an ATIF export in a new run directory."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--log-dir", type=Path, default=Path("logs/relay-demo"))
     args = parser.parse_args()
-    if args.repeats < 1:
-        parser.error("--repeats must be positive")
-    base = args.log_dir / uuid4().hex
-    timings: dict[bool, list[float]] = {False: [], True: []}
-    # Warm both paths, then alternate order to reduce order-dependent bias.
-    for enabled in (False, True):
-        run(base / f"warmup-{enabled}", enabled)
-    for i in range(args.repeats):
-        trials = {}
-        for enabled in (False, True) if i % 2 == 0 else (True, False):
-            path = base / f"{i}-{enabled}"
-            log, calls, elapsed = run(path, enabled)
-            timings[enabled].append(elapsed)
-            trials[enabled] = (log, calls)
-        baseline, baseline_calls = trials[False]
-        traced, traced_calls = trials[True]
-        assert baseline_calls == traced_calls == 2
-        assert baseline.results.metrics == traced.results.metrics
-        assert baseline.samples[0].policy_transcripts == traced.samples[0].policy_transcripts
-        assert traced.samples[0].termination_reasons == ("success",)
-        receipt = traced.samples[0].trial_metadata[0]["relay"]
-        assert receipt["status"] == "captured"
-    trace_path = base / f"{args.repeats - 1}-True" / receipt["path"]
-    rows = [json.loads(line) for line in trace_path.read_text().splitlines()]
-    print(f"Matched {args.repeats} pairs: calls, transcripts, scores; cube reached.")
-    print(f"Scores: {traced.results.metrics}")
-    print(f"Trace: {trace_path}")
-    for row in rows:
-        if row["category"] == "tool" and row["scope_category"] == "end":
-            print(f"  {row['name']}: {row['metadata']['status']}")
-    for enabled, values in timings.items():
-        print(
-            f"Relay {'on' if enabled else 'off'} median: {statistics.median(values) * 1000:.2f} ms"
-        )
-    print("Local scripted-provider timings include eval/log I/O and trace finalization.")
+    asyncio.run(export_atif(args.log_dir / uuid4().hex))
 
 
 if __name__ == "__main__":

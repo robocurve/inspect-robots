@@ -381,53 +381,6 @@ integer token counters returned by the wire. The Messages wire
 includes input, output, cache-creation, and cache-read tokens; other wires
 currently record `llm_calls` only. Trials with no LLM calls omit the key.
 
-### Optional Relay traces
-
-Install `inspect-robots-agent[relay]` on Python 3.11+ and pass `-P relay=true`
-(or `LLMAgentPolicy(..., relay=True)`) to emit
-[NVIDIA NeMo Relay](https://github.com/NVIDIA/NeMo-Relay) events. The default
-does not import Relay, and the base plugin still supports Python 3.10.
-
-| Trace content | Interpretation |
-| --- | --- |
-| Trial scope | Run ID, scene ID, epoch, execution status and termination reason |
-| Model scopes | One logical call, including any provider retries; reported input/output usage when available |
-| Tool scopes | Actual dispatches with tool-call ID and model-call index; accepted, rejected or raised an error |
-| Capture receipt | `trial_metadata[epoch]["relay"]` links the ATOF JSONL and reports `captured` or `error` |
-
-Files live under `relay/<run>/<trial>/events.jsonl` inside the log directory.
-Relay captures metadata only: prompts, images, raw responses, tool arguments,
-and exception messages are omitted. Identifiers and tool names remain visible.
-Native wire capture remains enabled independently and still contains payloads.
-
-Use the trace to follow a rejected tool through recovery and correlate model
-and tool time across Relay-instrumented agents. Keep native wire capture for
-individual HTTP attempts and retry details. Tool acceptance means dispatch
-validation succeeded; physical motion, approvers and task success remain the
-responsibility of the rollout and scorer. Ignored tool requests have no dispatch
-span. Budget-forced stops are marked `source=policy` with no model-call index.
-
-The adapter uses manual Relay lifecycle APIs, so it does not invoke Relay
-execution interceptors. Registered Relay subscribers can consume these events;
-this option configures only the local ATOF writer. Capture failures warn and
-produce an error receipt without re-running model or tool calls. Finalization
-waits up to one second for this trial's terminal event; an incomplete capture
-is reported as an error, with file cleanup deferred if I/O is still blocked.
-Use the receipt before relying on a trace. If scoring is interrupted, the core
-may skip the trial-end hook and omit the receipt; discarding the policy removes
-its subscriber and schedules file cleanup. Such a capture is incomplete.
-
-Run a no-key, no-hardware recovery demonstration from the repository root:
-
-```bash
-uv sync --locked --all-packages --extra dev --extra relay --python 3.11
-uv run --no-sync python examples/relay_agent.py --repeats 10
-```
-
-This runs the real policy and evaluator against a scripted provider and
-CubePick, compares calls/transcripts/scores with tracing disabled, and reports
-local timing. It tests instrumentation, not a real model's ability to recover.
-
 Like `temperature`, reasoning effort is omitted when `-P effort=` is unset, so
 the provider's own default applies. Explicit named levels (`minimal`, `low`,
 `medium`, `high`, `xhigh`, and `max`) pass through unchanged. A bare
@@ -456,6 +409,53 @@ Named levels stay the portable choice: every wire and provider accepts some of
 them, while fractional effort is accepted today only by Tinker's
 OpenAI-compatible endpoint (see below). A server that takes levels only rejects
 a fraction with a guided 4xx naming the wire that does accept one.
+
+## Optional Relay traces
+
+> [!NOTE]
+> This branch needs a released SDK containing
+> [NeMo Relay #1405](https://github.com/NVIDIA/NeMo-Relay/pull/1405).
+> The fix is merged upstream, but the current 0.10.3 dependency still
+> misreports failed manual LLM calls as successful. Update the pin and
+> lockfile before merging this integration.
+
+Install `inspect-robots-agent[relay]` on Python 3.11+ and pass `-P relay=true`
+(or `LLMAgentPolicy(..., relay=True)`) to emit
+[NVIDIA NeMo Relay](https://github.com/NVIDIA/NeMo-Relay) events. Relay is not
+imported by default; the base plugin still supports Python 3.10.
+
+| Boundary | Trace content |
+| --- | --- |
+| Trial | Run, scene, epoch, execution status and termination reason |
+| Model call | Logical call including retries; reported token usage when available |
+| Tool dispatch | Tool-call ID, model-call index and accepted/rejected/error outcome |
+
+Prompts, images, raw responses, tool arguments and exception messages are
+omitted. Identifiers and tool names remain visible. Native Inspect logs retain
+payloads and task scores. Tool acceptance precedes motion playout; it does not
+establish task success. Ignored tool requests have no dispatch span, and
+budget-forced stops carry `source=policy` without a model-call index.
+
+ATOF files live under `relay/<run>/<trial>/events.jsonl` in the log directory.
+Check `trial_metadata[epoch]["relay"]` for the path, expected/written event counts
+and `captured` or `error` status. Capture failures warn without repeating model
+or tool execution. Finalization waits up to one second, then defers blocked
+file cleanup. Interrupted scoring can omit the receipt; discarding the policy
+releases its subscriber. A missing or error receipt means incomplete capture.
+
+Run one scripted CubePick trial through Relay's built-in ATIF exporter:
+
+```bash
+uv sync --locked --all-packages --extra dev --extra relay --python 3.11
+uv run --no-sync python examples/relay_agent.py
+```
+
+The example needs no API key or hardware. It writes `atif/` and `inspect/`
+under a new `logs/relay-demo/<run>/` directory. In ATIF, tool result
+`extra.metadata.status` holds dispatch acceptance; generic invocation status
+means lifecycle completion, and `total_steps` counts conversation records.
+Existing Relay plugin settings also apply. This integration covers the LLM
+policy only and uses manual lifecycle APIs without execution interceptors.
 
 ## Depth rendering
 
