@@ -9,7 +9,8 @@ the latest released version on a best-effort basis.
 
 Please **do not** open a public issue for security vulnerabilities. Instead,
 report them privately via [GitHub's private vulnerability reporting](https://github.com/robocurve/inspect-robots/security/advisories/new)
-("Report a vulnerability" under the repository's Security tab).
+("Report a vulnerability" under the repository's Security tab), or email
+[security@robocurve.org](mailto:security@robocurve.org).
 
 Include a description, reproduction steps, and the potential impact. We will
 acknowledge your report, work with you on a fix, and credit you (if you wish)
