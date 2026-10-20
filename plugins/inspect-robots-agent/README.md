@@ -412,12 +412,9 @@ a fraction with a guided 4xx naming the wire that does accept one.
 
 ## Optional Relay traces
 
-> [!NOTE]
-> This branch needs a released SDK containing
-> [NeMo Relay #1405](https://github.com/NVIDIA/NeMo-Relay/pull/1405).
-> The fix is merged upstream, but the current 0.10.3 dependency still
-> misreports failed manual LLM calls as successful. Update the pin and
-> lockfile before merging this integration.
+Relay users can consume Inspect LLM-agent runs with existing Relay exporters,
+including ATIF, without a separate Inspect-log converter. Native Inspect logs
+retain the full transcript and independent task scores.
 
 Install `inspect-robots-agent[relay]` on Python 3.11+ and pass `-P relay=true`
 (or `LLMAgentPolicy(..., relay=True)`) to emit

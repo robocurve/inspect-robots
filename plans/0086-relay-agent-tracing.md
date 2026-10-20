@@ -1,14 +1,8 @@
 # Optional Relay tracing for the LLM agent
 
 Let Relay users consume Inspect LLM-policy runs through existing Relay tools.
+The ATIF example demonstrates this without a separate Inspect-log converter.
 Keep the integration in the agent plugin and leave core interfaces unchanged.
-
-Status: failed-call reporting is fixed upstream in
-[NeMo Relay #1405](https://github.com/NVIDIA/NeMo-Relay/pull/1405).
-The integration can be reviewed now. Wait for a published release containing
-that fix, then update the optional dependency and lockfile before merging.
-The current 0.10.3 pin still fails the provider-error regression.
-No local event-rewriting workaround is used.
 
 | Decision | Contract |
 | --- | --- |
