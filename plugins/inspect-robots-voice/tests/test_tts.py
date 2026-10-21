@@ -42,7 +42,9 @@ def test_missing_explicit_path_names_the_path(
     missing = tmp_path / "missing"
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
-    with pytest.raises(FileNotFoundError, match=str(missing)):
+    import re
+
+    with pytest.raises(FileNotFoundError, match=re.escape(str(missing))):
         resolve_model_files(
             str(missing) if kind == "model" else str(present),
             str(missing) if kind == "voices" else str(present),
