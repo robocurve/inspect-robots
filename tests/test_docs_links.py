@@ -56,7 +56,12 @@ def prose_lines(text: str) -> list[str]:
 def slug(heading: str) -> str:
     """GitHub's anchor for a heading (before duplicate suffixes)."""
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", heading)  # links -> text
-    text = re.sub(r"<[^>]+>", "", text).lower()
+    # HTML tags are dropped, but text inside code spans is kept verbatim.
+    pieces = re.split(r"(`+[^`]*`+)", text)
+    text = "".join(
+        piece.strip("`") if piece.startswith("`") else re.sub(r"<[^>]+>", "", piece)
+        for piece in pieces
+    ).lower()
     text = re.sub(r"[^\w\- ]", "", text)
     return text.replace(" ", "-")
 
@@ -83,31 +88,34 @@ def defines(source: Path, name: str) -> bool:
 def page_problems(page: Path, root: Path = ROOT) -> list[str]:
     problems = []
     rel = page.relative_to(root)
-    for number, raw in enumerate(prose_lines(page.read_text(encoding="utf-8")), 1):
-        where = f"{rel}:{number}"
+    lines = prose_lines(page.read_text(encoding="utf-8"))
+    for number, raw in enumerate(lines, 1):
         if REF_DEFINITION.match(raw):
-            problems.append(f"{where}: reference-style link definition; use an inline link")
-        spans = [m.span() for m in INLINE_CODE.finditer(raw)]
+            problems.append(f"{rel}:{number}: reference-style link definition; use an inline link")
         line = INLINE_CODE.sub(lambda m: "x" * len(m.group(0)), raw)
         for needle, why in FORBIDDEN.items():
             if needle in line:
-                problems.append(f"{where}: {why}")
-        for match in LINK.finditer(raw):
-            if any(start <= match.start() < end for start, end in spans):
-                continue  # the link syntax is itself inside inline code
-            text, target = match.group(1), match.group(2)
-            if target.startswith(("http://", "https://", "mailto:")):
-                continue
-            path_part, _, fragment = target.partition("#")
-            resolved = (page.parent / path_part).resolve() if path_part else page
-            if not resolved.exists():
-                problems.append(f"{where}: {target} does not exist")
-                continue
-            if fragment and resolved.suffix == ".md" and fragment not in anchors(resolved):
-                problems.append(f"{where}: no heading for #{fragment} in {path_part or rel.name}")
-            symbol = SYMBOL.match(text)
-            if symbol and resolved.suffix == ".py" and not defines(resolved, symbol.group(1)):
-                problems.append(f"{where}: {symbol.group(1)} is not defined in {path_part}")
+                problems.append(f"{rel}:{number}: {why}")
+    # Links can wrap across lines, so match them over the whole (fence-blanked) page.
+    text = "\n".join(lines)
+    spans = [m.span() for m in INLINE_CODE.finditer(text)]
+    for match in LINK.finditer(text):
+        if any(start <= match.start() < end for start, end in spans):
+            continue  # the link syntax is itself inside inline code
+        where = f"{rel}:{text.count(chr(10), 0, match.start()) + 1}"
+        label, target = match.group(1), match.group(2)
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        path_part, _, fragment = target.partition("#")
+        resolved = (page.parent / path_part).resolve() if path_part else page
+        if not resolved.is_relative_to(root.resolve()) or not resolved.exists():
+            problems.append(f"{where}: {target} does not exist in the repository")
+            continue
+        if fragment and resolved.suffix == ".md" and fragment not in anchors(resolved):
+            problems.append(f"{where}: no heading for #{fragment} in {path_part or rel.name}")
+        symbol = SYMBOL.match(label)
+        if symbol and resolved.suffix == ".py" and not defines(resolved, symbol.group(1)):
+            problems.append(f"{where}: {symbol.group(1)} is not defined in {path_part}")
     return problems
 
 
@@ -126,15 +134,21 @@ def test_repo_urls_name_existing_paths(page: Path) -> None:
 
 
 def test_checker_catches_broken_links(tmp_path: Path) -> None:
-    (tmp_path / "other.md").write_text("# Real heading\n", encoding="utf-8")
-    (tmp_path / "mod.py").write_text("class Real:\n    pass\n", encoding="utf-8")
-    page = tmp_path / "page.md"
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "outside.md").write_text("# Exists, but not in the repo\n", encoding="utf-8")
+    (root / "other.md").write_text("# Real heading\n", encoding="utf-8")
+    (root / "mod.py").write_text("class Real:\n    pass\n", encoding="utf-8")
+    page = root / "page.md"
     page.write_text(
         "\n".join(
             [
                 "# Page",
                 "[ok](other.md#real-heading) [ok](#page) [`Real`](mod.py)",
                 "[gone](missing.md)",
+                "[wrapped across",
+                "lines](missing-too.md)",
+                "[outside](../outside.md)",
                 "[bad anchor](other.md#nope)",
                 "[`Fake`](mod.py)",
                 "[api](/api/#inspect_robots.x)",
@@ -146,19 +160,26 @@ def test_checker_catches_broken_links(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    problems = page_problems(page, root=tmp_path)
+    problems = page_problems(page, root=root)
     assert [p.split(": ", 1)[1] for p in problems] == [
-        "missing.md does not exist",
+        "site-only API link",
+        "missing.md does not exist in the repository",
+        "missing-too.md does not exist in the repository",
+        "../outside.md does not exist in the repository",
         "no heading for #nope in other.md",
         "Fake is not defined in mod.py",
-        "site-only API link",
-        "/api/#inspect_robots.x does not exist",
+        "/api/#inspect_robots.x does not exist in the repository",
     ]
 
 
 def test_slug_matches_github() -> None:
     assert slug("Speaking policy notes (`--speak`)") == "speaking-policy-notes---speak"
     assert slug("Several rigs on one host") == "several-rigs-on-one-host"
+    assert (
+        slug('Zero-config: `inspect-robots "<instruction>"`')
+        == "zero-config-inspect-robots-instruction"
+    )
+    assert slug("Live <em>view</em>") == "live-view"
 
 
 def test_symbol_check_sees_the_api_links() -> None:
