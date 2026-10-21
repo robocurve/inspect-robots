@@ -275,14 +275,15 @@ class DeltaLimitApprover:
         if self._absolute:
             reference = store.get(_LAST_APPROVED_KEY)
             if reference is None:
-                # Copy: np.asarray aliases a float64 action, and a policy that
-                # reuses its output buffer would otherwise move the reference
-                # along with its next request.
-                approved = data.copy()
+                approved = data
             else:
                 ref = np.asarray(reference, dtype=np.float64)
                 approved = np.clip(data, ref - self._delta, ref + self._delta)
-            store[_LAST_APPROVED_KEY] = approved
+            # Store a copy, like rewind_reference: `approved` is either the
+            # policy's own array (np.asarray aliases a float64 action, and a
+            # policy may reuse its output buffer) or the array handed on in the
+            # returned action, which a later approver could mutate in place.
+            store[_LAST_APPROVED_KEY] = approved.copy()
         else:
             approved = np.clip(data, self._low, self._high)
         if np.array_equal(approved, data):
