@@ -78,12 +78,11 @@ inspect-robots run --task kitchenbench/clear-table --policy agent \
     --embodiment yam_arms
 ```
 
-:::note
-The interactions wire accepts only `minimal`, `low`, `medium`, and `high`. On
-Anthropic's own endpoint keep effort at `high` or below; `xhigh` and `max`
-need a larger token cap plus streaming, which the messages wire does not
-implement yet.
-:::
+> [!NOTE]
+> The interactions wire accepts only `minimal`, `low`, `medium`, and `high`. On
+> Anthropic's own endpoint keep effort at `high` or below; `xhigh` and `max`
+> need a larger token cap plus streaming, which the messages wire does not
+> implement yet.
 
 Effort is a per-owner arg, so task generation and grading scale
 independently of the policy: `-A effort=` for `--auto-task` and `-G effort=`

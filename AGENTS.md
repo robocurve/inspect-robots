@@ -69,12 +69,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   `CHANGELOG.md`, move its entry into a fragment.
 - Public API is fenced by `inspect_robots.__all__` and guarded by
   `tests/test_api_snapshot.py` — update both together.
-- Documentation source lives in `docs/`, and the Docusaurus site lives in
-  `website/`. Generate the ignored API page first with `uv run python
-  scripts/gen_api_docs.py`, then run `npm ci` and `npm run build` from
-  `website/` (`npm run start` previews it). A fresh checkout has no
-  `docs/api/index.md`; the npm pre-scripts fail with the generation command
-  instead of a sidebar error.
+- Guides live in `docs/` as plain GitHub Markdown (index: `docs/README.md`);
+  there is no docs site or build. Link API symbols to their defining
+  `src/` file; `tests/test_docs_links.py` checks links, anchors and symbols.
 
 ## Out of scope (separate repos / plugins)
 

@@ -56,7 +56,7 @@ Treat all of these as attacker-controlled:
 
 ## Less important / out of scope
 
-- `website/` and `docs/` (the static documentation site).
+- `docs/` (Markdown guides only; there is no documentation site).
 - `plugins/inspect-robots-isaacsim` and `plugins/inspect-robots-voice` (local
   simulator and local microphone/speaker); report only clear remote-input issues.
 - Anything that requires the attacker to already control the user's Python

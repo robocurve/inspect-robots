@@ -1,6 +1,6 @@
 # Command-line interface
 
-The `inspect_robots` CLI wraps the registry and [`eval`](/api/#inspect_robots.eval.eval).
+The `inspect_robots` CLI wraps the registry and [`eval`](../../src/inspect_robots/eval.py).
 The command is installed as `inspect-robots`, with `inspect-robot` as an alias
 for the common typo; both run the same CLI.
 
@@ -483,7 +483,7 @@ evaluation use the same value so the initial peek matches epoch zero.
 
 Run several registered tasks against one resolved policy/embodiment pair in a
 single invocation — the CLI counterpart of
-[`eval_set`](/api/#inspect_robots.eval.eval_set). Task names are matched exactly, or
+[`eval_set`](../../src/inspect_robots/eval.py). Task names are matched exactly, or
 by shell-quoted `fnmatch` glob (entry-point discovery namespaces tasks as
 `<benchmark>/<key>`, so a benchmark name is a ready-made prefix):
 
@@ -578,7 +578,7 @@ inspect-robots doctor --embodiment my_arms
 
 ## `inspect-robots inspect`
 
-Print a summary of a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog):
+Print a summary of a saved [`EvalLog`](../../src/inspect_robots/log.py):
 
 ```bash
 inspect-robots inspect logs/cubepick-reach_xxxx.json
@@ -615,7 +615,7 @@ inspect-robots inspect logs/cubepick-reach_xxxx.json --transcript
 
 ## `inspect-robots summarize`
 
-Distill a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) into a markdown
+Distill a saved [`EvalLog`](../../src/inspect_robots/log.py) into a markdown
 learnings file:
 
 ```bash
@@ -669,7 +669,7 @@ details and limits live in the plugin READMEs linked above.
 
 ## `inspect-robots view`
 
-Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
+Render a saved [`EvalLog`](../../src/inspect_robots/log.py) as a self-contained HTML
 report:
 
 ```bash

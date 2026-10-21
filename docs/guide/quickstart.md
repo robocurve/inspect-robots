@@ -19,11 +19,10 @@ Any virtual environment workflow works. Activate it once (`source
 .venv/bin/activate`; `.venv\Scripts\activate` on Windows) and call
 `inspect-robots` directly.
 
-:::note
-Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`. Inside a
-uv project, `uv run` re-syncs to the lockfile and can uninstall what `uv pip
-install` just added.
-:::
+> [!NOTE]
+> Invoke the CLI as plain `inspect-robots`, not `uv run inspect-robots`. Inside a
+> uv project, `uv run` re-syncs to the lockfile and can uninstall what `uv pip
+> install` just added.
 
 ## Run your first evaluation
 
@@ -49,7 +48,7 @@ print(log.status)                    # "success"
 print(log.results.metrics)           # {"success_at_end": 1.0}
 ```
 
-`eval()` returns a list of [`EvalLog`](/api/#inspect_robots.log.EvalLog) (one per task, mirroring
+`eval()` returns a list of [`EvalLog`](../../src/inspect_robots/log.py) (one per task, mirroring
 Inspect AI). Each log is immutable, schema-versioned, and written to `log_dir`.
 
 ## Use registry names

@@ -44,12 +44,10 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.5",
     "towncrier>=24.7",
-    "inspect-robots[docs]",
     # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.10)
     # rejects; pin the 2.4.x line for a deterministic dev/CI gate (runtime is free).
     "numpy<2.5",
 ]
-docs = ["griffe>=1.0"]
 all = ["inspect-robots[rerun]"]
 
 [project.scripts]
@@ -59,7 +57,7 @@ inspect-robot = "inspect_robots.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots"
-Documentation = "https://docs.inspectrobots.org/"
+Documentation = "https://github.com/robocurve/inspect-robots/tree/main/docs"
 Repository = "https://github.com/robocurve/inspect-robots"
 Issues = "https://github.com/robocurve/inspect-robots/issues"
 
@@ -107,7 +105,7 @@ python_version = "3.10"
 strict = true
 warn_unreachable = true
 disallow_untyped_defs = true
-files = ["src/inspect_robots", "tests", "scripts/gen_api_docs.py"]
+files = ["src/inspect_robots", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["rerun.*"]
