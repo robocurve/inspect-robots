@@ -12,7 +12,7 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -232,7 +232,7 @@ def _retry_delay(
                 try:
                     retry_at = parsedate_to_datetime(retry_after)
                     if retry_at.tzinfo is None:
-                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                        retry_at = retry_at.replace(tzinfo=UTC)
                     delay = max(0.0, retry_at.timestamp() - time.time())
                 except (IndexError, OverflowError, TypeError, ValueError):
                     pass

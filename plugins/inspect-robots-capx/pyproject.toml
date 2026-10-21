@@ -7,7 +7,7 @@ name = "inspect-robots-capx"
 version = "0.3.1"
 description = "Code-as-policy manipulation for Inspect Robots using CaP-X perception and IK servers."
 dynamic = ["readme"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 keywords = ["robotics", "llm", "code-as-policy", "capx", "inspect_robots", "evaluation"]

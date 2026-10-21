@@ -18,7 +18,7 @@ import uuid
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any, cast
@@ -129,7 +129,7 @@ def _grader_identity(grader: Grader | None) -> tuple[str | None, dict[str, Any]]
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _write_action_log(
@@ -616,7 +616,7 @@ def _run_eval(
     # One subdirectory per run: trial ids repeat across runs (scene-epoch),
     # so a shared directory would silently overwrite the previous run's
     # frames or transcripts.
-    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+    run_stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
 
     frame_store: FrameStore | None = None
     if store_frames:

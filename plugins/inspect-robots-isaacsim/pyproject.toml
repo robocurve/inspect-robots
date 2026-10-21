@@ -7,7 +7,7 @@ name = "inspect-robots-isaacsim"
 version = "0.1.1"
 description = "IsaacSim / Isaac Lab embodiment adapter for Inspect Robots — run Inspect Robots evals against an Isaac Lab simulation."
 dynamic = ["readme"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 keywords = ["robotics", "isaac-sim", "isaac-lab", "inspect_robots", "vla", "evaluation"]

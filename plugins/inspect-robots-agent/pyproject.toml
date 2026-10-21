@@ -7,7 +7,7 @@ name = "inspect-robots-agent"
 version = "0.29.0"
 description = "LLM agent policy for Inspect Robots: frontier LLMs (Claude, GPT, anything OpenAI-compatible) drive any registered embodiment through tool calls."
 dynamic = ["readme"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 keywords = ["robotics", "llm", "agent", "vla", "inspect_robots", "evaluation"]

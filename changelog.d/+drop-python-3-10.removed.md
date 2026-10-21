@@ -1,0 +1,1 @@
+**Core and plugins:** dropped Python 3.10, which reaches end of life in October 2026; `inspect-robots` and the in-tree plugins now require Python 3.11 or later. On 3.10, pip and uv keep resolving to the last release that supports it. This also lets the lockfile move fully to the patched Pillow 13.

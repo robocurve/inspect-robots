@@ -56,8 +56,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   (`--cov-fail-under=100`). Pre-commit runs ruff+mypy on commit and the coverage
   gate on push (`.pre-commit-config.yaml`). CI runs all gates on Linux+macOS /
   py3.11-3.12 as **blocking, required PR checks** (coverage below 100% fails the
-  build), plus a **non-blocking** `test-extra` tier for py3.10/py3.13, Windows,
-  and the NumPy floor — together covering the py3.10–3.13 range pyproject claims.
+  build), plus a **non-blocking** `test-extra` tier for py3.13, Windows,
+  and the NumPy floor (on py3.11) — together covering the py3.11–3.13 range
+  pyproject claims.
 - Ruff's D1 rules require a docstring on every public module, class, and function.
   State the contract or invariant the caller needs; do not restate the symbol name.
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the

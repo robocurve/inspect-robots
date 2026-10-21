@@ -53,7 +53,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2279,7 +2279,7 @@ def _index_entry(log: EvalLog, log_path: Path, page: str) -> IndexEntry:
 def _unreadable_index_entry(log_path: Path, error: Exception) -> IndexEntry:
     """Build an error row for a file that is not a readable EvalLog."""
     try:
-        created = datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat()
+        created = datetime.fromtimestamp(log_path.stat().st_mtime, tz=UTC).isoformat()
     except OSError:
         created = ""
     return IndexEntry(

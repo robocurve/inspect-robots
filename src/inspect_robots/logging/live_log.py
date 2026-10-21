@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any
@@ -307,7 +307,7 @@ class LiveLogSink:
             return
         if self._spec is None or self.path is None:
             raise RuntimeError("live sink has not started an evaluation")
-        updated_at = datetime.now(timezone.utc).isoformat()
+        updated_at = datetime.now(UTC).isoformat()
         duration = max(0.0, now - self._started_clock)
         live_log = EvalLog(
             version=EvalLog.SCHEMA_VERSION,

@@ -3,8 +3,7 @@
 towncrier silently drops a fragment whose type is misspelled, so a typo would
 lose a release-note entry without any error. This checks every fragment name
 and keeps the type list in step with ``[tool.towncrier]`` in pyproject.toml.
-The test reads pyproject.toml as text: tomllib is 3.11+ and the repo supports
-3.10.
+The test reads pyproject.toml as text.
 """
 
 from __future__ import annotations
