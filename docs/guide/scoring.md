@@ -1,8 +1,8 @@
 # Scoring
 
-A [`Scorer`](/api/#inspect_robots.scorer.Scorer) maps a recorded
-[`TrialRecord`](/api/#inspect_robots.rollout.TrialRecord) (plus the scene's
-[`Target`](/api/#inspect_robots.scene.Target)) to a [`Score`](/api/#inspect_robots.scorer.Score). Scorers
+A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded
+[`TrialRecord`](../../src/inspect_robots/rollout.py) (plus the scene's
+[`Target`](../../src/inspect_robots/scene.py)) to a [`Score`](../../src/inspect_robots/scorer.py). Scorers
 read the *recorded* trajectory (never a live environment), so scoring is
 reproducible from a saved log.
 
@@ -35,7 +35,7 @@ class SmoothMotion:
         return Score(value=-sum(deltas), explanation="negative total command magnitude")
 ```
 
-Register it with [`scorer`](/api/#inspect_robots.registry.scorer) to resolve it by name.
+Register it with [`scorer`](../../src/inspect_robots/registry.py) to resolve it by name.
 
 A scorer with no verdict for a trial can abstain by returning
 `Score(value=None)`. The log records the epoch as `null`, which is distinct
@@ -55,7 +55,7 @@ error (see "Automated grading" in the CLI guide).
 When a `Task` runs `epochs > 1`, an epoch reducer collapses the per-epoch
 scores of a scene before metrics aggregate across scenes. Reducers are namespaced
 separately from metrics and are selected by name on
-[`Epochs`](/api/#inspect_robots.task.Epochs):
+[`Epochs`](../../src/inspect_robots/task.py):
 
 | Reducer | Meaning |
 |---|---|
@@ -72,21 +72,21 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 
 Real robots have no privileged success oracle. The dominant method is a human
 verdict, captured *once* per trial and read back by
-[`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
+[`operator_scorer`](../../src/inspect_robots/scorer.py), keeping scoring reproducible.
 Benchmarks that read `operator_judgement` directly, instead of delegating to
 `operator_scorer`, should call
-[`is_affirmative_verdict`](/api/#inspect_robots.scorer.is_affirmative_verdict)
+[`is_affirmative_verdict`](../../src/inspect_robots/scorer.py)
 rather than restate the vocabulary. It owns the recognized affirmative words
 together with the case-folding and whitespace handling around them, so a change
 reaches every consumer at once.
-Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a registered
+Capture is the job of a [`Grader`](../../src/inspect_robots/grader.py): a registered
 component (`inspect_robots.graders` entry point, `grader` decorator) whose
 `grade(record, scene)` runs once per scored trial, after the rollout and
 before the scorers, and writes the judgement onto the record. The builtin
 `operator` grader prompts the terminal operator, and the builtin `vlm`
 grader is the autograder on the same seam: a vision model judges the trial's
 first and last frames against a rubric (the reserved
-[`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface predates it
+[`VLMScorer`](../../src/inspect_robots/scorer.py) interface predates it
 and stays a stub, because R6 requires scorers to be pure readers).
 
 Every attended CLI run is graded by default, registered tasks included, so

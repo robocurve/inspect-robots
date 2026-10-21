@@ -2,7 +2,7 @@
 
 ## The eval log
 
-Every run produces an immutable [`EvalLog`](/api/#inspect_robots.log.EvalLog): the canonical,
+Every run produces an immutable [`EvalLog`](../../src/inspect_robots/log.py): the canonical,
 auditable record. It mirrors Inspect AI: `version`, `status`, an `eval` spec
 (task/policy/embodiment, created time, git revision, package versions), `results`
 (aggregate metrics), `stats` (timing, inference latency), per-scene `samples`, and
@@ -26,13 +26,13 @@ see [Watching a run live](live-view.md).
 
 ## Sinks
 
-A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecycle
+A [`LogSink`](../../src/inspect_robots/logging/sink.py) observes the run lifecycle
 (`on_eval_start` → per trial `on_trial_start`/`log_step`/`on_trial_end` →
 `on_eval_end`). Builtins:
 
-- [`JsonLogSink`](/api/#inspect_robots.logging.json_log.JsonLogSink): the default; the canonical JSON record.
-- [`LiveLogSink`](/api/#inspect_robots.logging.live_log.LiveLogSink): a transient, schema-valid running snapshot.
-- [`RerunSink`](/api/#inspect_robots.logging.rerun_sink.RerunSink): optional, lazily imported.
+- [`JsonLogSink`](../../src/inspect_robots/logging/json_log.py): the default; the canonical JSON record.
+- [`LiveLogSink`](../../src/inspect_robots/logging/live_log.py): a transient, schema-valid running snapshot.
+- [`RerunSink`](../../src/inspect_robots/logging/rerun_sink.py): optional, lazily imported.
 
 Passing `sinks=` replaces the default `JsonLogSink`, it does not add to it.
 Include one in the list if you still want the JSON log:
@@ -171,8 +171,8 @@ trial.
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
 a per-run subdirectory of `<log_dir>/frames` through a
-[`FrameStore`](/api/#inspect_robots.frames.FrameStore) and the `TrialRecord` keeps lightweight
-[`FrameRef`](/api/#inspect_robots.frames.FrameRef) handles, so long, multi-camera episodes stay
+[`FrameStore`](../../src/inspect_robots/frames.py) and the `TrialRecord` keeps lightweight
+[`FrameRef`](../../src/inspect_robots/frames.py) handles, so long, multi-camera episodes stay
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's
 `stats.frames_dir` rather than globbing `<log_dir>/frames` directly.
@@ -181,7 +181,7 @@ The frame sequence includes both sides of every action. The reset observation
 is stored at index `0`; the result of step `t` is stored at `t + 1`. A camera
 present throughout a trial with `n` completed steps therefore produces `n + 1`
 files, including the terminal post-action state. In each
-[`StepRecord`](/api/#inspect_robots.rollout.StepRecord),
+[`StepRecord`](../../src/inspect_robots/rollout.py),
 `image_refs` points to the pre-action frames and `result_image_refs` points to
 the post-action frames. Both corresponding `Observation.images` mappings are
 empty while a frame store is active. Consumers must load the appropriate

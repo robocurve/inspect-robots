@@ -15,18 +15,16 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ![Status: alpha](https://img.shields.io/badge/status-alpha-blue)
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
-[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://docs.inspectrobots.org/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
-[**Documentation**](https://docs.inspectrobots.org/) ·
-[Quickstart](https://docs.inspectrobots.org/guide/quickstart/) ·
-[Rig reference](https://docs.inspectrobots.org/guide/rig-reference/) ·
-[Concepts](https://docs.inspectrobots.org/guide/concepts/) ·
-[For LLMs](https://docs.inspectrobots.org/llms.txt)
+[**Documentation**](https://github.com/robocurve/inspect-robots/tree/main/docs) ·
+[Quickstart](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/quickstart.md) ·
+[Rig reference](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/rig-reference.md) ·
+[Concepts](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/concepts.md)
 
 </div>
 
@@ -74,7 +72,7 @@ toggles and numeric settings declared by the embodiment plugin, such as yam's
 `auto_start`, then writes `~/.config/inspect-robots/config.ini`. On a different
 rig, install its plugin instead and type its component names at the prompts; to
 write the config file by hand, see
-[the CLI guide](https://docs.inspectrobots.org/guide/cli/).
+[the CLI guide](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/cli.md).
 
 The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
 server is listening, and the server does not start itself or survive a
@@ -342,7 +340,7 @@ Trossen discontinued the WidowX 250S in July 2025. That adapter supports
 existing 250S rigs; the successor WidowX AI uses a different stack.
 
 New robot integrations are welcome. If your rig is not listed,
-[Authoring an embodiment adapter](https://docs.inspectrobots.org/guide/adapters/)
+[Authoring an embodiment adapter](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/adapters.md)
 walks through both halves of the pair, and opening an issue with the robot and
 its SDK is a good first step.
 
@@ -483,10 +481,9 @@ and backend adapters live in separate plugin packages.
 
 ## Documentation
 
-Full guides and an auto-generated API reference live at
-**[docs.inspectrobots.org](https://docs.inspectrobots.org/)**.
-LLM-friendly versions: [`llms.txt`](https://docs.inspectrobots.org/llms.txt)
-and [`llms-full.txt`](https://docs.inspectrobots.org/llms-full.txt).
+Full guides live in **[`docs/`](https://github.com/robocurve/inspect-robots/tree/main/docs)** as plain Markdown, starting with
+the [Quickstart](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/quickstart.md). The API reference is the
+source docstrings; each guide links symbols to the module that defines them.
 
 ## Development
 
@@ -501,14 +498,6 @@ uv venv && uv pip install -e ".[dev]"
 uv run pre-commit install          # ruff + mypy on commit, 100% coverage on push
 uv run pytest --cov                 # 100% coverage required
 uv run ruff check . && uv run mypy
-```
-
-To build the Docusaurus documentation site, generate its ignored API page and
-then build from `website/`:
-
-```bash
-uv run python scripts/gen_api_docs.py
-cd website && npm ci && npm run build
 ```
 
 Pre-commit hooks and a blocking CI coverage gate keep `main` green. See

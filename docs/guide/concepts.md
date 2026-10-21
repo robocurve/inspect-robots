@@ -6,12 +6,12 @@ Inspect Robots factors a robotics evaluation into a few small, orthogonal pieces
 
 Unlike LLM evals (one swappable input, the model), a robotics eval has two:
 
-- [`Policy`](/api/#inspect_robots.policy.Policy): the VLA "brain". Given an
-  [`Observation`](/api/#inspect_robots.types.Observation), returns an
-  [`ActionChunk`](/api/#inspect_robots.types.ActionChunk): a horizon of actions executed open-loop
+- [`Policy`](../../src/inspect_robots/policy.py): the VLA "brain". Given an
+  [`Observation`](../../src/inspect_robots/types.py), returns an
+  [`ActionChunk`](../../src/inspect_robots/types.py): a horizon of actions executed open-loop
   (because VLA inference is slower than the control rate). `H = 1` is the
   degenerate reactive case.
-- [`Embodiment`](/api/#inspect_robots.embodiment.Embodiment): the "body + world" (a real robot or
+- [`Embodiment`](../../src/inspect_robots/embodiment.py): the "body + world" (a real robot or
   a simulator). It produces observations, executes actions, and owns the
   action/observation spaces, the native control rate, and reset/safety machinery.
 
@@ -21,44 +21,44 @@ without inheriting anything. Convenience base classes (`PolicyBase`,
 
 ## Tasks and scenes
 
-A [`Task`](/api/#inspect_robots.task.Task) is an embodiment-agnostic benchmark: a dataset
-of [`Scene`](/api/#inspect_robots.scene.Scene)s plus scorer(s), a step- or seconds-based
+A [`Task`](../../src/inspect_robots/task.py) is an embodiment-agnostic benchmark: a dataset
+of [`Scene`](../../src/inspect_robots/scene.py)s plus scorer(s), a step- or seconds-based
 horizon, and an epoch count. A seconds horizon is resolved to integer steps from
 the paired embodiment's declared control rate. A `Scene` is the robotics analog of Inspect AI's `Sample`, one initial
-condition: an instruction, an optional success [`Target`](/api/#inspect_robots.scene.Target),
+condition: an instruction, an optional success [`Target`](../../src/inspect_robots/scene.py),
 and a seed.
 
 ## Compatibility
 
-Before any rollout, [`check_compatibility`](/api/#inspect_robots.compat.check_compatibility) verifies the
-`(policy, embodiment)` pair: action dimensions and [`ActionSemantics`](/api/#inspect_robots.spaces.ActionSemantics)
+Before any rollout, [`check_compatibility`](../../src/inspect_robots/compat.py) verifies the
+`(policy, embodiment)` pair: action dimensions and [`ActionSemantics`](../../src/inspect_robots/spaces.py)
 (control mode, rotation representation, gripper, frame), the observation
 cameras/state keys the policy requires (resolving a name remap), the control rate,
 whether a seconds-based task has a usable control rate, and whether each scene
 is realizable on the embodiment. Hard mismatches fail fast
-with a [`CompatibilityError`](/api/#inspect_robots.errors.CompatibilityError).
+with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
 
 ## The rollout
 
-[`rollout`](/api/#inspect_robots.rollout.rollout) runs one trial as a single control-rate loop:
+[`rollout`](../../src/inspect_robots/rollout.py) runs one trial as a single control-rate loop:
 
-1. A [`Controller`](/api/#inspect_robots.controller.Controller) decides the next action, internally
+1. A [`Controller`](../../src/inspect_robots/controller.py) decides the next action, internally
    calling `policy.act()` and buffering the chunk (so open-loop execution and
    temporal ensembling compose without forking the loop).
-2. An [`Approver`](/api/#inspect_robots.approver.Approver) reviews the action before it reaches
+2. An [`Approver`](../../src/inspect_robots/approver.py) reviews the action before it reaches
    the embodiment: pass, clamp, or veto (a safety gate).
 3. `embodiment.step(action)` executes it; everything is logged to sinks and
-   recorded in an immutable [`TrialRecord`](/api/#inspect_robots.rollout.TrialRecord) (steps, a typed
+   recorded in an immutable [`TrialRecord`](../../src/inspect_robots/rollout.py) (steps, a typed
    transcript, inference latencies).
 
-Camera frames are streamed to a [`FrameStore`](/api/#inspect_robots.frames.FrameStore) and the
+Camera frames are streamed to a [`FrameStore`](../../src/inspect_robots/frames.py) and the
 record keeps lightweight references, so long multi-camera episodes stay
 memory-safe.
 
 ## Scoring
 
-A [`Scorer`](/api/#inspect_robots.scorer.Scorer) maps a recorded `TrialRecord` (+ the scene's
-`Target`) to a [`Score`](/api/#inspect_robots.scorer.Score). Because scorers consume the
+A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded `TrialRecord` (+ the scene's
+`Target`) to a [`Score`](../../src/inspect_robots/scorer.py). Because scorers consume the
 *recorded* trajectory (not a live environment), scoring is reproducible from a
 saved log. Across the `epochs` of a scene, an epoch reducer (`mean`, `max`,
 `pass_at_k`, …) collapses scores; metrics then aggregate across scenes.
@@ -69,16 +69,16 @@ The error taxonomy resolves the "fail fast vs never-crash-overnight" tension:
 
 | Class | Policy |
 |---|---|
-| [`CompatibilityError`](/api/#inspect_robots.errors.CompatibilityError), `ConfigError` | fail fast, before any rollout |
-| [`PolicyError`](/api/#inspect_robots.errors.PolicyError) | record the trial, then continue or halt per `fail_on_error` (`True` = first error, `0<x<1` = proportion, `x>1` = count), checked after every trial |
-| [`EmbodimentFault`](/api/#inspect_robots.errors.EmbodimentFault), [`SafetyAbort`](/api/#inspect_robots.errors.SafetyAbort) | **always halt**: a faulted/unsafe robot never auto-advances |
+| [`CompatibilityError`](../../src/inspect_robots/errors.py), `ConfigError` | fail fast, before any rollout |
+| [`PolicyError`](../../src/inspect_robots/errors.py) | record the trial, then continue or halt per `fail_on_error` (`True` = first error, `0<x<1` = proportion, `x>1` = count), checked after every trial |
+| [`EmbodimentFault`](../../src/inspect_robots/errors.py), [`SafetyAbort`](../../src/inspect_robots/errors.py) | **always halt**: a faulted/unsafe robot never auto-advances |
 
 Failures inside a trial (including `reset`) are wrapped into the taxonomy; a
 crashing approver becomes a `SafetyAbort` (it can no longer vouch for safety).
 A non-finite action from the policy is a `PolicyError`. A non-finite action
 introduced by an approver is a `SafetyAbort`.
 Every error raised from inside a trial carries the partial
-[`TrialRecord`](/api/#inspect_robots.rollout.TrialRecord) on its `record` attribute, so the
+[`TrialRecord`](../../src/inspect_robots/rollout.py) on its `record` attribute, so the
 steps that did run are delivered to sinks. Errored trials are recorded but
 never scored: a failed trial cannot masquerade as data in the metrics.
 A finished run in which every trial errored ends with `status: "error"` even
@@ -87,8 +87,8 @@ success.
 
 ## The eval log
 
-[`eval`](/api/#inspect_robots.eval.eval) orchestrates scenes × epochs and returns immutable
-[`EvalLog`](/api/#inspect_robots.log.EvalLog)s (status, spec, results, stats, per-scene samples,
+[`eval`](../../src/inspect_robots/eval.py) orchestrates scenes × epochs and returns immutable
+[`EvalLog`](../../src/inspect_robots/log.py)s (status, spec, results, stats, per-scene samples,
 error). Logs are written atomically as schema-versioned JSON with a read-back
 guarantee. Once rollouts have started, an `EvalLog` is always produced and
 persisted: scorer or reducer failures degrade the run to an error log rather

@@ -55,40 +55,6 @@ jobs:
       - name: Mypy (strict)
         run: uv run mypy
 
-  # Strict documentation build on one supported Python version.
-  docs-build:
-    name: docs build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0  # hatch-vcs needs full history/tags for versioning
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: |
-            **/pyproject.toml
-            **/uv.lock
-      - name: Install docs dependencies from uv.lock
-        run: uv sync --locked --python 3.12 --extra docs
-      - name: Generate API reference
-        run: uv run python scripts/gen_api_docs.py
-      - name: Reject stale mkdocstrings autorefs
-        run: '! grep -RIn "\]\[inspect_robots" docs/'
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-      - name: Install website dependencies
-        working-directory: website
-        run: npm ci
-      - name: Build site
-        working-directory: website
-        run: npm run build
-
   # Blocking test gate across the supported OS x Python matrix.
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -459,7 +425,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [issue-bot, quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
+    needs: [issue-bot, quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -472,7 +438,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, docs-build, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
     runs-on: ubuntu-latest
     permissions:
       issues: write

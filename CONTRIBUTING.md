@@ -86,25 +86,17 @@ prefer fixing the issue.
 
 ## Documentation
 
-The docs site uses [Docusaurus](https://docusaurus.io/) from `website/`, while
-the Markdown source stays in `docs/`. The API reference is generated from
-docstrings with Griffe, so keep public docstrings accurate. In guide pages,
-cross-reference generated API symbols with explicit links such as
-`` [`Observation`](/api/#inspect_robots.types.Observation) ``. The strict build
-checks that the target anchor exists.
+Guides are plain Markdown in `docs/`, rendered by GitHub; there is no docs
+site or build step. [`docs/README.md`](docs/README.md) is the index, so add new
+pages there. The source docstrings are the API reference, so keep public
+docstrings accurate.
 
-```bash
-uv pip install -e ".[docs]"
-uv run python scripts/gen_api_docs.py
-cd website
-npm ci
-npm run start                  # live preview at http://localhost:3000
-npm run build                  # strict CI-equivalent site build
-```
-
-Run API generation before either Docusaurus command. The generated
-`docs/api/index.md` file is ignored by Git. `npm run build` also writes
-`llms.txt` and `llms-full.txt` into `website/build/`.
+- Link an API symbol to the source file that defines it, relative to the page:
+  `` [`Observation`](../../src/inspect_robots/types.py) ``.
+- Use GitHub alert syntax for callouts (`> [!NOTE]`, `> [!WARNING]`).
+- `tests/test_docs_links.py` checks that relative links, heading anchors and
+  linked symbols resolve, so run `uv run pytest tests/test_docs_links.py`
+  after editing docs.
 
 ## Adding a plugin (out-of-tree)
 

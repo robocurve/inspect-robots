@@ -36,7 +36,7 @@ print each remediation command verbatim when a module is missing.
 ## Declare device slots
 
 Declare device-shaped constructor arguments on the registered embodiment
-factory. Import [`DeviceSlot`](/api/#inspect_robots.conformance.DeviceSlot)
+factory. Import [`DeviceSlot`](../../src/inspect_robots/conformance.py)
 from the `inspect_robots.conformance` submodule:
 
 ```python
@@ -97,7 +97,7 @@ non-`None` `group` are all-or-none. Ungrouped slots remain independent.
 ## Declare option slots
 
 Declare boolean behavior toggles on the registered embodiment factory. Import
-[`OptionSlot`](/api/#inspect_robots.conformance.OptionSlot) from the
+[`OptionSlot`](../../src/inspect_robots/conformance.py) from the
 `inspect_robots.conformance` submodule:
 
 ```python
@@ -119,7 +119,7 @@ collides with a device slot, a camera key, or an earlier option declaration.
 ## Declare number slots
 
 Declare finite numeric settings on the registered embodiment factory. Import
-[`NumberSlot`](/api/#inspect_robots.conformance.NumberSlot) from the
+[`NumberSlot`](../../src/inspect_robots/conformance.py) from the
 `inspect_robots.conformance` submodule:
 
 ```python
@@ -156,7 +156,7 @@ version accordingly.
 ## The conformance kit
 
 Add one test built on
-[`assert_embodiment_conformant`](/api/#inspect_robots.conformance.assert_embodiment_conformant)
+[`assert_embodiment_conformant`](../../src/inspect_robots/conformance.py)
 to your adapter repo:
 
 ```python
