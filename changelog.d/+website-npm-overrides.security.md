@@ -1,0 +1,1 @@
+**Repo:** the docs website now pins patched `tinypool` (2.x) and `postcss-selector-parser` (7.1.7) through npm `overrides`, clearing the Docusaurus-transitive Dependabot alerts that ordinary lockfile bumps could not reach.
