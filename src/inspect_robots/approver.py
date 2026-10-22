@@ -157,9 +157,11 @@ class DeltaLimitApprover:
 
     Construction never guesses: missing semantics, a needed missing/non-finite
     bound without an explicit ``max_delta``, an absolute pose mode whose
-    rotation representation cannot be clamped per-dimension, or a displacement
+    rotation representation cannot be clamped per-dimension, a displacement
     pose mode carrying a quaternion or rot6d delta (whose identity is not the
-    zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
+    zero vector, so per-dimension clamping distorts it), or a displacement
+    space where ``max_delta`` has an empty intersection with box bounds all raise
+    ``ValueError``.
     Non-finite values (``NaN`` or ``±inf``) anywhere in a reviewed action raise
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampApprover``
     (which clamps ``±inf`` to finite box bounds), a delta limiter cannot clamp
@@ -246,6 +248,15 @@ class DeltaLimitApprover:
                 )
             self._low = low if explicit is None else _intersect(low, -explicit, np.maximum)
             self._high = high if explicit is None else _intersect(high, explicit, np.minimum)
+            if (
+                self._low is not None
+                and self._high is not None
+                and bool(np.any(self._low > self._high))
+            ):
+                raise ValueError(
+                    "DeltaLimitApprover: max_delta has empty intersection with "
+                    "action space bounds; low would exceed high"
+                )
 
     @staticmethod
     def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
