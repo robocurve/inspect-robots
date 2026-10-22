@@ -11,6 +11,7 @@ the ``hello`` handshake via :meth:`connect`).
 from __future__ import annotations
 
 import logging
+import socket
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
@@ -108,7 +109,8 @@ class PolicyClient:
 
         Server ``error`` frames raise :class:`WsError` with the server's code;
         connection loss marks the client disconnected and raises
-        ``ConnectionError``. ``close`` has no paired response — the request
+        ``ConnectionError``. An interrupt that is not an ``Exception`` also
+        disconnects, then propagates unchanged. ``close`` has no paired response — the request
         frame itself is returned.
         """
         ws = self._ws
@@ -170,6 +172,13 @@ class PolicyClient:
                 f"connection to XPolicyLab policy server {self.url} lost during "
                 f"{message_type.value}: {exc}"
             ) from exc
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                # An asynchronous interrupt (Ctrl-C, a signalled End) can land
+                # mid-message, leaving the stream at an unknown position, so
+                # drop the socket and let the next use reconnect.
+                self._abandon()
+            raise
 
     def reset(self, trial_id: str) -> Frame:
         return self.request(MessageType.RESET, {"trial_id": trial_id}, trial_id=trial_id)
@@ -199,9 +208,16 @@ class PolicyClient:
             self._ws = None
 
     def _abandon(self) -> None:
-        """Drop a dead socket without protocol goodbyes."""
+        """Drop a dead or desynchronized socket immediately, without protocol goodbyes.
+
+        ``close()`` would wait up to the close timeout (10 s by default) for a
+        closing handshake the peer may never send; tear the socket down instead.
+        """
         ws = self._ws
         self._ws = None
         if ws is not None:
-            with suppress(Exception):
-                ws.close()
+            # shutdown() also unblocks websockets' reader thread on Linux.
+            with suppress(OSError):
+                ws.socket.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError):
+                ws.socket.close()

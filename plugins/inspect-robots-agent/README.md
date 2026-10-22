@@ -203,6 +203,21 @@ to the model, labeled with the environment step when it was received. The
 model treats these lines as trusted guidance from the human supervising the
 robot. The framework also saves the feedback in the eval log.
 
+### Ending a trial without waiting for the model
+
+A keypress End is read between steps, so a trial that is waiting for the model
+first receives its reply and executes it. A supervisor (such as a rig
+dashboard) can instead end the trial immediately. It sets
+`INSPECT_ROBOTS_AGENT_END_FILE` to a path when it launches the run, and creates
+that file to request End. While the path is set, each model request runs on a
+background thread and the agent checks for the file every 50 ms. When the file
+appears, the agent stops waiting, never uses the reply, and returns a
+hold-still stop (`stop_reason == "operator_end"`). A step already executing
+finishes first. The abandoned request completes in the background (its tokens
+are still billed) and must finish before the next trial reuses the client.
+Each trial's `reset()` deletes a leftover file. Without the variable, model
+requests run exactly as before.
+
 ## Motion pre-check
 
 Python callers can pass `pre_check=` to `LLMAgentPolicy` to inspect one

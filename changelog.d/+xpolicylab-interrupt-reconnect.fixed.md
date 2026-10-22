@@ -1,0 +1,1 @@
+**XPolicyLab:** An interrupt that is not an `Exception` (for example Ctrl-C) landing mid-reply left the socket marked connected at an unknown stream position, so the next trial failed on the leftover message. The client now drops the socket immediately, without waiting for a closing handshake, and the next use reconnects.

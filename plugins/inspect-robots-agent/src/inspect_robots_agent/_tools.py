@@ -367,6 +367,12 @@ class Toolset:
             note=f"{name}: {detail}",
         )
 
+    def operator_end(self, observation: Observation) -> ActionChunk:
+        """Hold the current state and request a stop attributed to the operator's End."""
+        chunk = self._stop("operator_end", {"reason": "operator requested End"}, observation).chunk
+        assert chunk is not None  # _stop always builds one
+        return chunk
+
     def _take_pic(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         call_note = arguments.get("note")
         if not isinstance(call_note, str) or not call_note.strip():

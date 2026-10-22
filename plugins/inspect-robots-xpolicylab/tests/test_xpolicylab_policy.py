@@ -6,6 +6,7 @@ The stub server in ``conftest.py`` speaks the real wire protocol in-process.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import msgpack
@@ -152,6 +153,52 @@ def test_invalid_constructor_args(kwargs: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # Rollout flow against the stub server
 # --------------------------------------------------------------------------- #
+
+
+class _Interrupt(BaseException):
+    """Stands in for KeyboardInterrupt or a signalled End landing mid-receive."""
+
+
+def test_interrupt_mid_reply_reconnects_for_next_trial(
+    stub_server: StubPolicyServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _policy(stub_server) as policy:
+        policy.reset(_SCENE)
+        ws = policy._client._ws
+        assert ws is not None
+        real_recv = ws.recv
+
+        def interrupted_recv(*args: Any, **kwargs: Any) -> Any:
+            # Part of the reply may already be buffered; its position is now unknown.
+            monkeypatch.setattr(ws, "recv", real_recv)
+            raise _Interrupt
+
+        def never_acknowledged_close(*args: Any, **kwargs: Any) -> None:
+            # A graceful close would wait out the 10 s close timeout here.
+            raise AssertionError("interrupt teardown must not wait for a closing handshake")
+
+        monkeypatch.setattr(ws, "recv", interrupted_recv)
+        monkeypatch.setattr(ws, "close", never_acknowledged_close)
+        started = time.monotonic()
+        with pytest.raises(_Interrupt):
+            policy.act(_observation())
+        assert time.monotonic() - started < 1
+        assert not policy._client.connected
+        assert ws.socket.fileno() == -1
+
+        # The next trial reconnects instead of reading the abandoned stream.
+        policy.reset(Scene(id="s1", instruction="next trial"))
+        assert len(policy.act(_observation())) == 2
+    assert len(stub_server.frames_of(MessageType.HELLO)) == 2
+
+
+def test_ordinary_error_keeps_connection(stub_server: StubPolicyServer) -> None:
+    with _policy(stub_server) as policy:
+        policy.reset(_SCENE)
+        with pytest.raises(WsError):
+            policy.act(_observation(instruction="error"))
+        # A complete error frame leaves the stream aligned, so the socket stays.
+        assert policy._client.connected
 
 
 def test_reset_act_returns_ordered_chunk(stub_server: StubPolicyServer) -> None:
