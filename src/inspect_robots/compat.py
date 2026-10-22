@@ -12,15 +12,19 @@ Hard mismatches are ``error`` issues that fail fast; soft ones are warnings.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import TypeVar
 
 from inspect_robots.embodiment import Embodiment
-from inspect_robots.errors import CompatibilityError
+from inspect_robots.errors import CompatibilityError, ConfigError
 from inspect_robots.policy import Policy
-from inspect_robots.spaces import Box
+from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.task import Task
+from inspect_robots.types import Observation
 
 _RATE_TOL = 1e-6
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,16 @@ def _resolve_keys(
     kind: str,
     issues: list[CompatIssue],
 ) -> None:
+    emb_to_policy: dict[str, list[str]] = {}
+    for pol_key, emb_key in remap.items():
+        emb_to_policy.setdefault(emb_key, []).append(pol_key)
+
+    effective_provided: set[str] = set()
+    for emb_key in provided:
+        targets = emb_to_policy.get(emb_key, [emb_key])
+        for target in targets:
+            effective_provided.add(target)
+
     for key in sorted(required):
         target = remap.get(key, key)
         if target not in provided:
@@ -140,6 +154,15 @@ def _resolve_keys(
                     f"missing_{kind}",
                     f"policy requires {kind} {key!r} (→ {target!r}) which the "
                     f"embodiment does not provide; provides {sorted(provided)}",
+                )
+            )
+        elif key not in effective_provided:
+            issues.append(
+                CompatIssue(
+                    "error",
+                    f"missing_{kind}",
+                    f"policy requires {kind} {key!r} which the embodiment does not "
+                    f"provide after remapping; effective keys: {sorted(effective_provided)}",
                 )
             )
 
@@ -244,6 +267,88 @@ def _check_scenes_realizable(task: Task, embodiment: Embodiment, issues: list[Co
             )
 
 
+def _check_mapping_collision(
+    provided: frozenset[str] | Sequence[str],
+    remap: Mapping[str, str],
+    kind: str,
+) -> None:
+    emb_to_policy: dict[str, list[str]] = {}
+    for pol_key, emb_key in remap.items():
+        emb_to_policy.setdefault(emb_key, []).append(pol_key)
+
+    seen: dict[str, str] = {}
+    for emb_key in sorted(provided):
+        targets = emb_to_policy.get(emb_key, [emb_key])
+        for target in targets:
+            if target in seen:
+                prior = seen[target]
+                raise ConfigError(
+                    f"key collision in {kind} remap: keys {prior!r} and {emb_key!r} "
+                    f"both map to {target!r}"
+                )
+            seen[target] = emb_key
+
+
+def check_remap_collisions(
+    observation_space: ObservationSpace,
+    remap: Mapping[str, str] | None,
+) -> None:
+    """Raise ConfigError if remap produces any key collision in the observation space."""
+    if not remap:
+        return
+    _check_mapping_collision(observation_space.camera_names, remap, "camera")
+    _check_mapping_collision(observation_space.state_keys, remap, "state")
+
+
+def _remap_mapping(
+    mapping: Mapping[str, T],
+    remap: Mapping[str, str],
+    kind: str,
+) -> dict[str, T]:
+    if not remap or not mapping:
+        return dict(mapping)
+
+    emb_to_policy: dict[str, list[str]] = {}
+    for pol_key, emb_key in remap.items():
+        emb_to_policy.setdefault(emb_key, []).append(pol_key)
+
+    result: dict[str, T] = {}
+    sources: dict[str, str] = {}
+
+    for emb_key, value in mapping.items():
+        targets = emb_to_policy.get(emb_key, [emb_key])
+        for target in targets:
+            if target in result:
+                prior = sources[target]
+                raise ConfigError(
+                    f"key collision in {kind} remap: keys {prior!r} and {emb_key!r} "
+                    f"both map to {target!r}"
+                )
+            result[target] = value
+            sources[target] = emb_key
+
+    return result
+
+
+def remap_observation(obs: Observation, remap: Mapping[str, str] | None) -> Observation:
+    """Remap observation camera, state, and timestamp keys for policy consumption.
+
+    Keys not named in ``remap`` pass through unchanged. If a remapping produces
+    duplicate keys in any observation mapping, raises ``ConfigError``.
+    """
+    if not remap:
+        return obs
+    remapped_images = _remap_mapping(obs.images, remap, "camera")
+    remapped_state = _remap_mapping(obs.state, remap, "state")
+    remapped_image_times = _remap_mapping(obs.image_times, remap, "camera")
+    return replace(
+        obs,
+        images=remapped_images,
+        state=remapped_state,
+        image_times=remapped_image_times,
+    )
+
+
 def assert_compatible(
     policy: Policy,
     embodiment: Embodiment,
@@ -252,7 +357,10 @@ def assert_compatible(
     remap: dict[str, str] | None = None,
 ) -> CompatibilityReport:
     """Check compatibility and raise
-    [`CompatibilityError`][inspect_robots.errors.CompatibilityError] on hard errors."""
+    [`CompatibilityError`][inspect_robots.errors.CompatibilityError] on hard errors,
+    or [`ConfigError`][inspect_robots.errors.ConfigError] on key collisions."""
+    if remap:
+        check_remap_collisions(embodiment.info.observation_space, remap)
     report = check_compatibility(policy, embodiment, task, remap=remap)
     report.raise_for_errors()
     return report

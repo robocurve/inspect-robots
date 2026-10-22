@@ -2,9 +2,12 @@
 
 The split below resolves the "fail fast vs never-crash-overnight" tension:
 
-- [`ConfigError`][inspect_robots.errors.ConfigError] /
-[`CompatibilityError`][inspect_robots.errors.CompatibilityError] are raised *before* any
-  rollout — bad configuration should fail loudly and immediately.
+- [`ConfigError`][inspect_robots.errors.ConfigError] is raised on invalid task,
+  policy, or embodiment configuration (typically before any rollout), or during
+  rollout if a dynamic configuration error occurs (such as an observation key
+  collision under ``remap``), halting the eval immediately.
+- [`CompatibilityError`][inspect_robots.errors.CompatibilityError] is raised *before* any
+  rollout — bad configuration or pairing should fail loudly and immediately.
 - [`PolicyError`][inspect_robots.errors.PolicyError] is recorded as a failed trial; whether it
 aborts the eval
   is governed by ``fail_on_error`` (Inspect semantics).
@@ -44,7 +47,7 @@ class InspectRobotsError(Exception):
 
 
 class ConfigError(InspectRobotsError):
-    """Invalid task / policy / embodiment configuration. Fail fast."""
+    """Invalid task / policy / embodiment configuration, or runtime collision. Fail fast."""
 
 
 class CompatibilityError(InspectRobotsError):
