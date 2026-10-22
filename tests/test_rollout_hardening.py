@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -277,6 +278,197 @@ def test_frame_store_streams_to_disk(tmp_path: Path) -> None:
     assert terminal.result_image_refs is not None
     assert terminal.result_image_refs["top"].t == terminal.t + 1
     assert terminal.result_image_refs["top"].load().shape == (32, 32, 3)
+    assert first.depth_refs is None
+    assert first.result_depth_refs is None
+
+
+class _DepthPolicy(ScriptedPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[object] = []
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self.seen.append(observation.extra.get("top_depth"))
+        return super().act(observation)
+
+
+class _DepthEmbodiment(CubePickEmbodiment):
+    def __init__(self, entry: object) -> None:
+        super().__init__()
+        self.entry = entry
+        self.calls = 0
+
+    def _observe(self, instruction: str | None) -> Observation:
+        obs = super()._observe(instruction)
+        entry = self.entry
+        if entry is None:
+
+            def entry() -> np.ndarray:
+                self.calls += 1
+                return np.full((4, 4), 1.25, dtype=np.float64)
+
+        images = dict(obs.images)
+        images["wrist"] = obs.images["top"]
+        return replace(obs, images=images, extra={"top_depth": entry, "keep": 1})
+
+
+def test_frame_store_resolves_depth_once_and_strips_the_record(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    embodiment = _DepthEmbodiment(None)
+    policy = _DepthPolicy()
+    record = _run(policy, embodiment, frame_store=store)
+    stored = len(record.steps) + 1
+    assert embodiment.calls == stored
+    assert policy.seen
+    assert all(isinstance(entry, np.ndarray) for entry in policy.seen)
+    rgb = list(store.root.glob("*.npy"))
+    depth = list((store.root / "depth").glob("*.npy"))
+    assert len(rgb) == stored * 2
+    assert len(depth) == stored
+    assert store.count == len(rgb) + len(depth)
+    first = record.steps[0]
+    assert first.depth_refs is not None and set(first.depth_refs) == {"top"}
+    assert first.result_depth_refs is not None and set(first.result_depth_refs) == {"top"}
+    loaded = first.depth_refs["top"].load()
+    assert loaded.dtype == np.float32
+    assert loaded.shape == (4, 4)
+    assert float(loaded[0, 0]) == np.float32(1.25)
+    for step in record.steps:
+        assert "top_depth" not in step.observation.extra
+        assert "top_depth" not in step.result.observation.extra
+        assert step.observation.extra["keep"] == 1
+        assert not step.observation.images
+
+
+def test_frame_store_off_leaves_depth_thunks_unresolved() -> None:
+    embodiment = _DepthEmbodiment(None)
+    policy = _DepthPolicy()
+    record = _run(policy, embodiment)
+    assert embodiment.calls == 0
+    assert all(callable(entry) for entry in policy.seen)
+    assert callable(record.steps[0].observation.extra["top_depth"])
+    assert record.steps[0].depth_refs is None
+
+
+def test_frame_store_keeps_depth_failures_as_text_and_writes_no_map(tmp_path: Path) -> None:
+    def broken() -> np.ndarray:
+        raise RuntimeError("camera offline")
+
+    store = FrameStore(str(tmp_path / "frames"))
+    policy = _DepthPolicy()
+    record = _run(policy, _DepthEmbodiment(broken), frame_store=store)
+    assert record.status == "success"
+    assert not (store.root / "depth").exists()
+    text = "depth 'top' unavailable: camera offline"
+    assert policy.seen[0] == text
+    assert "top_depth" not in record.steps[0].observation.extra
+    assert record.steps[0].depth_refs is None
+
+
+def test_frame_store_rejects_non_2d_depth_without_writing(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path / "frames"))
+    policy = _DepthPolicy()
+    record = _run(policy, _DepthEmbodiment(np.ones((2, 2, 1))), frame_store=store)
+    assert record.status == "success"
+    assert not (store.root / "depth").exists()
+    assert policy.seen[0] == "depth 'top' unavailable: expected a 2-D array, got shape (2, 2, 1)"
+
+
+def test_frame_store_passes_a_depth_array_and_failure_text_through(tmp_path: Path) -> None:
+    depth = np.full((2, 2), 0.5, dtype=np.float64)
+    store = FrameStore(str(tmp_path / "frames"))
+    policy = _DepthPolicy()
+    record = _run(policy, _DepthEmbodiment(depth), frame_store=store)
+    assert policy.seen[0] is depth
+    assert record.steps[0].depth_refs is not None
+    np.testing.assert_array_equal(record.steps[0].depth_refs["top"].load(), np.float32(0.5))
+
+    text = "depth 'top' unavailable: already failed"
+    text_store = FrameStore(str(tmp_path / "text"))
+    text_policy = _DepthPolicy()
+    text_record = _run(text_policy, _DepthEmbodiment(text), frame_store=text_store)
+    assert text_policy.seen[0] == text
+    assert text_record.steps[0].depth_refs is None
+    assert not (text_store.root / "depth").exists()
+
+
+def test_frame_store_depth_safety_abort_halts_before_motion(tmp_path: Path) -> None:
+    def stop() -> np.ndarray:
+        raise SafetyAbort("depth e-stop")
+
+    store = FrameStore(str(tmp_path / "frames"))
+    with pytest.raises(SafetyAbort, match="depth e-stop") as info:
+        _run(_DepthPolicy(), _DepthEmbodiment(stop), frame_store=store)
+    assert info.value.record is not None
+    assert info.value.record.status == "error"
+    assert info.value.record.steps == []
+    assert info.value.record.error == "SafetyAbort: depth e-stop"
+
+
+@pytest.mark.parametrize("halt", [SafetyAbort, EmbodimentFault])
+def test_frame_store_depth_halt_after_a_step_keeps_the_action(
+    tmp_path: Path, halt: type[SafetyAbort] | type[EmbodimentFault]
+) -> None:
+    def make_depth() -> tuple[object, dict[str, int]]:
+        calls = {"n": 0}
+
+        def depth() -> np.ndarray:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise halt("depth halt")
+            return np.ones((2, 2), dtype=np.float64)
+
+        return depth, calls
+
+    depth, calls = make_depth()
+    store = FrameStore(str(tmp_path / "frames"))
+    with pytest.raises(halt, match="depth halt") as info:
+        _run(_DepthPolicy(), _DepthEmbodiment(depth), frame_store=store)
+    assert calls["n"] == 2
+    record = info.value.record
+    assert record is not None
+    assert record.status == "error"
+    assert record.error == f"{halt.__name__}: depth halt"
+    assert len(record.steps) == 1
+    step = record.steps[0]
+    assert step.t == 0
+    assert int(np.asarray(step.action.data).size) == 2
+    assert step.result_image_refs is not None
+    assert set(step.result_image_refs) == {"top", "wrist"}
+    assert step.result_image_refs["top"].load().dtype == np.uint8
+    assert step.result_depth_refs is None
+    assert not step.result.observation.images
+    assert "top_depth" not in step.result.observation.extra
+    assert [event.kind for event in record.events if event.kind in {"step", "error"}] == [
+        "step",
+        "error",
+    ]
+    depth_names = [path.name for path in (store.root / "depth").glob("*.npy")]
+    assert any(name.endswith("_000000.npy") for name in depth_names)
+    assert not any(name.endswith("_000001.npy") for name in depth_names)
+
+    eval_depth, _eval_calls = make_depth()
+    (log,) = eval(
+        Task(
+            name="demo",
+            scenes=[Scene(id="s", instruction="reach", init_seed=0)],
+            scorer=success_at_end(),
+            max_steps=40,
+        ),
+        _DepthPolicy(),
+        _DepthEmbodiment(eval_depth),
+        log_dir=str(tmp_path / "logs"),
+        store_frames=True,
+    )
+    assert log.status == "error"
+    assert log.stats.total_steps == 1
+    actions_rel = log.samples[0].trial_metadata[0]["actions"]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / actions_rel).read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["kind"] == "header"
+    assert [row["t"] for row in rows[1:]] == [0]
 
 
 def test_per_trial_seed_varies_by_epoch() -> None:

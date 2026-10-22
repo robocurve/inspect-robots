@@ -53,6 +53,18 @@ def test_resolve_depth_calls_thunk_exactly_once() -> None:
     assert isinstance(resolved["left_cam"], np.ndarray)
 
 
+def test_resolve_depth_preformatted_failure_passes_through() -> None:
+    text = "depth 'left_cam' unavailable: camera offline"
+    resolved = resolve_depth(
+        Observation(
+            images={"left_cam": np.zeros((2, 2, 3), dtype=np.uint8)},
+            extra={"left_cam_depth": text},
+        )
+    )
+
+    assert resolved == {"left_cam": text}
+
+
 def test_resolve_depth_failing_thunk_becomes_text() -> None:
     def depth_thunk() -> np.ndarray:
         raise RuntimeError("camera offline")

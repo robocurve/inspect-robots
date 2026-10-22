@@ -217,6 +217,17 @@ def test_discovery_groups_sorts_and_scopes_to_npy(tmp_path: Path) -> None:
     assert count_frames(tmp_path) == 4
 
 
+def test_depth_subdirectory_is_not_an_rgb_stream(tmp_path: Path) -> None:
+    store = FrameStore(str(tmp_path))
+    store.put("pick-e0", 0, "top", np.zeros((2, 2, 3), dtype=np.uint8))
+    store.put_depth("pick-e0", 0, "top", np.full((2, 2), 1.0, dtype=np.float32))
+    streams, strays = discover_streams(tmp_path)
+    assert len(streams) == 1
+    assert count_frames(tmp_path) == 1
+    assert strays == []
+    assert list((tmp_path / "depth").glob("*.npy"))
+
+
 def test_versioned_streams_preserve_colliding_legacy_prefixes_and_numeric_steps(
     tmp_path: Path, fake_popen: type[_FakePopen]
 ) -> None:

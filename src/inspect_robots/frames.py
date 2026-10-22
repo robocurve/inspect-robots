@@ -4,7 +4,10 @@ A long multi-camera episode would exhaust memory if every frame were retained in
 the [`TrialRecord`][inspect_robots.rollout.TrialRecord]. Instead the rollout streams frames to
 disk through a [`FrameStore`][inspect_robots.frames.FrameStore] and keeps only lightweight
 [`FrameRef`][inspect_robots.frames.FrameRef]
-handles. This is owned by the rollout, NOT by any log sink, so trajectories are
+handles. Metric depth uses [`DepthFrameRef`][inspect_robots.frames.DepthFrameRef]
+and is written under ``depth/`` so RGB readers, including ``inspect-robots video``,
+never treat a float depth map as another camera. This is owned by the rollout,
+NOT by any log sink, so trajectories are
 recorded (and scorable) independent of which optional sinks are enabled.
 """
 
@@ -14,6 +17,7 @@ import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote_to_bytes
 
 import numpy as np
@@ -76,8 +80,29 @@ class FrameRef:
         return np.asarray(np.load(self.path), dtype=np.uint8)
 
 
+@dataclass(frozen=True)
+class DepthFrameRef:
+    """A handle to a metric depth map stored on disk.
+
+    ``load`` keeps ``float32`` metres. :meth:`FrameRef.load` casts to ``uint8``,
+    which would destroy depth, so depth has its own reference type.
+    """
+
+    camera: str
+    t: int
+    path: str
+
+    def load(self) -> npt.NDArray[np.float32]:
+        """Load the referenced depth map as ``float32`` metres."""
+        return np.asarray(np.load(self.path), dtype=np.float32)
+
+
 class FrameStore:
-    """Persist frames as ``.npy`` files under ``root`` and hand back refs."""
+    """Persist frames as ``.npy`` files under ``root`` and hand back refs.
+
+    RGB frames live directly under ``root``. Metric depth lives under
+    ``root/depth`` with the same filename scheme. ``count`` counts both.
+    """
 
     def __init__(self, root: str):
         self.root = Path(root)
@@ -90,3 +115,21 @@ class FrameStore:
         np.save(path, image)
         self.count += 1
         return FrameRef(camera=camera, t=t, path=str(path))
+
+    def put_depth(
+        self,
+        trial_id: str,
+        t: int,
+        camera: str,
+        depth: npt.NDArray[Any],
+    ) -> DepthFrameRef:
+        """Persist one 2-D metric depth map as ``float32`` and return its reference."""
+        array = np.asarray(depth)
+        if array.ndim != 2:
+            raise ValueError(f"depth must be a 2-D array, got shape {array.shape}")
+        directory = self.root / "depth"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / _frame_filename(trial_id, camera, t)
+        np.save(path, np.asarray(array, dtype=np.float32))
+        self.count += 1
+        return DepthFrameRef(camera=camera, t=t, path=str(path))
