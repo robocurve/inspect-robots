@@ -687,6 +687,82 @@ def test_pending_narration_handles_absent_target_and_residual(
     assert "remaining offset" not in narration
 
 
+def test_check_stall_early_return_when_no_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_check_stall returns None when no last move target is stored."""
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = _vision_observation(env_step=2)
+    toolset = policy._toolset
+    assert toolset is not None
+
+    # No target stored -> returns None
+    policy._last_move_target = None
+    policy._last_move_steps = 0
+    assert policy._check_stall(toolset, observation) is None
+
+
+def test_check_stall_reports_stalled_when_residual_above_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_check_stall reports stalled when residual is above tolerance."""
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = _vision_observation(env_step=5)
+    toolset = policy._toolset
+    assert toolset is not None
+
+    # Target stored, residual above tolerance -> stalled
+    policy._last_move_target = np.array([0.5])
+    policy._last_move_steps = 10
+    monkeypatch.setattr(
+        toolset, "residual", lambda target, obs: ("joint", 0.05)
+    )
+    result = policy._check_stall(toolset, observation)
+    assert result is not None
+    assert "stalled after 10 steps" in result
+    assert "joint=0.05" in result
+
+
+def test_check_stall_reports_ok_when_target_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_check_stall reports ok when residual is within tolerance."""
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = _vision_observation(env_step=5)
+    toolset = policy._toolset
+    assert toolset is not None
+
+    policy._last_move_target = np.array([0.5])
+    policy._last_move_steps = 8
+    monkeypatch.setattr(
+        toolset, "residual", lambda target, obs: ("joint", 1e-5)
+    )
+    result = policy._check_stall(toolset, observation)
+    assert result is not None
+    assert "ok (target reached in 8 steps)" in result
+
+
+def test_check_stall_reports_ok_when_residual_unmeasurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_check_stall reports ok when residual cannot be measured."""
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = _vision_observation(env_step=5)
+    toolset = policy._toolset
+    assert toolset is not None
+
+    policy._last_move_target = np.array([0.5])
+    policy._last_move_steps = 12
+    monkeypatch.setattr(toolset, "residual", lambda target, obs: None)
+    result = policy._check_stall(toolset, observation)
+    assert result is not None
+    assert "ok (completed 12 steps)" in result
+
+
 def test_image_parts_skip_requested_camera_missing_from_observation() -> None:
     observation = _vision_observation(cameras=("top",))
 
