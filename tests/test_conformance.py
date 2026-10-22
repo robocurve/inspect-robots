@@ -624,6 +624,18 @@ def test_missing_control_hz_is_a_warning() -> None:
     assert check_embodiment(silent).ok  # warnings never fail the check
 
 
+@pytest.mark.parametrize(
+    "bad_hz",
+    [0, -10.0, float("nan"), float("inf"), float("-inf"), True, False, "10"],
+)
+def test_invalid_control_hz_is_an_error(bad_hz: Any) -> None:
+    info = _good_absolute()
+    object.__setattr__(info, "control_hz", bad_hz)
+    codes = _codes(info)
+    assert codes["control_hz"] == "error"
+    assert not check_embodiment(info).ok
+
+
 def test_zero_width_dims_are_a_warning() -> None:
     info = _info(
         space=Box(
