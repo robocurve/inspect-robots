@@ -19,7 +19,8 @@ Report these as important, in roughly this order:
   `EvalLog` that break the binding resolutions in
   `plans/0001-foundation-design.md` §9 to §11, or mutate an `EvalLog` after it is
   written. For the serialised log format, a new field with a default is fine
-  when a test shows older logs still read back (see plans 0027 and 0081). Flag
+  when a test shows older logs still read back (see
+  `plans/0027-grader-notes.md` and `plans/0081-grader-config.md`). Flag
   a rename, removal or type change that breaks reading older logs, and flag a
   `SCHEMA_VERSION` bump that has no migration path, because
   `EvalLog.from_dict` accepts only the current version.
