@@ -91,6 +91,9 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - **`ci-ok` is the single required status check** — an aggregate job at the end
   of `ci.yml`. When adding a CI job, add it to `ci-ok`'s `needs` list, or it
   will not gate merges.
+- **Claude Code Review** (Anthropic's managed GitHub app) comments on every PR
+  push. It never approves; merges still follow the `robocurve-pr-reviewer`
+  verdict. Tune what it flags in `REVIEW.md`, which it reads from `main`.
 - **Red main is stop-the-line**: if CI fails on a push to main, the
   `alert-red-main` job opens an issue. Fix forward or revert before merging
   anything else; if the failure was transient, re-run the failed jobs and close
