@@ -18,15 +18,20 @@ Report these as important, in roughly this order:
 - **Interface contracts:** changes to `Policy`, `Embodiment`, `Task`, `Scorer` or
   `EvalLog` that break the binding resolutions in
   `plans/0001-foundation-design.md` §9 to §11, or mutate an `EvalLog` after it is
-  written. A change to the serialised log format without a `SCHEMA_VERSION`
-  bump in `log.py` is a bug.
+  written. For the serialised log format, a new field with a default is fine
+  when a test shows older logs still read back (see plans 0027 and 0081). Flag
+  a rename, removal or type change that breaks reading older logs, and flag a
+  `SCHEMA_VERSION` bump that has no migration path, because
+  `EvalLog.from_dict` accepts only the current version.
 - **Public API:** a symbol added to or removed from `inspect_robots.__all__`
   without the matching update to `tests/test_api_snapshot.py`, or the reverse.
 - **NumPy-only core:** a top-level import of anything beyond NumPy and the
   standard library in `src/inspect_robots/`. Optional dependencies must be
   imported lazily inside the function that needs them.
-- **Secrets and data:** API keys, tokens or local paths written to logs,
-  `EvalLog` files, HTML reports or test fixtures.
+- **Secrets:** API keys, tokens or other credentials written to logs, `EvalLog`
+  files, HTML reports or test fixtures. Documented path fields such as
+  `frames_dir` and `policy_checkpoint` store local paths by design; flag paths
+  only when they leak somewhere the schema does not call for them.
 - **Release hygiene:** a user-facing change with no `changelog.d/` fragment, a
   feature PR that edits `CHANGELOG.md` directly, or a static `version =` added to
   the root `pyproject.toml`.
