@@ -455,7 +455,8 @@ def eval(
     cameras see the scene unobstructed and return one fresh ``Observation``.
     Returning ``None`` declines. Other failures degrade with a
     ``RuntimeWarning`` and grading uses the last-step frames, except
-    ``SafetyAbort`` and ``EmbodimentFault``, which halt the eval.
+    ``SafetyAbort`` and ``EmbodimentFault``, which are recorded and halt the run
+    like a rollout fault.
 
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
@@ -463,8 +464,9 @@ def eval(
     mutate the record — e.g. capture ``TrialRecord.operator_judgement`` (R6)
     so the ``operator`` scorer can read it, and ``TrialRecord.operator_note``
     alongside it, which is recorded but never scored. Exceptions it raises
-    propagate to the caller. Note this fires on the *other* side of scoring
-    from ``LogSink.on_trial_end``.
+    propagate to the caller, except ``SafetyAbort`` and ``EmbodimentFault``,
+    which are recorded and halt the run like a rollout fault. Note this fires
+    on the *other* side of scoring from ``LogSink.on_trial_end``.
 
     ``grader`` is the component form of the same seam: a
     [`Grader`][inspect_robots.grader.Grader] object or registry name whose
@@ -670,6 +672,7 @@ def _run_eval(
     halted = False
     stopped = False
     cancelled_exc: _CancelledTrial | None = None
+    hook_halt_exc: BaseException | None = None
     # A proportion threshold is a share of the whole eval, so the denominator is
     # every trial the run intends to attempt. Using the completed-so-far count
     # made the first error 1/1 = 100%, which trips any threshold below 1.
@@ -768,79 +771,99 @@ def _run_eval(
                     judgement_sources.append(None)
                     notes.append(None)
                 else:
-                    if before_scoring is not None:
-                        # The only trials the hook sees are the ones scorers
-                        # will read — an operator verdict on a crashed trial
-                        # would be dead data (errored trials are never scored).
-                        if record.operator_judgement is None and not (
-                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
-                        ):
-                            observe_parked = getattr(embodiment, "observe_parked", None)
-                            if callable(observe_parked):
-                                try:
-                                    parked_observation = observe_parked()
-                                except (SafetyAbort, EmbodimentFault):
-                                    raise
-                                except Exception as exc:
-                                    warnings.warn(
-                                        "embodiment.observe_parked() failed with "
-                                        f"{type(exc).__name__}: {exc}; grading from "
-                                        "last-step frames",
-                                        RuntimeWarning,
-                                        stacklevel=2,
-                                    )
-                                else:
-                                    if isinstance(parked_observation, Observation):
-                                        record.parked_observation = parked_observation
-                                    elif parked_observation is not None:
+                    try:
+                        if before_scoring is not None:
+                            # The only trials the hook sees are the ones scorers
+                            # will read — an operator verdict on a crashed trial
+                            # would be dead data (errored trials are never scored).
+                            if record.operator_judgement is None and not (
+                                record.terminated
+                                and record.termination_reason in _DEFINITIVE_REASONS
+                            ):
+                                observe_parked = getattr(embodiment, "observe_parked", None)
+                                if callable(observe_parked):
+                                    try:
+                                        parked_observation = observe_parked()
+                                    except (SafetyAbort, EmbodimentFault):
+                                        raise
+                                    except Exception as exc:
                                         warnings.warn(
-                                            "embodiment.observe_parked() returned "
-                                            f"{type(parked_observation).__name__}; expected "
-                                            "Observation or None; grading from last-step frames",
+                                            "embodiment.observe_parked() failed with "
+                                            f"{type(exc).__name__}: {exc}; grading from "
+                                            "last-step frames",
                                             RuntimeWarning,
                                             stacklevel=2,
                                         )
-                        before_scoring(record, scene)
-                        graded_attempts += 1
-                        grading_error = record.metadata.get("grading_error")
-                        if grading_error and record.operator_judgement is None:
-                            ungraded_trials += 1
-                            if first_grading_error is None:
-                                first_grading_error = str(grading_error)
-                    epoch_values: dict[str, float | None] = {}
-                    for scorer in scorers:
-                        try:
-                            score = scorer(record, scene.target)
-                            value = value_to_float(score.value)
-                        except (SafetyAbort, EmbodimentFault):
-                            # Halt signals are not scoring errors: containing
-                            # them here would let the next rollout start after
-                            # an explicit safety abort or a hardware fault.
-                            raise
-                        except Exception as exc:
-                            # A scorer failure degrades to an error log - it must
-                            # never crash the eval and lose the trials that ran.
-                            detail = f"scorer {scorer.name!r} failed: {exc}"
-                            scene_status = "error"
-                            scene_error = (
-                                detail if scene_error is None else f"{scene_error}; {detail}"
-                            )
-                            if status == "success":
-                                status = "error"
-                                error = detail
-                            continue
-                        per_scorer_scores[scorer.name].append(score)
-                        epoch_values[scorer.name] = value
-                        if value is None:
-                            abstentions[scorer.name] = abstentions.get(scorer.name, 0) + 1
-                    epoch_dicts.append(epoch_values)
-                    # Captured at the same instant as the judgement, on purpose:
-                    # these fields are documented as strictly parallel, so a later
-                    # mutation (e.g. from policy.on_trial_end) must not be able
-                    # to reach one of them and miss the others.
-                    judgements.append(record.operator_judgement)
-                    judgement_sources.append(judgement_source(record))
-                    notes.append(record.operator_note)
+                                    else:
+                                        if isinstance(parked_observation, Observation):
+                                            record.parked_observation = parked_observation
+                                        elif parked_observation is not None:
+                                            warnings.warn(
+                                                "embodiment.observe_parked() returned "
+                                                f"{type(parked_observation).__name__}; expected "
+                                                "Observation or None"
+                                                "; grading from last-step frames",
+                                                RuntimeWarning,
+                                                stacklevel=2,
+                                            )
+                            before_scoring(record, scene)
+                            graded_attempts += 1
+                            grading_error = record.metadata.get("grading_error")
+                            if grading_error and record.operator_judgement is None:
+                                ungraded_trials += 1
+                                if first_grading_error is None:
+                                    first_grading_error = str(grading_error)
+                    except (EmbodimentFault, SafetyAbort) as exc:
+                        status = "error"
+                        error = f"{type(exc).__name__}: {exc}"
+                        scene_status = "error"
+                        scene_error = error
+                        halted = True
+                        hook_halt_exc = exc
+
+                        record.status = "error"
+                        record.error = scene_error
+                        # Re-route bookkeeping: move from scored to errored bucket
+                        epoch_dicts.append({})
+                        errored_trials += 1
+                        judgements.append(None)
+                        judgement_sources.append(None)
+                        notes.append(None)
+                    else:
+                        epoch_values: dict[str, float | None] = {}
+                        for scorer in scorers:
+                            try:
+                                score = scorer(record, scene.target)
+                                value = value_to_float(score.value)
+                            except (SafetyAbort, EmbodimentFault):
+                                # Halt signals are not scoring errors: containing
+                                # them here would let the next rollout start after
+                                # an explicit safety abort or a hardware fault.
+                                raise
+                            except Exception as exc:
+                                # A scorer failure degrades to an error log - it must
+                                # never crash the eval and lose the trials that ran.
+                                detail = f"scorer {scorer.name!r} failed: {exc}"
+                                scene_status = "error"
+                                scene_error = (
+                                    detail if scene_error is None else f"{scene_error}; {detail}"
+                                )
+                                if status == "success":
+                                    status = "error"
+                                    error = detail
+                                continue
+                            per_scorer_scores[scorer.name].append(score)
+                            epoch_values[scorer.name] = value
+                            if value is None:
+                                abstentions[scorer.name] = abstentions.get(scorer.name, 0) + 1
+                        epoch_dicts.append(epoch_values)
+                        # Captured at the same instant as the judgement, on purpose:
+                        # these fields are documented as strictly parallel, so a later
+                        # mutation (e.g. from policy.on_trial_end) must not be able
+                        # to reach one of them and miss the others.
+                        judgements.append(record.operator_judgement)
+                        judgement_sources.append(judgement_source(record))
+                        notes.append(record.operator_note)
 
                 # A never-reset trial must not persist the previous trial's
                 # policy state under this trial's identity.
@@ -1002,6 +1025,8 @@ def _run_eval(
         warnings.warn(survivor_warning, UserWarning, stacklevel=3)
     if cancelled_exc is not None:
         raise cancelled_exc
+    if hook_halt_exc is not None:
+        raise hook_halt_exc
     return [log]
 
 
