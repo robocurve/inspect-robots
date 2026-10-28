@@ -56,14 +56,80 @@ ECHO_INTERVAL_S = 0.05
 def _flush_stdin_fd() -> None:
     if not sys.stdin.isatty():
         return
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+        return
     fd = sys.stdin.fileno()  # pragma: no cover
-    while select.select([fd], [], [], 0)[0]:  # pragma: no cover
-        if not os.read(fd, 65536):  # pragma: no cover
-            break  # pragma: no cover
+    try:  # pragma: no cover
+        while select.select([fd], [], [], 0)[0]:  # pragma: no cover
+            if not os.read(fd, 65536):  # pragma: no cover
+                break  # pragma: no cover
+    except OSError:  # pragma: no cover
+        return
 
 
-def _stdin_read_bytes() -> bytes:
+_pending_surrogate: str | None = None
+
+
+def _stdin_read_bytes() -> bytes | None:
     """Read up to 64KiB of raw stdin without decoding (the footer pump's default fd seam)."""
+    global _pending_surrogate
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        chars: list[str] = []
+        has_keys = False
+        while msvcrt.kbhit():
+            has_keys = True
+            ch = msvcrt.getwch()
+            # On Windows, special keys emit two wide characters:
+            # either '\x00' or '\xe0' followed by the scan code.
+            # However, '\xe0' (U+00E0 'à') is also a legitimate character.
+            if ch == "\x00":
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if ch == "\xe0":
+                if msvcrt.kbhit():
+                    nxt = msvcrt.getwch()
+                    # Windows CRT scan codes for extended keys (arrows, navigation, F11/F12)
+                    if nxt in frozenset("HPKMGOIQRS\x85\x86"):
+                        continue
+                    chars.append(ch)
+                    ch = nxt
+                else:
+                    chars.append(ch)
+                    continue
+            if ch == "\r":
+                ch = "\n"
+            chars.append(ch)
+        if not chars:
+            return None if has_keys else b""
+        # Assemble UTF-16 surrogate pairs if any, retaining pending surrogate state across reads
+        assembled: list[str] = []
+        for ch in chars:
+            code = ord(ch)
+            if 0xD800 <= code <= 0xDBFF:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                _pending_surrogate = ch
+            elif 0xDC00 <= code <= 0xDFFF:
+                if _pending_surrogate is not None:
+                    assembled.append(
+                        chr(0x10000 + ((ord(_pending_surrogate) - 0xD800) << 10) + (code - 0xDC00))
+                    )
+                    _pending_surrogate = None
+                else:
+                    assembled.append(ch)
+            else:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                    _pending_surrogate = None
+                assembled.append(ch)
+        return "".join(assembled).encode("utf-8")
     return os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
 
 
@@ -84,6 +150,8 @@ def _enter_cbreak() -> object:
 
 def _restore(state: object) -> None:
     """Restore one exact termios snapshot returned by ``_enter_cbreak``."""
+    if state is _NO_TERMIOS_STATE:  # pragma: no cover
+        return
     import termios  # pragma: no cover
 
     fd, attrs = cast(tuple[int, list[Any]], state)  # pragma: no cover
@@ -197,7 +265,7 @@ class OperatorSession:
         write: Callable[[str], None] | None = None,
         flush_fn: Callable[[], None] | None = None,
         fd_readable: Callable[[], bool] | None = None,
-        fd_read: Callable[[], bytes] | None = None,
+        fd_read: Callable[[], bytes | None] | None = None,
         width_fn: Callable[[], int] | None = None,
         isatty_fn: Callable[[], bool] | None = None,
         raw_mode_fn: Callable[[], object] | None = None,
@@ -232,7 +300,9 @@ class OperatorSession:
         self._fd_readable: Callable[[], bool] = (
             fd_readable if fd_readable is not None else _stdin_readable
         )
-        self._fd_read: Callable[[], bytes] = fd_read if fd_read is not None else _stdin_read_bytes
+        self._fd_read: Callable[[], bytes | None] = (
+            fd_read if fd_read is not None else _stdin_read_bytes
+        )
         self._width_fn: Callable[[], int] = width_fn if width_fn is not None else _default_width
         self._now_fn: Callable[[], float] = now_fn if now_fn is not None else time.monotonic
         self._editor = _LineEditor()
@@ -276,15 +346,17 @@ class OperatorSession:
             return bool(self._line_queue) or self._pump_eof
         return self._fd_readable()
 
-    def _dispatch_read(self) -> str:
+    def _dispatch_read(self) -> str | None:
         """Console-facing ``read`` seam: queued footer lines, or one decoded fd chunk."""
         if self._footer_active:
             if self._line_queue:
                 chunk = "".join(f"{line}\n" for line in self._line_queue)
                 self._line_queue = []
                 return chunk
-            return ""
+            return None if not self._pump_eof else ""
         raw = self._fd_read()
+        if raw is None:
+            return None
         return "" if raw == b"" else raw.decode("utf-8", errors="replace")
 
     def _pump_input(self) -> None:
@@ -300,6 +372,8 @@ class OperatorSession:
         fed = False
         while self._fd_readable():
             chunk = self._fd_read()
+            if chunk is None:
+                continue
             if chunk == b"":
                 self._pump_eof = True
                 break
@@ -354,7 +428,10 @@ class OperatorSession:
         """
         self._footer_active = True
         while self._fd_readable():
-            if self._fd_read() == b"":
+            chunk = self._fd_read()
+            if chunk is None:
+                continue
+            if chunk == b"":
                 self._pump_eof = True
                 break
         self._editor.reset()
@@ -421,6 +498,8 @@ class OperatorSession:
             if not self._isatty_fn():
                 return
             saved_state = self._raw_mode_fn()
+            if saved_state is _NO_TERMIOS_STATE:
+                return
         except Exception:
             return
 
