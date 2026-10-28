@@ -807,6 +807,53 @@ def test_halt_without_attached_record_still_produces_error_log(
     assert log.results.total_trials == 0  # nothing to count or deliver
 
 
+def test_unexpected_exception_without_record_falls_back_to_empty_trial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_rollout(*args: object, **kwargs: object) -> TrialRecord:
+        raise RuntimeError("sim crashed unexpectedly")
+
+    import sys
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "rollout", fake_rollout)
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.results.total_trials == 1
+    assert log.results.errored_trials == 1
+    assert log.samples[0].status == "error"
+    assert "unexpected framework error (RuntimeError): sim crashed unexpectedly" in (
+        log.samples[0].error or ""
+    )
+
+
+def test_unexpected_exception_with_record_preserves_partial_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rec = TrialRecord(
+        scene_id="cube_pick_default",
+        epoch=0,
+        seed=0,
+        status="error",
+        error="disk full",
+    )
+    exc = OSError("disk full")
+    exc.record = rec  # type: ignore[attr-defined]
+
+    def fake_rollout(*args: object, **kwargs: object) -> TrialRecord:
+        raise exc
+
+    import sys
+
+    monkeypatch.setattr(sys.modules["inspect_robots.eval"], "rollout", fake_rollout)
+    (log,) = eval(_task(), ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "error"
+    assert log.results.total_trials == 1
+    assert log.results.errored_trials == 1
+    assert log.samples[0].status == "error"
+    assert log.samples[0].error == "unexpected framework error (OSError): disk full"
+    assert rec.status == "error"
+
+
 def test_halt_delivers_partial_record_and_counts_trial() -> None:
     sink = _RecordingSink()
     (log,) = eval(
