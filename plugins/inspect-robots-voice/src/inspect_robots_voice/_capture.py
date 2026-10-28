@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import queue as queue_module
+import threading
+import time
 import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -13,6 +15,36 @@ import numpy.typing as npt
 
 AudioArray = npt.NDArray[np.float32]
 Device = str | int | None
+
+
+_speakers_lock = threading.Lock()
+_active_speakers: set[object] = set()
+_last_playback_end: float = 0.0
+_HANGOVER_SECONDS: float = 0.3
+
+
+def _register_speaker(speaker: object) -> None:
+    """Register an active speaker sink to mute microphone capture."""
+    with _speakers_lock:
+        _active_speakers.add(speaker)
+
+
+def _unregister_speaker(speaker: object) -> None:
+    """Unregister an active speaker sink and start the echo-tail hangover timer."""
+    global _last_playback_end
+    with _speakers_lock:
+        _active_speakers.discard(speaker)
+        _last_playback_end = time.monotonic()
+
+
+def _is_playback_active(now: float | None = None) -> bool:
+    """Return True if a speaker is actively playing or within the echo-tail hangover."""
+    if now is None:
+        now = time.monotonic()
+    with _speakers_lock:
+        if _active_speakers:
+            return True
+        return (now - _last_playback_end) < _HANGOVER_SECONDS
 
 
 class MicrophoneCapture:
@@ -129,6 +161,8 @@ class MicrophoneCapture:
         status: object,
     ) -> None:
         del frames, time_info, status
+        if _is_playback_active():
+            return
         block = np.asarray(indata, dtype=np.float32).reshape(-1).copy()
         try:
             self._queue.put_nowait(block)
