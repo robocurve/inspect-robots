@@ -807,6 +807,57 @@ def test_move_joints_clips_every_interpolant_into_box() -> None:
     assert all(-1.0 <= float(action.data[0]) <= 0.3 for action in result.chunk.actions)
 
 
+def test_move_absolute_note_reports_clipping() -> None:
+    # Target above high bound gets clipped
+    space = _absolute_space(low=np.array([-1.0]), high=np.array([0.3]))
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+    result = toolset.execute(
+        _call("move_joints", targets={"joint": 1.0}),
+        _obs({"q": np.array([0.0])}),
+    )
+    assert result.error is None and result.chunk is not None
+    assert "clipped:" in result.note
+    assert "joint" in result.note
+    assert "1" in result.note  # 1.0 formatted as "1" by :.4g
+    assert "0.3" in result.note
+    assert "(max)" in result.note
+
+    # Target below low bound gets clipped
+    result2 = toolset.execute(
+        _call("move_joints", targets={"joint": -2.0}),
+        _obs({"q": np.array([0.0])}),
+    )
+    assert result2.error is None and result2.chunk is not None
+    assert "clipped:" in result2.note
+    assert "joint" in result2.note
+    assert "2" in result2.note  # -2.0 formatted as "2" by :.4g (sign handled separately)
+    assert "1" in result2.note  # -1.0 formatted as "1"
+    assert "(min)" in result2.note
+
+
+def test_format_clipping_from_list_edge_cases() -> None:
+    space = _absolute_space()
+    toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0)
+
+    # Empty list returns empty string
+    assert toolset._format_clipping_from_list([]) == ""
+
+    # req == clipped (should not happen in practice but covers the else branch)
+    result = toolset._format_clipping_from_list([("joint", 0.5, 0.5)])
+    assert result == "clipped: joint 0.5 -> 0.5"
+
+    # Multiple clipped dims
+    result = toolset._format_clipping_from_list([
+        ("joint1", 1.5, 1.0),
+        ("joint2", -1.5, -1.0),
+        ("joint3", 0.5, 0.5),
+    ])
+    assert "clipped:" in result
+    assert "joint1" in result and "1.5 -> 1 (max)" in result
+    assert "joint2" in result and "-1.5 -> -1 (min)" in result
+    assert "joint3" in result and "0.5 -> 0.5" in result
+
+
 def test_pre_check_receives_exact_read_only_clipped_waypoints_once() -> None:
     low = np.array([-1.0, -0.5])
     high = np.array([0.3, 0.5])
@@ -900,13 +951,19 @@ def test_move_joints_preserves_unnamed_dimensions_and_index_labels() -> None:
     assert final[0] == 0.2 and final[1] == 0.6
 
 
-def test_move_joints_rejects_out_of_bounds_but_accepts_bound() -> None:
+def test_move_joints_clips_out_of_bounds_and_accepts_bound() -> None:
     toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
-    rejected = toolset.execute(
+    clipped = toolset.execute(
         _call("move_joints", targets={"joint": 1.01}),
         _obs(),
     )
-    assert rejected.error == "target for joint is outside [-1.0, 1.0]"
+    assert clipped.error is None and clipped.chunk is not None
+    assert "clipped:" in clipped.note
+    assert "joint" in clipped.note
+    assert "1.01" in clipped.note
+    assert "1" in clipped.note  # 1.0 formatted as "1" by :.4g
+    assert "(max)" in clipped.note
+    assert clipped.chunk.actions[-1].data[0] == 1.0
 
     accepted = toolset.execute(
         _call("move_joints", targets={"joint": -1.0}),

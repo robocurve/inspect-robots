@@ -453,6 +453,8 @@ class Toolset:
         current: npt.NDArray[np.float64],
     ) -> ToolResult:
         target = current.copy()
+        # Track which dimensions were clipped from the requested value
+        clipped_dims: list[tuple[str, float, float]] = []
         for label, index in zip(values, named_indices, strict=True):
             value = vector[index]
             if self._step_limits[index] == 0:
@@ -461,13 +463,13 @@ class Toolset:
                         error=f"dimension {label} is fixed at {float(self._low[index])!r}"
                     )
             elif value < self._low[index] or value > self._high[index]:
-                return ToolResult(
-                    error=(
-                        f"target for {label} is outside "
-                        f"[{float(self._low[index])!r}, {float(self._high[index])!r}]"
-                    )
-                )
-            target[index] = value
+                # Clip out-of-bounds targets instead of rejecting; the approver chain
+                # is the safety backstop. Report the clipping in the move result.
+                clipped_value = float(np.clip(value, self._low[index], self._high[index]))
+                clipped_dims.append((label, value, clipped_value))
+                target[index] = clipped_value
+            else:
+                target[index] = value
 
         ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -497,7 +499,13 @@ class Toolset:
             waypoints.flags.writeable = False
             if message := self._pre_check(waypoints):
                 return ToolResult(error="pre-check rejected this motion: " + message)
-        return self._success(actions, steps, target=clipped_target)
+        return self._success(
+            actions,
+            steps,
+            target=clipped_target,
+            requested_target=target,
+            clipped_dims=clipped_dims,
+        )
 
     def _move_displacement(
         self,
@@ -549,6 +557,8 @@ class Toolset:
         steps: int,
         *,
         target: npt.NDArray[np.float64] | None = None,
+        requested_target: npt.NDArray[np.float64] | None = None,
+        clipped_dims: list[tuple[str, float, float]] | None = None,
     ) -> ToolResult:
         if actions:
             last = actions[-1]
@@ -556,11 +566,30 @@ class Toolset:
         note = f"executing {self._move_tool} over {steps} steps"
         if self._hz is not None:
             note += f" ({steps / self._hz:.1f}s)"
+        # Add clipping status if any dimensions were clipped from the requested values
+        if clipped_dims:
+            clipped_info = self._format_clipping_from_list(clipped_dims)
+            if clipped_info:
+                note += f"; {clipped_info}"
         return ToolResult(
             chunk=ActionChunk(actions=actions, control_hz=self._hz),
             note=note,
             target=target,
         )
+
+    def _format_clipping_from_list(self, clipped_dims: list[tuple[str, float, float]]) -> str:
+        """Return a clipping summary from a list of (label, requested, clipped)."""
+        diffs: list[str] = []
+        for label, req, clipped in clipped_dims:
+            if req > clipped:
+                diffs.append(f"{label} {req:.4g} -> {clipped:.4g} (max)")
+            elif req < clipped:
+                diffs.append(f"{label} {req:.4g} -> {clipped:.4g} (min)")
+            else:
+                diffs.append(f"{label} {req:.4g} -> {clipped:.4g}")
+        if not diffs:
+            return ""
+        return "clipped: " + ", ".join(diffs)
 
 
 def build_toolset(
