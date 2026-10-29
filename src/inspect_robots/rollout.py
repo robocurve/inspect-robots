@@ -286,6 +286,7 @@ def rollout(
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
     expected_dim = embodiment.info.action_space.dim
+    expected_shape = embodiment.info.action_space.shape
     policy_reset_ok = False
     delta_hook: Any = getattr(policy, "transcript_delta", None)
     messages_hook: Any = getattr(sink, "log_policy_messages", None)
@@ -411,13 +412,23 @@ def rollout(
 
             # A malformed action is the policy's fault; catching it here keeps it
             # from surfacing inside the approver/embodiment as a halting fault.
-            emitted_dim = int(np.asarray(action.data).size)
+            emitted_arr = np.asarray(action.data)
+            emitted_dim = int(emitted_arr.size)
             if emitted_dim != expected_dim:
                 raise _record_failure(
                     record,
                     PolicyError(
                         f"policy emitted a {emitted_dim}-D action but embodiment "
                         f"{embodiment.info.name!r} expects {expected_dim}-D"
+                    ),
+                    t,
+                )
+            if emitted_arr.shape != expected_shape:
+                raise _record_failure(
+                    record,
+                    PolicyError(
+                        f"policy emitted action shape {emitted_arr.shape} but embodiment "
+                        f"{embodiment.info.name!r} expects {expected_shape}"
                     ),
                     t,
                 )
@@ -455,13 +466,24 @@ def rollout(
             action = reviewed
 
             # Recheck because an approver may mutate the array in place or return a new action.
-            reviewed_dim = int(np.asarray(action.data).size)
+            reviewed_arr = np.asarray(action.data)
+            reviewed_dim = int(reviewed_arr.size)
             if reviewed_dim != expected_dim:
                 raise _record_failure(
                     record,
                     SafetyAbort(
                         f"approver {type(approver).__name__} returned a {reviewed_dim}-D "
                         f"action but embodiment {embodiment.info.name!r} expects {expected_dim}-D"
+                    ),
+                    t,
+                )
+            if reviewed_arr.shape != expected_shape:
+                raise _record_failure(
+                    record,
+                    SafetyAbort(
+                        f"approver {type(approver).__name__} returned action shape "
+                        f"{reviewed_arr.shape} but embodiment {embodiment.info.name!r} "
+                        f"expects {expected_shape}"
                     ),
                     t,
                 )
