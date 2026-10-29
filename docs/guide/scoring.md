@@ -68,6 +68,60 @@ from inspect_robots.task import Epochs, Task
 Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 ```
 
+## Uncertainty and comparing runs
+
+A run's `results.metrics` is a mean per scorer. On a robot that mean usually rests on a few dozen
+trials from a handful of scenes, so on its own it cannot say whether a second run that scored
+higher is better. [`inspect_robots.evidence`](/api/#inspect_robots.evidence) reads any saved log,
+old or new, and adds the missing pieces.
+
+```python
+from inspect_robots import compare_logs, metric_evidence, read_eval_log
+
+a = read_eval_log("logs/policy_a.json")
+b = read_eval_log("logs/policy_b.json")
+
+ev = metric_evidence(a)["success"]
+print(ev.mean, ev.ci_low, ev.ci_high, ev.coverage)   # scene-resampled 95% interval
+
+c = compare_logs(a, b, "success")
+print(c.verdict, c.delta, c.wins, c.losses, c.p_permutation, c.mde)
+print(c.scenes_needed(0.05))                          # plan the next run
+```
+
+Four rules are built in:
+
+- **Scenes are the unit:** epochs of one scene share a world, so intervals resample whole scenes
+  and tests permute whole scenes. Adding epochs does not narrow an interval that more scenes would.
+- **Coverage travels with the number:** errored and abstained trials are never scored, so a mean
+  can be a mean over survivors. Every summary reports, per scorer, scored against attempted trials,
+  and a comparison names no winner when either side is below `min_coverage` (0.95 by default).
+- **The saved metric decides:** each scene contributes its reduced score (the task's epoch
+  reducer, so `max` or `pass_at_2` is respected) and scenes weigh equally, as in
+  `results.metrics`. Lower-is-better scorers (`min_distance_to_goal` built in, or
+  `lower_is_better=True`) name the smaller value the winner; `delta` stays `A - B` either way.
+- **Pair by scene:** two runs of the same task see the same scenes, so the comparison is made
+  scene by scene. The win, loss and tie counts show when one hard scene is carrying a difference.
+
+The number of scenes also sets a floor on significance that no data can cross: a paired test over
+`n` scenes cannot return a two-sided p below `2 / 2**n`. At 5 scenes that is 0.0625, so a 5-scene
+comparison cannot separate two policies at 0.05 even when one wins every scene.
+`evidence.scenes_to_reach(alpha)` gives the minimum, and `compare_logs` warns when a comparison is
+below it. See [`inspect-robots compare`](cli.md#inspect-robots-compare) for the command-line form.
+
+Checking a fixed-design test after every scene and stopping once it looks good inflates the error:
+in simulation on real scene noise, that protocol declared a winner under no true difference in 18
+to 36% of runs. `evidence.anytime_valid_test` is safe to read after every scene, and
+`compare_logs` reports its e-value and the scene at which it could have stopped:
+
+```python
+from inspect_robots.evidence import anytime_valid_test
+
+result = anytime_valid_test([a - b for a, b in zip(scores_a, scores_b)])
+if result.stopped_at is not None:
+    print(f"stop after {result.stopped_at} scenes: {result.direction}")
+```
+
 ## Operator and VLM scoring (real world)
 
 Real robots have no privileged success oracle. The dominant method is a human
