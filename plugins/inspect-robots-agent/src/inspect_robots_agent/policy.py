@@ -17,6 +17,7 @@ import json
 import math
 import os
 import sys
+import threading
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import suppress
@@ -46,6 +47,7 @@ from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
     ENV_MODEL,
+    AssistantMessage,
     ChatClient,
     Provider,
     ToolCall,
@@ -60,6 +62,19 @@ from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 from ._capture import WireCapture, _safe
 
 _MAX_CONSECUTIVE_FAILURES = 3
+
+#: Supervisor-created file that ends the trial without waiting for the model.
+#: When this environment variable names a path, each model request runs on a
+#: background thread while ``act()`` polls for the file. Its appearance abandons
+#: the request (its late reply is never used) and returns a hold-still stop.
+END_FILE_ENV: Final = "INSPECT_ROBOTS_AGENT_END_FILE"
+_END_POLL_S: Final = 0.05
+
+
+class _EndRequested(Exception):
+    """The operator's End arrived while ``act()`` was waiting on the model."""
+
+
 # Shared by the camera label writer and the reader that recovers revealed
 # camera names from it, so the two cannot drift apart again.
 _CAMERA_LABEL_PREFIX = "camera "
@@ -777,6 +792,9 @@ class LLMAgentPolicy(PolicyBase):
         self._pre_check = pre_check
         self._explicit_base_url = bool(base_url)
         self._wire = wire
+        self._end_file = environ.get(END_FILE_ENV) or None
+        # A model request End abandoned; it must finish before the client is reused.
+        self._abandoned: threading.Thread | None = None
         self.config = AgentPolicyConfig(
             temperature=temperature,
             model=provider.model,
@@ -844,6 +862,11 @@ class LLMAgentPolicy(PolicyBase):
 
     def reset(self, scene: Scene) -> None:
         """Start a fresh per-trial conversation with the scene goal and call budget."""
+        self._settle_abandoned_call()
+        if self._end_file is not None:
+            # An End from an earlier trial must not end this one.
+            with suppress(FileNotFoundError):
+                os.remove(self._end_file)
         if isinstance(self._client, ResponsesClient):
             self._client._reset_cache_tracking()
         self._hindsight = None
@@ -1014,12 +1037,11 @@ class LLMAgentPolicy(PolicyBase):
                     self._image_horizon,
                     mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
-            message = self._client.complete(
-                outgoing,
-                toolset.schemas(),
-                temperature=self._temperature,
-                reasoning_effort=self._effort,
-            )
+            try:
+                message = self._complete(outgoing, toolset.schemas())
+            except _EndRequested:
+                self._echo("[agent] -- operator End: model reply abandoned; holding")
+                return toolset.operator_end(observation)
             self._calls_used += 1
             if message.usage is not None:
                 for key, value in message.usage.items():
@@ -1216,6 +1238,60 @@ class LLMAgentPolicy(PolicyBase):
                 raise RuntimeError(
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
+
+    def _complete(
+        self, outgoing: list[dict[str, Any]], schemas: list[dict[str, Any]]
+    ) -> AssistantMessage:
+        """Request one model turn, abandoning the wait if the operator's End arrives."""
+        if self._end_file is None:
+            return self._client.complete(
+                outgoing, schemas, temperature=self._temperature, reasoning_effort=self._effort
+            )
+        if os.path.exists(self._end_file):
+            raise _EndRequested
+        outcome: dict[str, Any] = {}
+        finished = threading.Event()
+
+        def request() -> None:
+            try:
+                outcome["message"] = self._client.complete(
+                    outgoing, schemas, temperature=self._temperature, reasoning_effort=self._effort
+                )
+            except Exception as exc:  # handed to the waiting thread, or dropped if abandoned
+                outcome["error"] = exc
+            finally:
+                finished.set()
+
+        # The thread reads the live history: reset() replaces the list rather
+        # than mutating it, and an abandoned act() appends nothing further.
+        thread = threading.Thread(target=request, name="agent-model-request", daemon=True)
+        thread.start()
+        try:
+            while not finished.wait(_END_POLL_S):
+                if os.path.exists(self._end_file):
+                    raise _EndRequested
+        except BaseException:
+            self._abandoned = thread
+            raise
+        error = outcome.get("error")
+        if error is not None:
+            raise error
+        message: AssistantMessage | None = outcome.get("message")
+        if message is None:  # pragma: no cover - only a non-Exception exit of the thread
+            raise RuntimeError("model request thread ended without a reply")
+        return message
+
+    def _settle_abandoned_call(self) -> None:
+        """Wait out a request End abandoned, so its late reply cannot race the next one.
+
+        Clients keep per-session state (Gemini Live's streamed cursor, Responses
+        cache tracking), so an abandoned request must finish before the client
+        is used again. Its own timeout bounds the wait.
+        """
+        thread, self._abandoned = self._abandoned, None
+        if thread is not None and thread.is_alive():
+            self._echo("[agent] -- waiting for the abandoned model request to finish")
+            thread.join()
 
     def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not
