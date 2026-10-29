@@ -196,6 +196,36 @@ def test_rewind_reference_stores_a_copy() -> None:
     assert np.allclose(out.data, [0.5, 0.5])
 
 
+def test_first_action_reference_is_a_copy_of_the_policy_buffer() -> None:
+    # A policy that writes each target into one preallocated array must not
+    # move the limiter's reference along with it.
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    buffer = np.array([0.0, 0.0])
+    approver.review(Action(data=buffer), store)
+
+    buffer[:] = [0.9, 0.9]
+    out = approver.review(Action(data=buffer), store)
+
+    assert np.allclose(out.data, [0.1, 0.1])
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_clamped_reference_is_not_shared_with_the_returned_action() -> None:
+    # A later approver or the controller mutating the clamped action in place
+    # must not move the limiter's reference with it.
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+
+    clamped = approver.review(Action(data=np.array([0.9, 0.9])), store)
+    assert np.allclose(clamped.data, [0.1, 0.1])
+    clamped.data[:] = [0.9, 0.9]
+
+    out = approver.review(Action(data=np.array([0.9, 0.9])), store)
+    assert np.allclose(out.data, [0.2, 0.2])
+
+
 def test_rewind_reference_uses_the_limiter_store_key() -> None:
     approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
     store: dict[str, object] = {}
