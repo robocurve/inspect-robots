@@ -769,7 +769,7 @@ def test_move_joints_derives_steps_and_snaps_bit_exact_target() -> None:
     assert snapped.chunk.actions[-1].data[0] == 0.3
 
 
-def test_absolute_result_carries_target_and_residual_is_best_effort() -> None:
+def test_absolute_result_carries_target_and_shortfall_is_best_effort() -> None:
     toolset = build_toolset(
         _absolute_space(labels=("joint",)),
         _absolute_obs_space(),
@@ -782,18 +782,17 @@ def test_absolute_result_carries_target_and_residual_is_best_effort() -> None:
 
     assert result.target is not None
     assert np.array_equal(result.target, np.array([0.5]))
-    assert toolset.residual(result.target, _obs({"q": np.array([0.496])})) == (
-        "joint",
-        pytest.approx(0.004),
-    )
-    assert toolset.residual(result.target, Observation()) is None
-    assert toolset.residual(result.target, _obs({"q": np.array([0.1, 0.2])})) is None
-    assert toolset.residual(result.target, _obs({"q": np.array([np.nan])})) is None
+    assert toolset.shortfall(result.target, _obs({"q": np.array([0.496])}), 1e-4) == [
+        ("joint", 0.5, 0.496)
+    ]
+    assert toolset.shortfall(result.target, Observation(), 1e-4) is None
+    assert toolset.shortfall(result.target, _obs({"q": np.array([0.1, 0.2])}), 1e-4) is None
+    assert toolset.shortfall(result.target, _obs({"q": np.array([np.nan])}), 1e-4) is None
 
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     moved = displacement.execute(_call("move_by", deltas={"0": 0.05}), Observation())
     assert moved.target is None
-    assert displacement.residual(np.zeros(2), Observation()) is None
+    assert displacement.shortfall(np.zeros(2), Observation(), 1e-4) is None
 
 
 def test_move_joints_clips_every_interpolant_into_box() -> None:
@@ -1408,3 +1407,20 @@ def test_toolset_pinned_labels_displacement_modes() -> None:
     )
     toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
     assert toolset.pinned_labels == ("fixed_dim",)
+
+
+def test_shortfall_lists_off_target_axes_largest_first() -> None:
+    space = Box(
+        shape=(3,),
+        low=np.full(3, -1.0),
+        high=np.full(3, 1.0),
+        semantics=ActionSemantics("joint_pos", dim_labels=("a", "b", "c")),
+    )
+    toolset = build_toolset(space, _absolute_obs_space(dim=3), control_hz=10.0)
+    target = np.array([0.5, 0.2, -0.3])
+
+    short = toolset.shortfall(target, _obs({"q": np.array([0.45, 0.2, 0.0])}), 1e-4)
+
+    assert short == [("c", -0.3, 0.0), ("a", 0.5, 0.45)]
+    assert toolset.shortfall(target, _obs({"q": target.copy()}), 1e-4) == []
+    assert toolset.shortfall(target, Observation(), 1e-4) is None

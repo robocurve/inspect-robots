@@ -57,6 +57,7 @@ from inspect_robots_agent.policy import (
     _observation_content,
     _operator_lines,
     _PendingCapture,
+    _shortfall_sentence,
 )
 
 # --- scripted-conversation harness ---------------------------------------------
@@ -681,7 +682,7 @@ def test_pending_narration_handles_absent_target_and_residual(
 
     toolset = policy._toolset
     assert toolset is not None
-    monkeypatch.setattr(toolset, "residual", lambda target, current: None)
+    monkeypatch.setattr(toolset, "shortfall", lambda target, current, tolerance: None)
     with_target = replace(without_target, target=np.array([0.1]))
     narration = policy._pending_narration(with_target, observation, ())
     assert "remaining offset" not in narration
@@ -2972,3 +2973,122 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
 
     # Assert wire directory stem and transcript stem agree
     assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem
+
+
+# --- move status on the next observation (#408) ---------------------------------
+
+
+def _move_then_observe(q_after: float, extra: dict[str, Any]) -> str:
+    """Move the absolute joint to 0.2, deliver one observation, return its text."""
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.2}}),
+            _tool_response("done", {"summary": "moved"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    chunk = policy.act(Observation(state={"q": np.array([0.0])}, extra={"env_step": 4}))
+    policy.act(Observation(state={"q": np.array([q_after])}, extra=extra))
+    content = script.requests[1]["messages"][-1]["content"]
+    assert len(chunk) == 11
+    return str(content[0]["text"])
+
+
+def test_move_status_reaches_next_observation_without_a_capture() -> None:
+    text = _move_then_observe(0.15, {"env_step": 15, "approvals": []})
+
+    assert (
+        "The motion finished playing (11 of 11 steps). Largest remaining offset from the "
+        "requested target is 0.05 on joint. Requested vs reached: joint 0.2 -> 0.15. "
+        "No approver step changed this motion, and the target is inside the action bounds."
+    ) in text
+
+
+@pytest.mark.parametrize(
+    ("approvals", "expected"),
+    [
+        (
+            [{"t": 5, "detail": "clamped, delta_clamped"}, {"t": 6, "detail": "delta_clamped"}],
+            "The approver clamped 1 step(s) of this motion to the action bounds.",
+        ),
+        (
+            [{"t": 5, "detail": "delta_clamped"}, "not-a-record"],
+            "The approver slowed 1 step(s) to its per-step limit, so the arm may still be on "
+            "its way.",
+        ),
+        ([{"t": 5, "detail": None}], "The approver modified 1 step(s) of this motion."),
+    ],
+)
+def test_move_status_attributes_a_missed_target_to_the_approver(
+    approvals: list[object], expected: str
+) -> None:
+    text = _move_then_observe(0.15, {"env_step": 15, "approvals": approvals})
+
+    assert f"Requested vs reached: joint 0.2 -> 0.15. {expected}" in text
+
+
+def test_move_status_without_approval_record_or_playout_reports_only_the_offset() -> None:
+    text = _move_then_observe(0.15, {"env_step": "unknown"})
+
+    assert "finished playing" not in text
+    assert "Requested vs reached: joint 0.2 -> 0.15." in text
+    assert "approver" not in text
+
+
+def test_move_status_reports_target_reached() -> None:
+    text = _move_then_observe(0.2, {"env_step": 15, "approvals": []})
+
+    assert "The motion finished playing (11 of 11 steps). Target reached." in text
+    assert "Requested vs reached" not in text
+
+
+def test_move_status_is_silent_when_nothing_is_measurable() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.2}}),
+            _tool_response("done", {"summary": "moved"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    policy.act(Observation(state={"q": np.array([0.0])}))
+    policy.act(Observation(state={"q": np.array([np.nan])}))
+
+    text = script.requests[1]["messages"][-1]["content"][0]["text"]
+    assert "motion" not in text
+    assert "Target reached" not in text
+
+
+def test_move_status_is_not_recorded_for_a_stop_or_kept_across_reset() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.2}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.2}}),
+            _tool_response("done", {"summary": "moved"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    policy.act(Observation(state={"q": np.array([0.0])}, extra={"env_step": 0}))
+    assert policy._motion is not None
+    policy.reset(Scene(id="s1", instruction="move"))
+    assert policy._motion is None
+
+    policy.act(Observation(state={"q": np.array([0.0])}, extra={"env_step": 0}))
+    stop = policy.act(Observation(state={"q": np.array([0.2])}, extra={"env_step": 11}))
+    assert stop.actions[0].meta["request_stop"] is True
+    assert policy._motion is None
+
+
+def test_shortfall_sentence_names_three_axes_then_counts_the_rest() -> None:
+    four = [("a", 1.0, 0.5), ("b", 1.0, 0.6), ("c", 1.0, 0.7), ("d", 1.0, 0.8)]
+    five = [*four, ("e", 1.0, 0.9)]
+
+    assert _shortfall_sentence(four) == (
+        "Requested vs reached: a 1 -> 0.5, b 1 -> 0.6, c 1 -> 0.7, and 1 more axis."
+    )
+    assert _shortfall_sentence(five).endswith(", and 2 more axes.")
