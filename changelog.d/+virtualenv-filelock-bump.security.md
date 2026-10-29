@@ -1,0 +1,1 @@
+**Repo:** bumped `virtualenv` to 21.15.1 and `filelock` to 4.2.4 in `uv.lock`, clearing the open `virtualenv` alerts and the filelock lock-file advisories (GHSA-v4x8-3wr5-3wq8 and others). Dev-only; reached through `pre-commit`.
