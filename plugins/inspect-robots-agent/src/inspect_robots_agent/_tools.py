@@ -281,11 +281,13 @@ class Toolset:
                         "note": {
                             "type": "string",
                             "description": (
-                                "What you observe right now in the observation (images, if any, "
-                                "and state), and why you chose this motion. The user reads these "
-                                "notes live and in the saved transcript to follow what you see "
-                                "and what you decide. Write for them, in one or two plain "
-                                "sentences."
+                                # An operator-facing status caption. Wording that asks the model
+                                # to explain why it chose the motion reads as a request for its
+                                # hidden reasoning, which some models refuse on every call.
+                                "One or two plain sentences for the human operator watching "
+                                "the robot: describe the scene as it currently looks (images, "
+                                "if any, and state) and state the goal of this motion. Shown "
+                                "live and in the saved transcript."
                             ),
                         },
                     },

@@ -3419,3 +3419,35 @@ def test_observation_content_renders_motor_temperature_lines() -> None:
     )
     (text,) = _observation_content(observation)
     assert text["text"].endswith("motor temperatures: left arm hottest left_j1 41 C")
+
+
+def _filtered_response() -> dict[str, Any]:
+    return {"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]}
+
+
+def test_content_filter_forces_give_up_and_counts_the_call(tmp_path: Path) -> None:
+    script = _Script([_filtered_response()])
+    log = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))[0]
+
+    assert len(script.requests) == 1
+    assert log.samples[0].termination_reasons == ("give_up",)
+    assert log.samples[0].trial_metadata[0]["llm_usage"]["llm_calls"] == 1
+
+
+@pytest.mark.parametrize(("timeout_s", "expected"), [(None, 120.0), (300, 300.0)])
+def test_timeout_s_overrides_the_wire_default(timeout_s: float | None, expected: float) -> None:
+    policy = LLMAgentPolicy(
+        model="test/model", base_url="http://llm.test/v1", env={}, timeout_s=timeout_s
+    )
+    client = policy._client
+    assert isinstance(client, ChatClient)
+    assert client._http.timeout.read == expected
+    assert policy.config.timeout_s == (None if timeout_s is None else expected)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1, float("nan"), float("inf"), True, "300"])
+def test_invalid_timeout_s_is_a_guided_error(timeout_s: Any) -> None:
+    with pytest.raises(ConfigError, match="timeout_s must be finite and > 0"):
+        LLMAgentPolicy(
+            model="test/model", base_url="http://llm.test/v1", env={}, timeout_s=timeout_s
+        )

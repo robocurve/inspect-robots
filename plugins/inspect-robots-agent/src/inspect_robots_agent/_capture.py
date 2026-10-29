@@ -147,6 +147,27 @@ class WireCapture:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
 
+    def record_interaction(self, *, attempt: int, event: str, **details: Any) -> None:
+        """Durably checkpoint provider IDs separately from billable wire rows."""
+        try:
+            if self._dead or self._target_dir is None:
+                return
+            self._target_dir.mkdir(parents=True, exist_ok=True)
+            row = {
+                "call": self._call + (attempt == 0),
+                "attempt": attempt,
+                "event": event,
+                **details,
+            }
+            with (self._target_dir / "interactions.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException as exc:
+            self._disable(exc)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+
     def end_trial(self) -> str | None:
         """Close the trial and return its relative JSONL pointer when nonempty."""
         pointer = self._relative_path if self._rows_written else None

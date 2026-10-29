@@ -513,7 +513,7 @@ def test_capture_precedes_malformed_json_200_raise(tmp_path: Path) -> None:
     assert row["response"] == "{not-json"
 
 
-def test_capture_precedes_wrong_shape_200_key_error(tmp_path: Path) -> None:
+def test_capture_precedes_wrong_shape_200_error(tmp_path: Path) -> None:
     capture = WireCapture()
     capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
     client = _client(
@@ -521,7 +521,7 @@ def test_capture_precedes_wrong_shape_200_key_error(tmp_path: Path) -> None:
         capture=capture,
     )
 
-    with pytest.raises(KeyError, match="message"):
+    with pytest.raises(RuntimeError, match="missing assistant message"):
         client.complete(messages=[], tools=[])
 
     (row,) = _wire_rows(tmp_path)
@@ -587,3 +587,85 @@ def test_reasoning_tools_rejection_has_responses_wire_guidance() -> None:
         "fix: pass -P wire=responses (needs a direct OpenAI endpoint, e.g. "
         "$OPENAI_API_KEY set), or -P effort=none"
     )
+
+
+def test_explicit_google_base_url_strips_the_prefix_and_requires_a_key() -> None:
+    google = llm_module._DIRECT_PROVIDERS["google"].base_url
+    provider = resolve_provider(
+        model="google/test-model",
+        base_url=google + "/",
+        api_key_env="GEMINI_API_KEY",
+        env={"GEMINI_API_KEY": "k"},
+    )
+    assert (provider.base_url, provider.model) == (google, "test-model")
+    with pytest.raises(ConfigError, match=r"requires a credential in \$GEMINI_API_KEY"):
+        resolve_provider(
+            model="google/test-model", base_url=google, api_key_env="GEMINI_API_KEY", env={}
+        )
+
+
+@pytest.mark.parametrize("finish_reason", ["content_filter", "CONTENT_FILTER: safety"])
+def test_content_filter_finish_reason_raises_content_filtered(finish_reason: str) -> None:
+    payload = {"choices": [{"finish_reason": finish_reason, "message": {"content": None}}]}
+    with pytest.raises(llm_module.ContentFilteredError, match="blocked"):
+        llm_module._parse_message(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({}, "no valid choice"),
+        ({"choices": []}, "no valid choice"),
+        ({"choices": ["x"]}, "no valid choice"),
+        ({"choices": [{"finish_reason": "length"}]}, r"missing assistant message \(length\)"),
+        ({"choices": [{}]}, r"missing assistant message \(unknown\)"),
+    ],
+)
+def test_malformed_choices_raise_runtime_errors(payload: dict[str, Any], match: str) -> None:
+    with pytest.raises(RuntimeError, match=match):
+        llm_module._parse_message(payload)
+
+
+def test_reasoning_fields_are_replayed_and_chat_usage_is_normalized() -> None:
+    details = [{"type": "reasoning.text", "text": "think"}]
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "reasoning": "think",
+                    "reasoning_details": details,
+                    "reasoning_content": None,
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+            "cost": 0.25,
+            "prompt_tokens_details": {"cached_tokens": 6, "cache_write_tokens": True},
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        },
+    }
+    message = llm_module._parse_message(payload)
+    assert message.usage == {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "cost_usd": 0.25,
+        "cache_read_input_tokens": 6,
+        "reasoning_tokens": 3,
+    }
+    raw = message.raw()
+    assert raw["reasoning"] == "think"
+    assert raw["reasoning_details"] == details
+    assert raw["reasoning_details"] is not details
+    assert "reasoning_content" not in raw
+
+
+@pytest.mark.parametrize("usage", [None, "x", {}, {"prompt_tokens": True}])
+def test_absent_or_empty_chat_usage_is_none(usage: Any) -> None:
+    payload = {"choices": [{"message": {"content": "ok"}}], "usage": usage}
+    assert llm_module._parse_message(payload).usage is None

@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -154,7 +155,12 @@ def resolve_provider(
         )
     if base_url:
         key_env = api_key_env or _OPENROUTER_KEY
-        return Provider(base_url=base_url.rstrip("/"), api_key=env.get(key_env, ""), model=model)
+        base_url = base_url.rstrip("/")
+        if base_url == _DIRECT_PROVIDERS["google"].base_url:
+            if not env.get(key_env):
+                raise ConfigError(f"Google's endpoint requires a credential in ${key_env}")
+            model = model.removeprefix("google/")
+        return Provider(base_url=base_url, api_key=env.get(key_env, ""), model=model)
     claim = _direct_claim(model, env, native_wires=native_wires)
     if claim is not None:
         _, direct = claim
@@ -191,11 +197,15 @@ class AssistantMessage:
 
     content: str | None
     tool_calls: tuple[ToolCall, ...]
-    usage: dict[str, int] | None = None
+    usage: Mapping[str, int | float] | None = None
+    #: Provider reasoning fields (``reasoning_details`` and kin) replayed verbatim.
+    reasoning_fields: dict[str, Any] | None = None
 
     def raw(self) -> dict[str, Any]:
         """The wire-format dict to append back onto the conversation."""
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
+        if self.reasoning_fields:
+            message.update(deepcopy(self.reasoning_fields))
         if self.tool_calls:
             message["tool_calls"] = [
                 {
@@ -342,8 +352,21 @@ class ChatClient:
         self._http.close()
 
 
+class ContentFilteredError(RuntimeError):
+    """The provider blocked a reply; end the episode without retrying its request."""
+
+
 def _parse_message(payload: dict[str, Any]) -> AssistantMessage:
-    message = payload["choices"][0]["message"]
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise RuntimeError("LLM chat response contains no valid choice")
+    choice = choices[0]
+    finish_reason = str(choice.get("finish_reason") or "unknown")
+    if finish_reason.partition(":")[0].strip().lower() == "content_filter":
+        raise ContentFilteredError(f"Provider blocked the response ({finish_reason})")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError(f"LLM chat response missing assistant message ({finish_reason})")
     calls = tuple(
         ToolCall(
             id=str(c["id"]),
@@ -354,4 +377,40 @@ def _parse_message(payload: dict[str, Any]) -> AssistantMessage:
         for c in message.get("tool_calls") or []
     )
     content = message.get("content")
-    return AssistantMessage(content=content if content is None else str(content), tool_calls=calls)
+    reasoning_fields = {
+        key: deepcopy(message[key])
+        for key in ("reasoning", "reasoning_content", "reasoning_details", "extra_content")
+        if message.get(key) is not None
+    }
+    return AssistantMessage(
+        content=content if content is None else str(content),
+        tool_calls=calls,
+        usage=_parse_usage(payload.get("usage")),
+        reasoning_fields=reasoning_fields or None,
+    )
+
+
+def _parse_usage(raw: Any) -> dict[str, int | float] | None:
+    """Normalize chat counters; input_tokens includes cached input, like Responses."""
+    if not isinstance(raw, dict):
+        return None
+    usage: dict[str, int | float] = {}
+    for source, target in (
+        ("prompt_tokens", "input_tokens"),
+        ("completion_tokens", "output_tokens"),
+        ("total_tokens", "total_tokens"),
+        ("cost", "cost_usd"),
+    ):
+        value = raw.get(source)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            usage[target] = value
+    for group, source, target in (
+        ("prompt_tokens_details", "cached_tokens", "cache_read_input_tokens"),
+        ("prompt_tokens_details", "cache_write_tokens", "cache_creation_input_tokens"),
+        ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens"),
+    ):
+        details = raw.get(group)
+        value = details.get(source) if isinstance(details, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            usage[target] = value
+    return usage or None

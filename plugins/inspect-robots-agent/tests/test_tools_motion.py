@@ -609,10 +609,9 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
     assert absolute_parameters[0]["properties"]["note"] == {
         "type": "string",
         "description": (
-            "What you observe right now in the observation (images, if any, and state), and why "
-            "you chose this motion. The user reads these notes live and in the saved transcript "
-            "to follow what you see and what you decide. Write for them, in one or two plain "
-            "sentences."
+            "One or two plain sentences for the human operator watching the robot: describe the "
+            "scene as it currently looks (images, if any, and state) and state the goal of this "
+            "motion. Shown live and in the saved transcript."
         ),
     }
     assert "note" not in absolute_parameters[1]["properties"]

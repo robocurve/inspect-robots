@@ -48,6 +48,7 @@ from inspect_robots_agent._llm import (
     _OPENROUTER_BASE,
     ENV_MODEL,
     ChatClient,
+    ContentFilteredError,
     Provider,
     ToolCall,
     _direct_claim,
@@ -103,6 +104,7 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
 )
 _SPEEDS = frozenset({"fast"})
 _SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
+_INTERACTIONS_SERVICE_TIERS = frozenset({"standard", "flex", "priority"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
@@ -306,6 +308,8 @@ class AgentPolicyConfig(PolicyConfig):
     pre_check: str | None = None
     max_retries: int = 3
     backoff_s: float = 1.0
+    #: Per-request HTTP timeout in seconds; ``None`` keeps each wire's default.
+    timeout_s: float | None = None
     #: Evaluation notes appended verbatim to every trial's system prompt
     #: (scoring regime, budget use); ``None`` when not configured.
     eval_notes: str | None = None
@@ -394,6 +398,7 @@ class LLMAgentPolicy(PolicyBase):
         service_tier: str | None = None,
         max_retries: int = 3,
         backoff_s: float = 1.0,
+        timeout_s: float | None = None,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -501,6 +506,21 @@ class LLMAgentPolicy(PolicyBase):
         ):
             raise ConfigError("backoff_s must be finite and >= 0")
         resolved_backoff_s = float(backoff_s)
+        if timeout_s is not None and (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            raise ConfigError(
+                f"timeout_s must be finite and > 0, or None, got {timeout_s!r}.\n"
+                "fix: pass -P timeout_s=300 (seconds per LLM request), or drop it"
+            )
+        resolved_timeout_s = None if timeout_s is None else float(timeout_s)
+        # Only an explicit timeout overrides; each wire's client keeps its own default.
+        timeout_kw: dict[str, float] = (
+            {} if resolved_timeout_s is None else {"timeout_s": resolved_timeout_s}
+        )
         environ = dict(os.environ) if env is None else env
         requested_model = model or environ.get(ENV_MODEL)
         direct_claim = (
@@ -543,15 +563,18 @@ class LLMAgentPolicy(PolicyBase):
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if service_tier is not None:
-            if service_tier not in _SERVICE_TIERS:
+            allowed_tiers = (
+                _INTERACTIONS_SERVICE_TIERS if wire == "interactions" else _SERVICE_TIERS
+            )
+            if service_tier not in allowed_tiers:
                 raise ConfigError(
-                    f"service_tier must be one of {sorted(_SERVICE_TIERS)}, "
+                    f"service_tier must be one of {sorted(allowed_tiers)}, "
                     f"or None, got {service_tier!r}"
                 )
-            if wire != "responses":
+            if wire not in {"responses", "interactions"}:
                 raise ConfigError(
-                    f"service_tier is only supported on wire='responses', got wire={wire!r}.\n"
-                    "fix: pass -P wire=responses, or drop -P service_tier="
+                    f"service_tier requires wire=responses or interactions, got wire={wire!r}.\n"
+                    "fix: use a supported wire, or drop -P service_tier="
                 )
         if images not in _IMAGE_MODES:
             raise ConfigError(
@@ -793,6 +816,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "responses":
             self._client = ResponsesClient(
@@ -802,6 +826,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "gemini-live":
             self._client = GeminiLiveClient(
@@ -809,14 +834,17 @@ class LLMAgentPolicy(PolicyBase):
                 max_retries=max_retries,
                 backoff_s=resolved_backoff_s,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "interactions":
             self._client = InteractionsClient(
                 provider,
+                service_tier=service_tier,
                 max_retries=max_retries,
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         else:
             self._client = ChatClient(
@@ -825,6 +853,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
@@ -855,6 +884,7 @@ class LLMAgentPolicy(PolicyBase):
             max_llm_calls=max_llm_calls,
             max_retries=max_retries,
             backoff_s=resolved_backoff_s,
+            timeout_s=resolved_timeout_s,
             effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
@@ -876,7 +906,7 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
-        self._usage_totals: dict[str, int] = {}
+        self._usage_totals: dict[str, int | float] = {}
         self._pending: _PendingCapture | None = None
         self._pending_motion: _PendingMotion | None = None
         self._pending_sleep: _PendingSleep | None = None
@@ -1110,12 +1140,16 @@ class LLMAgentPolicy(PolicyBase):
                     self._image_horizon,
                     mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
-            message = self._client.complete(
-                outgoing,
-                toolset.schemas(),
-                temperature=self._temperature,
-                reasoning_effort=self._effort,
-            )
+            try:
+                message = self._client.complete(
+                    outgoing,
+                    toolset.schemas(),
+                    temperature=self._temperature,
+                    reasoning_effort=self._effort,
+                )
+            except ContentFilteredError as exc:
+                self._calls_used += 1
+                return self._forced_give_up(toolset, observation, str(exc))
             self._calls_used += 1
             if message.usage is not None:
                 for key, value in message.usage.items():

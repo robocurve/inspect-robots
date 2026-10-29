@@ -332,6 +332,8 @@ be distinguishable, encode it in a named factory's qualname, for example
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `service_tier`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `max_retries` (default `3`, counting total attempts), `backoff_s` (default `1.0`),
+`timeout_s` (seconds per LLM request; default is the wire's own: 120 for most,
+300 for `interactions`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
