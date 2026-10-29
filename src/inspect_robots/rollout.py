@@ -218,6 +218,20 @@ def _non_finite_detail(data: object) -> str | None:
     return "contains inf"
 
 
+def _meta_truthy(value: object) -> bool | None:
+    """Truthiness of a metadata value, or ``None`` when it is ambiguous.
+
+    ``Action.meta`` accepts arbitrary values, and some of them — e.g.
+    multi-element NumPy arrays — have no scalar truth value: ``bool()`` raises
+    instead. Approval reporting must neither crash on such values nor claim
+    them as approver reasons, so ambiguous values are reported as ``None``.
+    """
+    try:
+        return bool(value)
+    except Exception:
+        return None
+
+
 def _store_frames(
     frame_store: FrameStore | None, trial_id: str, t: int, obs: Observation
 ) -> tuple[Observation, Mapping[str, FrameRef] | None]:
@@ -449,6 +463,22 @@ def rollout(
                 raise _record_failure(record, SafetyAbort(str(exc)), t) from exc
             if reviewed is not action:
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
+                # A third-party approver may record its reason under other meta
+                # keys (e.g. a collision approver's ``collision_detail``). Report
+                # the keys it *newly* sets to a truthy value relative to the
+                # action it reviewed — approvers forward the policy's meta
+                # verbatim, so policy-written keys stay out of the detail.
+                # Metadata values are arbitrary, so truthiness is only consulted
+                # when it is unambiguous: a value without a scalar truth value
+                # (e.g. a multi-element NumPy array) neither claims a reason nor
+                # crashes the rollout.
+                flags += [
+                    f"{k}={v}" if isinstance(v, str) else k
+                    for k, v in reviewed.meta.items()
+                    if _meta_truthy(v) is True
+                    and k not in ("clamped", "delta_clamped")
+                    and (k not in action.meta or _meta_truthy(action.meta[k]) is False)
+                ]
                 detail = ", ".join(flags) or None
                 record.events.append(approval_event(t, modified=True, detail=detail))
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})

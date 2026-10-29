@@ -536,6 +536,135 @@ def test_modified_action_records_approval_event_without_detail() -> None:
     assert approvals[0].data["detail"] is None
 
 
+class _CollisionApprover:
+    """Holds the first action and records why, as a collision approver would."""
+
+    def __init__(self) -> None:
+        self.held = False
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        if self.held:
+            return action
+        self.held = True
+        meta = {
+            **dict(action.meta),
+            "collision_blocked": True,
+            "collision_detail": "left_gripper-table@3/8",
+            "collision_pending": False,
+        }
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_third_party_approver_reasons_reach_approval_detail() -> None:
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_CollisionApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    # Boolean flags contribute their key name, string values render as
+    # ``key=value``, and falsy keys are not reasons.
+    assert approvals[0].data["detail"] == (
+        "collision_blocked, collision_detail=left_gripper-table@3/8"
+    )
+
+
+class _MetaStampingPolicy(ScriptedPolicy):
+    """Stamps a policy-owned meta key, as the agent plugin's ``chunk_final`` does."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [replace(a, meta={**a.meta, "chunk_final": True}) for a in chunk.actions]
+        return replace(chunk, actions=stamped)
+
+
+def test_approval_detail_excludes_policy_forwarded_meta() -> None:
+    # The approver forwards the policy's meta verbatim (as the built-ins do), so
+    # only keys it *newly* sets may appear in the detail — never policy keys
+    # like ``chunk_final``, even though the approver copies them forward.
+    record = _run(_MetaStampingPolicy(), CubePickEmbodiment(), approver=_CollisionApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == (
+        "collision_blocked, collision_detail=left_gripper-table@3/8"
+    )
+
+
+class _ArrayMetaPolicy(ScriptedPolicy):
+    """Stamps array-valued diagnostics into action meta, as policies may."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [
+            replace(a, meta={**a.meta, "diagnostics": np.array([1.0, 2.0])}) for a in chunk.actions
+        ]
+        return replace(chunk, actions=stamped)
+
+
+def test_approval_detail_ignores_forwarded_array_meta() -> None:
+    # Regression: ``Action.meta`` accepts arbitrary values, and forwarding a
+    # multi-element NumPy array (``bool()`` raises on it) through a clamping
+    # approver used to crash the rollout before the reviewed action executed.
+    space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
+    record = _run(_ArrayMetaPolicy(), CubePickEmbodiment(), approver=ClampApprover(space))
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    # The unchanged policy metadata is not a reason; the clamp still is.
+    assert approvals[0].data["detail"] == "clamped"
+
+
+class _ArrayReasonApprover:
+    """Holds the first action with a clear reason and an ambiguous array one."""
+
+    def __init__(self) -> None:
+        self.held = False
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        del store
+        if self.held:
+            return action
+        self.held = True
+        meta = {
+            **dict(action.meta),
+            "collision_blocked": True,
+            "collision_candidates": np.array([1.0, 2.0]),
+        }
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_approval_detail_skips_array_valued_approver_meta() -> None:
+    # A value without a scalar truth value can neither claim a reason nor crash
+    # approval reporting; the unambiguous boolean reason is still reported.
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_ArrayReasonApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "collision_blocked"
+
+
+class _FalsyFlagPolicy(ScriptedPolicy):
+    """Stamps a *falsy* flag into action meta, as a pending-state channel would."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [replace(a, meta={**a.meta, "collision_pending": False}) for a in chunk.actions]
+        return replace(chunk, actions=stamped)
+
+
+class _FlagFlippingApprover:
+    """Flips a previously-falsy meta flag to truthy, claiming it as a reason."""
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        del store
+        meta = {**dict(action.meta), "collision_pending": True}
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_approval_detail_reports_falsy_flag_flipped_by_approver() -> None:
+    # A key present but falsy in the reviewed action counts as newly set to a
+    # truthy value once the approver flips it, so it is reported as a reason.
+    record = _run(_FalsyFlagPolicy(), CubePickEmbodiment(), approver=_FlagFlippingApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "collision_pending"
+
+
 def test_rollout_surfaces_approvals_in_observation_extra() -> None:
     class _ObsCapturingPolicy:
         def __init__(self) -> None:
