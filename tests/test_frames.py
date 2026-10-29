@@ -141,6 +141,26 @@ def test_write_length_error_preserves_existing_frames_and_count(
     np.testing.assert_array_equal(ref.load(), frame)
 
 
+def test_put_depth_roundtrip_preserves_metres_under_depth_dir(tmp_path: Path) -> None:
+    from inspect_robots.frames import DepthFrameRef, _parse_frame_filename
+
+    store = FrameStore(str(tmp_path))
+    depth = np.array([[0.25, np.nan], [1.5, np.inf]], dtype=np.float64)
+    rgb = store.put("pick-e0", 3, "top", np.zeros((2, 2, 3), dtype=np.uint8))
+    ref = store.put_depth("pick-e0", 3, "top", depth)
+    assert isinstance(ref, DepthFrameRef)
+    assert Path(ref.path).parent == tmp_path / "depth"
+    assert _parse_frame_filename(Path(ref.path).name) == ("pick-e0", "top", 3)
+    assert Path(rgb.path).parent == tmp_path
+    assert store.count == 2
+    loaded = ref.load()
+    assert loaded.dtype == np.float32
+    np.testing.assert_allclose(loaded, depth.astype(np.float32), equal_nan=True)
+    with pytest.raises(ValueError, match="2-D"):
+        store.put_depth("pick-e0", 4, "top", np.ones(3, dtype=np.float32))
+    assert store.count == 2
+
+
 def test_actual_filesystem_length_error_has_no_legacy_retry(tmp_path: Path) -> None:
     if not hasattr(os, "pathconf"):
         pytest.skip("filesystem component limit query unavailable")

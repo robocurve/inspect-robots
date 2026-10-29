@@ -188,6 +188,14 @@ empty while a frame store is active. Consumers must load the appropriate
 `FrameRef` instead of reading inline arrays. Without a frame store, observations
 remain inline and both ref mappings are `None`.
 
+A per-camera `extra["<camera>_depth"]` entry (a 2-D float array of metres, or a
+zero-argument callable returning one) is resolved once per observation and
+written as float32 under `depth/` in the same run directory. The stored
+observation drops those keys. `depth_refs` and `result_depth_refs` are the
+handles, or `None` when that observation had no depth arrays.
+`inspect-robots video` reads only the RGB `.npy` files in the run directory, so
+a depth map is not encoded as another camera.
+
 Frame storage starts immediately after reset, before the first policy action.
 If the policy fails during its first decision, reset frames can remain on disk
 even though no `StepRecord` exists. This is intentional: the initial sensor

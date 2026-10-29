@@ -442,10 +442,11 @@ value is non-numeric or not two-dimensional, or fewer than 1% of its pixels
 are valid, the policy emits a descriptive text line and no depth image.
 
 Saved transcripts retain the metric depth label but replace the depth image
-with the standard `[image omitted: streamed camera frame]` placeholder. The
-HTML viewer shows that placeholder text verbatim below the depth label because
-the frame store has no saved frame for rendered depth. This is a known
-cosmetic artifact; the metric label remains available in the report.
+with the standard `[image omitted: streamed camera frame]` placeholder. With
+`store_frames` on, the rollout also writes each camera's metric depth as
+float32 under `frames/<run>/depth/`. The HTML viewer still shows the
+placeholder, because it embeds RGB frames only. The metric label remains
+available in the report.
 
 ## Inkling on Tinker
 
