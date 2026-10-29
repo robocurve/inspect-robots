@@ -571,7 +571,17 @@ def _run_eval(
     # Fail fast on incompatible pairings before touching any hardware/sim.
     # This also validates the embodiment rate needed by a seconds-based task
     # before the resolved horizon is exposed to an adapter (plan 0026).
-    assert_compatible(policy, embodiment, task, remap=remap)
+    report = assert_compatible(policy, embodiment, task, remap=remap)
+    # Soft mismatches (e.g. action-frame differences) permit rollout with
+    # reduced guarantees, but the caller must see them: surface every
+    # warning issue as a Python UserWarning instead of silently dropping
+    # the report (issue #593).
+    for issue in report.warnings:
+        warnings.warn(
+            f"compatibility warning [{issue.code}]: {issue.message}",
+            UserWarning,
+            stacklevel=2,
+        )
     task_envelope = task.resolve_envelope(embodiment.info.control_hz)
 
     # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs

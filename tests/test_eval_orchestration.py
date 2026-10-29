@@ -2299,3 +2299,41 @@ def test_eval_distinct_scorer_names_preserve_per_epoch_and_reduced_metrics(tmp_p
     assert log.samples[0].reduced["loose"] == 1.0
     assert log.results.metrics["strict"] == 0.0
     assert log.results.metrics["loose"] == 1.0
+
+
+def test_eval_emits_user_warning_for_soft_frame_mismatch(tmp_path: Path) -> None:
+    """Issue #593: soft compatibility warnings (e.g. action frame mismatch)
+    must be surfaced as Python UserWarnings instead of being silently dropped."""
+    from dataclasses import replace as dc_replace
+
+    space = ScriptedPolicy().info.action_space
+    assert space.semantics is not None
+    camera_policy_info = dc_replace(
+        ScriptedPolicy().info,
+        action_space=dc_replace(
+            space,
+            semantics=dc_replace(space.semantics, frame="camera"),
+        ),
+    )
+
+    class CameraFramePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = camera_policy_info
+
+    task = Task(
+        name="frame-mismatch",
+        scenes=[Scene(id="s0", instruction="reach")],
+        scorer=success_at_end(),
+        max_steps=1,
+    )
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        (log,) = eval(task, CameraFramePolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    frame_warnings = [
+        w for w in emitted if issubclass(w.category, UserWarning) and "frame" in str(w.message)
+    ]
+    assert frame_warnings, f"expected a frame UserWarning, got {[str(w.message) for w in emitted]}"
+    assert "policy frame 'camera' != embodiment 'world'" in str(frame_warnings[0].message)
+    # Soft warnings still permit the rollout.
+    assert log.status == "success"
