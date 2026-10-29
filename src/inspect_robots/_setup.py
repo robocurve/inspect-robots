@@ -23,7 +23,7 @@ from inspect_robots.conformance import (
     number_slots,
     option_slots,
 )
-from inspect_robots.defaults import _parse_value, config_path
+from inspect_robots.defaults import _parse_number, _parse_value, config_path
 
 # Same minimal-ANSI convention as cli.py (#37): plain when piped or NO_COLOR.
 _BOLD = "1"
@@ -117,7 +117,7 @@ def _valid_text(_value: str) -> bool:
 
 
 def _valid_max_steps(value: str) -> bool:
-    parsed = _parse_value(value)
+    parsed = _parse_number(value)
     return isinstance(parsed, int) and not isinstance(parsed, bool) and parsed >= 1
 
 
