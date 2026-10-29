@@ -595,7 +595,7 @@ def test_build_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
 def test_schemas_match_control_mode_and_remove_duration() -> None:
     absolute = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
     names = [t["function"]["name"] for t in absolute.schemas()]
-    assert names == ["move_joints", "done", "give_up"]
+    assert names == ["move_joints", "done", "give_up", "sleep"]
     move_schema = json.dumps(absolute.schemas()[0])
     assert "left_j0" in move_schema and "right_gripper" in move_schema
     assert "duration_s" not in move_schema
@@ -604,6 +604,7 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
         ["targets", "note"],
         ["summary", "hindsight"],
         ["reason", "hindsight"],
+        ["seconds", "note"],
     ]
     assert absolute_parameters[0]["properties"]["note"] == {
         "type": "string",
@@ -619,7 +620,7 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
 
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     names = [t["function"]["name"] for t in displacement.schemas()]
-    assert names == ["move_by", "done", "give_up"]
+    assert names == ["move_by", "done", "give_up", "sleep"]
     displacement_parameters = [
         schema["function"]["parameters"] for schema in displacement.schemas()
     ]
@@ -627,6 +628,7 @@ def test_schemas_match_control_mode_and_remove_duration() -> None:
         ["deltas", "note"],
         ["summary", "hindsight"],
         ["reason", "hindsight"],
+        ["seconds", "note"],
     ]
     assert displacement_parameters[0]["properties"]["note"]["type"] == "string"
 
@@ -641,7 +643,7 @@ def test_stop_schemas_describe_required_hindsight() -> None:
         "task. Say 'none' if nothing qualifies."
     )
 
-    for schema, detail_key in zip(toolset.schemas()[1:], ("summary", "reason"), strict=True):
+    for schema, detail_key in zip(toolset.schemas()[1:3], ("summary", "reason"), strict=True):
         parameters = schema["function"]["parameters"]
         assert parameters["required"] == [detail_key, "hindsight"]
         assert parameters["properties"]["hindsight"] == {
@@ -663,11 +665,13 @@ def test_take_pic_schema_is_exposed_only_on_demand() -> None:
         "move_joints",
         "done",
         "give_up",
+        "sleep",
     ]
     assert [schema["function"]["name"] for schema in on_demand.schemas()] == [
         "move_joints",
         "done",
         "give_up",
+        "sleep",
         "take_pic",
     ]
     capture = on_demand.schemas()[-1]["function"]
@@ -682,7 +686,7 @@ def test_take_pic_schema_is_exposed_only_on_demand() -> None:
             images={"top": np.zeros((2, 2, 3), dtype=np.uint8)},
         ),
     )
-    assert stray.error == "unknown tool 'take_pic'; available: move_joints, done, give_up"
+    assert stray.error == ("unknown tool 'take_pic'; available: move_joints, done, give_up, sleep")
 
 
 def test_on_demand_requires_a_declared_camera_at_bind_time() -> None:
@@ -1577,3 +1581,115 @@ def test_displacement_mode_has_no_setpoint_lines() -> None:
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     displacement.execute(_call("move_by", deltas={"0": 0.05}), Observation())
     assert displacement.setpoint_lines(Observation()) == []
+
+
+# --- sleep (plan 0087) -----------------------------------------------------
+
+
+def _tool_call(name: str, arguments: dict[str, Any]) -> ToolCall:
+    return ToolCall(id=f"id_{name}", name=name, arguments=json.dumps(arguments))
+
+
+def test_sleep_schema_is_offered_on_every_surface_with_seconds_and_note() -> None:
+    for toolset in (
+        build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0),
+        build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0),
+    ):
+        (schema,) = [s for s in toolset.schemas() if s["function"]["name"] == "sleep"]
+        parameters = schema["function"]["parameters"]
+        assert parameters["required"] == ["seconds", "note"]
+        assert set(parameters["properties"]) == {"seconds", "note"}
+        assert "not LLM calls" in schema["function"]["description"]
+        assert "at most 180" in schema["function"]["description"]
+
+
+def test_sleep_holds_the_held_target_including_a_gripper_squeeze() -> None:
+    toolset = build_toolset(_bimanual_space(), _bimanual_obs_space(), control_hz=10.0)
+    start = np.zeros(14)
+    start[6] = start[13] = 1.0
+    toolset.start_trial()
+    moved = toolset.execute(
+        _tool_call(
+            "move_joints",
+            {"targets": {"left_j1": 0.4, "left_gripper": 0.2}, "note": _DEFAULT_MOVE_NOTE},
+        ),
+        Observation(state={"joint_pos": start}),
+    )
+    assert moved.error is None and moved.target is not None
+    sagged = moved.target.copy()
+    sagged[1] -= 0.03  # the readback lags the setpoint; the hold must not chase it
+
+    result = toolset.execute(
+        _tool_call("sleep", {"seconds": 2.5, "note": "letting the shoulder cool"}),
+        Observation(state={"joint_pos": sagged}),
+    )
+
+    assert result.error is None and result.chunk is not None
+    assert result.sleep == 2.5
+    assert result.target is None  # nothing to measure a residual against
+    assert len(result.chunk.actions) == 25
+    assert all(np.array_equal(a.data, moved.target) for a in result.chunk.actions)
+    assert result.chunk.actions[-1].meta == {"chunk_final": True}
+    assert all(a.meta == {} for a in result.chunk.actions[:-1])
+    assert result.note == "sleeping 2.5 s (25 steps) holding the current setpoint"
+
+
+def test_sleep_before_any_move_holds_the_measured_state_and_caps_the_duration() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    toolset.start_trial()
+    result = toolset.execute(
+        _tool_call("sleep", {"seconds": 1000, "note": "wait"}),
+        Observation(state={"q": np.array([0.3])}),
+    )
+    assert result.error is None and result.chunk is not None
+    assert result.sleep == 180.0
+    assert len(result.chunk.actions) == 1800
+    assert result.chunk.actions[0].data[0] == 0.3
+    # The hold becomes the held target, so a later unnamed dimension keeps it.
+    later = toolset.execute(
+        _tool_call("move_joints", {"targets": {}, "note": _DEFAULT_MOVE_NOTE}),
+        Observation(state={"q": np.array([0.9])}),
+    )
+    assert later.error is not None or later.target is not None
+
+
+def test_sleep_on_a_displacement_surface_sends_zero_deltas() -> None:
+    toolset = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
+    result = toolset.execute(_tool_call("sleep", {"seconds": 0.3, "note": "settle"}), _obs())
+    assert result.error is None and result.chunk is not None
+    assert len(result.chunk.actions) == 3
+    assert all(not np.any(a.data) for a in result.chunk.actions)
+
+
+def test_sleep_rejects_bad_arguments() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    observation = Observation(state={"q": np.array([0.0])})
+    assert toolset.execute(_tool_call("sleep", {"seconds": 5}), observation).error == (
+        "note is required: describe what you observe and why you wait"
+    )
+    for bad in (0, -1, "long", True, float("inf"), None):
+        result = toolset.execute(_tool_call("sleep", {"seconds": bad, "note": "wait"}), observation)
+        assert result.error == "seconds must be a positive number", bad
+
+
+def test_sleep_raises_on_a_non_finite_reference_before_any_move() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    toolset.start_trial()
+    with pytest.raises(ValueError, match="non-finite"):
+        toolset.execute(
+            _tool_call("sleep", {"seconds": 1, "note": "wait"}),
+            Observation(state={"q": np.array([float("nan")])}),
+        )
+
+
+def test_hold_chunk_resends_the_target_and_closes_the_motion_window() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    assert toolset.resolved_hz == 10.0
+    assert toolset.hold_steps(5.0) == 50
+    assert toolset.hold_steps(0.01) == 1
+    target = np.array([0.3])
+    chunk = toolset.hold_chunk(target, 3)
+    assert len(chunk.actions) == 3
+    assert all(np.array_equal(action.data, target) for action in chunk.actions)
+    assert chunk.actions[-1].meta == {"chunk_final": True}
+    assert chunk.actions[0].meta == {}

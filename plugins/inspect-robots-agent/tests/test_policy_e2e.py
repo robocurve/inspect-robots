@@ -58,6 +58,9 @@ from inspect_robots_agent.policy import (
     _observation_content,
     _operator_lines,
     _PendingMotion,
+    _PendingSleep,
+    _sleep_narration,
+    _thermal_status,
 )
 
 # --- scripted-conversation harness ---------------------------------------------
@@ -258,6 +261,9 @@ class _FlushRecordingStream(io.StringIO):
 
 
 def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
+    # A frozen clock keeps the wall-clock line deterministic ("0 s") unless a
+    # test injects its own.
+    kwargs.setdefault("clock", lambda: 100.0)
     return LLMAgentPolicy(
         model="test/model",
         base_url="http://llm.test/v1",
@@ -1139,6 +1145,7 @@ def test_depth_off_preserves_pre_depth_observation_message() -> None:
         observation,
         policy._state_labels,
         setpoint_lines=policy._toolset.setpoint_lines(observation),
+        wall_s=0.0,
     )
 
     policy.act(observation)
@@ -1158,6 +1165,7 @@ def test_missing_depth_key_preserves_pre_depth_observation_message() -> None:
         observation,
         policy._state_labels,
         setpoint_lines=policy._toolset.setpoint_lines(observation),
+        wall_s=0.0,
     )
 
     policy.act(observation)
@@ -1502,7 +1510,12 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
     first = script.requests[0]
     assert first["model"] == "test/model"
-    assert [t["function"]["name"] for t in first["tools"]] == ["move_by", "done", "give_up"]
+    assert [t["function"]["name"] for t in first["tools"]] == [
+        "move_by",
+        "done",
+        "give_up",
+        "sleep",
+    ]
     system, goal, observation = first["messages"]
     assert "cubepick" in system["content"]
     assert "Embodiment notes:\n" in system["content"]
@@ -1859,6 +1872,7 @@ def test_on_demand_observation_names_available_cameras_without_sending_frames() 
         "move_joints",
         "done",
         "give_up",
+        "sleep",
         "take_pic",
     ]
 
@@ -2174,7 +2188,9 @@ def test_unknown_tool_error_names_take_pic_in_on_demand_mode() -> None:
     policy.act(_vision_observation())
 
     errors = [message["content"] for message in policy._messages if message.get("role") == "tool"]
-    assert errors[0] == ("unknown tool 'look'; available: move_joints, done, give_up, take_pic")
+    assert errors[0] == (
+        "unknown tool 'look'; available: move_joints, done, give_up, sleep, take_pic"
+    )
 
 
 def test_valid_capture_after_an_earlier_error_is_ignored_with_failure_reason() -> None:
@@ -3165,11 +3181,12 @@ def test_observations_carry_setpoint_lines_after_the_state_lines() -> None:
 
     first = script.requests[0]["messages"][-1]["content"][0]["text"].splitlines()
     second = script.requests[1]["messages"][-1]["content"][0]["text"].splitlines()
-    assert first[1:3] == [
+    assert first[1] == "Wall clock: 0 s since the trial began."
+    assert first[2:4] == [
         "state[q]: joint=0.0",
         "setpoint: none yet; the first move starts from the readback.",
     ]
-    assert second[1:4] == [
+    assert second[2:5] == [
         "state[q]: joint=0.48",
         "setpoint: joint=0.5",
         "readback minus setpoint: joint=-0.0200",
@@ -3177,3 +3194,228 @@ def test_observations_carry_setpoint_lines_after_the_state_lines() -> None:
     assert _observation_content(Observation(), setpoint_lines=["setpoint: x=1"])[0]["text"] == (
         "Current observation.\nsetpoint: x=1"
     )
+
+
+# --- sleep and wall clock (plan 0087) --------------------------------------
+
+
+class _ThermalEmbodiment:
+    """Two arms; the left shoulder cools 1 C per 5 steps while left_x sits at 0."""
+
+    def __init__(self, *, celsius: float = 58.0) -> None:
+        self._q = np.zeros(4)
+        self._rested = 0
+        self._celsius = celsius
+        self.info = EmbodimentInfo(
+            name="thermal-test",
+            action_space=Box(
+                shape=(4,),
+                low=np.array([-1.0, 0.0, -1.0, 0.0]),
+                high=np.array([1.0, 1.0, 1.0, 1.0]),
+                semantics=ActionSemantics(
+                    "joint_pos", dim_labels=("left_x", "left_gripper", "right_x", "right_gripper")
+                ),
+            ),
+            observation_space=ObservationSpace(
+                state=StateSpec(fields=(StateField(key="q", shape=(4,)),))
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+        )
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        self._q = np.array([0.0, 1.0, 0.0, 1.0])
+        return self._observe(scene.instruction)
+
+    def step(self, action: Action) -> StepResult:
+        self._q = np.asarray(action.data, dtype=np.float64).copy()
+        if abs(self._q[0]) < 1e-9:
+            self._rested += 1
+            if self._rested % 5 == 0:
+                self._celsius -= 1.0
+        return StepResult(observation=self._observe(None))
+
+    def close(self) -> None:
+        return None
+
+    def _observe(self, instruction: str | None) -> Observation:
+        return Observation(
+            state={"q": self._q.copy()},
+            instruction=instruction,
+            extra={
+                "motor_temps": {
+                    "limit": 60.0,
+                    "warn_margin": 10.0,
+                    "arms": {
+                        "left": {"hottest": "left_j1", "celsius": self._celsius},
+                        "right": {"hottest": "right_j2", "celsius": 31.0},
+                    },
+                    "lines": [
+                        f"motor temperatures: left arm hottest left_j1 {self._celsius:.0f} C"
+                    ],
+                }
+            },
+        )
+
+
+def _last_user_text(request: dict[str, Any]) -> str:
+    users = [m for m in request["messages"] if m.get("role") == "user"]
+    content = users[-1]["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(part["text"] for part in content if part.get("type") == "text")
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_sleep_holds_without_llm_calls_and_narrates_the_temperatures(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"left_x": 0.5}}),
+            _tool_response("move_joints", {"targets": {"left_x": 0.0}}),
+            _tool_response("sleep", {"seconds": 5, "note": "resting the left arm at home"}),
+            _tool_response("done", {"summary": "cooled", "hindsight": "none"}),
+        ]
+    )
+    sink = _RecordingSink()
+    policy = _policy(script, max_speed_frac=0.5)
+    logs = ir_eval(
+        _task(max_steps=400), policy, _ThermalEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
+    )
+
+    assert logs[0].status == "success"
+    assert len(script.requests) == 4  # the 50-step sleep cost no LLM call
+    (record,) = sink.records
+    notes = [m["content"] for m in policy._messages if m.get("role") == "tool"]
+    assert "sleeping 5 s (50 steps) holding the current setpoint" in notes
+    moves = [int(m.group(1)) for n in notes if (m := re.search(r"over (\d+) steps", n))]
+    assert len(record.steps) == sum(moves) + 50 + 1
+    held = record.steps[sum(moves) : sum(moves) + 50]
+    assert all(step.action.data[0] == 0.0 for step in held)
+    assert held[-1].action.meta == {"chunk_final": True}
+    text = _last_user_text(script.requests[3])
+    assert (
+        "Slept 5 s holding the setpoint. Hottest motors: left_j1 58 C, right_j2 31 C before, "
+        "left_j1 48 C, right_j2 31 C now." in text
+    )
+    assert "motor temperatures: left arm hottest left_j1 48 C" in text
+
+
+def test_sleep_narration_without_temperatures_is_just_the_duration(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("sleep", {"seconds": 0.3, "note": "let it settle"}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    sink = _RecordingSink()
+    policy = _policy(script)
+    ir_eval(_task(), policy, _AbsoluteEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+
+    (record,) = sink.records
+    assert len(record.steps) == 3 + 1
+    assert _last_user_text(script.requests[1]).count("Slept 0.3 s holding the setpoint.") == 1
+    assert "Hottest motors" not in _last_user_text(script.requests[1])
+
+
+def test_sleep_narration_pairs_before_and_after_only_when_both_exist() -> None:
+    before = _thermal_status(
+        Observation(
+            state={},
+            extra={
+                "motor_temps": {
+                    "limit": 60,
+                    "arms": {"left": {"hottest": "left_j1", "celsius": 50}},
+                }
+            },
+        )
+    )
+    assert before is not None
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), None) == (
+        "Slept 3 s holding the setpoint."
+    )
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=None), before) == (
+        "Slept 3 s holding the setpoint."
+    )
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), before) == (
+        "Slept 3 s holding the setpoint. Hottest motors: left_j1 50 C before, left_j1 50 C now."
+    )
+
+
+def test_wall_clock_line_counts_from_reset(tmp_path: Path) -> None:
+    clock = _FakeClock()
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.1}}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    policy = _policy(script, clock=clock)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach", init_seed=0))
+    clock.now = 107.4
+    policy.act(Observation(state={"ee_pos": np.zeros(3)}, extra={"env_step": 0}))
+    assert "Wall clock: 7 s since the trial began." in _last_user_text(script.requests[0])
+    clock.now = 190.0
+    policy.act(Observation(state={"ee_pos": np.zeros(3)}, extra={"env_step": 2}))
+    assert "Wall clock: 90 s since the trial began." in _last_user_text(script.requests[1])
+
+
+def test_observation_content_omits_the_wall_clock_without_a_trial() -> None:
+    (text,) = _observation_content(Observation(state={}))
+    assert "Wall clock" not in text["text"]
+    (text,) = _observation_content(Observation(state={}), wall_s=-0.5)
+    assert "Wall clock: 0 s since the trial began." in text["text"]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        None,
+        "hot",
+        {"limit": "60", "arms": {}},
+        {"limit": True, "arms": {}},
+        {"limit": 60.0, "warn_margin": "ten", "arms": {}},
+        {"limit": 60.0, "arms": ["left"]},
+    ],
+)
+def test_thermal_status_treats_malformed_reports_as_absent(report: Any) -> None:
+    extra = {} if report is None else {"motor_temps": report}
+    assert _thermal_status(Observation(state={}, extra=extra)) is None
+
+
+def test_thermal_status_skips_malformed_arm_entries() -> None:
+    observation = Observation(
+        state={},
+        extra={
+            "motor_temps": {
+                "limit": 60,
+                "arms": {
+                    "left": {"hottest": "left_j1", "celsius": 55},
+                    "right": "broken",
+                    "base": {"hottest": None, "celsius": None},
+                    "lift": {"hottest": "lift_j0", "celsius": True},
+                },
+            }
+        },
+    )
+    status = _thermal_status(observation)
+    assert status is not None
+    assert status.hottest == {"left": ("left_j1", 55.0)}
+    assert status.margin == 0.0 and status.limit == 60.0
+    assert status.text() == "left_j1 55 C"
+
+
+def test_observation_content_renders_motor_temperature_lines() -> None:
+    observation = Observation(
+        state={},
+        extra={"motor_temps": {"lines": ["motor temperatures: left arm hottest left_j1 41 C", 7]}},
+    )
+    (text,) = _observation_content(observation)
+    assert text["text"].endswith("motor temperatures: left arm hottest left_j1 41 C")

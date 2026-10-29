@@ -227,6 +227,34 @@ to the model, labeled with the environment step when it was received. The
 model treats these lines as trusted guidance from the human supervising the
 robot. The framework also saves the feedback in the eval log.
 
+## Motor temperatures, `sleep` and the wall clock
+
+An embodiment may put `extra["motor_temps"]` on its observations, in the
+same shape as `motion_report`: a mapping whose `lines` are plain-language
+strings for the policy. The agent renders those lines after the motion
+report, so a YAM rig with `motor_temp_limit` set shows the model the hottest
+motor on each arm against the limit, plus a warning line once a motor is
+inside the warning margin (inspect-robots-yam plan 0035). The embodiment's
+docs tell the model what to do about it: move that arm back to the start pose
+it saw at the first observation, the lowest-load pose, and sleep there.
+
+`sleep(seconds, note)` is that wait (plan 0087). It holds every setpoint
+exactly where it is for up to 180 s in one stationary chunk, spending
+environment steps and wall-clock time but no LLM call; a gripper squeeze
+stays squeezed. The next turn's observation reports the outcome:
+
+```
+Slept 30 s holding the setpoint. Hottest motors: left_j1 58 C, right_j2 31 C
+before, left_j1 47 C, right_j2 31 C now.
+```
+
+The harness adds no parking logic of its own: resting an arm is the model's
+own `move_to`, composed with `sleep`.
+
+Every observation also carries `Wall clock: N s since the trial began.` right
+after the step budget. The step budget measures robot motion; the wall clock
+is real time, so the model can pace its calls and its sleeps.
+
 ## Motion pre-check
 
 Python callers can pass `pre_check=` to `LLMAgentPolicy` to inspect one

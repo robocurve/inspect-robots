@@ -41,6 +41,8 @@ _MAX_DURATION_S = 10.0
 _BACKSTOP_STEP_FRAC = 0.05
 _DEFAULT_SPEED_FRAC = 0.1
 _RELATIVE_HEADROOM = 1e-6
+#: The longest a single `sleep` may hold, in seconds.
+_SLEEP_MAX_S = 180.0
 #: Readback-minus-setpoint offsets below this are measurement noise, not listed.
 _SETPOINT_OFFSET_MIN = 5e-3
 _HINDSIGHT_DESCRIPTION = (
@@ -82,6 +84,8 @@ class ToolResult:
     note: str = ""
     capture: tuple[str, ...] | None = None
     target: npt.NDArray[np.float64] | None = None
+    #: Seconds a validated ``sleep`` holds the current setpoint (its chunk is in ``chunk``).
+    sleep: float | None = None
 
 
 class Toolset:
@@ -185,6 +189,21 @@ class Toolset:
         nothing about where a freshly reset embodiment is.
         """
         self._held_target = None
+
+    @property
+    def resolved_hz(self) -> float:
+        """The control rate motions are timed at (the fallback when the embodiment names none)."""
+        return self._resolved_hz
+
+    def hold_steps(self, seconds: float) -> int:
+        """Steps a stationary hold of ``seconds`` takes at the resolved control rate, at least 1."""
+        return max(1, round(seconds * self._resolved_hz))
+
+    def hold_chunk(self, target: npt.NDArray[np.float64], steps: int) -> ActionChunk:
+        """A chunk that re-sends ``target`` for ``steps`` steps: a ``sleep``."""
+        actions = [Action(data=target.copy()) for _ in range(steps)]
+        actions[-1] = Action(data=target.copy(), meta={"chunk_final": True})
+        return ActionChunk(actions=actions, control_hz=self._hz)
 
     @property
     def bounds_text(self) -> str:
@@ -316,7 +335,7 @@ class Toolset:
                 },
             },
         }
-        schemas = [move, done, give_up]
+        schemas = [move, done, give_up, self._sleep_schema()]
         if self._images == "on_demand":
             schemas.append(
                 {
@@ -356,6 +375,35 @@ class Toolset:
             )
         return schemas
 
+    def _sleep_schema(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "sleep",
+                "description": (
+                    "Hold every setpoint exactly where it is for `seconds` (at most "
+                    f"{_SLEEP_MAX_S:g}) and do nothing else. Sleeping spends environment "
+                    "steps and wall-clock time, not LLM calls. Use it to let hot motors "
+                    "cool after moving the arm to a resting pose, or to let the scene "
+                    "settle."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "seconds": {"type": "number", "description": "How long to hold."},
+                        "note": {
+                            "type": "string",
+                            "description": (
+                                "What you observe right now and why waiting is worth the "
+                                "time. Written for the user, in one or two plain sentences."
+                            ),
+                        },
+                    },
+                    "required": ["seconds", "note"],
+                },
+            },
+        }
+
     def execute(self, call: Any, observation: Observation) -> ToolResult:
         """Turn one tool call into an action chunk or an error string for the LLM."""
         try:
@@ -368,8 +416,10 @@ class Toolset:
             return self._stop(call.name, arguments, observation)
         if call.name == "take_pic" and self._images == "on_demand":
             return self._take_pic(arguments, observation)
+        if call.name == "sleep":
+            return self._sleep(arguments, observation)
         if call.name != self._move_tool:
-            available = f"{self._move_tool}, done, give_up"
+            available = f"{self._move_tool}, done, give_up, sleep"
             if self._images == "on_demand":
                 available += ", take_pic"
             return ToolResult(error=f"unknown tool {call.name!r}; available: {available}")
@@ -458,6 +508,44 @@ class Toolset:
                 )
             )
         return ToolResult(capture=tuple(requested))
+
+    def _sleep(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        """Validate a ``sleep`` and build the stationary chunk that holds the current setpoint.
+
+        Absolute surfaces hold the last commanded target (the measured state
+        before any move), so a gripper squeeze stays squeezed; displacement
+        surfaces hold with zero deltas. Nothing moves, so the playout cap for
+        motions does not apply.
+        """
+        call_note = arguments.get("note")
+        if not isinstance(call_note, str) or not call_note.strip():
+            return ToolResult(error="note is required: describe what you observe and why you wait")
+        seconds = arguments.get("seconds")
+        if (
+            isinstance(seconds, bool)
+            or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds)
+            or seconds <= 0
+        ):
+            return ToolResult(error="seconds must be a positive number")
+        seconds = min(float(seconds), _SLEEP_MAX_S)
+        if self._absolute:
+            held = self._held_target
+            if held is None:
+                current = self._current_state(observation)
+                if not bool(np.all(np.isfinite(current))):
+                    raise ValueError("proprioceptive reference contains a non-finite value")
+                held = np.clip(current, self._low, self._high)
+                self._held_target = held.copy()
+            target = held.copy()
+        else:
+            target = np.zeros(len(self._labels))
+        steps = self.hold_steps(seconds)
+        return ToolResult(
+            chunk=self.hold_chunk(target, steps),
+            note=f"sleeping {seconds:g} s ({steps} steps) holding the current setpoint",
+            sleep=seconds,
+        )
 
     def _move(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         current: npt.NDArray[np.float64] | None = None

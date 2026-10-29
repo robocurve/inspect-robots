@@ -17,8 +17,9 @@ import json
 import math
 import os
 import sys
+import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -326,6 +327,28 @@ class _PendingCapture:
     requested: tuple[str, ...] | None
 
 
+@dataclass(frozen=True, eq=False)
+class _ThermalStatus:
+    """One observation's ``extra["motor_temps"]`` reduced to what a cool-down needs."""
+
+    limit: float
+    margin: float
+    #: Per tracked arm: the hottest motor's label and temperature.
+    hottest: dict[str, tuple[str, float]]
+
+    def text(self) -> str:
+        """The tracked hottest motors as ``left_j1 58 C`` fragments."""
+        return ", ".join(f"{label} {celsius:.0f} C" for label, celsius in self.hottest.values())
+
+
+@dataclass(frozen=True, eq=False)
+class _PendingSleep:
+    """A ``sleep`` whose outcome is narrated with the next observation."""
+
+    seconds: float
+    before: _ThermalStatus | None
+
+
 class LLMAgentPolicy(PolicyBase):
     """Drives whatever embodiment it is bound to via LLM tool calls.
 
@@ -365,6 +388,7 @@ class LLMAgentPolicy(PolicyBase):
         prior_learnings: str | None = None,
         eval_notes: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
         service_tier: str | None = None,
@@ -809,6 +833,7 @@ class LLMAgentPolicy(PolicyBase):
         self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
+        self._clock = clock
         self._images = images
         self._depth = depth
         self._image_horizon = resolved_image_horizon
@@ -854,6 +879,8 @@ class LLMAgentPolicy(PolicyBase):
         self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
         self._pending_motion: _PendingMotion | None = None
+        self._pending_sleep: _PendingSleep | None = None
+        self._trial_started: float | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
 
@@ -937,6 +964,8 @@ class LLMAgentPolicy(PolicyBase):
         self._usage_totals.clear()
         self._pending = None
         self._pending_motion = None
+        self._pending_sleep = None
+        self._trial_started = self._clock()
         self._revealed.clear()
 
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
@@ -1009,6 +1038,10 @@ class LLMAgentPolicy(PolicyBase):
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
+        slept = self._pending_sleep
+        self._pending_sleep = None
+        if slept is not None:
+            narration = _sleep_narration(slept, _thermal_status(observation))
         motion = self._pending_motion
         self._pending_motion = None
         if motion is not None:
@@ -1043,6 +1076,7 @@ class LLMAgentPolicy(PolicyBase):
             narration=narration,
             depth=depth,
             setpoint_lines=toolset.setpoint_lines(observation),
+            wall_s=None if self._trial_started is None else self._clock() - self._trial_started,
         )
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
@@ -1130,6 +1164,7 @@ class LLMAgentPolicy(PolicyBase):
             closed = False
             closed_after_failure = False
             stopped = False
+            sleep_request: float | None = None
             last_error: str | None = None
             for call in message.tool_calls:
                 result_text: str
@@ -1221,6 +1256,7 @@ class LLMAgentPolicy(PolicyBase):
                             if result.chunk is not None:
                                 chunk = result.chunk
                                 target = result.target
+                                sleep_request = result.sleep
                                 stopped = bool(chunk.actions[0].meta.get("request_stop"))
                                 if stopped:
                                     self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
@@ -1268,7 +1304,11 @@ class LLMAgentPolicy(PolicyBase):
                     }
                 )
             if chunk is not None:
-                if not stopped:
+                if sleep_request is not None:
+                    self._pending_sleep = _PendingSleep(
+                        seconds=sleep_request, before=_thermal_status(observation)
+                    )
+                elif not stopped:
                     # Narrated with the next observation in every image mode:
                     # how much played and how far the readback sits from the
                     # target, so a short move never passes silently.
@@ -1390,20 +1430,70 @@ def _approvals_line(observation: Observation) -> str | None:
     return f"approver: {total} step(s) modified{detail_str}."
 
 
-def _motion_report_lines(observation: Observation) -> list[str]:
-    """Render an embodiment's ``extra["motion_report"]["lines"]``, tolerating malformed data.
+def _extra_lines(observation: Observation, key: str) -> list[str]:
+    """Render ``extra[key]["lines"]``, tolerating absent or malformed data.
 
     The convention is embodiment-agnostic: a mapping whose ``lines`` are
     plain-language strings written for the policy (the YAM plugin's per-arm
-    IK diagnosis, for example). Anything else is ignored silently.
+    IK diagnosis under ``motion_report``, its hottest-motor line under
+    ``motor_temps``). Anything else is ignored silently.
     """
-    report = observation.extra.get("motion_report")
+    report = observation.extra.get(key)
     if not isinstance(report, Mapping):
         return []
     lines = report.get("lines")
     if not isinstance(lines, list):
         return []
     return [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+
+
+def _motion_report_lines(observation: Observation) -> list[str]:
+    """Render an embodiment's ``extra["motion_report"]["lines"]``."""
+    return _extra_lines(observation, "motion_report")
+
+
+def _thermal_status(observation: Observation) -> _ThermalStatus | None:
+    """Reduce ``extra["motor_temps"]`` to each arm's hottest reading, or ``None``.
+
+    A report without a numeric limit or arm map is treated as absent.
+    """
+    report = observation.extra.get("motor_temps")
+    if not isinstance(report, Mapping):
+        return None
+    limit = report.get("limit")
+    margin = report.get("warn_margin", 0.0)
+    reported = report.get("arms")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or isinstance(margin, bool)
+        or not isinstance(margin, (int, float))
+        or not isinstance(reported, Mapping)
+    ):
+        return None
+    hottest: dict[str, tuple[str, float]] = {}
+    for name, entry in reported.items():
+        if not isinstance(entry, Mapping):
+            continue
+        label = entry.get("hottest")
+        celsius = entry.get("celsius")
+        if (
+            isinstance(label, str)
+            and not isinstance(celsius, bool)
+            and isinstance(celsius, (int, float))
+        ):
+            hottest[str(name)] = (label, float(celsius))
+    return _ThermalStatus(limit=float(limit), margin=float(margin), hottest=hottest)
+
+
+def _sleep_narration(slept: _PendingSleep, after: _ThermalStatus | None) -> str:
+    """Describe a finished sleep, with the hottest motors before and after when reported."""
+    narration = f"Slept {slept.seconds:g} s holding the setpoint."
+    before = slept.before.text() if slept.before is not None else ""
+    now = after.text() if after is not None else ""
+    if before and now:
+        narration += f" Hottest motors: {before} before, {now} now."
+    return narration
 
 
 def _operator_lines(observation: Observation) -> list[str]:
@@ -1432,12 +1522,14 @@ def _observation_content(
     narration: str | None = None,
     depth: Mapping[str, Any] | None = None,
     setpoint_lines: Sequence[str] = (),
+    wall_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs.
 
     ``setpoint_lines`` (from ``Toolset.setpoint_lines``) follow the state
     lines so the readback and the setpoint it is compared against sit
-    together.
+    together. ``wall_s`` is the wall-clock time since the trial began; it
+    follows the step budget so the model can pace motion against real time.
     """
     lines = ["Current observation."]
     if observation.instruction:
@@ -1446,12 +1538,15 @@ def _observation_content(
     if isinstance(step, int) and max_steps is not None:
         remaining = max_steps - step
         lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
+    if wall_s is not None:
+        lines.append(f"Wall clock: {max(0.0, wall_s):.0f} s since the trial began.")
     lines.extend(_state_lines(observation, state_labels))
     lines.extend(setpoint_lines)
     app_line = _approvals_line(observation)
     if app_line is not None:
         lines.append(app_line)
     lines.extend(_motion_report_lines(observation))
+    lines.extend(_extra_lines(observation, "motor_temps"))
     lines.extend(_operator_lines(observation))
     if narration is not None:
         lines.append(narration)
