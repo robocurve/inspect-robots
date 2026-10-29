@@ -49,6 +49,7 @@ from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
 from inspect_robots_agent._tools import ToolResult
 from inspect_robots_agent.policy import (
+    _EVAL_NOTES_TEXT_LIMIT,
     _ON_DEMAND_SYSTEM_TEMPLATE,
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _SYSTEM_TEMPLATE,
@@ -3006,3 +3007,60 @@ def test_reset_forgets_the_held_move_target_between_trials() -> None:
     policy.reset(Scene(id="s1", instruction="reach again"))
     fresh = policy.act(Observation(state={"q": np.array([0.25, 0.55])}))
     assert np.array_equal(fresh.actions[-1].data, np.array([0.5, 0.55]))
+
+
+def test_eval_notes_follow_the_budget_and_precede_prior_learnings(tmp_path: Path) -> None:
+    docs = "Use the wrist camera before closing the gripper."
+    learnings = "Approach from the object's left side.\n"
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    notes = "  Scoring: partial credit per milestone; use the whole budget.\n"
+    from inspect_robots.task import TaskEnvelope
+
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(
+        _Script([_text_response("unused")]),
+        prior_learnings=str(path),
+        eval_notes=notes,
+    )
+    policy.bind(info)
+    policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    prompt = transcript[0]["content"]
+    budget_at = prompt.index("Environment step budget:")
+    notes_at = prompt.index("\n\nEvaluation notes:\n" + notes.strip())
+    learnings_at = prompt.index(_PRIOR_LEARNINGS_FRAME)
+    assert budget_at < notes_at < learnings_at
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.eval_notes == notes.strip()
+
+
+def test_eval_notes_default_off_leaves_prompt_and_config_unchanged() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert "Evaluation notes:" not in transcript[0]["content"]
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.eval_notes is None
+
+
+@pytest.mark.parametrize(
+    ("eval_notes", "message"),
+    [
+        (42, "eval_notes must be a string, got 42"),
+        ("   \n ", "eval_notes is empty or whitespace-only"),
+        ("x" * (_EVAL_NOTES_TEXT_LIMIT + 1), "the limit is"),
+    ],
+)
+def test_eval_notes_rejects_non_strings_blanks_and_oversize(
+    eval_notes: object, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _policy(_Script([_text_response("unused")]), eval_notes=eval_notes)

@@ -288,7 +288,7 @@ Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
-renders), and `prior_learnings`.
+renders), `prior_learnings`, and `eval_notes`.
 `speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
 either on another wire is an error. `speed=fast` is meaningful only for Claude
 on Anthropic's API; Tinker accepts and silently ignores it.
@@ -361,6 +361,26 @@ when the policy is constructed, and its resolved path and content hash are
 recorded in the eval configuration. The `hindsight` answers that `done` and
 `give_up` collect into `trial_metadata` are the natural source material for
 this file: harvest them across runs, distill, and feed them back here.
+
+Set `-P eval_notes="..."` to append a short benchmark-level brief to the
+system prompt as an `Evaluation notes:` section. It lands after the budget
+lines and before any prior learnings, and the stripped text is recorded in the
+eval configuration. The generic prompt tells the agent to call `give_up` when
+the goal cannot be achieved, which is the wrong advice under a rubric that
+awards partial credit: it ends trials early that would still have scored.
+Pass the scoring regime here instead of editing task instructions, so run
+identities stay intact and benchmarks that want early stops (safety refusals)
+are unaffected. Keep it to a few sentences (the limit is 8 KiB); for example:
+
+```bash
+inspect-robots run --policy agent -P model=anthropic/claude-opus-5-5 \
+    -P eval_notes="Scoring: partial credit is awarded for each milestone \
+reached, so progress counts even if you cannot finish. give_up only ends the \
+trial early and never improves the score; use your whole call and step budget \
+before stopping." \
+    --instruction "stack the bowls on the table"
+```
+
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.

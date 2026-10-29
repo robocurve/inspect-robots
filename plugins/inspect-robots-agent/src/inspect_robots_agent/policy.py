@@ -114,6 +114,7 @@ _UNSET: Final = _Unset()
 
 # Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
 _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
+_EVAL_NOTES_TEXT_LIMIT = 8 * 1024
 
 # Native action units: 0.1 mm for eef_pos, 0.1 mrad for joints.
 _TARGET_REACHED_TOLERANCE = 1e-4
@@ -300,6 +301,9 @@ class AgentPolicyConfig(PolicyConfig):
     pre_check: str | None = None
     max_retries: int = 3
     backoff_s: float = 1.0
+    #: Evaluation notes appended verbatim to every trial's system prompt
+    #: (scoring regime, budget use); ``None`` when not configured.
+    eval_notes: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -322,7 +326,10 @@ class LLMAgentPolicy(PolicyBase):
     Metric camera depth is rendered by default; pass ``depth="off"`` to omit
     it without resolving any depth entries.
     ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
-    and appends its text to every trial's system prompt.
+    and appends its text to every trial's system prompt. ``eval_notes`` appends
+    a short benchmark-level brief (how trials are scored, how to spend the
+    budget) ahead of it, so an evaluation can override the generic prompt's
+    stopping advice without touching the task instruction.
     """
 
     #: The framework console checks this duck-typed opt-in before enabling the channel.
@@ -346,6 +353,7 @@ class LLMAgentPolicy(PolicyBase):
         depth: str = "render",
         image_horizon: int | _Unset | None = _UNSET,
         prior_learnings: str | None = None,
+        eval_notes: str | None = None,
         transport: httpx.BaseTransport | None = None,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
@@ -405,6 +413,27 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings_sha256 = hashlib.sha256(
                 prior_learnings_text.encode("utf-8")
             ).hexdigest()
+
+        eval_notes_text: str | None = None
+        if eval_notes is not None:
+            if not isinstance(eval_notes, str):
+                raise ConfigError(
+                    f"eval_notes must be a string, got {eval_notes!r}.\n"
+                    "fix: the -P parser coerces unquoted values; pass "
+                    "-P 'eval_notes=\"Scoring: ...\"'"
+                )
+            eval_notes_text = eval_notes.strip()
+            if not eval_notes_text:
+                raise ConfigError(
+                    "eval_notes is empty or whitespace-only.\n"
+                    "fix: pass the brief as text or omit -P eval_notes="
+                )
+            if len(eval_notes_text) > _EVAL_NOTES_TEXT_LIMIT:
+                raise ConfigError(
+                    f"eval_notes has {len(eval_notes_text)} characters; the limit is "
+                    f"{_EVAL_NOTES_TEXT_LIMIT}.\n"
+                    "fix: keep the brief short; longer material belongs in prior_learnings"
+                )
 
         pre_check_identity: str | None = None
         if pre_check is not None:
@@ -774,6 +803,7 @@ class LLMAgentPolicy(PolicyBase):
         self._depth = depth
         self._image_horizon = resolved_image_horizon
         self._prior_learnings_text = prior_learnings_text
+        self._eval_notes = eval_notes_text
         self._pre_check = pre_check
         self._explicit_base_url = bool(base_url)
         self._wire = wire
@@ -799,6 +829,7 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
+            eval_notes=eval_notes_text,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
@@ -871,6 +902,10 @@ class LLMAgentPolicy(PolicyBase):
                 "`executing move_to over N steps (X.Xs)`). Pace yourself against the "
                 "environment step budget, not only the call budget."
             )
+        if self._eval_notes is not None:
+            # After the budget lines, so "use the whole budget" sits next to
+            # the numbers, and before prior learnings, which are advisory.
+            formatted += "\n\nEvaluation notes:\n" + self._eval_notes
         if self._prior_learnings_text is not None:
             formatted = (
                 formatted
