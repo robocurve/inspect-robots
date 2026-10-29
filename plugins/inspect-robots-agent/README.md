@@ -98,8 +98,13 @@ endpoint support:
 Motion tool calls state where to go, not how long to move. For absolute modes,
 the move tool (`move_joints` for joint spaces, `move_to` for Cartesian pose
 modes) interpolates named partial targets from the observed state at a fixed
-safe speed. The default `max_speed_frac=0.1` allows a tenth of each
-dimension's range per second, subject to a 5%-of-range per-step ceiling that
+safe speed. Dimensions a call leaves unnamed keep the last target commanded in
+the trial (their measured value before the first move), so a gripper squeeze or
+a wrist rotation stays commanded without being repeated on every call, and the
+measured tracking sag never becomes the next command; `done` and `give_up`
+re-send that held target too. The default `max_speed_frac=0.1` allows a tenth
+of each dimension's range per second, subject to a 5%-of-range per-step
+ceiling that
 matches the core's default delta backstop. At that default a near-full-range
 move exceeds the 10 s per-call playout cap, so the agent receives a
 split-the-move error and issues it as two smaller motions; raise the fraction

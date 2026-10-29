@@ -2972,3 +2972,37 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
 
     # Assert wire directory stem and transcript stem agree
     assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem
+
+
+def test_reset_forgets_the_held_move_target_between_trials() -> None:
+    info = EmbodimentInfo(
+        name="two-dim",
+        action_space=Box(
+            shape=(2,),
+            low=np.zeros(2),
+            high=np.ones(2),
+            semantics=ActionSemantics("joint_pos", dim_labels=("a", "b")),
+        ),
+        observation_space=ObservationSpace(
+            state=StateSpec(fields=(StateField(key="q", shape=(2,)),))
+        ),
+        control_hz=10.0,
+        is_simulated=True,
+    )
+    policy = _policy(
+        _Script(
+            [
+                _tool_response("move_joints", {"targets": {"b": 0.6}}),
+                _tool_response("move_joints", {"targets": {"a": 0.5}}),
+            ]
+        )
+    )
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+    policy.act(Observation(state={"q": np.array([0.2, 0.2])}))
+    held = policy.act(Observation(state={"q": np.array([0.25, 0.55])}))
+    assert np.array_equal(held.actions[-1].data, np.array([0.5, 0.6]))
+
+    policy.reset(Scene(id="s1", instruction="reach again"))
+    fresh = policy.act(Observation(state={"q": np.array([0.25, 0.55])}))
+    assert np.array_equal(fresh.actions[-1].data, np.array([0.5, 0.55]))

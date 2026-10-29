@@ -1408,3 +1408,130 @@ def test_toolset_pinned_labels_displacement_modes() -> None:
     )
     toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
     assert toolset.pinned_labels == ("fixed_dim",)
+
+
+# --- held targets across calls -------------------------------------------------
+
+
+def _two_dim_toolset(**kwargs: Any) -> Any:
+    space = Box(
+        shape=(2,),
+        low=np.zeros(2),
+        high=np.ones(2),
+        semantics=ActionSemantics("joint_pos", dim_labels=("a", "b")),
+    )
+    return build_toolset(space, _absolute_obs_space(dim=2), control_hz=10.0, **kwargs)
+
+
+def test_unnamed_dimensions_keep_the_last_commanded_target_not_the_measured_value() -> None:
+    toolset = _two_dim_toolset()
+    first = toolset.execute(
+        _call("move_joints", targets={"b": 0.6}),
+        _obs({"q": np.array([0.2, 0.2])}),
+    )
+    assert first.error is None and first.chunk is not None
+    assert np.array_equal(first.chunk.actions[-1].data, np.array([0.2, 0.6]))
+
+    # b sagged to 0.55 under load; a partial move naming only a must not
+    # ratchet b down to the sag, and must not pass through it either.
+    second = toolset.execute(
+        _call("move_joints", targets={"a": 0.5}),
+        _obs({"q": np.array([0.25, 0.55])}),
+    )
+    assert second.error is None and second.chunk is not None
+    waypoints = np.stack([action.data for action in second.chunk.actions])
+    assert np.all(waypoints[:, 1] == 0.6)
+    assert waypoints[0, 0] == pytest.approx(0.25 + 0.25 / len(waypoints))
+    assert waypoints[-1, 0] == 0.5
+    assert second.target is not None
+    assert np.array_equal(second.target, np.array([0.5, 0.6]))
+    # Pacing follows the named motion only: a's 0.25 at 1% of range per step.
+    assert len(second.chunk.actions) == 26
+
+
+def test_held_target_survives_rejected_calls_and_pre_check_refusals() -> None:
+    refuse = False
+    toolset = _two_dim_toolset(
+        pre_check=lambda waypoints: "too close to the table" if refuse else None
+    )
+    accepted = toolset.execute(
+        _call("move_joints", targets={"b": 0.6}),
+        _obs({"q": np.array([0.2, 0.2])}),
+    )
+    assert accepted.error is None
+
+    out_of_bounds = toolset.execute(
+        _call("move_joints", targets={"b": 1.5}),
+        _obs({"q": np.array([0.2, 0.55])}),
+    )
+    assert out_of_bounds.error == "target for b is outside [0.0, 1.0]"
+    refuse = True
+    refused = toolset.execute(
+        _call("move_joints", targets={"b": 0.9}),
+        _obs({"q": np.array([0.2, 0.55])}),
+    )
+    assert refused.error == "pre-check rejected this motion: too close to the table"
+    refuse = False
+
+    after = toolset.execute(
+        _call("move_joints", targets={"a": 0.3}),
+        _obs({"q": np.array([0.2, 0.55])}),
+    )
+    assert after.error is None and after.chunk is not None
+    assert np.array_equal(after.chunk.actions[-1].data, np.array([0.3, 0.6]))
+
+
+def test_start_trial_forgets_the_held_target() -> None:
+    toolset = _two_dim_toolset()
+    toolset.execute(_call("move_joints", targets={"b": 0.6}), _obs({"q": np.array([0.2, 0.2])}))
+
+    toolset.start_trial()
+    fresh = toolset.execute(
+        _call("move_joints", targets={"a": 0.3}),
+        _obs({"q": np.array([0.2, 0.55])}),
+    )
+    assert fresh.error is None and fresh.chunk is not None
+    assert np.array_equal(fresh.chunk.actions[-1].data, np.array([0.3, 0.55]))
+
+
+def test_held_target_is_the_clipped_target_so_pinned_dimensions_stay_on_their_bound() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.3]),
+        high=np.array([1.0, 0.3]),
+        semantics=ActionSemantics("joint_pos", dim_labels=("joint", "fixed")),
+    )
+    toolset = build_toolset(space, _absolute_obs_space(dim=2), control_hz=10.0)
+    first = toolset.execute(
+        _call("move_joints", targets={"joint": 0.1}),
+        _obs({"q": np.array([0.0, 0.31])}),
+    )
+    assert first.error is None and first.target is not None
+    assert first.target[1] == 0.3
+
+    second = toolset.execute(
+        _call("move_joints", targets={"joint": 0.2}),
+        _obs({"q": np.array([0.1, 0.32])}),
+    )
+    assert second.error is None and second.chunk is not None
+    assert all(action.data[1] == 0.3 for action in second.chunk.actions)
+
+
+@pytest.mark.parametrize("name", ["done", "give_up"])
+def test_stop_actions_resend_the_held_target_rather_than_the_measured_state(name: str) -> None:
+    toolset = _two_dim_toolset()
+    before = toolset.execute(
+        _call(name, summary="x", reason="x"), _obs({"q": np.array([0.2, 0.2])})
+    )
+    assert before.chunk is not None
+    assert np.array_equal(before.chunk.actions[0].data, np.array([0.2, 0.2]))
+
+    toolset.execute(_call("move_joints", targets={"b": 0.0}), _obs({"q": np.array([0.2, 0.5])}))
+    # The gripper-like dimension b is commanded shut (0.0) but reads 0.04 on
+    # the object; ending the trial must not re-command the 0.04.
+    after = toolset.execute(
+        _call(name, summary="x", reason="x"), _obs({"q": np.array([0.2, 0.04])})
+    )
+    assert after.chunk is not None
+    assert np.array_equal(after.chunk.actions[0].data, np.array([0.2, 0.0]))
+    assert after.chunk.actions[0].meta["request_stop"] is True

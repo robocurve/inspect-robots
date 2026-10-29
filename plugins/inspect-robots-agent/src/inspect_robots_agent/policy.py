@@ -847,6 +847,8 @@ class LLMAgentPolicy(PolicyBase):
         if isinstance(self._client, ResponsesClient):
             self._client._reset_cache_tracking()
         self._hindsight = None
+        if self._toolset is not None:
+            self._toolset.start_trial()
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:

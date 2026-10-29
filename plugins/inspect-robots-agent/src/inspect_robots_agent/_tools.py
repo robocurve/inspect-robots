@@ -3,8 +3,10 @@
 Tools are generated from the embodiment's spaces, so the plugin never needs
 embodiment-specific motion knowledge. Absolute targets are interpolated with a
 declared per-dimension limit where available and a range-derived backstop
-otherwise. Displacements are split by the available box side, which the plugin
-treats as the embodiment author's per-action limit.
+otherwise. Dimensions a call leaves unnamed keep the last target commanded in
+the trial (the measured state before the first move), so tracking sag never
+becomes the next command. Displacements are split by the available box side,
+which the plugin treats as the embodiment author's per-action limit.
 
 Tool mistakes come back as structured error strings the LLM can correct.
 Broken observations still raise, and unsupported configurations fail at build
@@ -122,6 +124,9 @@ class Toolset:
         self._images = images
         self._cameras = cameras
         self._pre_check = pre_check
+        #: The clipped target of the trial's last successful absolute move;
+        #: ``None`` before the first one and after ``start_trial()``.
+        self._held_target: npt.NDArray[np.float64] | None = None
         if absolute:
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
@@ -132,6 +137,14 @@ class Toolset:
     def state_labels(self) -> tuple[str, tuple[str, ...]] | None:
         """Return the state field and per-element labels selected at build time."""
         return self._state_labels
+
+    def start_trial(self) -> None:
+        """Forget the held target so the next move starts from the measured state.
+
+        Call this at every trial reset: the previous trial's last command says
+        nothing about where a freshly reset embodiment is.
+        """
+        self._held_target = None
 
     @property
     def bounds_text(self) -> str:
@@ -163,7 +176,10 @@ class Toolset:
                 "positions, radians for rotations, per the dimension labels). "
                 "The motion is a straight line interpolated at a fixed safe "
                 "speed and the result reports its step count. Unnamed "
-                "dimensions hold their current value. Coordinates are absolute "
+                "dimensions keep their last commanded target (their measured "
+                "value before the first move of a trial), so a gripper squeeze "
+                "or a rotation stays commanded without naming it again. "
+                "Coordinates are absolute "
                 "in the embodiment's declared frame; on multi-arm embodiments "
                 "each arm uses its own base frame and axes may differ between "
                 "arms depending on mounting. Rotation dimensions are absolute "
@@ -177,7 +193,8 @@ class Toolset:
             move_description = (
                 "Move to absolute joint/dimension targets. The motion is smoothly "
                 "interpolated at a fixed safe speed and the result reports its step "
-                "count. Unnamed dimensions hold their current value. " + self._bounds_text
+                "count. Unnamed dimensions keep their last commanded target (their "
+                "measured value before the first move of a trial). " + self._bounds_text
             )
             values_key = "targets"
         else:
@@ -350,7 +367,11 @@ class Toolset:
         return np.asarray(observation.state[self._state_key], dtype=np.float64)
 
     def _stop(self, name: str, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        data = self._current_state(observation)
+        # Ending the trial must not move anything: re-send the setpoint the
+        # controller is already tracking (a gripper squeeze included) rather
+        # than the measured state, which lags it by the tracking sag.
+        held = self._held_target
+        data = self._current_state(observation) if held is None else held.copy()
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
         meta = {"request_stop": True, "stop_reason": name, "stop_detail": detail}
         hindsight = arguments.get("hindsight")
@@ -452,7 +473,8 @@ class Toolset:
         named_indices: list[int],
         current: npt.NDArray[np.float64],
     ) -> ToolResult:
-        target = current.copy()
+        held = self._held_target
+        target = (current if held is None else held).copy()
         for label, index in zip(values, named_indices, strict=True):
             value = vector[index]
             if self._step_limits[index] == 0:
@@ -482,9 +504,16 @@ class Toolset:
             return self._cap_error()
         steps = max(1, math.ceil(float(headed_ratio)))
 
+        # Named dimensions interpolate from where the arm is. Unnamed ones are
+        # already commanded at the held target (the controller keeps tracking
+        # the previous setpoint between calls), so they sit there from the
+        # first waypoint: interpolating them from the measured state would
+        # briefly command the tracking sag, e.g. loosen a gripper squeeze.
+        start = target.copy()
+        start[named_indices] = current[named_indices]
         fractions = np.linspace(1.0 / steps, 1.0, steps)
         actions = [
-            Action(data=np.clip(current + (target - current) * fraction, self._low, self._high))
+            Action(data=np.clip(start + (target - start) * fraction, self._low, self._high))
             for fraction in fractions
         ]
         actions[-1] = Action(data=np.clip(target.copy(), self._low, self._high))
@@ -497,6 +526,7 @@ class Toolset:
             waypoints.flags.writeable = False
             if message := self._pre_check(waypoints):
                 return ToolResult(error="pre-check rejected this motion: " + message)
+        self._held_target = clipped_target.copy()
         return self._success(actions, steps, target=clipped_target)
 
     def _move_displacement(
