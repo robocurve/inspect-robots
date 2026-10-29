@@ -410,6 +410,52 @@ them, while fractional effort is accepted today only by Tinker's
 OpenAI-compatible endpoint (see below). A server that takes levels only rejects
 a fraction with a guided 4xx naming the wire that does accept one.
 
+## Optional Relay traces
+
+Relay users can consume Inspect LLM-agent runs with existing Relay exporters,
+including ATIF, without a separate Inspect-log converter. Native Inspect logs
+retain the full transcript and independent task scores.
+
+Install `inspect-robots-agent[relay]` on Python 3.11+ and pass `-P relay=true`
+(or `LLMAgentPolicy(..., relay=True)`) to emit
+[NVIDIA NeMo Relay](https://github.com/NVIDIA/NeMo-Relay) events. Relay is not
+imported by default; the base plugin still supports Python 3.10.
+
+| Boundary | Trace content |
+| --- | --- |
+| Trial | Run, scene, epoch, execution status and termination reason |
+| Model call | Logical call including retries; reported token usage when available |
+| Tool dispatch | Tool-call ID, model-call index and accepted/rejected/error outcome |
+
+Prompts, images, raw responses, tool arguments and exception messages are
+omitted. Identifiers and tool names remain visible. Native Inspect logs retain
+payloads and task scores. Dispatch outcomes include the policy's rejection of
+unavailable or already-shown camera frames. Tool acceptance precedes motion
+playout; it does not establish task success. Ignored tool requests have no
+dispatch span, and budget-forced stops carry `source=policy` without a
+model-call index.
+
+ATOF files live under `relay/<run>/<trial>/events.jsonl` in the log directory.
+Check `trial_metadata[epoch]["relay"]` for the path, expected/written event counts
+and `captured` or `error` status. Capture failures warn without repeating model
+or tool execution. Finalization waits up to one second, then defers blocked
+file cleanup. Interrupted scoring can omit the receipt; discarding the policy
+releases its subscriber. A missing or error receipt means incomplete capture.
+
+Run one scripted CubePick trial through Relay's built-in ATIF exporter:
+
+```bash
+uv sync --locked --all-packages --extra dev --extra relay --python 3.11
+uv run --no-sync python examples/relay_agent.py
+```
+
+The example needs no API key or hardware. It writes `atif/` and `inspect/`
+under a new `logs/relay-demo/<run>/` directory. In ATIF, tool result
+`extra.metadata.status` holds dispatch acceptance; generic invocation status
+means lifecycle completion, and `total_steps` counts conversation records.
+Existing Relay plugin settings also apply. This integration covers the LLM
+policy only and uses manual lifecycle APIs without execution interceptors.
+
 ## Depth rendering
 
 For each camera, the policy looks for metric depth in

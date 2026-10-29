@@ -18,8 +18,8 @@ import math
 import os
 import sys
 from collections import Counter
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -38,6 +38,7 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import TrialRecord
+    from inspect_robots_agent._relay import RelayTrace
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._gemini_live import GeminiLiveClient
@@ -46,6 +47,7 @@ from inspect_robots_agent._llm import (
     _DIRECT_PROVIDERS,
     _OPENROUTER_BASE,
     ENV_MODEL,
+    AssistantMessage,
     ChatClient,
     Provider,
     ToolCall,
@@ -55,7 +57,7 @@ from inspect_robots_agent._llm import (
 )
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
-from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
+from inspect_robots_agent._tools import PreCheck, ToolDispatch, Toolset, build_toolset
 
 from ._capture import WireCapture, _safe
 
@@ -300,6 +302,7 @@ class AgentPolicyConfig(PolicyConfig):
     pre_check: str | None = None
     max_retries: int = 3
     backoff_s: float = 1.0
+    relay: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -352,7 +355,19 @@ class LLMAgentPolicy(PolicyBase):
         service_tier: str | None = None,
         max_retries: int = 3,
         backoff_s: float = 1.0,
+        relay: bool = False,
     ) -> None:
+        if not isinstance(relay, bool):
+            raise ConfigError("relay must be a boolean")
+        self._relay: RelayTrace | None = None
+        if relay:
+            try:
+                from inspect_robots_agent._relay import RelayTrace
+            except ImportError as exc:
+                raise ConfigError(
+                    "Relay tracing requires Python 3.11+ and inspect-robots-agent[relay].\n"
+                    "fix: install the relay extra with a supported Python interpreter"
+                ) from exc
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
         for name, val in [
@@ -717,6 +732,8 @@ class LLMAgentPolicy(PolicyBase):
             else None
         )
         self._capture = WireCapture() if wire_capture else None
+        if relay:
+            self._relay = RelayTrace(provider.model, wire)
         self._client: (
             ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient | InteractionsClient
         )
@@ -784,6 +801,7 @@ class LLMAgentPolicy(PolicyBase):
             api_key_env=api_key_env,
             wire=wire,
             wire_capture=wire_capture,
+            relay=relay,
             speed=speed,
             service_tier=service_tier,
             max_output_tokens=resolved_max_output_tokens,
@@ -892,11 +910,15 @@ class LLMAgentPolicy(PolicyBase):
 
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
         """Begin streaming wire attempts for the next trial when enabled."""
+        if self._relay is not None:
+            self._relay.begin(log_dir, run_id, scene_id, epoch)
         if self._capture is not None:
             self._capture.begin_trial(log_dir, run_id, f"{_safe(scene_id)}-e{epoch}")
 
     def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
         """Persist wire capture, hindsight, usage, and the transcript at trial end."""
+        if self._relay is not None:
+            record.metadata["relay"] = self._relay.end(record.status, record.termination_reason)
         if isinstance(self._client, GeminiLiveClient):
             # Trial finalization must stay successful even if a half-dead Live
             # transport violates close()'s own best-effort contract.
@@ -1014,12 +1036,7 @@ class LLMAgentPolicy(PolicyBase):
                     self._image_horizon,
                     mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
-            message = self._client.complete(
-                outgoing,
-                toolset.schemas(),
-                temperature=self._temperature,
-                reasoning_effort=self._effort,
-            )
+            message = self._complete(outgoing, toolset)
             self._calls_used += 1
             if message.usage is not None:
                 for key, value in message.usage.items():
@@ -1074,119 +1091,134 @@ class LLMAgentPolicy(PolicyBase):
                 echo_text: str | None = None
                 is_capture = self._images == "on_demand" and call.name == "take_pic"
                 if not closed:
-                    result = toolset.execute(call, observation)
-                    if is_capture:
-                        closed = True
-                        if result.error is not None:
-                            result_text = result.error
-                            failures += 1
-                            last_error = result.error
-                            closed_after_failure = True
-                        elif result.capture == ():
-                            result_text = "no camera images are available in this observation"
-                            rejections += 1
-                            if rejections > 1:
+                    with self._execute_tool(
+                        toolset, call, observation, self._calls_used - 1
+                    ) as dispatch:
+                        result = dispatch.result
+                        if is_capture:
+                            closed = True
+                            if result.error is not None:
+                                result_text = result.error
                                 failures += 1
-                                last_error = result_text
-                            closed_after_failure = True
-                        else:
-                            requested = (
-                                tuple(observation.images)
-                                if result.capture is None
-                                else _unique_names(result.capture)
-                            )
-                            # Exclude cameras from self._revealed if their image-bearing message
-                            # was evicted by image_horizon
-                            if self._image_horizon is not None:
-                                active_camera_names: set[str] = set()
-                                for msg in outgoing:
-                                    content_list = msg.get("content")
-                                    if isinstance(content_list, list):
-                                        for part in content_list:
-                                            if (
-                                                isinstance(part, dict)
-                                                and part.get("type") == "text"
-                                            ):
-                                                text = part.get("text", "")
-                                                # The label is written with !r, and
-                                                # repr() uses double quotes for a
-                                                # name holding an apostrophe, so
-                                                # accept whichever quote it chose.
-                                                start = len(_CAMERA_LABEL_PREFIX) + 1
-                                                quote = text[start - 1 : start]
-                                                if (
-                                                    text.startswith(_CAMERA_LABEL_PREFIX)
-                                                    and quote in ("'", '"')
-                                                    and (end := text.find(quote, start)) != -1
-                                                ):
-                                                    active_camera_names.add(text[start:end])
-                                self._revealed.intersection_update(active_camera_names)
-
-                            skipped = tuple(name for name in requested if name in self._revealed)
-                            immediate_frames = tuple(
-                                name for name in requested if name not in self._revealed
-                            )
-                            if immediate_frames:
-                                self._revealed.update(immediate_frames)
-                                result_text = (
-                                    f"captured {len(immediate_frames)} frame(s): "
-                                    f"{_quoted_names(immediate_frames)}"
-                                )
-                                if skipped:
-                                    result_text += f" (already shown: {_quoted_names(skipped)})"
-                                failures = 0
-                                echo_text = f"captured {len(immediate_frames)} frame(s)"
-                            else:
-                                result_text = (
-                                    "already shown for this observation: "
-                                    f"{_quoted_names(skipped)}; the view cannot change until "
-                                    "the robot moves"
-                                )
+                                last_error = result.error
+                                closed_after_failure = True
+                            elif result.capture == ():
+                                dispatch.rejected = True
+                                result_text = "no camera images are available in this observation"
                                 rejections += 1
                                 if rejections > 1:
                                     failures += 1
                                     last_error = result_text
                                 closed_after_failure = True
-                    else:
-                        if result.error is not None:
-                            result_text = result.error
-                            failures += 1
-                            last_error = result.error
-                            closed = True
-                            closed_after_failure = True
+                            else:
+                                requested = (
+                                    tuple(observation.images)
+                                    if result.capture is None
+                                    else _unique_names(result.capture)
+                                )
+                                # Exclude cameras from self._revealed if their image-bearing message
+                                # was evicted by image_horizon
+                                if self._image_horizon is not None:
+                                    active_camera_names: set[str] = set()
+                                    for msg in outgoing:
+                                        content_list = msg.get("content")
+                                        if isinstance(content_list, list):
+                                            for part in content_list:
+                                                if (
+                                                    isinstance(part, dict)
+                                                    and part.get("type") == "text"
+                                                ):
+                                                    text = part.get("text", "")
+                                                    # The label is written with !r, and
+                                                    # repr() uses double quotes for a
+                                                    # name holding an apostrophe, so
+                                                    # accept whichever quote it chose.
+                                                    start = len(_CAMERA_LABEL_PREFIX) + 1
+                                                    quote = text[start - 1 : start]
+                                                    if (
+                                                        text.startswith(_CAMERA_LABEL_PREFIX)
+                                                        and quote in ("'", '"')
+                                                        and (end := text.find(quote, start)) != -1
+                                                    ):
+                                                        active_camera_names.add(text[start:end])
+                                    self._revealed.intersection_update(active_camera_names)
+
+                                skipped = tuple(
+                                    name for name in requested if name in self._revealed
+                                )
+                                immediate_frames = tuple(
+                                    name for name in requested if name not in self._revealed
+                                )
+                                if immediate_frames:
+                                    self._revealed.update(immediate_frames)
+                                    result_text = (
+                                        f"captured {len(immediate_frames)} frame(s): "
+                                        f"{_quoted_names(immediate_frames)}"
+                                    )
+                                    if skipped:
+                                        result_text += f" (already shown: {_quoted_names(skipped)})"
+                                    failures = 0
+                                    echo_text = f"captured {len(immediate_frames)} frame(s)"
+                                else:
+                                    dispatch.rejected = True
+                                    result_text = (
+                                        "already shown for this observation: "
+                                        f"{_quoted_names(skipped)}; the view cannot change until "
+                                        "the robot moves"
+                                    )
+                                    rejections += 1
+                                    if rejections > 1:
+                                        failures += 1
+                                        last_error = result_text
+                                    closed_after_failure = True
                         else:
-                            result_text = result.note
-                            if result.chunk is not None:
-                                chunk = result.chunk
-                                target = result.target
-                                stopped = bool(chunk.actions[0].meta.get("request_stop"))
-                                if stopped:
-                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
+                            if result.error is not None:
+                                result_text = result.error
+                                failures += 1
+                                last_error = result.error
                                 closed = True
+                                closed_after_failure = True
+                            else:
+                                result_text = result.note
+                                if result.chunk is not None:
+                                    chunk = result.chunk
+                                    target = result.target
+                                    stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                    if stopped:
+                                        self._hindsight = chunk.actions[0].meta.get(
+                                            "stop_hindsight"
+                                        )
+                                    closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture
                     # that may ride behind a motion. A failed validation keeps
                     # the queue slot open for a later call in this same turn.
-                    result = toolset.execute(call, observation)
-                    if result.error is not None:
-                        result_text = result.error
-                    elif result.capture == ():
-                        result_text = "no camera images are available in this observation"
-                    else:
-                        self._pending = _PendingCapture(
-                            requested=result.capture,
-                            issued_step=observation.extra.get("env_step"),
-                            chunk_len=len(chunk),
-                            target=target,
-                        )
-                        result_text = (
-                            "queued: frames arrive with the next observation, "
-                            "after the motion plays"
-                        )
-                        requested = (
-                            tuple(observation.images) if result.capture is None else result.capture
-                        )
-                        echo_text = f"queued capture: {_quoted_names(requested)}"
+                    with self._execute_tool(
+                        toolset, call, observation, self._calls_used - 1
+                    ) as dispatch:
+                        result = dispatch.result
+                        if result.error is not None:
+                            result_text = result.error
+                        elif result.capture == ():
+                            dispatch.rejected = True
+                            result_text = "no camera images are available in this observation"
+                        else:
+                            self._pending = _PendingCapture(
+                                requested=result.capture,
+                                issued_step=observation.extra.get("env_step"),
+                                chunk_len=len(chunk),
+                                target=target,
+                            )
+                            result_text = (
+                                "queued: frames arrive with the next observation, "
+                                "after the motion plays"
+                            )
+                            requested = (
+                                tuple(observation.images)
+                                if result.capture is None
+                                else result.capture
+                            )
+                            echo_text = f"queued capture: {_quoted_names(requested)}"
                 elif is_capture and chunk is not None and stopped:
                     result_text = "ignored: the trial ends with this call"
                 elif closed_after_failure:
@@ -1217,15 +1249,46 @@ class LLMAgentPolicy(PolicyBase):
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
 
+    def _complete(self, outgoing: list[dict[str, Any]], toolset: Toolset) -> AssistantMessage:
+        def complete() -> AssistantMessage:
+            return self._client.complete(
+                outgoing,
+                toolset.schemas(),
+                temperature=self._temperature,
+                reasoning_effort=self._effort,
+            )
+
+        if self._relay is not None:
+            return self._relay.model_call(complete, self._calls_used)
+        return complete()
+
+    @contextmanager
+    def _execute_tool(
+        self,
+        toolset: Toolset,
+        call: ToolCall,
+        observation: Observation,
+        index: int | None,
+    ) -> Iterator[ToolDispatch]:
+        if self._relay is not None:
+            with self._relay.tool_call(
+                lambda: toolset.execute(call, observation), call, index
+            ) as dispatch:
+                yield dispatch
+        else:
+            result = toolset.execute(call, observation)
+            yield ToolDispatch(result, rejected=result.error is not None)
+
     def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not
         # model output, so it stays out of the transcript.
         self._echo(f"[agent] -- {why}; forcing give_up")
         synthetic = ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))
-        result = toolset.execute(synthetic, observation)
-        if result.chunk is None:  # pragma: no cover - synthetic stop is structurally valid
-            raise RuntimeError(f"forced give_up failed: {result.error}")
-        return result.chunk
+        with self._execute_tool(toolset, synthetic, observation, None) as dispatch:
+            result = dispatch.result
+            if result.chunk is None:  # pragma: no cover - synthetic stop is structurally valid
+                raise RuntimeError(f"forced give_up failed: {result.error}")
+            return result.chunk
 
     def _pending_narration(
         self,

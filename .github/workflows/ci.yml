@@ -333,7 +333,7 @@ jobs:
             **/pyproject.toml
             **/uv.lock
       - name: Sync workspace (core + plugins, dev extras)
-        run: uv sync --locked --python 3.11 --all-packages --extra dev
+        run: uv sync --locked --python 3.11 --all-packages --extra dev --extra relay
       - name: Ruff (plugin, lint)
         run: uv run --no-sync ruff check plugins/inspect-robots-agent
       - name: Ruff (plugin, format check)
@@ -350,6 +350,10 @@ jobs:
         run: >
           uv run --no-sync python -m pytest plugins/inspect-robots-agent/tests -q
           --cov=inspect_robots_agent --cov-report=term-missing --cov-fail-under=0
+      - name: Verify agent without the optional Relay extra
+        run: |
+          uv sync --locked --python 3.11 --all-packages --extra dev
+          uv run --no-sync python -m pytest plugins/inspect-robots-agent/tests -q
 
   # The CaP-X code-as-policy suite needs no GPU, sockets, or CaP-X checkout:
   # httpx.MockTransport scripts the LLM plus all three model-server protocols,
