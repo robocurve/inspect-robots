@@ -334,6 +334,7 @@ the compatibility check without extra configuration.
 | [SO-ARM](https://github.com/TheRobotStudio/SO-ARM100) followers (SO-100 / SO-101) | `so_arm` | [inspect-robots-so101](https://github.com/robocurve/inspect-robots-so101) | 6-D `joint_pos` | `lerobot` |
 | WidowX 250S | `widowx` | [inspect-robots-widowx](https://github.com/robocurve/inspect-robots-widowx) | 7-D `eef_delta_pose` | `openvla`, `openpi` |
 | Any ROS 1 or ROS 2 arm through rosbridge | `ros` | [inspect-robots-ros](plugins/inspect-robots-ros/) | `joint_pos`, width set by the joints you list | — |
+| [Seeed](https://www.seeedstudio.com/) reBot Arm B601-RS (community) | `b601` | [inspect-robots-b601](https://github.com/kyeshmz/inspect-robots-b601) | 7-D `joint_pos` (6 joints + gripper) | `agent` |
 
 Trossen discontinued the WidowX 250S in July 2025. That adapter supports
 existing 250S rigs; the successor WidowX AI uses a different stack.
