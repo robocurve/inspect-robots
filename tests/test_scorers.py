@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -9,6 +11,7 @@ from inspect_robots.rollout import StepRecord, TrialRecord
 from inspect_robots.scorer import (
     Score,
     VLMScorer,
+    _ReachedGoalState,
     episode_length,
     get_reducer,
     is_affirmative_verdict,
@@ -63,6 +66,81 @@ def test_min_distance_to_goal() -> None:
 def test_reached_goal_state() -> None:
     assert reached_goal_state(0.05)(_record([0.5, 0.02], success=True), None).value is True
     assert reached_goal_state(0.05)(_record([0.5, 0.2], success=False), None).value is False
+
+
+def _record_with_infos(infos: list[dict[str, Any]], *, success: bool = False) -> TrialRecord:
+    steps = [
+        StepRecord(
+            t=t,
+            observation=Observation(),
+            action=Action(data=np.zeros(2)),
+            result=StepResult(
+                observation=Observation(),
+                terminated=(t == len(infos) - 1) and success,
+                termination_reason="success" if ((t == len(infos) - 1) and success) else None,
+                info=info,
+            ),
+        )
+        for t, info in enumerate(infos)
+    ]
+    rec = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    rec.terminated = success
+    rec.termination_reason = "success" if success else None
+    return rec
+
+
+def test_distance_scorers_handle_nan_and_unobserved_signals() -> None:
+    rec = _record_with_infos([{"distance": float("nan")}, {"distance": 0.02}])
+    assert min_distance_to_goal()(rec, None).value == 0.02
+    assert reached_goal_state(0.05)(rec, None).value is True
+
+
+def test_distance_scorers_filter_invalid_distance_entries() -> None:
+    rec = _record_with_infos(
+        [
+            {"other_key": 123},
+            {"distance": True},
+            {"distance": None},
+            {"distance": "invalid"},
+            {"distance": -0.5},
+            {"distance": float("inf")},
+            {"distance": float("-inf")},
+            {"distance": 0.04},
+        ]
+    )
+    assert min_distance_to_goal()(rec, None).value == 0.04
+    assert reached_goal_state(0.05)(rec, None).value is True
+
+
+def test_distance_scorers_no_distance_signal_recorded() -> None:
+    empty_rec = _record_with_infos([])
+    assert min_distance_to_goal()(empty_rec, None).value == float("inf")
+    assert reached_goal_state(0.05)(empty_rec, None).value is False
+
+    all_nan_rec = _record_with_infos([{"distance": float("nan")}, {"distance": None}])
+    assert min_distance_to_goal()(all_nan_rec, None).value == float("inf")
+    assert reached_goal_state(0.05)(all_nan_rec, None).value is False
+
+
+def test_reached_goal_state_validates_threshold() -> None:
+    assert _ReachedGoalState(0).threshold == 0.0
+    assert _ReachedGoalState(0.05).threshold == 0.05
+
+    with pytest.raises(TypeError, match="real number"):
+        reached_goal_state(True)
+    with pytest.raises(TypeError, match="real number"):
+        reached_goal_state(False)
+    with pytest.raises(TypeError, match="real number"):
+        reached_goal_state("0.05")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="real number"):
+        reached_goal_state(None)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="finite"):
+        reached_goal_state(float("nan"))
+    with pytest.raises(ValueError, match="finite"):
+        reached_goal_state(float("inf"))
+    with pytest.raises(ValueError, match="non-negative"):
+        reached_goal_state(-0.01)
 
 
 def test_operator_scorer_reads_recorded_verdict() -> None:

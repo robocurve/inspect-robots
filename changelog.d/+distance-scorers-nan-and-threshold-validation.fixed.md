@@ -1,0 +1,1 @@
+**Core:** `min_distance_to_goal` and `reached_goal_state` now filter out non-finite, negative, or unobserved distance signals so `NaN` readings cannot corrupt evaluations, and `reached_goal_state` validates that `threshold` is a finite non-negative real number.

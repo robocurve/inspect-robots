@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from math import comb
+from math import comb, isfinite
 from statistics import mean as _mean
 from statistics import median as _median
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -226,7 +226,20 @@ def episode_length(*, name: str = "episode_length") -> Scorer:
 
 
 def _distances(record: TrialRecord) -> list[float]:
-    return [float(s.result.info["distance"]) for s in record.steps if "distance" in s.result.info]
+    dists: list[float] = []
+    for s in record.steps:
+        if "distance" not in s.result.info:
+            continue
+        raw = s.result.info["distance"]
+        if isinstance(raw, bool):
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(val) and val >= 0.0:
+            dists.append(val)
+    return dists
 
 
 @dataclass(frozen=True)
@@ -249,6 +262,16 @@ def min_distance_to_goal(*, name: str = "min_distance_to_goal") -> Scorer:
 class _ReachedGoalState:
     threshold: float
     name: str = "reached_goal_state"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.threshold, bool) or not isinstance(self.threshold, int | float):
+            raise TypeError(f"threshold must be a real number, got {self.threshold!r}")
+        val = float(self.threshold)
+        if not isfinite(val):
+            raise ValueError(f"threshold must be finite, got {self.threshold!r}")
+        if val < 0.0:
+            raise ValueError(f"threshold must be non-negative, got {self.threshold!r}")
+        object.__setattr__(self, "threshold", val)
 
     def __call__(self, record: TrialRecord, target: Target | None) -> Score:
         dists = _distances(record)
