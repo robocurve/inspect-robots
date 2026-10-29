@@ -182,6 +182,17 @@ The embodiment then plays the chunk at its native rate. In this case the speed
 and playout caps are step-count constructs, not wall-clock guarantees, and the
 tool result does not report seconds.
 
+After every move, the next observation narrates how much of the motion
+played and the readback's largest remaining offset from the requested target
+(or `Target reached.`), in every image mode. When the embodiment publishes a
+`motion_report` in `observation.extra` (a mapping whose `lines` are
+plain-language strings written for the policy, such as the YAM plugin's
+per-arm IK diagnosis: whether the target could be posed at all, which joints
+sit on a limit, whether the move was still catching up, or how far the arm
+sits behind its command), those lines are rendered after the approver line.
+Malformed reports are ignored. Together these tell the model *why* a move
+fell short instead of leaving it to guess.
+
 When the embodiment publishes operating notes via `EmbodimentInfo.docs`
 (joint layout, sign conventions, gripper polarity), the policy appends them
 to the system prompt as an `Embodiment notes:` section. The system prompt

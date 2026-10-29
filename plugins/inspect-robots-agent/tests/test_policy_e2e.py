@@ -57,7 +57,7 @@ from inspect_robots_agent.policy import (
     _image_parts,
     _observation_content,
     _operator_lines,
-    _PendingCapture,
+    _PendingMotion,
 )
 
 # --- scripted-conversation harness ---------------------------------------------
@@ -672,19 +672,16 @@ def test_pending_narration_handles_absent_target_and_residual(
     policy = _policy(_Script([_text_response("unused")]))
     policy.bind(_VisionAbsoluteEmbodiment().info)
     observation = _vision_observation(env_step=2)
-    without_target = _PendingCapture(
-        requested=("top",),
-        issued_step=1,
-        chunk_len=1,
-        target=None,
+    without_target = _PendingMotion(issued_step=1, chunk_len=1, target=None)
+    assert "finished playing" in policy._motion_narration(
+        without_target, observation, with_frames=True
     )
-    assert "finished playing" in policy._pending_narration(without_target, observation, ())
 
     toolset = policy._toolset
     assert toolset is not None
     monkeypatch.setattr(toolset, "residual", lambda target, current: None)
     with_target = replace(without_target, target=np.array([0.1]))
-    narration = policy._pending_narration(with_target, observation, ())
+    narration = policy._motion_narration(with_target, observation, with_frames=True)
     assert "remaining offset" not in narration
 
 
@@ -3064,3 +3061,79 @@ def test_eval_notes_rejects_non_strings_blanks_and_oversize(
 ) -> None:
     with pytest.raises(ConfigError, match=message):
         _policy(_Script([_text_response("unused")]), eval_notes=eval_notes)
+
+
+def test_default_image_mode_narrates_playout_and_residual_after_every_move() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    chunk = policy.act(Observation(state={"q": np.array([0.0])}, extra={"env_step": 4}))
+    policy.act(Observation(state={"q": np.array([0.496])}, extra={"env_step": 4 + len(chunk)}))
+    policy.act(Observation(state={"q": np.array([0.5])}))
+
+    second = script.requests[1]["messages"][-1]["content"][0]["text"]
+    third = script.requests[2]["messages"][-1]["content"][0]["text"]
+    assert (
+        f"The motion finished playing ({len(chunk)} of {len(chunk)} steps). "
+        "Largest remaining offset from the requested target is 0.004 on joint." in second
+    )
+    assert "This observation follows the motion. Target reached." in third
+    assert "These frames follow the motion." not in third
+
+
+def test_stop_calls_and_resets_leave_no_pending_motion() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("done", {"summary": "finished"}),
+            _tool_response("move_joints", {"targets": {"joint": 0.1}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+    policy.act(Observation(state={"q": np.array([0.0])}))
+    assert policy._pending_motion is not None
+
+    policy.reset(Scene(id="s1", instruction="reach"))
+    assert policy._pending_motion is None
+    policy.act(Observation(state={"q": np.array([0.0])}))  # done
+    assert policy._pending_motion is None
+
+    fresh = script.requests[-1]["messages"][-1]["content"][0]["text"]
+    assert "follows the motion" not in fresh and "finished playing" not in fresh
+
+
+def test_motion_report_lines_render_after_the_approver_line_and_ignore_malformed_data() -> None:
+    observation = Observation(
+        state={"joint_pos": np.array([0.1])},
+        extra={
+            "approvals": [{"t": 3, "detail": "delta_clamped"}],
+            "motion_report": {
+                "lines": [
+                    "motion report (left arm): on target.",
+                    "  ",
+                    42,
+                    " motion report (right arm): the arm sits 3.0 cm behind its command. ",
+                ],
+                "arms": {},
+            },
+        },
+    )
+
+    text = _observation_content(observation)[0]["text"]
+
+    assert text.splitlines()[-3:] == [
+        "approver: 1 step(s) modified (delta_clamped).",
+        "motion report (left arm): on target.",
+        "motion report (right arm): the arm sits 3.0 cm behind its command.",
+    ]
+    for malformed in ({"motion_report": "nope"}, {"motion_report": {"lines": "nope"}}, {}):
+        assert "motion report" not in _observation_content(Observation(extra=malformed))[0]["text"]

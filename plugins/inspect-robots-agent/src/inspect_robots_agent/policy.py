@@ -307,13 +307,19 @@ class AgentPolicyConfig(PolicyConfig):
 
 
 @dataclass(frozen=True, eq=False)
+class _PendingMotion:
+    """A move whose playout and residual are narrated with the next observation."""
+
+    issued_step: object
+    chunk_len: int
+    target: npt.NDArray[np.float64] | None
+
+
+@dataclass(frozen=True, eq=False)
 class _PendingCapture:
     """A capture request waiting for the observation produced after motion playout."""
 
     requested: tuple[str, ...] | None
-    issued_step: object
-    chunk_len: int
-    target: npt.NDArray[np.float64] | None
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -843,6 +849,7 @@ class LLMAgentPolicy(PolicyBase):
         self._calls_used = 0
         self._usage_totals: dict[str, int] = {}
         self._pending: _PendingCapture | None = None
+        self._pending_motion: _PendingMotion | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
 
@@ -925,6 +932,7 @@ class LLMAgentPolicy(PolicyBase):
         self._calls_used = 0
         self._usage_totals.clear()
         self._pending = None
+        self._pending_motion = None
         self._revealed.clear()
 
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
@@ -997,6 +1005,12 @@ class LLMAgentPolicy(PolicyBase):
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
+        motion = self._pending_motion
+        self._pending_motion = None
+        if motion is not None:
+            narration = self._motion_narration(
+                motion, observation, with_frames=self._pending is not None
+            )
         if self._images == "on_demand":
             reveal = ()
             pending = self._pending
@@ -1010,7 +1024,13 @@ class LLMAgentPolicy(PolicyBase):
                 reveal = tuple(name for name in requested if name in observation.images)
                 missing = tuple(name for name in requested if name not in observation.images)
                 self._revealed.update(reveal)
-                narration = self._pending_narration(pending, observation, missing)
+                if missing:
+                    # A capture only ever rides behind a motion, so its
+                    # narration already exists.
+                    assert narration is not None
+                    narration += (
+                        f" Missing camera(s) in this observation: {_quoted_names(missing)}."
+                    )
         observation_content = _observation_content(
             observation,
             self._state_labels,
@@ -1210,12 +1230,7 @@ class LLMAgentPolicy(PolicyBase):
                     elif result.capture == ():
                         result_text = "no camera images are available in this observation"
                     else:
-                        self._pending = _PendingCapture(
-                            requested=result.capture,
-                            issued_step=observation.extra.get("env_step"),
-                            chunk_len=len(chunk),
-                            target=target,
-                        )
+                        self._pending = _PendingCapture(requested=result.capture)
                         result_text = (
                             "queued: frames arrive with the next observation, "
                             "after the motion plays"
@@ -1248,6 +1263,15 @@ class LLMAgentPolicy(PolicyBase):
                     }
                 )
             if chunk is not None:
+                if not stopped:
+                    # Narrated with the next observation in every image mode:
+                    # how much played and how far the readback sits from the
+                    # target, so a short move never passes silently.
+                    self._pending_motion = _PendingMotion(
+                        issued_step=observation.extra.get("env_step"),
+                        chunk_len=len(chunk),
+                        target=target,
+                    )
                 return chunk
             if failures >= _MAX_CONSECUTIVE_FAILURES:
                 raise RuntimeError(
@@ -1264,35 +1288,37 @@ class LLMAgentPolicy(PolicyBase):
             raise RuntimeError(f"forced give_up failed: {result.error}")
         return result.chunk
 
-    def _pending_narration(
+    def _motion_narration(
         self,
-        pending: _PendingCapture,
+        motion: _PendingMotion,
         observation: Observation,
-        missing: tuple[str, ...],
+        *,
+        with_frames: bool,
     ) -> str:
-        """Describe observed playout, residual, and any cameras missing at delivery."""
+        """Describe how much of the last move played and the readback's offset from its target."""
         arriving_step = observation.extra.get("env_step")
         if (
-            isinstance(pending.issued_step, int)
+            isinstance(motion.issued_step, int)
             and isinstance(arriving_step, int)
-            and (advanced := arriving_step - pending.issued_step) > 0
+            and (advanced := arriving_step - motion.issued_step) > 0
         ):
-            if advanced >= pending.chunk_len:
+            if advanced >= motion.chunk_len:
                 narration = (
-                    f"The motion finished playing ({pending.chunk_len} of "
-                    f"{pending.chunk_len} steps)."
+                    f"The motion finished playing ({motion.chunk_len} of {motion.chunk_len} steps)."
                 )
             else:
                 narration = (
-                    f"The motion played {advanced} of {pending.chunk_len} steps before "
+                    f"The motion played {advanced} of {motion.chunk_len} steps before "
                     "this observation; it did not run to the end."
                 )
-        else:
+        elif with_frames:
             narration = "These frames follow the motion."
+        else:
+            narration = "This observation follows the motion."
 
         toolset = self._toolset
-        if pending.target is not None and toolset is not None:
-            residual = toolset.residual(pending.target, observation)
+        if motion.target is not None and toolset is not None:
+            residual = toolset.residual(motion.target, observation)
             if residual is not None:
                 label, magnitude = residual
                 if magnitude > _TARGET_REACHED_TOLERANCE:
@@ -1302,8 +1328,6 @@ class LLMAgentPolicy(PolicyBase):
                     )
                 else:
                     narration += " Target reached."
-        if missing:
-            narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
         return narration
 
     def _echo(self, text: str) -> None:
@@ -1361,6 +1385,22 @@ def _approvals_line(observation: Observation) -> str | None:
     return f"approver: {total} step(s) modified{detail_str}."
 
 
+def _motion_report_lines(observation: Observation) -> list[str]:
+    """Render an embodiment's ``extra["motion_report"]["lines"]``, tolerating malformed data.
+
+    The convention is embodiment-agnostic: a mapping whose ``lines`` are
+    plain-language strings written for the policy (the YAM plugin's per-arm
+    IK diagnosis, for example). Anything else is ignored silently.
+    """
+    report = observation.extra.get("motion_report")
+    if not isinstance(report, Mapping):
+        return []
+    lines = report.get("lines")
+    if not isinstance(lines, list):
+        return []
+    return [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+
+
 def _operator_lines(observation: Observation) -> list[str]:
     """Render only well-formed feedback entries from the framework-reserved channel."""
     messages = observation.extra.get("operator_messages")
@@ -1399,6 +1439,7 @@ def _observation_content(
     app_line = _approvals_line(observation)
     if app_line is not None:
         lines.append(app_line)
+    lines.extend(_motion_report_lines(observation))
     lines.extend(_operator_lines(observation))
     if narration is not None:
         lines.append(narration)
