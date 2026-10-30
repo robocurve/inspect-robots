@@ -130,6 +130,58 @@ embodiment looked up by registry name is closed when the run finishes (even
 on a halt). If you construct the embodiment object yourself, you own it: call
 `close()` yourself when you are done.
 
+### The evaluation interface
+
+`reset()` and `step()` are the embodiment's policy interface. Between trials,
+[`eval`](../../src/inspect_robots/eval.py) also drives an evaluation interface:
+four optional methods, each used only when the embodiment defines it.
+
+| Method | Called | Effect |
+|---|---|---|
+| `health() -> HealthReport` | Before each trial | A failed check stops the run before anything moves. |
+| `prepare_trial(scene) -> Readiness` | Before each trial, after `health()` | Not ready stops the run, with the stated reason as its error. |
+| `home()` | Before each trial's `reset()` | Moves to the start pose. Skip it if `reset()` already homes. |
+| `park()` | After each trial, once it is scored | Moves to a safe rest pose and holds it, so the scene can be reset by hand. |
+
+```python
+from inspect_robots import HealthCheck, HealthReport, Readiness
+
+
+class MyArm:
+    ...
+
+    def health(self) -> HealthReport:
+        return HealthReport(
+            checks=(
+                HealthCheck("motors", ok=self._bus_alive(), detail="CAN bus down"),
+                HealthCheck("wrist camera", ok=self._frame_age_s() < 1.0, detail="stale frames"),
+            )
+        )
+
+    def prepare_trial(self, scene: Scene) -> Readiness:
+        if scene.setup == "open_drawer" and not self._has_drawer:
+            return Readiness(ready=False, reason="this rig has no drawer")
+        return Readiness(ready=True)
+
+    def park(self) -> None:
+        self._ramp_to(self._rest_pose)  # hold the pose; close() releases torque
+```
+
+[`HealthCheck`](../../src/inspect_robots/embodiment.py),
+[`HealthReport`](../../src/inspect_robots/embodiment.py) and
+[`Readiness`](../../src/inspect_robots/embodiment.py) are exported from
+`inspect_robots`. Any exception from `health()`, `prepare_trial()` or `home()`
+also stops the run before the trial starts. `park()` runs after every trial
+whatever its outcome, except a run cancelled with Ctrl-C, so it must be safe to
+call after a fault; it may decline by returning without moving. A failed park
+after a clean trial stops the run. The log lists the methods an embodiment
+offers under `embodiment_info["evaluation_interface"]`.
+
+Set `EmbodimentInfo.morphology` to name the physical platform. Two embodiments
+on the same platform must offer different policy interfaces (for example joint
+targets and end-effector targets on the same arms). The conformance kit checks
+this; see [Authoring an embodiment adapter](adapters.md#the-conformance-kit).
+
 ## Real-robot vs simulator
 
 The interfaces assume real-robot reality: no guaranteed privileged success,

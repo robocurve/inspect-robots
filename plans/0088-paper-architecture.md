@@ -97,6 +97,9 @@ change is non-trivial, changelog fragments, tests at 100% coverage, and
 8. **Records with identity and chunks.** `record_id`, the resolved per-trial
    configuration (credentials excluded), and the produced chunks with inference
    latency; a per-trial directory; log schema 3, still reading 1 and 2.
+   Record events are persisted, including the `policy_terminal` event (kind,
+   reason and step). Schema 2 logs keep only operator messages, so the log
+   shows that a policy ended a trial but not the event that ended it.
 9. **Record editors and analyzers.** Raw records become immutable; edits are
    annotations beside them with provenance; graders become editors that write
    annotations only; `inspect-robots edit`, `score` and `analyze`;

@@ -28,7 +28,7 @@ import numpy as np
 from inspect_robots import __version__
 from inspect_robots.action_manager import ActionManager, DefaultActionManager
 from inspect_robots.compat import assert_compatible
-from inspect_robots.embodiment import Embodiment
+from inspect_robots.embodiment import Embodiment, HealthReport, Readiness
 from inspect_robots.errors import (
     ConfigError,
     EmbodimentFault,
@@ -644,6 +644,8 @@ def _run_eval(
             "control_hz": embodiment.info.control_hz,
             "is_simulated": embodiment.info.is_simulated,
             "capabilities": sorted(embodiment.info.capabilities),
+            "morphology": getattr(embodiment.info, "morphology", None),
+            "evaluation_interface": _evaluation_interface(embodiment),
         },
         grader=grader_name,
         grader_config=grader_config,
@@ -706,6 +708,16 @@ def _run_eval(
 
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
+            # The evaluation interface runs before the trial exists: a failed
+            # check stops the run with nothing moved and no trial recorded.
+            not_ready = _before_trial(embodiment, scene, epoch)
+            if not_ready is not None:
+                status = "error"
+                error = not_ready
+                scene_status = "error"
+                scene_error = not_ready
+                stopped = True
+                break
             bus.on_trial_start(scene.id, epoch)
             record: Record | None = None
             policy_start_failed = False
@@ -913,6 +925,21 @@ def _run_eval(
                 policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
+            # Park after every trial that ran, so the scene can be reset by hand.
+            # A cancelled run is left to close(): the operator asked it to stop.
+            if not policy_start_failed and cancelled_exc is None:
+                park_failure = _park(embodiment)
+                if park_failure is not None and halted:
+                    warnings.warn(park_failure, RuntimeWarning, stacklevel=2)
+                elif park_failure is not None:
+                    status = "error"
+                    error = park_failure
+                    scene_status = "error"
+                    scene_error = (
+                        park_failure if scene_error is None else f"{scene_error}; {park_failure}"
+                    )
+                    halted = True
+
             if halted:
                 stopped = True
                 break
@@ -1031,6 +1058,65 @@ def _run_eval(
     if cancelled_exc is not None:
         raise cancelled_exc
     return [log]
+
+
+_EVALUATION_HOOKS = ("health", "prepare_trial", "home", "park")
+
+
+def _evaluation_interface(embodiment: Embodiment) -> list[str]:
+    """The evaluation-interface hooks this embodiment offers, in call order."""
+    return [name for name in _EVALUATION_HOOKS if callable(getattr(embodiment, name, None))]
+
+
+def _before_trial(embodiment: Embodiment, scene: Scene, epoch: int) -> str | None:
+    """Run ``health``, ``prepare_trial`` and ``home`` if offered; return why not to start.
+
+    Any exception, a failed ``HealthReport`` or a not-ready ``Readiness`` stops
+    the run: starting a trial on a platform that just said no is never safe.
+    """
+    trial = f"scene {scene.id!r} epoch {epoch}"
+    health = getattr(embodiment, "health", None)
+    if callable(health):
+        try:
+            report = health()
+        except Exception as exc:
+            return f"embodiment.health() failed before {trial}: {type(exc).__name__}: {exc}"
+        if not isinstance(report, HealthReport):
+            return f"embodiment.health() returned {type(report).__name__}; expected HealthReport"
+        if not report.ok:
+            return f"embodiment health check failed before {trial}: {report.summary()}"
+    prepare_trial = getattr(embodiment, "prepare_trial", None)
+    if callable(prepare_trial):
+        try:
+            readiness = prepare_trial(scene)
+        except Exception as exc:
+            return f"embodiment.prepare_trial() failed before {trial}: {type(exc).__name__}: {exc}"
+        if not isinstance(readiness, Readiness):
+            return (
+                f"embodiment.prepare_trial() returned {type(readiness).__name__}; "
+                "expected Readiness"
+            )
+        if not readiness.ready:
+            return f"embodiment not ready for {trial}: {readiness.reason or 'no reason given'}"
+    home = getattr(embodiment, "home", None)
+    if callable(home):
+        try:
+            home()
+        except Exception as exc:
+            return f"embodiment.home() failed before {trial}: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _park(embodiment: Embodiment) -> str | None:
+    """Call ``park`` if offered; return the failure as a message, or None."""
+    park = getattr(embodiment, "park", None)
+    if not callable(park):
+        return None
+    try:
+        park()
+    except Exception as exc:
+        return f"embodiment.park() failed: {type(exc).__name__}: {exc}"
+    return None
 
 
 def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:

@@ -25,6 +25,9 @@ from inspect_robots.embodiment import (
     Embodiment,
     EmbodimentBase,
     EmbodimentInfo,
+    HealthCheck,
+    HealthReport,
+    Readiness,
 )
 from inspect_robots.eval import eval, eval_set
 from inspect_robots.grader import Grader, operator_grader, vlm_grader
@@ -108,6 +111,8 @@ __all__ = [
     "EvalSpec",
     "EvalStats",
     "Grader",
+    "HealthCheck",
+    "HealthReport",
     "Observation",
     "ObservationSpace",
     "OperatorConsole",
@@ -117,6 +122,7 @@ __all__ = [
     "PolicyBase",
     "PolicyConfig",
     "PolicyInfo",
+    "Readiness",
     "Record",
     "Rubric",
     "Scene",

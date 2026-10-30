@@ -49,6 +49,9 @@ EXPECTED = {
     "Embodiment",
     "EmbodimentBase",
     "EmbodimentInfo",
+    "HealthCheck",
+    "HealthReport",
+    "Readiness",
     # attended operator input
     "OperatorInput",
     "OperatorConsole",

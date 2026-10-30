@@ -20,6 +20,7 @@ fine). The adapter authoring guide covers the human half.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -418,3 +419,105 @@ def assert_guardrail_contribution_conformant(embodiment: Embodiment, action_spac
     report = check_guardrail_contribution(embodiment, action_space)
     if not report.ok:
         raise AssertionError(report.summary())
+
+
+def _policy_interface(info: EmbodimentInfo) -> tuple[object, ...]:
+    """What a policy sees of an embodiment: the action contract and the observation layout."""
+    space = info.action_space
+    semantics = space.semantics
+    observation = info.observation_space
+    state = observation.state
+    return (
+        space.shape,
+        None if semantics is None else (semantics.control_mode, semantics.frame),
+        None if semantics is None else semantics.dim_labels,
+        tuple((camera.name, camera.height, camera.width) for camera in observation.cameras),
+        () if state is None else tuple((f.key, f.shape) for f in state.fields),
+    )
+
+
+def check_policy_interfaces(infos: Iterable[EmbodimentInfo]) -> ConformanceReport:
+    """Check that embodiments sharing a morphology offer distinct policy interfaces.
+
+    The paper's unit is one (morphology, policy interface) pair: two
+    embodiments on the same platform that a policy cannot tell apart are one
+    embodiment registered twice, and their results would be pooled under two
+    names. Embodiments without a ``morphology`` are not compared. Errors name
+    each clashing pair. Purely declarative.
+    """
+    issues: list[ConformanceIssue] = []
+    seen: dict[tuple[str, tuple[object, ...]], str] = {}
+    names: list[str] = []
+    for info in infos:
+        names.append(info.name)
+        if info.morphology is None:
+            continue
+        key = (info.morphology, _policy_interface(info))
+        earlier = seen.setdefault(key, info.name)
+        if earlier != info.name:
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "policy_interface",
+                    f"{earlier!r} and {info.name!r} share morphology {info.morphology!r} "
+                    "and the same policy interface; give them different action or "
+                    "observation spaces, or register one embodiment",
+                )
+            )
+    return ConformanceReport(embodiment=", ".join(names), issues=tuple(issues))
+
+
+_EVALUATION_HOOK_ARITY = {"health": 0, "prepare_trial": 1, "home": 0, "park": 0}
+
+
+def check_evaluation_interface(embodiment: Embodiment) -> ConformanceReport:
+    """Check the optional evaluation-interface hooks without calling them.
+
+    Absent hooks pass. A present ``health``, ``home`` or ``park`` must be
+    callable with no arguments, and ``prepare_trial`` with one (the scene).
+    Signatures that cannot be inspected pass. A warning notes ``park``
+    without ``health``: an embodiment that can move itself to rest can
+    usually also say whether it is fit to run.
+    """
+    issues: list[ConformanceIssue] = []
+    missing = object()
+    offered: set[str] = set()
+    for name, arity in _EVALUATION_HOOK_ARITY.items():
+        hook = getattr(embodiment, name, missing)
+        if hook is missing:
+            continue
+        if not callable(hook):
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "evaluation_interface",
+                    f"{name} is not callable (got {type(hook).__name__})",
+                )
+            )
+            continue
+        offered.add(name)
+        try:
+            signature = inspect.signature(hook)
+        except (TypeError, ValueError):
+            continue
+        try:
+            signature.bind(*([None] * arity))
+        except TypeError:
+            expected = "the scene" if arity else "no arguments"
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "evaluation_interface",
+                    f"{name}({', '.join(signature.parameters)}) cannot be called with {expected}",
+                )
+            )
+    if "park" in offered and "health" not in offered:
+        issues.append(
+            ConformanceIssue(
+                "warning",
+                "evaluation_interface",
+                "park() is offered without health(); eval() cannot refuse to start "
+                "a trial on an unhealthy platform",
+            )
+        )
+    return ConformanceReport(embodiment=embodiment.info.name, issues=tuple(issues))
