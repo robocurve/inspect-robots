@@ -102,3 +102,17 @@ JSON directly should accept `"version": 2`.
 
 A task with a `max_seconds` budget now ends an out-of-budget trial with the
 reason `max_seconds` instead of `max_steps`.
+
+## Records and log schema 3
+
+Every trial now has a record with a unique id, the action chunks the policy
+produced, and a per-trial directory under `records/` (see
+[Trial records](guide/logging-and-rerun.md#trial-records)). Logs are written as
+schema version 3, which adds `SceneResult.record_ids`, `SceneResult.record_dirs`,
+`SceneResult.events` and `EvalStats.records_dir`. Versions 1 and 2 still read,
+with empty new fields. Tools that parse the JSON directly should accept
+`"version": 3`.
+
+`eval.policy_config` now redacts values under credential-like keys. Pass
+`store_records=False` to `eval()` or `eval_set()` to skip the record
+directories.

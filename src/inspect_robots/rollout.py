@@ -11,11 +11,13 @@ and returns an immutable
 from __future__ import annotations
 
 import json
+import time
+import uuid
 import warnings
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -43,7 +45,14 @@ from inspect_robots.transcript import (
     step_event,
     terminal_event,
 )
-from inspect_robots.types import OPERATOR_END, Action, Observation, StepResult, Termination
+from inspect_robots.types import (
+    OPERATOR_END,
+    Action,
+    ActionChunk,
+    Observation,
+    StepResult,
+    Termination,
+)
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -84,14 +93,73 @@ class StepRecord:
     result_image_refs: Mapping[str, FrameRef] | None = None
 
 
+@dataclass(frozen=True, eq=False)
+class ChunkRecord:
+    """One action chunk exactly as the policy produced it, before any action manager or guard.
+
+    ``t`` is the control step at which the policy was called. ``actions`` holds
+    one flattened array per action in the chunk, unvalidated, so a malformed
+    action that failed the trial is recorded as produced (empty for a terminal
+    chunk with no actions). ``latency_s`` is the policy's own reported inference
+    latency, if any; ``wall_s`` is the time ``act()`` took as measured by the
+    rollout, which includes any network round trip.
+    """
+
+    t: int
+    actions: tuple[np.ndarray, ...]
+    terminal: Termination | None
+    latency_s: float | None
+    wall_s: float
+
+
+class _ChunkTap:
+    """Stand in for the policy inside an action manager, recording every chunk it returns.
+
+    Recording at the policy boundary, not in the action manager, keeps the
+    record complete for any action manager, including third-party ones that
+    call ``act()`` on their own schedule. Every other attribute is the policy's.
+    """
+
+    def __init__(self, policy: Policy, chunks: list[ChunkRecord]) -> None:
+        self._policy = policy
+        self._chunks = chunks
+        self.t = -1
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._policy, name)
+
+    def act(self, observation: Observation) -> ActionChunk:
+        started = time.perf_counter()
+        chunk = self._policy.act(observation)
+        wall_s = time.perf_counter() - started
+        self._chunks.append(
+            ChunkRecord(
+                t=self.t,
+                actions=tuple(np.asarray(action.data).ravel() for action in chunk.actions),
+                terminal=chunk.terminal,
+                latency_s=chunk.inference_latency_s,
+                wall_s=wall_s,
+            )
+        )
+        return chunk
+
+
 @dataclass
 class Record:
-    """The full record of one trial — the unit scorers consume."""
+    """The full record of one trial — the unit scorers consume.
+
+    ``record_id`` identifies the trial across logs, annotations and analyses;
+    it is unique per trial, including across runs. ``chunks`` holds every
+    action chunk the policy produced, in order; ``steps`` holds the actions
+    actually executed after the action manager and guard.
+    """
 
     scene_id: str
     epoch: int
     seed: int | None
+    record_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     steps: list[StepRecord] = field(default_factory=list)
+    chunks: list[ChunkRecord] = field(default_factory=list)
     # In-memory only: EvalLog embeds SceneResult aggregates and never Record,
     # so no asdict path reaches the numpy images and the log schema is untouched.
     parked_observation: Observation | None = None
@@ -332,6 +400,7 @@ def rollout(
     record = Record(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
+    tap = _ChunkTap(policy, record.chunks)
     expected_dim = embodiment.info.action_space.dim
     policy_reset_ok = False
     delta_hook: Any = getattr(policy, "transcript_delta", None)
@@ -427,7 +496,8 @@ def rollout(
                     obs,
                     extra=policy_extra,
                 )
-                action = action_manager.next_action(policy, obs_with_extra, t, store)
+                tap.t = t
+                action = action_manager.next_action(cast("Policy", tap), obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise

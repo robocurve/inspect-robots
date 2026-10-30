@@ -11,7 +11,8 @@ dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
 ``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info`` /
 ``grader_config``, and ``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
-``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
+``SceneResult.operator_messages`` and ``SceneResult.events``.
+``SceneResult.policy_transcripts`` entries
 are arbitrary mutable JSON values. Treat a log as read-only; nothing
 deep-freezes it.
 """
@@ -52,10 +53,13 @@ def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
 
 # Version 2 (the paper release) adds rubrics (EvalSpec.rubrics, SceneResult.rubrics)
 # and the policy's stated termination detail (SceneResult.termination_details).
-# Version 1 logs still read: their new fields are empty and their result keys,
-# which were scorer names, are unchanged.
-SCHEMA_VERSION = 2
-READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
+# Version 3 gives every trial a record: SceneResult.record_ids and record_dirs name
+# each trial's record directory (EvalStats.records_dir), and SceneResult.events
+# keeps each trial's full event transcript, including the policy_terminal event.
+# Older logs still read: their new fields are empty and their result keys,
+# which were scorer names in version 1, are unchanged.
+SCHEMA_VERSION = 3
+READABLE_SCHEMA_VERSIONS = frozenset({1, 2, SCHEMA_VERSION})
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,8 @@ class EvalStats:
     mean_inference_latency_s: float | None = None
     # Directory of streamed camera frame side-cars, if frame logging was enabled.
     frames_dir: str | None = None
+    # Directory of per-trial record directories, if record storage was enabled.
+    records_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +177,15 @@ class SceneResult:
     # Strictly parallel to ``epochs``: the policy's audit record per trial,
     # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
     policy_transcripts: tuple[Any, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's ``Record.record_id``.
+    record_ids: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's record directory relative to
+    # the log directory (``record.json`` and ``chunks.jsonl``), or None when
+    # record storage was disabled or failed.
+    record_dirs: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's event transcript, as
+    # ``{"kind", "t", "data"}`` dictionaries in the order they happened.
+    events: tuple[tuple[dict[str, Any], ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,6 +250,9 @@ class EvalLog:
             sample["termination_details"] = tuple(sample.get("termination_details", ()))
             sample["rubrics"] = tuple(sample.get("rubrics", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
+            sample["record_ids"] = tuple(sample.get("record_ids", ()))
+            sample["record_dirs"] = tuple(sample.get("record_dirs", ()))
+            sample["events"] = tuple(tuple(trial) for trial in sample.get("events", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],

@@ -51,7 +51,7 @@ from inspect_robots.registry import (
     sink,
     task,
 )
-from inspect_robots.rollout import Record
+from inspect_robots.rollout import ChunkRecord, Record
 from inspect_robots.rubric import Rubric
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import (
@@ -100,6 +100,7 @@ __all__ = [
     "ActionSemantics",
     "Box",
     "CameraSpec",
+    "ChunkRecord",
     "ConsolePoll",
     "Embodiment",
     "EmbodimentBase",

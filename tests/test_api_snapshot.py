@@ -21,6 +21,7 @@ EXPECTED = {
     "EvalStats",
     "SceneResult",
     "Record",
+    "ChunkRecord",
     # tasks, scenes, scoring
     "Task",
     "TaskEnvelope",

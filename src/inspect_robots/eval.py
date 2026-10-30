@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -185,6 +186,137 @@ def _write_action_log(
         )
         return None
     return relative_path.as_posix()
+
+
+# A key naming a credential, matched on its last underscore-separated part(s):
+# "api_key", "hf_token" and "password" match; "max_tokens" and "api_key_env"
+# (which names an environment variable, not its value) do not.
+_SECRET_KEY = re.compile(
+    r"(?i)(^|_)(api_?key|secret|token|password|passwd|credentials?|authorization"
+    r"|access_?key|private_?key)$"
+)
+_REDACTED = "<redacted>"
+
+
+def _describe(value: Any, depth: int = 0) -> Any:
+    """A JSON-safe description of ``value`` for records, with credential-like keys redacted.
+
+    Objects become ``{"type": "module.Class", ...public attributes}`` so an
+    action manager or guard chain is recorded with its parameters. Arrays
+    larger than 64 values are summarized by shape. Recursion stops at depth 4.
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, np.generic):
+        return _describe(value.item(), depth)
+    if isinstance(value, np.ndarray):
+        if value.size > 64:
+            return {"type": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
+        return _describe(value.tolist(), depth)
+    if depth >= 4:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _REDACTED
+            if _SECRET_KEY.search(str(key)) and item is not None
+            else _describe(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = sorted(value, key=repr) if isinstance(value, (set, frozenset)) else value
+        return [_describe(item, depth + 1) for item in items]
+    attributes = getattr(value, "__dict__", None)
+    described: dict[str, Any] = {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
+    if isinstance(attributes, dict):
+        public = {key: item for key, item in attributes.items() if not key.startswith("_")}
+        described.update(_describe(public, depth))
+    return described
+
+
+def _write_atomic(path: Path, payload: str) -> None:
+    """Write ``payload`` to ``path`` through a fsynced temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _write_record(
+    record: Record,
+    records_dir: Path,
+    log_dir: Path,
+    events: tuple[dict[str, Any], ...],
+    configuration: dict[str, Any],
+    action_space: Box,
+) -> str | None:
+    """Persist one trial's record directory; return it relative to ``log_dir``, or None.
+
+    ``record.json`` holds identity, configuration, termination and events;
+    ``chunks.jsonl`` holds a header line, then one line per produced chunk.
+    Non-finite action values are written as strings (``"nan"``, ``"inf"``) so
+    a chunk that failed the trial is still recorded as the policy produced it.
+    """
+    directory = records_dir / f"{_safe(record.scene_id)}-e{record.epoch}"
+    semantics = action_space.semantics
+    document = {
+        "record_id": record.record_id,
+        "run_id": records_dir.name,
+        "scene_id": record.scene_id,
+        "epoch": record.epoch,
+        "seed": record.seed,
+        "status": record.status,
+        "error": record.error,
+        "termination": {
+            "reason": record.termination_reason,
+            "detail": record.termination_detail,
+            "terminated": record.terminated,
+            "truncated": record.truncated,
+        },
+        "steps": len(record.steps),
+        "chunks": len(record.chunks),
+        "actions": record.metadata.get("actions"),
+        "configuration": configuration,
+        "events": list(events),
+    }
+    header = {
+        "kind": "header",
+        "record_id": record.record_id,
+        "action_dim": action_space.dim,
+        "labels": semantics.dim_labels if semantics is not None else None,
+    }
+    lines = [json.dumps(header)]
+    lines.extend(
+        json.dumps(
+            {
+                "t": chunk.t,
+                "actions": [_describe(action.tolist()) for action in chunk.actions],
+                "terminal": None
+                if chunk.terminal is None
+                else {"kind": chunk.terminal.kind, "reason": chunk.terminal.reason},
+                "latency_s": chunk.latency_s,
+                "wall_s": chunk.wall_s,
+            }
+        )
+        for chunk in record.chunks
+    )
+    try:
+        _write_atomic(directory / "chunks.jsonl", "\n".join(lines) + "\n")
+        _write_atomic(
+            directory / "record.json", json.dumps(document, indent=2, allow_nan=False) + "\n"
+        )
+    except (OSError, ValueError) as exc:
+        warnings.warn(
+            f"Record storage disabled for this trial after {type(exc).__name__}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    return directory.relative_to(log_dir).as_posix()
 
 
 def _git_commit() -> str | None:
@@ -398,6 +530,7 @@ def eval(
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
+    store_records: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[Record, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -447,6 +580,14 @@ def eval(
     executed action sequence to ``<log_dir>/actions`` as an atomic JSONL
     side-car. The ``actions`` trial-metadata key is framework-reserved. Set
     ``store_actions`` to ``False`` to disable these files.
+
+    ``store_records`` defaults to ``True`` and writes one directory per trial
+    under ``<log_dir>/records/<run>/``: ``record.json`` (the record id, the
+    resolved per-trial configuration with credential-like values redacted, the
+    termination, and every event) and ``chunks.jsonl`` (every action chunk as
+    the policy produced it, with its inference latency). The log names each
+    trial's directory in ``SceneResult.record_dirs``. A write failure degrades
+    to a ``RuntimeWarning``.
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
@@ -520,6 +661,7 @@ def eval(
             remap=remap,
             store_frames=store_frames,
             store_actions=store_actions,
+            store_records=store_records,
             operator_input=operator_input,
             before_scoring=before_scoring,
             grader_identity=_grader_identity(resolved_grader),
@@ -548,6 +690,7 @@ def _run_eval(
     remap: dict[str, str] | None,
     store_frames: bool,
     store_actions: bool,
+    store_records: bool,
     operator_input: OperatorInput | None,
     before_scoring: Callable[[Record, Scene], None] | None,
     grader_identity: tuple[str | None, dict[str, Any]],
@@ -639,7 +782,7 @@ def _run_eval(
         created=_now_iso(),
         inspect_robots_version=__version__,
         git_commit=_git_commit(),
-        policy_config=asdict(policy.config),
+        policy_config=_describe(asdict(policy.config)),
         embodiment_info={
             "control_hz": embodiment.info.control_hz,
             "is_simulated": embodiment.info.is_simulated,
@@ -658,6 +801,24 @@ def _run_eval(
         or getattr(embodiment.info, "environment_revision", None),
         policy_checkpoint=policy_checkpoint or getattr(policy.info, "checkpoint", None),
     )
+    records_dir: Path | None = Path(log_dir) / "records" / run_stamp if store_records else None
+    run_configuration = {
+        "task": task.name,
+        "inspect_robots_version": spec.inspect_robots_version,
+        "git_commit": spec.git_commit,
+        "seed": seed,
+        "max_steps": task_envelope.max_steps,
+        "max_seconds": task.max_seconds,
+        "policy": {
+            "name": spec.policy,
+            "checkpoint": spec.policy_checkpoint,
+            "config": spec.policy_config,
+        },
+        "embodiment": {"name": spec.embodiment, **spec.embodiment_info},
+        "action_manager": _describe(action_manager),
+        "guard": _describe(guard),
+        "grader": {"name": spec.grader, "config": spec.grader_config},
+    }
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
     bus.bind_frames_dir(str(frame_store.root) if frame_store is not None else None)
     bus.bind_scenes(task.scenes)
@@ -702,6 +863,9 @@ def _run_eval(
         termination_details: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
+        record_ids: list[str | None] = []
+        record_dirs: list[str | None] = []
+        trial_events: list[tuple[dict[str, Any], ...]] = []
         scene_metadata = _json_safe_scene_metadata(scene.metadata)
         scene_status = "success"
         scene_error: str | None = None
@@ -908,6 +1072,34 @@ def _run_eval(
                     if actions_path is not None:
                         record.metadata["actions"] = actions_path
 
+                events = tuple(
+                    {"kind": event.kind, "t": event.t, "data": _describe(event.data)}
+                    for event in record.events
+                )
+                record_dir: str | None = None
+                if records_dir is not None:
+                    record_dir = _write_record(
+                        record,
+                        records_dir,
+                        Path(log_dir),
+                        events,
+                        {
+                            **run_configuration,
+                            "trial_seed": trial_seed,
+                            "scene": {
+                                "id": scene.id,
+                                "instruction": scene.instruction,
+                                "init_seed": scene.init_seed,
+                                "setup": scene.setup,
+                                "metadata": scene_metadata,
+                            },
+                            "rubrics": [rubric.describe() for rubric in rubrics],
+                        },
+                        embodiment.info.action_space,
+                    )
+                record_ids.append(record.record_id)
+                record_dirs.append(record_dir)
+                trial_events.append(events)
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
                 termination_details.append(record.termination_detail)
@@ -988,6 +1180,9 @@ def _run_eval(
                 rubrics=tuple(rubric.describe() for rubric in rubrics),
                 operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
+                record_ids=tuple(record_ids),
+                record_dirs=tuple(record_dirs),
+                events=tuple(trial_events),
             )
         )
         if stopped:
@@ -1028,6 +1223,7 @@ def _run_eval(
         total_steps=total_steps,
         mean_inference_latency_s=(mean(all_latencies) if all_latencies else None),
         frames_dir=str(frame_store.root) if frame_store is not None else None,
+        records_dir=str(records_dir) if records_dir is not None else None,
     )
     log = EvalLog(
         version=EvalLog.SCHEMA_VERSION,
@@ -1218,6 +1414,7 @@ def eval_set(
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
+    store_records: bool = True,
     operator_input: OperatorInput | None = None,
     before_scoring: Callable[[Record, Scene], None] | None = None,
     grader: Grader | str | None = None,
@@ -1245,7 +1442,7 @@ def eval_set(
     produce an error row even when that task's completed JSON log is already
     on disk.
 
-    ``store_actions`` follows ``eval()``'s default-on action side-car contract.
+    ``store_actions`` and ``store_records`` follow ``eval()``'s default-on side-car contracts.
 
     ``grader``/``before_scoring`` follow ``eval()``'s contract (one pre-scoring
     hook, not both). Sequential runs resolve the grader once and share it;
@@ -1326,6 +1523,7 @@ def eval_set(
                         remap=remap,
                         store_frames=store_frames,
                         store_actions=store_actions,
+                        store_records=store_records,
                         grader=task_grader,
                         environment_id=environment_id,
                         environment_revision=environment_revision,
@@ -1377,6 +1575,7 @@ def eval_set(
                     remap=remap,
                     store_frames=store_frames,
                     store_actions=store_actions,
+                    store_records=store_records,
                     operator_input=operator_input,
                     # Hand the grader itself down, not just its bound method:
                     # each task builds its own EvalSpec and a bare callable

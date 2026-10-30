@@ -14,6 +14,7 @@ from inspect_robots import eval_set, read_eval_log
 from inspect_robots._parallel import run_parallel
 from inspect_robots.cli import main
 from inspect_robots.errors import ConfigError, EmbodimentFault, SafetyAbort
+from inspect_robots.log import SceneResult
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import registered
 from inspect_robots.scene import Scene, Target
@@ -195,8 +196,13 @@ def test_parallel_equivalence_logs_and_resources(
     assert [log.eval.task for log in parallel] == names
     for expected, actual in zip(serial, parallel, strict=True):
         assert actual.results == expected.results
-        assert [replace(sample, trial_metadata=()) for sample in actual.samples] == [
-            replace(sample, trial_metadata=()) for sample in expected.samples
+
+        # Record ids are unique per trial and record directories name their run.
+        def comparable(sample: SceneResult) -> SceneResult:
+            return replace(sample, trial_metadata=(), record_ids=(), record_dirs=())
+
+        assert [comparable(sample) for sample in actual.samples] == [
+            comparable(sample) for sample in expected.samples
         ]
         assert actual.eval.seed == expected.eval.seed
     saved = [read_eval_log(str(path)) for path in (tmp_path / "parallel").glob("*.json")]

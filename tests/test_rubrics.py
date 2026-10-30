@@ -10,7 +10,7 @@ import pytest
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.errors import ConfigError
-from inspect_robots.log import read_eval_log
+from inspect_robots.log import EvalLog, read_eval_log
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.rollout import Record
 from inspect_robots.rubric import SAFETY, Rubric, merge
@@ -177,7 +177,7 @@ def test_results_are_keyed_by_rubric_and_rubrics_are_logged(tmp_path: Path) -> N
 
     (log_file,) = tmp_path.glob("*.json")
     reread = read_eval_log(str(log_file))
-    assert reread.version == 2
+    assert reread.version == EvalLog.SCHEMA_VERSION
     assert reread.samples[1].rubrics == special.rubrics
     assert reread.eval.rubrics == log.eval.rubrics
 
@@ -209,9 +209,9 @@ def test_schema_one_logs_still_read(tmp_path: Path) -> None:
     assert old.samples[0].rubrics == ()
     assert old.samples[0].reduced == log.samples[0].reduced
 
-    data["version"] = 3
+    data["version"] = 99
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match=r"reads versions \[1, 2\]"):
+    with pytest.raises(ValueError, match=r"reads versions \[1, 2, 3\]"):
         read_eval_log(str(path))
 
 

@@ -2313,3 +2313,24 @@ def test_wire_malformed_request_degrades_to_an_empty_call(tmp_path: Path) -> Non
     assert "Trial 0 Wire" in document
     assert "no new messages" in document
     assert "<dd>n/a</dd>" in document
+
+
+def test_the_policys_stated_reasons_are_shown_per_trial() -> None:
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        termination_reasons=("give_up", "max_steps"),
+        termination_details=("the drawer is <glued> shut", None),
+    )
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="run")
+    assert "<h3>Policy's stated reasons</h3>" in document
+    assert ">trial 0</span>the drawer is &lt;glued&gt; shut</div>" in document
+    assert ">trial 1</span>" not in document.split("Policy")[1].split("<h3>")[0]
+
+    plain = render_html(
+        dataclasses.replace(
+            log, samples=(dataclasses.replace(scene, termination_details=(None, None)),)
+        ),
+        title="run",
+    )
+    assert "stated reasons" not in plain

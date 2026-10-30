@@ -1570,6 +1570,15 @@ def _scene_section(
     reasons_block = (
         "" if not reasons else f'<h3>Termination reasons</h3><div class="score-row">{reasons}</div>'
     )
+    details = "".join(
+        (
+            f'<div class="grader-note"><span class="note-label">trial {index}</span>'
+            f"{_escape(detail)}</div>"
+        )
+        for index, detail in enumerate(scene.termination_details)
+        if detail is not None
+    )
+    details_block = "" if not details else f"<h3>Policy's stated reasons</h3>{details}"
     judgements = "".join(
         '<span class="score-chip">n/a</span>'
         if judgement is None
@@ -1645,7 +1654,8 @@ def _scene_section(
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene_status)}</div>{instruction}{rubric}{error}"
         f"{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{notes_block}{transcripts}{feedback_block}"
+        f"{reasons_block}{details_block}{judgements_block}{notes_block}{transcripts}"
+        f"{feedback_block}"
         f"{wires}</section>"
     )
 
