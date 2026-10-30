@@ -22,7 +22,7 @@ from inspect_robots.console import (
     OperatorInput,
 )
 from inspect_robots.errors import EmbodimentFault
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import operator_scorer
 from inspect_robots.session import (
@@ -360,7 +360,7 @@ def test_prompt_operator_adopts_definitive_embodiment_verdict(
     expected_verdict: str,
 ) -> None:
     session = _RecordingLinesSession(lambda _prompt: pytest.fail("operator prompt must not fire"))
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -398,7 +398,7 @@ def test_prompt_verdict_closes_status_and_flushes_before_reading_answer() -> Non
 
     session = OperatorSession(input_fn=read, write=output.append, flush_fn=flush)
     session.status("parking")
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
@@ -410,7 +410,7 @@ def test_prompt_verdict_closes_status_and_flushes_before_reading_answer() -> Non
 def test_prompt_verdict_displays_indented_multiline_rubric_before_prompting() -> None:
     answers = iter(["y", ""])
     session = _RecordingLinesSession(lambda _prompt: next(answers))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
     scene = Scene(
         id="s0",
         instruction="stack",
@@ -431,7 +431,7 @@ def test_prompt_verdict_displays_indented_multiline_rubric_before_prompting() ->
 def test_prompt_verdict_ignores_absent_non_string_or_blank_rubrics(rubric: object) -> None:
     answers = iter(["n", ""])
     session = _RecordingLinesSession(lambda _prompt: next(answers))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     session.prompt_verdict(
         record,
@@ -445,7 +445,7 @@ def test_prompt_verdict_ignores_absent_non_string_or_blank_rubrics(rubric: objec
 @pytest.mark.parametrize("source", ["console", "embodiment"])
 def test_prompt_verdict_does_not_display_rubric_on_adopt_paths(source: str) -> None:
     session = _RecordingLinesSession(lambda _prompt: pytest.fail("adopt path must not prompt"))
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -479,7 +479,7 @@ def test_prompt_verdict_still_prompts_when_stale_input_flush_fails() -> None:
         return next(answers)
 
     session = OperatorSession(input_fn=read, flush_fn=flush)
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
@@ -489,7 +489,7 @@ def test_prompt_verdict_still_prompts_when_stale_input_flush_fails() -> None:
 
 def test_prompt_operator_early_returns_for_pre_set_console_verdict_via_write_line() -> None:
     session = _RecordingLinesSession(lambda _prompt: pytest.fail("pre-set verdict must not prompt"))
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -521,7 +521,7 @@ def test_prompt_operator_still_prompts_without_definitive_verdict(
     termination_reason: str | None,
 ) -> None:
     session, prompts, _output = _scripted_prompt_session(["y", ""])
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -539,7 +539,7 @@ def test_prompt_operator_still_prompts_without_definitive_verdict(
 
 def test_prompt_operator_prompts_for_truncated_success_reason() -> None:
     session, _prompts, _output = _scripted_prompt_session(["n", ""])
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -557,7 +557,7 @@ def test_prompt_operator_prompts_for_truncated_success_reason() -> None:
 
 def test_prompt_operator_warns_before_judging_step_limited_trial() -> None:
     session, _prompts, output = _scripted_prompt_session(["n", ""])
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -583,7 +583,7 @@ def test_operator_scorer_reads_adopted_embodiment_verdict(
         input_fn=lambda _prompt: pytest.fail("operator prompt must not fire"),
         write=lambda _text: None,
     )
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -599,8 +599,8 @@ def test_operator_scorer_reads_adopted_embodiment_verdict(
 def test_prompt_operator_unit_semantics() -> None:
     scene = Scene(id="s0", instruction="reach")
 
-    def record_with_steps() -> TrialRecord:
-        record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    def record_with_steps() -> Record:
+        record = Record(scene_id="s0", epoch=0, seed=0)
         record.steps = [None, None, None]  # type: ignore[list-item]
         return record
 
@@ -670,7 +670,7 @@ def test_prompt_operator_records_optional_grader_notes(
     expected_event: dict[str, str | None] | None,
 ) -> None:
     session, _prompts, _output = _scripted_prompt_session([verdict, note_input])
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     session.prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
@@ -692,7 +692,7 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof() -> None:
             return "n"
         raise EOFError
 
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     OperatorSession(input_fn=answer).prompt_verdict(record, Scene(id="s0", instruction="reach"))
 
@@ -705,7 +705,7 @@ def test_prompt_operator_keeps_verdict_when_notes_prompt_reaches_eof() -> None:
 
 def test_prompt_verdict_prompts_for_operator_ended_trial() -> None:
     session, _prompts, _output = _scripted_prompt_session(["partial", "left gripper slipped"])
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,
@@ -721,7 +721,7 @@ def test_prompt_verdict_prompts_for_operator_ended_trial() -> None:
 
 def test_prompt_verdict_notes_early_end_reason_before_asking() -> None:
     session, prompts, output = _scripted_prompt_session(["y", ""])
-    record = TrialRecord(
+    record = Record(
         scene_id="s0",
         epoch=0,
         seed=0,

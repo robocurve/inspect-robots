@@ -119,7 +119,7 @@ embodiments, and attended operator input:
 - [`inspect-robots-capx`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-capx):
   evaluate CaP-X-style code-as-policy agents against a joint-space embodiment.
   Model-generated Python calls separately served SAM3, Contact-GraspNet, and
-  Pyroki helpers, then queues approver-checked joint targets behind `--policy
+  Pyroki helpers, then queues guard-checked joint targets behind `--policy
   capx`.
 - [`inspect-robots-voice`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice):
   transcribe local microphone speech into feedback during an attended run with

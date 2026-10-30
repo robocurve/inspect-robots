@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from inspect_robots.scene import Target
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
 ScoreValue = bool | int | float | str
 Reducer = Callable[[Sequence["Score"]], "Score"]
@@ -64,7 +64,7 @@ class Scorer(Protocol):
         """Stable identifier used as the score key in evaluation results."""
         ...
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         """Assign one score from the recorded trajectory and optional target."""
         ...
 
@@ -194,7 +194,7 @@ def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
 class _SuccessAtEnd:
     name: str = "success_at_end"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         last = record.steps[-1] if record.steps else None
         success = bool(
             last is not None
@@ -216,7 +216,7 @@ def success_at_end(*, name: str = "success_at_end") -> Scorer:
 class _EpisodeLength:
     name: str = "episode_length"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         return Score(value=len(record.steps))
 
 
@@ -225,7 +225,7 @@ def episode_length(*, name: str = "episode_length") -> Scorer:
     return _EpisodeLength(name=name)
 
 
-def _distances(record: TrialRecord) -> list[float]:
+def _distances(record: Record) -> list[float]:
     return [float(s.result.info["distance"]) for s in record.steps if "distance" in s.result.info]
 
 
@@ -233,7 +233,7 @@ def _distances(record: TrialRecord) -> list[float]:
 class _MinDistanceToGoal:
     name: str = "min_distance_to_goal"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         dists = _distances(record)
         if not dists:
             return Score(value=float("inf"), explanation="no distance signal recorded")
@@ -250,7 +250,7 @@ class _ReachedGoalState:
     threshold: float
     name: str = "reached_goal_state"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         dists = _distances(record)
         reached = bool(dists) and min(dists) <= self.threshold
         return Score(value=reached, explanation=f"min_distance <= {self.threshold}")
@@ -282,7 +282,7 @@ def is_affirmative_verdict(verdict: str | None) -> bool:
 class _OperatorScorer:
     name: str = "operator"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         # R6: the human verdict is captured once during rollout and recorded;
         # this scorer only READS it, so scoring stays reproducible from a log.
         verdict = record.operator_judgement
@@ -320,7 +320,7 @@ class VLMScorer:
 
     name = "vlm"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         """Fail explicitly because VLM judging ships as the 'vlm' grader instead."""
         raise NotImplementedError(
             "VLM judging ships as the 'vlm' grader (--grader vlm) with the "

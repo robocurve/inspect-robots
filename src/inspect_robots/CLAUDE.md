@@ -17,9 +17,9 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 | `task.py` | `Task` (scenes + scorer + exactly one `max_steps`/`max_seconds` horizon), `Epochs`, `TaskEnvelope` (`resolve_envelope(control_hz)` — the adapter-safe identity+resolved-step limits view passed to `bind_task` hooks) |
 | `scorer.py` | `Score`/`Scorer`, epoch reducers, builtin scorers (incl. operator/VLM) |
 | `grader.py` | `Grader` Protocol — judgement *capture*, the other half of R6 (plan 0049): runs once per scored trial via the `before_scoring` seam, mutates the record, scorers stay pure readers; builtin `operator` grader wraps `OperatorSession.prompt_verdict` with a lazy default session and a `connect_session(session)` hook; builtin `vlm` grader (plan 0069) judges first/last frames plus rubric over the `_chatwire` OpenAI-compatible wire — fail-fast construction (model/key/rubric file), adopt-before-spend gates for existing and embodiment-definitive verdicts, an idempotent `preflight()` request before any rollout (plan 0085: 4xx raises, outages warn; the CLI runs it before resolving components), and post-rollout failures recorded as `metadata["grading_error"]` so the `operator` scorer abstains and the run ends in error; an optional duck-typed `config()` hook (plan 0081) reports the resolved configuration `eval()` records in `EvalSpec.grader_config`, credentials excluded |
-| `controller.py` | `Controller` middleware: `DefaultController` (open-loop chunking), `SmoothingController` |
-| `approver.py` | `Approver` safety gate: `AutoApprover`, `ClampApprover`, `DeltaLimitApprover` (semantics-aware no-wild-swings limit), `ChainApprover` |
-| `rollout.py` | `rollout()` closed loop, `TrialRecord`/`StepRecord`, per-trial seeding, delivered-once sourced operator input, best-effort normalized policy-transcript capture, the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge, and a duck-typed best-effort `end_trial()` hook that closes the footer immediately when console `begin_trial()` or `poll()` disables the channel and runs again in the per-trial `finally`, so implementations must tolerate two calls; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
+| `action_manager.py` | `ActionManager` middleware: `DefaultActionManager` (open-loop chunking), `SmoothingActionManager` |
+| `guard.py` | `Guard` safety gate: `PassThroughGuard`, `ClampGuard`, `DeltaLimitGuard` (semantics-aware no-wild-swings limit), `GuardChain` |
+| `rollout.py` | `rollout()` closed loop, `Record`/`StepRecord`, per-trial seeding, delivered-once sourced operator input, best-effort normalized policy-transcript capture, the duck-typed `transcript_delta()` to sink `log_policy_messages()` live-stream bridge, and a duck-typed best-effort `end_trial()` hook that closes the footer immediately when console `begin_trial()` or `poll()` disables the channel and runs again in the per-trial `finally`, so implementations must tolerate two calls; honors a policy-requested stop via pre-review `action.meta["request_stop"]` (truncation; embodiment termination wins; not preserved under ensembling) |
 | `frames.py` | `FrameStore`/`FrameRef` — stream camera frames to disk (R5) |
 | `transcript.py` | typed event stream (reset/inference/step/approval/sourced operator_message/operator/error); `judgement_source()` reads the last `operator` event for the log's `judgement_sources` |
 | `compat.py` | `check_compatibility`/`assert_compatible` — fail-fast before rollout |
@@ -44,15 +44,15 @@ interfaces. The package is `mypy --strict` clean and ships `py.typed`.
 
 ## Key invariants
 
-- The rollout loop is **one control-rate loop** calling `Controller.next_action`;
-  inference/replanning is controller-internal (so ensembling composes — R3).
+- The rollout loop is **one control-rate loop** calling `ActionManager.next_action`;
+  inference/replanning is internal to the action manager (so ensembling composes — R3).
 - Frames live in a rollout-owned `FrameStore`, never in a sink (R5).
 - Action *semantics* live on the action `Box`, not on every `Action` (R8).
 - The rollout rejects non-finite actions before review and before `step()`.
 - Generic policy/embodiment exceptions (incl. from `reset`) are wrapped into
-  `PolicyError` / `EmbodimentFault`; a crashing approver becomes `SafetyAbort`;
+  `PolicyError` / `EmbodimentFault`; a crashing guard becomes `SafetyAbort`;
   `SafetyAbort`/`EmbodimentFault` always halt the eval. Every error raised from
-  inside a trial carries the partial `TrialRecord` on `exc.record`.
+  inside a trial carries the partial `Record` on `exc.record`.
 - `eval()` must always return/persist an `EvalLog` once rollouts have started —
   scorer/reducer failures degrade to an error log, never a crash. Errored
   trials are recorded (and delivered to sinks) but **never scored**. A run in

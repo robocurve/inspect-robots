@@ -141,7 +141,7 @@ A standalone `take_pic` shows the current frame and lets the model decide
 again before moving. A `take_pic` placed after one motion in the same assistant
 turn is queued with `queued: frames arrive with the next observation, after
 the motion plays`: the motion chunk is returned immediately, and the requested
-frames are attached to the next observation after the controller has played
+frames are attached to the next observation after the action manager has played
 the available part of the chunk. Two motions still cannot be chained.
 
 Queued-capture narration reports what the rollout actually observed. It says
@@ -149,13 +149,13 @@ whether all requested chunk steps played or only a prefix did, names camera
 frames missing on arrival, and, for absolute control modes with matching
 proprioception, reports the largest measured offset from the requested target.
 The residual is the arrival check: a full step count alone does not prove the
-arm reached its target when an approver rewrote actions or a smoothing
-controller blended them.
+arm reached its target when a guard rewrote actions or a smoothing
+action manager blended them.
 
-Controller choice affects that report. `DefaultController` buffers
+ActionManager choice affects that report. `DefaultActionManager` buffers
 `min(replan_interval, chunk_len)` actions, so a `replan_interval` shorter than
 the interpolation always reports partial playout; a chunk shorter than the
-interval reports finished. `EnsemblingController` re-queries every control
+interval reports finished. `EnsemblingActionManager` re-queries every control
 step, so the observed advance is always one step. It also rebuilds actions
 from chunk metadata, which means `done` and `give_up` do not terminate under
 ensembling (an existing core limitation). A trial that terminates or reaches
@@ -197,7 +197,7 @@ played and the readback's largest remaining offset from the requested target
 plain-language strings written for the policy, such as the YAM plugin's
 per-arm IK diagnosis: whether the target could be posed at all, which joints
 sit on a limit, whether the move was still catching up, or how far the arm
-sits behind its command), those lines are rendered after the approver line.
+sits behind its command), those lines are rendered after the guard line.
 Malformed reports are ignored. Together these tell the model *why* a move
 fell short instead of leaving it to guess.
 
@@ -212,7 +212,7 @@ remaining environment steps in each observation. The per-step
 observation also labels the proprioceptive state vector with the action
 dimension names (`left_j0=0.01 ...`) whenever the mapping is unambiguous.
 
-Every action still passes the CLI's default safety approvers (bounds clamp plus
+Every action still passes the CLI's default safety guards (bounds clamp plus
 per-step delta limit); the plugin contains no safety-critical code path of its
 own. An explicit `--max-action-delta` tighter than 5% of range can truncate
 absolute interpolants. In displacement modes, a value tighter than the action
@@ -301,10 +301,10 @@ cannot carry callables. Displacement control modes are refused at bind time
 when a pre-check is configured because their emitted vectors are per-step
 deltas, not absolute configurations.
 
-**Layering:** The pre-check supplies model feedback. The framework approver
+**Layering:** The pre-check supplies model feedback. The framework guard
 chain remains the enforcement backstop. Passing the pre-check does not imply
-that an approver will pass the motion. In particular, the YAM collision
-approver sweeps interpolated substeps finer than the emitted waypoint spacing
+that a guard will pass the motion. In particular, the YAM collision
+guard sweeps interpolated substeps finer than the emitted waypoint spacing
 at low control rates. An adapter that needs parity should interpolate and
 check between emitted waypoints itself.
 

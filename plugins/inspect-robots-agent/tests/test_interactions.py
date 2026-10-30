@@ -17,7 +17,7 @@ import inspect_robots_agent._gemini_live as live_module
 import inspect_robots_agent._interactions as interactions_module
 from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots_agent import InteractionsClient, LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
@@ -794,7 +794,7 @@ def test_policy_act_chains_delta_and_capture_round_trips_blobs(tmp_path: Path) -
     assert all(part.get("type") != "function_call" for part in second["input"])
     assert "The cube is ahead" not in json.dumps(second["input"])
 
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0, status="success")
+    record = Record(scene_id="s0", epoch=0, seed=0, status="success")
     policy.on_trial_end(record, str(tmp_path), "run-1")
     pointer = record.metadata["wire_capture"]
     assert isinstance(pointer, str)

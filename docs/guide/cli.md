@@ -533,8 +533,8 @@ up CPU-bound Python code, and separate policy instances may increase memory use.
 
 The Python API accepts `eval_set(task_names, "policy", "embodiment", max_workers=N)`.
 For parallel runs, tasks and components (including an optional grader) must be
-registered names. Live task/component objects, custom sinks, controllers,
-approvers, operator input and pre-scoring hooks are rejected to avoid sharing
+registered names. Live task/component objects, custom sinks, action managers,
+guards, operator input and pre-scoring hooks are rejected to avoid sharing
 mutable state between tasks. Custom configuration can be supplied by registered
 factories. Each task preflights its grader before opening its components, and a
 grading configuration error stops task admission. Log schemas and per-trial

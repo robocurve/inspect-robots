@@ -171,7 +171,7 @@ trial.
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
 a per-run subdirectory of `<log_dir>/frames` through a
-[`FrameStore`](../../src/inspect_robots/frames.py) and the `TrialRecord` keeps lightweight
+[`FrameStore`](../../src/inspect_robots/frames.py) and the `Record` keeps lightweight
 [`FrameRef`](../../src/inspect_robots/frames.py) handles, so long, multi-camera episodes stay
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's

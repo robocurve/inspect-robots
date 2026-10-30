@@ -1,9 +1,9 @@
-"""The Approver — a safety gate between policy output and the embodiment.
+"""The Guard — a safety gate between policy output and the embodiment.
 
-Every action passes through ``Approver.review`` before ``embodiment.step``. This
+Every action passes through ``Guard.review`` before ``embodiment.step``. This
 is the robotics analog of Inspect AI's ``ApprovalPolicy`` and is more
-safety-critical: an approver may pass, clamp, or veto an action (a veto raises
-[`SafetyAbort`][inspect_robots.errors.SafetyAbort]). In the tracer slice the default approver
+safety-critical: a guard may pass, clamp, or veto an action (a veto raises
+[`SafetyAbort`][inspect_robots.errors.SafetyAbort]). In the tracer slice the default guard
 passes everything through; clamping/operator approval land in rollout hardening.
 """
 
@@ -21,7 +21,7 @@ from inspect_robots.types import Action
 
 
 @runtime_checkable
-class Approver(Protocol):
+class Guard(Protocol):
     """Reviews an action before it reaches the embodiment.
 
     May return the action unchanged, return a modified (e.g. clamped) action, or
@@ -34,36 +34,36 @@ class Approver(Protocol):
 
 
 @dataclass(frozen=True)
-class GuardrailContribution:
-    """Approvers an embodiment adds to the CLI's default guardrail chain.
+class GuardContribution:
+    """Guards an embodiment adds to the CLI's default guardrail chain.
 
-    ``approvers`` pairs a short display name (shown in the ``guardrails:``
-    banner) with each approver to append. ``warnings`` names contributions
+    ``guards`` pairs a short display name (shown in the ``guardrails:``
+    banner) with each guard to append. ``warnings`` names contributions
     the embodiment declined to make or made in a degraded state, and why, so
-    neither condition is invisible. Warnings may accompany active approvers.
+    neither condition is invisible. Warnings may accompany active guards.
 
-    A contributed approver must preserve the incoming ``Action`` object's
+    A contributed guard must preserve the incoming ``Action`` object's
     identity when approving it unmodified. If it substitutes another target,
     such as holding an earlier pose, it must call
-    ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
+    ``DeltaLimitGuard.rewind_reference`` with that executed pose so later
     deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
     other exceptions are bugs and propagate. The rollout enforces finiteness
-    before review and again on the returned action, so contributed approvers
+    before review and again on the returned action, so contributed guards
     need not duplicate that validation.
     """
 
-    approvers: tuple[tuple[str, Approver], ...] = ()
+    guards: tuple[tuple[str, Guard], ...] = ()
     warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name, approver in self.approvers:
+        for name, guard in self.guards:
             if not name or "\n" in name or "\r" in name:
                 raise ValueError("guardrail display names must be non-empty and newline-free")
-            if not callable(getattr(approver, "review", None)):
-                raise ValueError(f"guardrail approver {name!r} must have a callable review")
+            if not callable(getattr(guard, "review", None)):
+                raise ValueError(f"guardrail guard {name!r} must have a callable review")
 
 
-class AutoApprover:
+class PassThroughGuard:
     """Approve every action unchanged (the permissive default)."""
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
@@ -71,7 +71,7 @@ class AutoApprover:
         return action
 
 
-class ClampApprover:
+class ClampGuard:
     """Clamp actions to a box's ``low``/``high`` bounds before they reach hardware.
 
     One-sided boxes are honored: a ``low``-only box clamps from below, a
@@ -96,7 +96,7 @@ class ClampApprover:
         """Reject NaNs and clamp bounded dimensions, preserving identity when unchanged."""
         data = np.asarray(action.data, dtype=np.float64)
         if bool(np.isnan(data).any()):
-            raise SafetyAbort("ClampApprover: action contains NaN; refusing to pass it on")
+            raise SafetyAbort("ClampGuard: action contains NaN; refusing to pass it on")
         low, high = self._space.low, self._space.high
         if low is None and high is None:
             return action
@@ -116,7 +116,7 @@ _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 _ABSOLUTE_POSE_MODES = ABSOLUTE_CONTROL_MODES & _POSE_MODES
 _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # Rotation reps that survive independent per-dimension clamping of an absolute
-# orientation (same set the EnsemblingController accepts for per-dimension
+# orientation (same set the EnsemblingActionManager accepts for per-dimension
 # averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
 # Displacement pose modes carry rotation *deltas*, whose no-op is not the zero
@@ -138,7 +138,7 @@ _DISPLACEMENT_SAFE_ROT = frozenset(get_args(RotationRepr)) - _DISPLACEMENT_POSE_
 _LAST_APPROVED_KEY = "delta_limit:last"
 
 
-class DeltaLimitApprover:
+class DeltaLimitGuard:
     """The "no wild swings" gate — semantics-aware per-step change limiting.
 
     Absolute-target modes (``joint_pos``, ``eef_abs_pose``) clamp each
@@ -153,7 +153,7 @@ class DeltaLimitApprover:
     dimension clamps to the intersection of the box and
     ``[-max_delta, +max_delta]``. The derived default is the box alone —
     core cannot assume displacement bounds are per-step-sized, so without an
-    explicit ``max_delta`` the limiter adds nothing beyond ``ClampApprover``.
+    explicit ``max_delta`` the limiter adds nothing beyond ``ClampGuard``.
 
     Construction never guesses: missing semantics, a needed missing/non-finite
     bound without an explicit ``max_delta``, an absolute pose mode whose
@@ -161,7 +161,7 @@ class DeltaLimitApprover:
     pose mode carrying a quaternion or rot6d delta (whose identity is not the
     zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
     Non-finite values (``NaN`` or ``±inf``) anywhere in a reviewed action raise
-    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampApprover``
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampGuard``
     (which clamps ``±inf`` to finite box bounds), a delta limiter cannot clamp
     ``±inf`` into anything meaningful because it has no trustworthy finite bound
     on the first absolute step. A modified action is
@@ -174,12 +174,12 @@ class DeltaLimitApprover:
         sem = action_space.semantics
         if sem is None:
             raise ValueError(
-                "DeltaLimitApprover: action space declares no semantics; the "
+                "DeltaLimitGuard: action space declares no semantics; the "
                 "limiter cannot tell absolute targets from displacements"
             )
         if sem.control_mode in _ABSOLUTE_POSE_MODES and sem.rotation_repr not in _LIMITABLE_ROT:
             raise ValueError(
-                f"DeltaLimitApprover: cannot clamp absolute rotation_repr "
+                f"DeltaLimitGuard: cannot clamp absolute rotation_repr "
                 f"{sem.rotation_repr!r} per dimension; only {sorted(_LIMITABLE_ROT)} "
                 f"are safe"
             )
@@ -188,7 +188,7 @@ class DeltaLimitApprover:
             and sem.rotation_repr in _DISPLACEMENT_POSE_UNSAFE_ROT
         ):
             raise ValueError(
-                f"DeltaLimitApprover: cannot clamp displacement rotation_repr "
+                f"DeltaLimitGuard: cannot clamp displacement rotation_repr "
                 f"{sem.rotation_repr!r} per dimension; its identity is not at the "
                 f"origin, so per-dimension clamping distorts it instead of "
                 f"limiting it; only {sorted(_DISPLACEMENT_SAFE_ROT)} are safe here"
@@ -212,7 +212,7 @@ class DeltaLimitApprover:
                 )
                 if bool(np.any(undeclared)) and (low is None or high is None):
                     raise ValueError(
-                        "DeltaLimitApprover: deriving a default needs finite low/high "
+                        "DeltaLimitGuard: deriving a default needs finite low/high "
                         "bounds; pass max_delta explicitly"
                     )
                 self._delta = np.empty(dim, dtype=np.float64)
@@ -228,7 +228,7 @@ class DeltaLimitApprover:
                         and np.all(np.isfinite(native_default))
                     ):
                         raise ValueError(
-                            "DeltaLimitApprover: deriving a default needs finite low/high "
+                            "DeltaLimitGuard: deriving a default needs finite low/high "
                             "bounds; pass max_delta explicitly"
                         )
                     self._delta[undeclared] = native_default
@@ -241,7 +241,7 @@ class DeltaLimitApprover:
         else:
             if explicit is None and (low is None or high is None):
                 raise ValueError(
-                    "DeltaLimitApprover: a displacement-mode space without both "
+                    "DeltaLimitGuard: a displacement-mode space without both "
                     "bounds needs an explicit max_delta"
                 )
             self._low = low if explicit is None else _intersect(low, -explicit, np.maximum)
@@ -251,14 +251,14 @@ class DeltaLimitApprover:
     def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
         """Reset an existing limiter reference to a copy of an executed pose.
 
-        A downstream approver that substitutes a target, such as holding an
+        A downstream guard that substitutes a target, such as holding an
         earlier safe pose, must use this before the next action is reviewed so
         the limiter measures subsequent deltas from the pose that actually ran.
         If the limiter has not established a reference, this is a no-op.
         """
         if not bool(np.all(np.isfinite(pose))):
             raise ValueError(
-                "DeltaLimitApprover: rewind_reference received a non-finite pose; "
+                "DeltaLimitGuard: rewind_reference received a non-finite pose; "
                 "refusing to corrupt reference state"
             )
         if _LAST_APPROVED_KEY in store:
@@ -269,7 +269,7 @@ class DeltaLimitApprover:
         data = np.asarray(action.data, dtype=np.float64)
         if not bool(np.all(np.isfinite(data))):
             raise SafetyAbort(
-                "DeltaLimitApprover: action contains a non-finite value (NaN or ±inf); "
+                "DeltaLimitGuard: action contains a non-finite value (NaN or ±inf); "
                 "refusing to pass it on"
             )
         if self._absolute:
@@ -298,10 +298,10 @@ def _validate_max_delta(
             arr = np.broadcast_to(raw, (dim,)).reshape(shape)
         except ValueError as exc:
             raise ValueError(
-                f"DeltaLimitApprover: max_delta does not broadcast to {shape} (or {dim} dimensions)"
+                f"DeltaLimitGuard: max_delta does not broadcast to {shape} (or {dim} dimensions)"
             ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
-        raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
+        raise ValueError("DeltaLimitGuard: max_delta must be finite and > 0")
     # Shaped like the box for the same reason the derived default is: review()
     # clips against the action's own shape, and the displacement branch
     # intersects with bounds of that shape, so a flat delta fails to broadcast
@@ -319,25 +319,23 @@ def _intersect(
     return result
 
 
-class ChainApprover:
-    """Run approvers in sequence, feeding each the previous one's result.
+class GuardChain:
+    """Run guards in sequence, feeding each the previous one's result.
 
     Gives "guardrails" one composable name, e.g.
-    ``ChainApprover(ClampApprover(space), DeltaLimitApprover(space))``.
-    Identity is preserved end to end: if no approver modifies the action, the
+    ``GuardChain(ClampGuard(space), DeltaLimitGuard(space))``.
+    Identity is preserved end to end: if no guard modifies the action, the
     original object comes back, so the rollout's modification check still works.
     """
 
-    def __init__(self, *approvers: Approver):
-        for approver in approvers:
-            if not callable(getattr(approver, "review", None)):
-                raise ValueError(
-                    f"ChainApprover element must have a callable review, got {approver!r}"
-                )
-        self._approvers = approvers
+    def __init__(self, *guards: Guard):
+        for guard in guards:
+            if not callable(getattr(guard, "review", None)):
+                raise ValueError(f"GuardChain element must have a callable review, got {guard!r}")
+        self._approvers = guards
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Apply each configured gate in order to the preceding gate's output."""
-        for approver in self._approvers:
-            action = approver.review(action, store)
+        for guard in self._approvers:
+            action = guard.review(action, store)
         return action

@@ -31,6 +31,11 @@ to the module that defines it.
     pass conformance.
 13. [Command-line interface](guide/cli.md): every `inspect-robots` command.
 
+## Upgrading
+
+- [Migrating to the paper release](migrating-to-the-paper-release.md): renamed types and
+  arguments, with before and after examples.
+
 ## Cookbooks
 
 - [Evaluate a GR00T fine-tune on real YAM arms](cookbooks/gr00t-on-yam.md)

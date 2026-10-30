@@ -104,7 +104,7 @@ beside the eval log. CLI flags override any default (`--no-rerun-save`,
 
 The policy slot is not limited to VLAs. With the
 [inspect-robots-agent](plugins/inspect-robots-agent/) plugin, a frontier LLM
-drives the same rig through tool calls, one approver-checked motion chunk
+drives the same rig through tool calls, one guard-checked motion chunk
 per call.
 
 Put a `.env` with your API key in the working directory (the CLI loads it
@@ -411,7 +411,7 @@ shipped from this repo as separate packages:
 - **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
-  then queues approver-checked joint targets behind `--policy capx`.
+  then queues guard-checked joint targets behind `--policy capx`.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
   microphone speech into operator feedback during attended runs with
   `--voice`, or narrate streamed policy notes and terminal summaries with
@@ -468,9 +468,9 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect
 | Inspect AI | Inspect Robots |
 |---|---|
 | `Model` | `Policy` (VLA) **+** `Embodiment` *(two inputs)* |
-| `Task = dataset + solver + scorer` | `Task = scenes + controller + scorer` |
+| `Task = dataset + solver + scorer` | `Task = scenes + action manager + scorer` |
 | `Sample` | `Scene` |
-| `Solver` chain | `Controller` middleware (chunking, ensembling, smoothing) |
+| `Solver` chain | `ActionManager` middleware (chunking, ensembling, smoothing) |
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task` / `@solver` / `@scorer` + registry | `@task` / `@policy` / `@embodiment` / `@scorer` + entry points |
 

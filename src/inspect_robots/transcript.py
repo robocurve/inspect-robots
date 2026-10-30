@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
 EventKind = str  # Includes reset, inference, step, approval, operator_message, operator, error.
 
@@ -75,7 +75,7 @@ def operator_event(t: int, verdict: str, source: str = "prompt", note: str | Non
     )
 
 
-def judgement_source(record: TrialRecord) -> str | None:
+def judgement_source(record: Record) -> str | None:
     """Return which path produced the record's judgement.
 
     ``None`` when the record has no ``operator_judgement``, or when the

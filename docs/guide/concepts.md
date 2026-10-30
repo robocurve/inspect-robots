@@ -42,13 +42,13 @@ with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
 
 [`rollout`](../../src/inspect_robots/rollout.py) runs one trial as a single control-rate loop:
 
-1. A [`Controller`](../../src/inspect_robots/controller.py) decides the next action, internally
+1. An [`ActionManager`](../../src/inspect_robots/action_manager.py) decides the next action, internally
    calling `policy.act()` and buffering the chunk (so open-loop execution and
    temporal ensembling compose without forking the loop).
-2. An [`Approver`](../../src/inspect_robots/approver.py) reviews the action before it reaches
+2. A [`Guard`](../../src/inspect_robots/guard.py) reviews the action before it reaches
    the embodiment: pass, clamp, or veto (a safety gate).
 3. `embodiment.step(action)` executes it; everything is logged to sinks and
-   recorded in an immutable [`TrialRecord`](../../src/inspect_robots/rollout.py) (steps, a typed
+   recorded in an immutable [`Record`](../../src/inspect_robots/rollout.py) (steps, a typed
    transcript, inference latencies).
 
 Camera frames are streamed to a [`FrameStore`](../../src/inspect_robots/frames.py) and the
@@ -57,7 +57,7 @@ memory-safe.
 
 ## Scoring
 
-A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded `TrialRecord` (+ the scene's
+A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded `Record` (+ the scene's
 `Target`) to a [`Score`](../../src/inspect_robots/scorer.py). Because scorers consume the
 *recorded* trajectory (not a live environment), scoring is reproducible from a
 saved log. Across the `epochs` of a scene, an epoch reducer (`mean`, `max`,
@@ -74,11 +74,11 @@ The error taxonomy resolves the "fail fast vs never-crash-overnight" tension:
 | [`EmbodimentFault`](../../src/inspect_robots/errors.py), [`SafetyAbort`](../../src/inspect_robots/errors.py) | **always halt**: a faulted/unsafe robot never auto-advances |
 
 Failures inside a trial (including `reset`) are wrapped into the taxonomy; a
-crashing approver becomes a `SafetyAbort` (it can no longer vouch for safety).
+crashing guard becomes a `SafetyAbort` (it can no longer vouch for safety).
 A non-finite action from the policy is a `PolicyError`. A non-finite action
-introduced by an approver is a `SafetyAbort`.
+introduced by a guard is a `SafetyAbort`.
 Every error raised from inside a trial carries the partial
-[`TrialRecord`](../../src/inspect_robots/rollout.py) on its `record` attribute, so the
+[`Record`](../../src/inspect_robots/rollout.py) on its `record` attribute, so the
 steps that did run are delivered to sinks. Errored trials are recorded but
 never scored: a failed trial cannot masquerade as data in the metrics.
 A finished run in which every trial errored ends with `status: "error"` even

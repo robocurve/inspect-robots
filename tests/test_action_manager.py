@@ -1,4 +1,4 @@
-"""Controller middleware: open-loop replanning and composition."""
+"""ActionManager middleware: open-loop replanning and composition."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from inspect_robots.controller import DefaultController, SmoothingController
+from inspect_robots.action_manager import DefaultActionManager, SmoothingActionManager
 from inspect_robots.errors import PolicyError
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
@@ -27,7 +27,7 @@ def test_default_controller_plays_whole_chunk_then_replans() -> None:
     embodiment = CubePickEmbodiment()
     obs = _obs(embodiment)
     store: dict[str, object] = {}
-    ctrl = DefaultController()  # replan_interval None -> whole chunk
+    ctrl = DefaultActionManager()  # replan_interval None -> whole chunk
     for _ in range(5):
         ctrl.next_action(policy, obs, 0, store)
     assert policy.num_inferences == 1  # one inference covered all 5 actions
@@ -38,7 +38,7 @@ def test_replan_interval_reinfers_periodically() -> None:
     embodiment = CubePickEmbodiment()
     obs = _obs(embodiment)
     store: dict[str, object] = {}
-    ctrl = DefaultController(replan_interval=2)
+    ctrl = DefaultActionManager(replan_interval=2)
     for _ in range(6):
         ctrl.next_action(policy, obs, 0, store)
     assert policy.num_inferences == 3  # 6 actions / 2 per inference
@@ -47,7 +47,7 @@ def test_replan_interval_reinfers_periodically() -> None:
 @pytest.mark.parametrize("bad_interval", [0, -1, 2.5, True, False, "5"])
 def test_default_controller_rejects_invalid_replan_interval(bad_interval: Any) -> None:
     with pytest.raises(ValueError, match="replan_interval must be an integer >= 1 or None"):
-        DefaultController(replan_interval=bad_interval)
+        DefaultActionManager(replan_interval=bad_interval)
 
 
 def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
@@ -65,7 +65,7 @@ def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
             object.__setattr__(chunk, "inference_latency_s", None)
             return chunk
 
-    ctrl = DefaultController()
+    ctrl = DefaultActionManager()
     store: dict[str, object] = {}
     with pytest.raises(PolicyError, match="returned an empty ActionChunk"):
         ctrl.next_action(_EmptyChunkPolicy(), Observation(), 0, store)  # type: ignore[arg-type]
@@ -74,7 +74,7 @@ def test_default_controller_raises_policy_error_on_empty_chunk() -> None:
 @pytest.mark.parametrize("bad_alpha", [0.0, -0.5, 1.5, float("nan")])
 def test_smoothing_controller_rejects_invalid_alpha(bad_alpha: float) -> None:
     with pytest.raises(ValueError, match=r"alpha must be in \(0, 1\]"):
-        SmoothingController(DefaultController(), alpha=bad_alpha)
+        SmoothingActionManager(DefaultActionManager(), alpha=bad_alpha)
 
 
 def test_smoothing_controller_composes() -> None:
@@ -82,14 +82,14 @@ def test_smoothing_controller_composes() -> None:
     embodiment = CubePickEmbodiment()
     obs = _obs(embodiment)
     store: dict[str, object] = {}
-    inner = DefaultController()
-    smooth = SmoothingController(inner, alpha=0.5)
+    inner = DefaultActionManager()
+    smooth = SmoothingActionManager(inner, alpha=0.5)
     a0 = smooth.next_action(policy, obs, 0, store)
     a1 = smooth.next_action(policy, obs, 1, store)
     # First action passes through; the second is the EMA of raw and previous.
     assert isinstance(a0.data, np.ndarray)
     assert a1.data.shape == (2,)
-    # Inference bookkeeping still flows from the wrapped controller.
+    # Inference bookkeeping still flows from the wrapped action manager.
     assert policy.num_inferences == 1
 
 
@@ -121,7 +121,9 @@ def test_stacked_smoothing_controllers_keep_separate_state() -> None:
     # stream is required: with a constant one the corruption is invisible.
     values = [1.0, 5.0, 2.0, 8.0, 3.0]
     obs = Observation(instruction="x")
-    outer = SmoothingController(SmoothingController(DefaultController(), alpha=0.5), alpha=0.9)
+    outer = SmoothingActionManager(
+        SmoothingActionManager(DefaultActionManager(), alpha=0.5), alpha=0.9
+    )
 
     store: dict[str, object] = {}
     policy = _VaryingPolicy(values)

@@ -27,8 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from inspect_robots.approver import GuardrailContribution
 from inspect_robots.embodiment import Embodiment, EmbodimentInfo
+from inspect_robots.guard import GuardContribution
 from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box
 
 DEVICE_KINDS = ("v4l2", "can", "serial")
@@ -358,10 +358,10 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
                 )
 
         if low is not None and high is not None:
-            from inspect_robots.approver import DeltaLimitApprover
+            from inspect_robots.guard import DeltaLimitGuard
 
             try:
-                DeltaLimitApprover(space)
+                DeltaLimitGuard(space)
             except ValueError as exc:
                 # Same refusal the CLI degradation path reports; here it is an
                 # error because a conformant adapter must be limitable.
@@ -387,28 +387,27 @@ def check_guardrail_contribution(embodiment: Embodiment, action_space: Box) -> C
     """Validate an optional contribution hook by executing plugin code.
 
     An absent attribute passes. A present attribute must be callable and must
-    return ``GuardrailContribution``. Exceptions raised by the hook propagate
+    return ``GuardContribution``. Exceptions raised by the hook propagate
     as plugin bugs. Unlike ``check_embodiment``, callers must opt in knowing
     this check can run arbitrary adapter code.
     """
     missing = object()
-    hook = getattr(embodiment, "contribute_guardrails", missing)
+    hook = getattr(embodiment, "contribute_guards", missing)
     if hook is missing:
         return ConformanceReport(embodiment=embodiment.info.name)
     if not callable(hook):
         issue = ConformanceIssue(
             "error",
             "guardrail_contribution",
-            f"contribute_guardrails is not callable (got {type(hook).__name__})",
+            f"contribute_guards is not callable (got {type(hook).__name__})",
         )
         return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     contribution = hook(action_space)
-    if not isinstance(contribution, GuardrailContribution):
+    if not isinstance(contribution, GuardContribution):
         issue = ConformanceIssue(
             "error",
             "guardrail_contribution",
-            f"contribute_guardrails returned {type(contribution).__name__}, "
-            "expected GuardrailContribution",
+            f"contribute_guards returned {type(contribution).__name__}, expected GuardContribution",
         )
         return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     return ConformanceReport(embodiment=embodiment.info.name)

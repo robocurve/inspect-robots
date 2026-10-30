@@ -74,7 +74,7 @@ def test_device_slots_valid_tuple_round_trips_in_order() -> None:
     slots = (
         DeviceSlot("left_channel", "can", "left arm CAN channel", "arms"),
         DeviceSlot("camera", "v4l2", "camera"),
-        DeviceSlot("tty", "serial", "controller serial port"),
+        DeviceSlot("tty", "serial", "action_manager serial port"),
     )
 
     class _Factory:

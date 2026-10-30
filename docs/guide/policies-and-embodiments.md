@@ -46,7 +46,7 @@ class MyVLA:
 
 The policy owns model-specific spatial preprocessing; the embodiment emits raw
 frames. Temporal concerns (history, smoothing, ensembling) live in a
-[Controller](../guide/concepts.md).
+[ActionManager](../guide/concepts.md).
 
 ## An embodiment (robot or sim)
 

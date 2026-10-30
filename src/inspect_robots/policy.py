@@ -24,7 +24,7 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.embodiment import EmbodimentInfo
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.task import TaskEnvelope
 
 
@@ -123,7 +123,7 @@ class PolicyBase(ABC):
         hook of the same name, which runs first with only scene id and epoch.
         """
 
-    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:  # noqa: B027
+    def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:  # noqa: B027
         """Optional: Hook called by eval() when a trial completes.
 
         Called for errored and cancelled trials too, except trials whose

@@ -8,7 +8,7 @@ Sinks may additionally define the duck-typed
 ``log_policy_messages(t, messages)`` extension. The rollout calls it at most
 once per control step and only when the policy performed an inference. Policy
 implementations are expected to supply plain-JSON-type messages shaped like
-``TrialRecord.policy_transcript`` entries, but core does not enforce or
+``Record.policy_transcript`` entries, but core does not enforce or
 normalize that shape on this live path, so sinks must render defensively.
 Sinks must not mutate the supplied messages. The extension deliberately stays
 off both ``LogSink`` and ``NullSink``: it must not change structural protocol
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog, EvalSpec
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.types import Action, Observation, StepResult
 
 
@@ -56,7 +56,7 @@ class LogSink(Protocol):
         """Observe one completed control transition in step order."""
         ...
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Receive the recorded trajectory (partial on error) after the trial's last step."""
         ...
 
@@ -82,7 +82,7 @@ class NullSink:
         """Provide the optional no-op for sinks that do not consume live transitions."""
         return None
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Provide the optional no-op for sinks that do not consume completed trajectories."""
         return None
 

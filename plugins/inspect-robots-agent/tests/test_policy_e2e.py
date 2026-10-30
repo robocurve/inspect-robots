@@ -25,13 +25,13 @@ import pytest
 
 import inspect_robots_agent.policy as agent_policy_module
 from inspect_robots import eval as ir_eval
-from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
-from inspect_robots.controller import DefaultController
+from inspect_robots.action_manager import DefaultActionManager
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
+from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardChain
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import (
@@ -284,9 +284,9 @@ def _task(max_steps: int = 40) -> Task:
 
 class _RecordingSink(NullSink):
     def __init__(self) -> None:
-        self.records: list[TrialRecord] = []
+        self.records: list[Record] = []
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         self.records.append(record)
 
 
@@ -627,8 +627,8 @@ def test_version_skew_warning_fires_once_across_trial_ends(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     policy = _policy(_Script([_text_response("unused")]))
-    first = TrialRecord(scene_id="s0", epoch=0, seed=0, status="success")
-    second = TrialRecord(scene_id="s0", epoch=1, seed=1, status="success")
+    first = Record(scene_id="s0", epoch=0, seed=0, status="success")
+    second = Record(scene_id="s0", epoch=1, seed=1, status="success")
 
     policy.on_trial_end(first, str(tmp_path), "run-1")
     policy.on_trial_end(second, str(tmp_path), "run-1")
@@ -1529,7 +1529,7 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
 
 
 def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> None:
-    def run(approver: Any) -> TrialRecord:
+    def run(guard: Any) -> Record:
         script = _Script(
             [
                 _tool_response("move_by", {"deltas": {"dx": 0.08}}),
@@ -1543,18 +1543,18 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
             CubePickEmbodiment(),
             log_dir=str(tmp_path),
             sinks=[sink],
-            approver=approver,
+            guard=guard,
         )
         return sink.records[0]
 
     space = CubePickEmbodiment().info.action_space
-    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.02)))
+    guarded = run(GuardChain(ClampGuard(space), DeltaLimitGuard(space, max_delta=0.02)))
     approvals = [e for e in guarded.events if e.kind == "approval"]
     assert approvals
     assert any(e.data.get("detail") == "delta_clamped" for e in approvals)
     assert float(np.asarray(guarded.steps[0].action.data)[0]) == 0.02
 
-    unguarded = run(None)  # eval()'s Python-API default is the permissive AutoApprover
+    unguarded = run(None)  # eval()'s Python-API default is the permissive PassThroughGuard
     assert not [e for e in unguarded.events if e.kind == "approval"]
     assert float(np.asarray(unguarded.steps[0].action.data)[0]) == 0.08
 
@@ -2353,7 +2353,7 @@ def test_chained_capture_reports_default_controller_partial_playout(tmp_path: Pa
         _policy(script, images="on_demand"),
         _VisionAbsoluteEmbodiment(),
         log_dir=str(tmp_path),
-        controller=DefaultController(replan_interval=1),
+        action_manager=DefaultActionManager(replan_interval=1),
     )
 
     arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
@@ -2800,7 +2800,7 @@ def test_reset_clears_usage_accumulated_by_the_previous_trial(tmp_path: Path) ->
     policy.act(Observation())
 
     policy.reset(Scene(id="fresh", instruction="wait"))
-    record = TrialRecord(scene_id="fresh", epoch=0, seed=0)
+    record = Record(scene_id="fresh", epoch=0, seed=0)
     policy.on_trial_end(record, str(tmp_path), "run")
 
     assert "llm_usage" not in record.metadata
@@ -2809,7 +2809,7 @@ def test_reset_clears_usage_accumulated_by_the_previous_trial(tmp_path: Path) ->
 def test_trial_with_zero_llm_calls_omits_usage_metadata(tmp_path: Path) -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="wait"))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     policy.on_trial_end(record, str(tmp_path), "run")
 
@@ -2977,7 +2977,7 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
     policy.on_trial_start(unsafe_id, 0, str(tmp_path), "run-1")
     policy.act(Observation())
 
-    record = TrialRecord(scene_id=unsafe_id, epoch=0, seed=0)
+    record = Record(scene_id=unsafe_id, epoch=0, seed=0)
     policy.on_trial_end(record, str(tmp_path), "run-1")
 
     # Assert wire_capture metadata and file exists at sanitized path

@@ -1,6 +1,6 @@
 """Joint-space motion synthesis for model-generated policy code.
 
-The per-step ceiling reproduces ``DeltaLimitApprover``'s declared limit or
+The per-step ceiling reproduces ``DeltaLimitGuard``'s declared limit or
 native-dtype ``0.05 * (high - low)`` arithmetic. The speed fraction may make
 the ceiling tighter, but never looser, so actions within one returned chunk
 are not silently rewritten by the CLI's default delta backstop.
@@ -73,7 +73,7 @@ class MotionQueue:
                 effective_budget[index] = entry
         # Interpolants snap to the float grid at the bounds' magnitude; if that
         # grid is coarse relative to the effective budget (offset boxes like
-        # [1e16, 1e16 + 2]), emitted steps can exceed the approver's budget.
+        # [1e16, 1e16 + 2]), emitted steps can exceed the guard's budget.
         spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
         if bool(np.any(movable & (spacing > 5e-7 * effective_budget))):
             raise ValueError(

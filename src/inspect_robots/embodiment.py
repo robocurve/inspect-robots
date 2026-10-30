@@ -10,7 +10,7 @@ on human confirmation; there is no guaranteed privileged success oracle.
 Simulators are a stricter special case that opt into extra ``capabilities``.
 
 Per R1 (see the design doc): ``rollout()`` applies no wall-clock pacing of its
-own — ``step()`` is called as fast as the policy/controller/approver can
+own — ``step()`` is called as fast as the policy/action_manager/guard can
 produce actions. An embodiment that needs real-time cadence (e.g. matching a
 real robot's control period) paces itself inside ``step()``, and declares the
 ``"self_paced"`` capability to document that it does.
@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from inspect_robots.approver import GuardrailContribution
+from inspect_robots.guard import GuardContribution
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box, ObservationSpace
 from inspect_robots.types import Action, Observation, StepResult
@@ -124,12 +124,12 @@ class Embodiment(Protocol):
     cores and adapters that have not adopted the session hook.
 
     Embodiments may also define an **optional**
-    ``contribute_guardrails(self, action_space: Box) -> GuardrailContribution``
+    ``contribute_guards(self, action_space: Box) -> GuardContribution``
     hook, likewise omitted from this Protocol so existing implementations
     remain runtime-conformant. The CLI calls it with the resolved action space
     and appends its contribution after the generic clamp and delta limiter.
     Direct ``rollout()`` and programmatic ``eval()`` callers compose their own
-    approvers, so the hook is CLI input rather than a universal callback.
+    guards, so the hook is CLI input rather than a universal callback.
     ``EmbodimentBase`` returns an empty contribution by default.
     """
 
@@ -170,9 +170,9 @@ class EmbodimentBase(ABC):
     def bind_task(self, envelope: TaskEnvelope) -> None:  # noqa: B027 - no-op default
         """Default: embodiments with nothing to display or pre-allocate ignore it."""
 
-    def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+    def contribute_guards(self, action_space: Box) -> GuardContribution:
         """Default: embodiments without specialized safety gates contribute nothing."""
-        return GuardrailContribution()
+        return GuardContribution()
 
     def close(self) -> None:  # noqa: B027 - intentional no-op default
         """Default: nothing to release."""

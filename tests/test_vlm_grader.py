@@ -16,7 +16,7 @@ from inspect_robots.frames import FrameStore
 from inspect_robots.grader import _PREFLIGHT_PROMPT, Grader, vlm_grader
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
-from inspect_robots.rollout import StepRecord, TrialRecord
+from inspect_robots.rollout import Record, StepRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
@@ -31,7 +31,7 @@ def _framed_record(
     *,
     initial: dict[str, npt.NDArray[np.uint8]] | None = None,
     final: dict[str, npt.NDArray[np.uint8]] | None = None,
-) -> TrialRecord:
+) -> Record:
     """One-step record with inline first/last frames (final defaults to one camera)."""
     steps = [
         StepRecord(
@@ -43,7 +43,7 @@ def _framed_record(
             ),
         )
     ]
-    return TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    return Record(scene_id="s", epoch=0, seed=0, steps=steps)
 
 
 class _CapturePost:
@@ -99,7 +99,7 @@ def _image_urls(parts: list[dict[str, object]]) -> list[str]:
 
 
 def test_trial_record_parked_observation_defaults_to_none() -> None:
-    record = TrialRecord(scene_id="s", epoch=0, seed=0)
+    record = Record(scene_id="s", epoch=0, seed=0)
 
     assert record.parked_observation is None
 
@@ -314,7 +314,7 @@ def test_vlm_grader_grades_zero_step_trial_from_parked_frames(
 ) -> None:
     post = _CapturePost()
     grader = _vlm(post, monkeypatch)
-    record = TrialRecord(
+    record = Record(
         scene_id="s",
         epoch=0,
         seed=0,
@@ -351,7 +351,7 @@ def test_vlm_grader_loads_frame_refs_sorted_and_capped(
             result_image_refs={"cam": store.put("trial", 1, "cam", _frame(7))},
         )
     ]
-    record = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    record = Record(scene_id="s", epoch=0, seed=0, steps=steps)
     post = _CapturePost()
     grader = _vlm(post, monkeypatch, max_cameras=2)
 
@@ -381,7 +381,7 @@ def test_vlm_grader_never_loads_frames_beyond_the_camera_cap(
             result_image_refs={"a_cam": kept, "z_cam": corrupt},
         )
     ]
-    record = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    record = Record(scene_id="s", epoch=0, seed=0, steps=steps)
     post = _CapturePost()
 
     _vlm(post, monkeypatch, max_cameras=1).grade(record, _scene())
@@ -426,7 +426,7 @@ def test_vlm_grader_degrades_without_final_frames(
 ) -> None:
     post = _CapturePost()
     grader = _vlm(post, monkeypatch)
-    empty = TrialRecord(scene_id="s", epoch=0, seed=0)
+    empty = Record(scene_id="s", epoch=0, seed=0)
     framed_but_bare = _framed_record(final={})
 
     grader.grade(empty, _scene())
@@ -454,7 +454,7 @@ def test_vlm_grader_degrades_on_frame_load_failure(
             result_image_refs={"cam": ref},
         )
     ]
-    record = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    record = Record(scene_id="s", epoch=0, seed=0, steps=steps)
     post = _CapturePost()
     grader = _vlm(post, monkeypatch)
 

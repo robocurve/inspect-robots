@@ -28,7 +28,7 @@ from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import embodiment as embodiment_decorator
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import Score, min_distance_to_goal, operator_scorer, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
@@ -99,9 +99,9 @@ class _RecordingSink(NullSink):
     """Collects the records delivered via on_trial_end."""
 
     def __init__(self) -> None:
-        self.records: list[TrialRecord] = []
+        self.records: list[Record] = []
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         self.records.append(record)
 
 
@@ -183,7 +183,7 @@ class _CountingScorer:
     def __init__(self) -> None:
         self.calls = 0
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         del record, target
         self.calls += 1
         return Score(value=1.0)
@@ -200,10 +200,10 @@ class _CaptureGrader:
     name = "capture"
 
     def __init__(self) -> None:
-        self.records: list[TrialRecord] = []
+        self.records: list[Record] = []
         self.parked_at_grade: list[object] = []
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         del scene
         self.records.append(record)
         self.parked_at_grade.append(record.parked_observation)
@@ -299,7 +299,7 @@ def test_cancelled_eval_reraises_typed_exception_with_original_cause(
     original = KeyboardInterrupt("operator interrupt")
     raised: list[_CancelledTrial] = []
 
-    def capturing_rollout(*args: object, **kwargs: object) -> TrialRecord:
+    def capturing_rollout(*args: object, **kwargs: object) -> Record:
         try:
             return actual_rollout(*args, **kwargs)  # type: ignore[arg-type]
         except _CancelledTrial as exc:
@@ -459,7 +459,7 @@ def test_categorical_scorer_with_mean_reducer_degrades_to_error_log(tmp_path: Pa
     class _CategoricalScorer:
         name = "direction"
 
-        def __call__(self, record: TrialRecord, target: object) -> object:
+        def __call__(self, record: Record, target: object) -> object:
             from inspect_robots.scorer import Score
 
             return Score(value="left")
@@ -480,7 +480,7 @@ def test_raising_scorer_degrades_to_error_log(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def __call__(self, record: TrialRecord, target: object) -> object:
+        def __call__(self, record: Record, target: object) -> object:
             from inspect_robots.scorer import Score
 
             self.calls += 1
@@ -508,7 +508,7 @@ def test_scorer_halt_signals_stop_the_eval(tmp_path: Path, halt: Exception) -> N
     class _HaltingScorer:
         name = "halting"
 
-        def __call__(self, record: TrialRecord, target: object) -> object:
+        def __call__(self, record: Record, target: object) -> object:
             raise halt
 
     class _CountingEmbodiment(CubePickEmbodiment):
@@ -548,7 +548,7 @@ def test_scorer_returning_unconvertible_value_degrades_to_error_log(
     class _BadValueScorer:
         name = "bad_value"
 
-        def __call__(self, record: TrialRecord, target: object) -> object:
+        def __call__(self, record: Record, target: object) -> object:
             from inspect_robots.scorer import Score
 
             return Score(value=object())  # type: ignore[arg-type]
@@ -568,7 +568,7 @@ class _AbstainOnEpoch:
     def __init__(self, epochs: set[int]) -> None:
         self.epochs = epochs
 
-    def __call__(self, record: TrialRecord, target: object) -> Score:
+    def __call__(self, record: Record, target: object) -> Score:
         if record.epoch in self.epochs:
             return Score(value=None, explanation="abstain: no operator verdict recorded")
         return Score(value=True)
@@ -599,7 +599,7 @@ def test_abstaining_scorer_records_no_verdict_rather_than_an_error(tmp_path: Pat
 
 def test_abstained_epochs_and_scenes_are_left_out_of_the_metric(tmp_path: Path) -> None:
     class _AbstainOnScene(_AbstainOnEpoch):
-        def __call__(self, record: TrialRecord, target: object) -> Score:
+        def __call__(self, record: Record, target: object) -> Score:
             if record.scene_id == "s1":
                 return Score(value=None)
             return super().__call__(record, target)
@@ -629,7 +629,7 @@ def test_one_failing_scorer_keeps_the_others(tmp_path: Path) -> None:
     class _BoomScorer:
         name = "boom"
 
-        def __call__(self, record: TrialRecord, target: object) -> object:
+        def __call__(self, record: Record, target: object) -> object:
             raise RuntimeError("boom")
 
     task = Task(
@@ -794,7 +794,7 @@ def test_halt_without_attached_record_still_produces_error_log(
 ) -> None:
     # Defensive path: a halting error raised without rollout's record attachment
     # (e.g. from third-party middleware) must still yield an error log.
-    def fake_rollout(*args: object, **kwargs: object) -> TrialRecord:
+    def fake_rollout(*args: object, **kwargs: object) -> Record:
         raise EmbodimentFault("fault with no record")
 
     import sys
@@ -1227,7 +1227,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
     # still yields a scored-as-error trial rather than a crash.
     class _EagerErrorController:
         def next_action(self, policy: object, obs: object, t: int, store: object) -> Action:
-            raise PolicyError("controller-level failure")
+            raise PolicyError("action_manager-level failure")
 
     sink = _RecordingSink()
     (log,) = eval(
@@ -1236,7 +1236,7 @@ def test_policy_error_without_attached_record_synthesizes_one(tmp_path: Path) ->
         CubePickEmbodiment(),
         log_dir=str(tmp_path),
         sinks=[sink],
-        controller=_EagerErrorController(),
+        action_manager=_EagerErrorController(),
     )
     assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
@@ -1289,7 +1289,7 @@ def test_before_scoring_runs_before_scorers_and_persists_judgement(tmp_path: Pat
     task = _task(scorer=operator_scorer())
     seen: list[tuple[str, int]] = []
 
-    def judge(record: TrialRecord, scene: Scene) -> None:
+    def judge(record: Record, scene: Scene) -> None:
         seen.append((scene.id, record.epoch))
         record.operator_judgement = "yes"
 
@@ -1310,7 +1310,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
     task = _task(epochs=2, scorer=operator_scorer())
     calls: list[int] = []
 
-    def judge(record: TrialRecord, scene: Scene) -> None:
+    def judge(record: Record, scene: Scene) -> None:
         calls.append(record.epoch)
         record.operator_judgement = "yes"
         record.operator_note = "clean pickup"
@@ -1330,7 +1330,7 @@ def test_before_scoring_skipped_for_errored_trials(tmp_path: Path) -> None:
 
 
 def test_before_scoring_exception_propagates(tmp_path: Path) -> None:
-    def bad_hook(record: TrialRecord, scene: Scene) -> None:
+    def bad_hook(record: Record, scene: Scene) -> None:
         raise RuntimeError("hook exploded")
 
     with pytest.raises(RuntimeError, match="hook exploded"):
@@ -1350,7 +1350,7 @@ def test_before_scoring_default_none_records_no_judgements(tmp_path: Path) -> No
 
 
 def test_eval_set_forwards_before_scoring(tmp_path: Path) -> None:
-    def judge(record: TrialRecord, scene: Scene) -> None:
+    def judge(record: Record, scene: Scene) -> None:
         record.operator_judgement = "pass"
 
     success, logs = eval_set(
@@ -1551,7 +1551,7 @@ def test_eval_begins_console_each_trial_and_discards_scoring_window_input(
         ]
     )
 
-    def type_during_scoring(record: TrialRecord, scene: Scene) -> None:
+    def type_during_scoring(record: Record, scene: Scene) -> None:
         del scene
         if record.epoch == 0:
             operator_input.pending_messages.append("typed during scoring")
@@ -1670,7 +1670,7 @@ def test_raising_on_trial_start_skips_rollout_but_keeps_results_parallel(
             self.acts.append(self.current_epoch)
             return super().act(observation)
 
-        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
             self.ends.append(record.epoch)
 
     policy = _StartFailurePolicy()
@@ -1735,7 +1735,7 @@ def test_on_trial_end_hook_persists_metadata_and_recovers_from_errors(tmp_path: 
     seen_ids: list[str] = []
 
     class _HookPolicy(ScriptedPolicy):
-        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
             # First epoch works, second raises exception
             seen_ids.append(run_id)
             if record.epoch == 0:
@@ -1767,7 +1767,7 @@ def test_operator_fields_are_captured_before_the_on_trial_end_hook(tmp_path: Pat
     # runs too late for both: if one append ever drifts past on_trial_end, this
     # sees that tuple populated while the other is still (None,), and fails.
     class _LateJudgePolicy(ScriptedPolicy):
-        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
             record.operator_judgement = "y"
             record.operator_note = "written too late to be recorded"
 
@@ -1782,7 +1782,7 @@ def test_on_trial_end_hook_error_on_already_errored_trial(tmp_path: Path) -> Non
     # A test to cover the branch where status is ALREADY "error" when the hook throws.
     # This happens if a previous epoch's hook already failed, setting global status="error".
     class _DoubleCrashPolicy(ScriptedPolicy):
-        def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+        def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
             raise RuntimeError("hook exploded")
 
     # We run 2 epochs. Epoch 0 throws in hook, setting status="error".
@@ -1898,7 +1898,7 @@ class _UngradedGrader:
         self.epochs = epochs
         self.also_judge = also_judge
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         if record.epoch in self.epochs:
             record.metadata["grading_error"] = "grading request failed with HTTP 400: nope"
             if self.also_judge:
@@ -2033,7 +2033,7 @@ def test_eval_isolates_failing_sink_and_preserves_logs_and_other_sinks(tmp_path:
         ) -> None:
             raise RuntimeError("log_step crashed")
 
-        def on_trial_end(self, record: TrialRecord) -> None:
+        def on_trial_end(self, record: Record) -> None:
             raise RuntimeError("on_trial_end crashed")
 
         def on_eval_end(self, log: EvalLog) -> None:

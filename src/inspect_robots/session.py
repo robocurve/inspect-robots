@@ -29,7 +29,7 @@ from inspect_robots.console import (
 from inspect_robots.errors import EmbodimentFault
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scene import Scene
 
 
@@ -677,7 +677,7 @@ class OperatorSession:
                 message = f"{message} {hint}"
             raise EmbodimentFault(message) from exc
 
-    def prompt_verdict(self, record: TrialRecord, scene: Scene) -> None:
+    def prompt_verdict(self, record: Record, scene: Scene) -> None:
         """Capture or adopt the terminal operator's verdict on the trial record (R6).
 
         Any sticky status is closed before output or prompting, and stale stdin is

@@ -38,7 +38,7 @@ from inspect_robots.task import TaskEnvelope
 from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._gemini_live import GeminiLiveClient
@@ -1003,7 +1003,7 @@ class LLMAgentPolicy(PolicyBase):
         if self._capture is not None:
             self._capture.begin_trial(log_dir, run_id, f"{_safe(scene_id)}-e{epoch}")
 
-    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+    def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
         """Persist wire capture, hindsight, usage, and the transcript at trial end."""
         if isinstance(self._client, GeminiLiveClient):
             # Trial finalization must stay successful even if a half-dead Live

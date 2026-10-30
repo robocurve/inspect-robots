@@ -2,7 +2,7 @@
 
 Model output is executed in-process with the evaluator's privileges. This is
 the policy under evaluation, not a security boundary. Robot actions still pass
-through the rollout's approver chain, but untrusted models must run inside an
+through the rollout's guard chain, but untrusted models must run inside an
 external container or equivalent isolation.
 """
 

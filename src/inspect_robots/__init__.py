@@ -48,7 +48,7 @@ from inspect_robots.registry import (
     sink,
     task,
 )
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import (
     Score,
@@ -105,6 +105,7 @@ __all__ = [
     "PolicyBase",
     "PolicyConfig",
     "PolicyInfo",
+    "Record",
     "Scene",
     "SceneResult",
     "Score",
@@ -115,7 +116,6 @@ __all__ = [
     "Target",
     "Task",
     "TaskEnvelope",
-    "TrialRecord",
     "__version__",
     "defaults",
     "embodiment",

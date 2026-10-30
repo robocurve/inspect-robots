@@ -152,8 +152,8 @@ def test_invalid_worker_count(workers: Any, tmp_path: Path) -> None:
         {"embodiment": CubePickEmbodiment()},
         {"grader": object()},
         {"sinks": []},
-        {"controller": object()},
-        {"approver": object()},
+        {"action_manager": object()},
+        {"guard": object()},
         {"operator_input": object()},
         {"before_scoring": lambda *_: None},
     ],
@@ -486,7 +486,7 @@ def test_parallel_api_really_overlaps_and_owns_graders(
     components: tuple[list[ScriptedPolicy], list[CubePickEmbodiment]],
 ) -> None:
     import inspect_robots.registry as registry
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
     barrier = Barrier(2)
     graders: list[object] = []
@@ -497,7 +497,7 @@ def test_parallel_api_really_overlaps_and_owns_graders(
         def __init__(self) -> None:
             graders.append(self)
 
-        def grade(self, record: TrialRecord, scene: Scene) -> None:
+        def grade(self, record: Record, scene: Scene) -> None:
             barrier.wait(timeout=5)
 
     monkeypatch.setitem(registry._FACTORIES["grader"], "parallel-grader", Grader)
@@ -522,7 +522,7 @@ def test_parallel_grader_rejection_stops_before_constructing_components(
     components: tuple[list[ScriptedPolicy], list[CubePickEmbodiment]],
 ) -> None:
     import inspect_robots.registry as registry
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
     barrier = Barrier(2)
     factory_calls: list[bool] = []
@@ -536,7 +536,7 @@ def test_parallel_grader_rejection_stops_before_constructing_components(
             preflight_calls.append(self)
             raise ConfigError("parallel grader preflight rejected")
 
-        def grade(self, record: TrialRecord, scene: Scene) -> None:
+        def grade(self, record: Record, scene: Scene) -> None:
             pytest.fail("a rejecting grader must never grade")
 
     def make_grader() -> RejectingParallelGrader:
@@ -686,13 +686,13 @@ def test_cli_parallel_policy_without_close_and_failed_task(
     import inspect_robots.registry as registry
 
     monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", str(tmp_path / "missing.ini"))
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scorer import Score
 
     class FailingScorer:
         name = "failing"
 
-        def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+        def __call__(self, record: Record, target: Target | None) -> Score:
             raise ValueError("scorer failed")
 
     monkeypatch.setitem(

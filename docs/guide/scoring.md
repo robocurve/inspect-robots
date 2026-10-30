@@ -1,7 +1,7 @@
 # Scoring
 
 A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded
-[`TrialRecord`](../../src/inspect_robots/rollout.py) (plus the scene's
+[`Record`](../../src/inspect_robots/rollout.py) (plus the scene's
 [`Target`](../../src/inspect_robots/scene.py)) to a [`Score`](../../src/inspect_robots/scorer.py). Scorers
 read the *recorded* trajectory (never a live environment), so scoring is
 reproducible from a saved log.

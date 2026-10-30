@@ -3,7 +3,7 @@
 R6 splits judging in two. A grader captures the success judgement once per
 scored trial, after the rollout returns and before scorers run; it may be
 interactive (a human prompt) or expensive (a VLM call), and it mutates the
-[`TrialRecord`][inspect_robots.rollout.TrialRecord]. Scorers stay pure readers
+[`Record`][inspect_robots.rollout.Record]. Scorers stay pure readers
 of the record, so re-scoring a saved log remains deterministic.
 """
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
-    from inspect_robots.rollout import StepRecord, TrialRecord
+    from inspect_robots.rollout import Record, StepRecord
     from inspect_robots.scene import Scene
     from inspect_robots.session import OperatorSession
 
@@ -51,7 +51,7 @@ class Grader(Protocol):
     name: str
     """Registry name identifying this grader in logs and CLI output."""
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Capture (or decline to capture) a judgement for one trial."""
         ...
 
@@ -68,7 +68,7 @@ class _OperatorGrader:
         """Adopt the run's session so prompts share the run's terminal seams."""
         self._session = session
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Delegate to ``OperatorSession.prompt_verdict`` (R6 capture).
 
         Without a connected session (e.g. ``eval(grader="operator")`` from the
@@ -124,9 +124,7 @@ def _phase_frames(
     return [(camera, refs[camera].load()) for camera in sorted(refs)[:max_cameras]]
 
 
-def _parked_frames(
-    record: TrialRecord, max_cameras: int
-) -> list[tuple[str, npt.NDArray[np.uint8]]]:
+def _parked_frames(record: Record, max_cameras: int) -> list[tuple[str, npt.NDArray[np.uint8]]]:
     """Collect deterministic, capped frames from a fresh parked observation."""
     observation = record.parked_observation
     if observation is None or not observation.images:
@@ -289,7 +287,7 @@ class _VLMGrader:
                 parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
         return [{"role": "user", "content": parts}]
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Capture a model judgement, or degrade to an ungraded trial (R6).
 
         Adopts an existing console verdict or a definitive embodiment

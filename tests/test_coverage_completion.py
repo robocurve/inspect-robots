@@ -14,23 +14,27 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import inspect_robots.controller as controller_mod
+import inspect_robots.action_manager as controller_mod
 import inspect_robots.registry as reg
 from inspect_robots import eval
-from inspect_robots.approver import AutoApprover, ClampApprover
+from inspect_robots.action_manager import (
+    DefaultActionManager,
+    EnsemblingActionManager,
+    SmoothingActionManager,
+)
 from inspect_robots.cli import _parse_kvs, main
 from inspect_robots.compat import check_compatibility
-from inspect_robots.controller import DefaultController, EnsemblingController, SmoothingController
 from inspect_robots.defaults import _parse_value
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import EmbodimentFault, PolicyError
 from inspect_robots.eval import _git_commit, _should_fail
+from inspect_robots.guard import ClampGuard, PassThroughGuard
 from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import register, registered, resolve
-from inspect_robots.rollout import StepRecord, TrialRecord, rollout
+from inspect_robots.rollout import Record, StepRecord, rollout
 from inspect_robots.scene import ListSceneDataset, Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end, value_to_float
 from inspect_robots.spaces import ActionSemantics, Box, ObservationSpace
@@ -52,18 +56,18 @@ def _task(*scenes: Scene, max_steps: int = 10) -> Task:
 
 
 # --------------------------------------------------------------------------- #
-# approver
+# guard
 # --------------------------------------------------------------------------- #
 def test_clamp_approver_passthrough_when_unbounded() -> None:
-    approver = ClampApprover(Box(shape=(2,)))  # no low/high
+    guard = ClampGuard(Box(shape=(2,)))  # no low/high
     action = Action(data=np.array([9.0, 9.0]))
-    assert approver.review(action, {}) is action
+    assert guard.review(action, {}) is action
 
 
 def test_clamp_approver_passthrough_when_in_bounds() -> None:
-    approver = ClampApprover(Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0])))
+    guard = ClampGuard(Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0])))
     action = Action(data=np.array([0.5, -0.5]))
-    assert approver.review(action, {}) is action
+    assert guard.review(action, {}) is action
 
 
 # --------------------------------------------------------------------------- #
@@ -125,24 +129,24 @@ def test_cli_inspect_error_log(tmp_path: Path, capsys: pytest.CaptureFixture[str
 
 
 # --------------------------------------------------------------------------- #
-# controller
+# action manager
 # --------------------------------------------------------------------------- #
 def test_controller_validation_raises() -> None:
     with pytest.raises(ValueError):
-        DefaultController(replan_interval=0)
+        DefaultActionManager(replan_interval=0)
     with pytest.raises(ValueError):
-        SmoothingController(DefaultController(), alpha=0.0)
+        SmoothingActionManager(DefaultActionManager(), alpha=0.0)
     with pytest.raises(ValueError):
-        EnsemblingController(Box(shape=(2,), semantics=_CUBE_SEM), m=-1.0)
+        EnsemblingActionManager(Box(shape=(2,), semantics=_CUBE_SEM), m=-1.0)
 
 
 def test_ensembling_warns_per_instance() -> None:
     # No global warn-once state: every instance constructed without semantics
     # warns, independent of construction order elsewhere in the process.
     with pytest.warns(RuntimeWarning):
-        EnsemblingController(Box(shape=(2,)))
+        EnsemblingActionManager(Box(shape=(2,)))
     with pytest.warns(RuntimeWarning):
-        EnsemblingController(Box(shape=(2,)))
+        EnsemblingActionManager(Box(shape=(2,)))
 
 
 def test_default_controller_records_actual_buffered_count() -> None:
@@ -152,7 +156,7 @@ def test_default_controller_records_actual_buffered_count() -> None:
     embodiment = CubePickEmbodiment()
     obs = embodiment.reset(_SCENE, seed=0)
     store: dict[str, object] = {}
-    DefaultController(replan_interval=10).next_action(policy, obs, 0, store)
+    DefaultActionManager(replan_interval=10).next_action(policy, obs, 0, store)
     inferences = store[controller_mod._INFER_KEY]
     assert inferences[-1][1] == 4  # type: ignore[index]
 
@@ -219,7 +223,7 @@ def test_value_to_float_string_paths() -> None:
 
 
 def test_min_distance_without_signal() -> None:
-    record = TrialRecord(
+    record = Record(
         scene_id="s",
         epoch=0,
         seed=0,
@@ -258,8 +262,8 @@ def _rollout(policy: object, embodiment: object):  # type: ignore[no-untyped-def
         max_steps=20,
         seed=0,
         epoch=0,
-        controller=DefaultController(),
-        approver=AutoApprover(),
+        action_manager=DefaultActionManager(),
+        guard=PassThroughGuard(),
         sink=NullSink(),
     )
 
@@ -323,7 +327,7 @@ def test_transcript_event_helpers() -> None:
 def test_null_sink_lifecycle() -> None:
     sink = NullSink()
     obs = Observation()
-    record = TrialRecord(scene_id="s", epoch=0, seed=0)
+    record = Record(scene_id="s", epoch=0, seed=0)
     sink.on_eval_start(None)  # type: ignore[arg-type]
     sink.on_trial_start("s", 0)
     sink.log_step(0, obs, Action(data=np.zeros(2)), StepResult(observation=obs))

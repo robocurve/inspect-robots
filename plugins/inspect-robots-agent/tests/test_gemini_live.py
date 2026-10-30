@@ -16,7 +16,7 @@ from websockets.sync.server import ServerConnection
 import inspect_robots_agent._gemini_live as live_module
 from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots_agent import GeminiLiveClient, LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
@@ -728,7 +728,7 @@ def test_policy_trial_end_closes_and_next_trial_reopens_lazily(
     assert isinstance(policy._client, GeminiLiveClient)
     policy._client.complete(_messages(_observation("same")), [])
     policy.on_trial_end(
-        TrialRecord(scene_id="s0", epoch=0, seed=0, status="success"),
+        Record(scene_id="s0", epoch=0, seed=0, status="success"),
         str(tmp_path),
         "run",
     )
@@ -757,7 +757,7 @@ def test_trial_end_is_clean_when_server_is_already_gone(
     server.stop()
 
     policy.on_trial_end(
-        TrialRecord(scene_id="s0", epoch=0, seed=0, status="success"),
+        Record(scene_id="s0", epoch=0, seed=0, status="success"),
         str(tmp_path),
         "run",
     )

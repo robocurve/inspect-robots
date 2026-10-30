@@ -183,7 +183,7 @@ constructor hardware-free; connect in `reset()`).
 | `bounds` | Finite `low`/`high` on every dim. Without them the bounds clamp is skipped and no default delta limit can be derived. |
 | `dim_labels` | Every dim is named (`("left_j0", ..., "right_gripper")`), uniquely. The agent moves joints by these names. |
 | `state_alignment` | Absolute-target modes (`joint_pos`, `eef_abs_pose`) declare exactly one `StateSpec` field with `shape == (action_dim,)`: the proprioceptive reference the agent interpolates from. |
-| `guardrails` | `DeltaLimitApprover(action_space)` constructs. This catches absolute pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`), and displacement pose modes (`eef_delta_pose`) whose rotation representation's identity is not the zero vector (`quat_*`, `rot6d`; use `none`, `axis_angle`, or `euler_xyz`). |
+| `guardrails` | `DeltaLimitGuard(action_space)` constructs. This catches absolute pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`), and displacement pose modes (`eef_delta_pose`) whose rotation representation's identity is not the zero vector (`quat_*`, `rot6d`; use `none`, `axis_angle`, or `euler_xyz`). |
 
 ### Warnings
 
@@ -222,6 +222,6 @@ The reference adapters (`inspect-robots-yam`, `plugins/inspect-robots-isaacsim`)
 share a shape worth reusing: hardware access behind injected seams (driver
 factory, camera reader, clock) so the full suite runs in CI; scalar-only
 constructor kwargs so `-E key=value` works from the CLI; a hard safety clamp
-inside `step()` independent of any approver; 100% coverage with the real
+inside `step()` independent of any guard; 100% coverage with the real
 drivers behind `pragma: no cover` seams; and a preflight or `doctor` run
 documented as the first step on new hardware.

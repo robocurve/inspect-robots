@@ -819,7 +819,7 @@ def build_toolset(
     low64 = np.asarray(low, dtype=np.float64)
     high64 = np.asarray(high, dtype=np.float64)
     # The range must be finite in the box's native dtype, not just in float64:
-    # DeltaLimitApprover subtracts without promoting, so float32 bounds like
+    # DeltaLimitGuard subtracts without promoting, so float32 bounds like
     # [-3e38, 3e38] overflow for it even though the float64 difference is fine.
     with np.errstate(over="ignore"):
         native_range = np.asarray(high - low, dtype=np.float64)
@@ -827,7 +827,7 @@ def build_toolset(
         raise ToolsetError("action-space range (high - low) overflows; bounds are too large")
     if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
         raise ToolsetError("displacement control bounds must contain zero in every dimension")
-    # DeltaLimitApprover derives undeclared dimensions in the box's native
+    # DeltaLimitGuard derives undeclared dimensions in the box's native
     # dtype; reproduce that arithmetic exactly before substituting declarations.
     native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
     step_limits = np.zeros_like(high64)

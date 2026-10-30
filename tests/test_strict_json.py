@@ -2,7 +2,7 @@
 
 The written eval log must be parseable by any conforming JSON parser: no
 ``Infinity``/``NaN`` literals (non-finite floats become ``null``). A non-finite
-action introduced by an approver halts the eval as ``SafetyAbort``, and the log
+action introduced by a guard halts the eval as ``SafetyAbort``, and the log
 still reaches disk.
 """
 
@@ -18,7 +18,7 @@ import pytest
 from inspect_robots import eval, read_eval_log
 from inspect_robots.logging.json_log import _sanitize
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import min_distance_to_goal, success_at_end
 from inspect_robots.task import Task
@@ -130,8 +130,8 @@ def test_inf_metric_written_as_null(tmp_path: Path) -> None:
 
 def test_nan_action_halts_as_safety_abort_and_log_reaches_disk(tmp_path: Path) -> None:
     embodiment = CubePickEmbodiment()
-    approver = _NaNApprover()
-    (log,) = eval(_task(), ScriptedPolicy(), embodiment, approver=approver, log_dir=str(tmp_path))
+    guard = _NaNApprover()
+    (log,) = eval(_task(), ScriptedPolicy(), embodiment, guard=guard, log_dir=str(tmp_path))
     assert log.status == "error"
     assert log.error is not None and "non-finite" in log.error
     assert "_NaNApprover" in log.error
@@ -190,7 +190,7 @@ def test_scene_instruction_and_judgements_serialize_strict(tmp_path: Path) -> No
 
 def test_populated_operator_judgement_and_note_serialize_strict(tmp_path: Path) -> None:
     # A captured judgement and grader note both survive the strict JSON sink.
-    def judge(record: TrialRecord, scene: Scene) -> None:
+    def judge(record: Record, scene: Scene) -> None:
         record.operator_judgement = "y"
         record.operator_note = "Gripper Closed Early"
 
@@ -228,7 +228,7 @@ def test_policy_transcript_non_finite_floats_write_as_null(tmp_path: Path) -> No
 
 
 def test_numpy_float_non_finite_writes_as_null(tmp_path: Path) -> None:
-    def hook(record: TrialRecord, scene: Scene) -> None:
+    def hook(record: Record, scene: Scene) -> None:
         record.metadata["np_nan32"] = np.float32(np.nan)
         record.metadata["np_inf32"] = np.float32(np.inf)
         record.metadata["np_fine32"] = np.float32(3.14)
@@ -251,7 +251,7 @@ def test_numpy_float_non_finite_writes_as_null(tmp_path: Path) -> None:
 
 
 def test_numpy_integer_and_bool_metadata_preserved(tmp_path: Path) -> None:
-    def hook(record: TrialRecord, scene: Scene) -> None:
+    def hook(record: Record, scene: Scene) -> None:
         record.metadata["np_int64"] = np.int64(7)
         record.metadata["np_int32"] = np.int32(-42)
         record.metadata["np_uint8"] = np.uint8(255)

@@ -7070,10 +7070,10 @@ def test_build_guardrails_full_chain_on_bounded_displacement_space() -> None:
     from inspect_robots.types import Action
 
     space = CubePickEmbodiment().info.action_space
-    approver, active, warnings = _build_guardrails(space, None)
+    guard, active, warnings = _build_guardrails(space, None)
     assert active == ["clamp", "delta-limit"]
     assert warnings == []
-    out = approver.review(Action(data=np.array([5.0, 5.0])), {})
+    out = guard.review(Action(data=np.array([5.0, 5.0])), {})
     assert out.meta.get("clamped") is True  # box bounds enforced
 
 
@@ -7084,8 +7084,8 @@ def test_contributed_guardrail_follows_delta_limit_and_has_exact_banner(
 
     import numpy as np
 
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
     from inspect_robots.types import Action
@@ -7098,14 +7098,14 @@ def test_contributed_guardrail_follows_delta_limit_and_has_exact_banner(
             return action
 
     class _ContributingEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
-            return GuardrailContribution(approvers=(("collision", _Observer()),))
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
+            return GuardContribution(guards=(("collision", _Observer()),))
 
     embodiment = _ContributingEmbodiment()
     args = argparse.Namespace(disable_guardrails=False, max_action_delta=0.05)
-    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
-    assert approver is not None
-    approver.review(Action(data=np.array([0.08, 0.0])), {})
+    guard = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert guard is not None
+    guard.review(Action(data=np.array([0.08, 0.0])), {})
 
     assert seen == [0.05]
     assert capsys.readouterr().out == "guardrails: clamp + delta-limit + collision\n"
@@ -7114,8 +7114,8 @@ def test_contributed_guardrail_follows_delta_limit_and_has_exact_banner(
 def test_contributed_approvers_keep_declaration_order_and_warnings() -> None:
     import numpy as np
 
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.cli import _build_guardrails
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
     from inspect_robots.types import Action
@@ -7131,9 +7131,9 @@ def test_contributed_approvers_keep_declaration_order_and_warnings() -> None:
             return action
 
     class _ContributingEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
-            return GuardrailContribution(
-                approvers=(
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
+            return GuardContribution(
+                guards=(
                     ("first", _Recorder("first")),
                     ("second", _Recorder("second")),
                 ),
@@ -7141,8 +7141,8 @@ def test_contributed_approvers_keep_declaration_order_and_warnings() -> None:
             )
 
     embodiment = _ContributingEmbodiment()
-    approver, active, warnings = _build_guardrails(embodiment.info.action_space, None, embodiment)
-    approver.review(Action(data=np.array([0.01, 0.01])), {})
+    guard, active, warnings = _build_guardrails(embodiment.info.action_space, None, embodiment)
+    guard.review(Action(data=np.array([0.01, 0.01])), {})
 
     assert calls == ["first", "second"]
     assert active == ["clamp", "delta-limit", "first", "second"]
@@ -7156,23 +7156,23 @@ def test_warnings_only_contribution_keeps_the_generic_chain(
 
     import numpy as np
 
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
     from inspect_robots.types import Action
 
     class _WarningEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
-            return GuardrailContribution(warnings=("collision guardrail unavailable",))
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
+            return GuardContribution(warnings=("collision guardrail unavailable",))
 
     embodiment = _WarningEmbodiment()
     args = argparse.Namespace(disable_guardrails=False, max_action_delta=None)
-    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
-    assert approver is not None
+    guard = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert guard is not None
     action = Action(data=np.array([0.01, 0.01]))
 
-    assert approver.review(action, {}) is action
+    assert guard.review(action, {}) is action
     captured = capsys.readouterr()
     assert captured.out == "guardrails: clamp + delta-limit\n"
     assert captured.err == "guardrails warning: collision guardrail unavailable\n"
@@ -7183,7 +7183,7 @@ def test_non_callable_guardrail_hook_is_a_hard_error() -> None:
     from inspect_robots.mock import CubePickEmbodiment
 
     class _BrokenEmbodiment(CubePickEmbodiment):
-        contribute_guardrails = 7
+        contribute_guards = 7
 
     embodiment = _BrokenEmbodiment()
     with pytest.raises(SystemExit, match=r"cubepick.*int"):
@@ -7195,7 +7195,7 @@ def test_none_guardrail_hook_is_a_hard_error() -> None:
     from inspect_robots.mock import CubePickEmbodiment
 
     class _BrokenEmbodiment(CubePickEmbodiment):
-        contribute_guardrails = None
+        contribute_guards = None
 
     embodiment = _BrokenEmbodiment()
     with pytest.raises(SystemExit, match=r"cubepick.*NoneType"):
@@ -7208,7 +7208,7 @@ def test_wrong_guardrail_contribution_type_is_a_hard_error() -> None:
     from inspect_robots.spaces import Box
 
     class _BrokenEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> object:
+        def contribute_guards(self, action_space: Box) -> object:
             return "not a contribution"
 
     embodiment = _BrokenEmbodiment()
@@ -7219,8 +7219,8 @@ def test_wrong_guardrail_contribution_type_is_a_hard_error() -> None:
 def test_contribution_is_the_only_gate_for_an_unbounded_space() -> None:
     import numpy as np
 
-    from inspect_robots.approver import ChainApprover, GuardrailContribution
     from inspect_robots.cli import _build_guardrails
+    from inspect_robots.guard import GuardChain, GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
     from inspect_robots.types import Action
@@ -7233,16 +7233,16 @@ def test_contribution_is_the_only_gate_for_an_unbounded_space() -> None:
             return action
 
     class _ContributingEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
-            return GuardrailContribution(approvers=(("only-gate", _OnlyGate()),))
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
+            return GuardContribution(guards=(("only-gate", _OnlyGate()),))
 
     embodiment = _ContributingEmbodiment()
     space = Box(shape=(2,))
-    approver, active, warnings = _build_guardrails(space, None, embodiment)
+    guard, active, warnings = _build_guardrails(space, None, embodiment)
     action = Action(data=np.array([4.0, 5.0]))
 
-    assert isinstance(approver, ChainApprover)
-    assert approver.review(action, {}) is action
+    assert isinstance(guard, GuardChain)
+    assert guard.review(action, {}) is action
     assert calls == [action]
     assert active == ["only-gate"]
     assert not any("no guardrails" in warning for warning in warnings)
@@ -7253,31 +7253,31 @@ def test_disable_guardrails_does_not_invoke_contribution(
 ) -> None:
     import argparse
 
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.cli import _build_and_announce_guardrails
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
 
     calls: list[Box] = []
 
     class _ContributingEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
             calls.append(action_space)
-            return GuardrailContribution()
+            return GuardContribution()
 
     embodiment = _ContributingEmbodiment()
     args = argparse.Namespace(disable_guardrails=True, max_action_delta=None)
 
-    approver = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
-    assert approver is None
+    guard = _build_and_announce_guardrails(args, embodiment.info.action_space, embodiment)
+    assert guard is None
     assert calls == []
     assert "guardrails: disabled" in capsys.readouterr().out
 
 
 def test_embodiment_base_default_matches_an_absent_hook() -> None:
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.cli import _build_guardrails
     from inspect_robots.embodiment import EmbodimentBase
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.scene import Scene
     from inspect_robots.types import Action, StepResult
@@ -7299,22 +7299,22 @@ def test_embodiment_base_default_matches_an_absent_hook() -> None:
     _, absent_active, absent_warnings = _build_guardrails(absent.info.action_space, None, absent)
     _, base_active, base_warnings = _build_guardrails(base.info.action_space, None, base)
 
-    assert base.contribute_guardrails(base.info.action_space) == GuardrailContribution()
+    assert base.contribute_guards(base.info.action_space) == GuardContribution()
     assert (base_active, base_warnings) == (absent_active, absent_warnings)
 
 
 def test_guardrail_contribution_conformance_passes_absent_and_valid_hooks() -> None:
-    from inspect_robots.approver import GuardrailContribution
     from inspect_robots.conformance import (
         assert_guardrail_contribution_conformant,
         check_guardrail_contribution,
     )
+    from inspect_robots.guard import GuardContribution
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.spaces import Box
 
     class _ValidEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> GuardrailContribution:
-            return GuardrailContribution()
+        def contribute_guards(self, action_space: Box) -> GuardContribution:
+            return GuardContribution()
 
     absent = CubePickEmbodiment()
     valid = _ValidEmbodiment()
@@ -7333,10 +7333,10 @@ def test_guardrail_contribution_conformance_reports_bad_hooks() -> None:
     from inspect_robots.spaces import Box
 
     class _NonCallableEmbodiment(CubePickEmbodiment):
-        contribute_guardrails = 7
+        contribute_guards = 7
 
     class _WrongTypeEmbodiment(CubePickEmbodiment):
-        def contribute_guardrails(self, action_space: Box) -> object:
+        def contribute_guards(self, action_space: Box) -> object:
             return "not a contribution"
 
     non_callable = _NonCallableEmbodiment()
@@ -7349,7 +7349,7 @@ def test_guardrail_contribution_conformance_reports_bad_hooks() -> None:
     report = check_guardrail_contribution(wrong_type, wrong_type.info.action_space)
     assert not report.ok
     assert "str" in report.summary()
-    with pytest.raises(AssertionError, match="GuardrailContribution"):
+    with pytest.raises(AssertionError, match="GuardContribution"):
         assert_guardrail_contribution_conformant(wrong_type, wrong_type.info.action_space)
 
 
@@ -7360,8 +7360,8 @@ def test_build_guardrails_threads_max_action_delta() -> None:
     from inspect_robots.mock import CubePickEmbodiment
     from inspect_robots.types import Action
 
-    approver, _, _ = _build_guardrails(CubePickEmbodiment().info.action_space, 0.05)
-    out = approver.review(Action(data=np.array([0.08, 0.0])), {})
+    guard, _, _ = _build_guardrails(CubePickEmbodiment().info.action_space, 0.05)
+    out = guard.review(Action(data=np.array([0.08, 0.0])), {})
     assert float(out.data[0]) == pytest.approx(0.05)
     assert out.meta.get("delta_clamped") is True
 
@@ -8319,7 +8319,7 @@ def test_no_prompt_with_explicit_operator_grader_is_a_conflict() -> None:
 def test_explicit_custom_config_grader_is_honored_unattended(
     _hermetic_defaults: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scene import Scene
 
     graded: list[str] = []
@@ -8327,7 +8327,7 @@ def test_explicit_custom_config_grader_is_honored_unattended(
     class _MarkerGrader:
         name = "marker"
 
-        def grade(self, record: TrialRecord, scene: Scene) -> None:
+        def grade(self, record: Record, scene: Scene) -> None:
             graded.append(record.scene_id)
             record.operator_judgement = "y"
 
@@ -8383,13 +8383,13 @@ def _run_adhoc_args(log_dir: Path) -> list[str]:
 
 
 def _register_argcap_grader(captured: list[dict[str, object]]) -> None:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scene import Scene
 
     class _ArgcapGrader:
         name = "argcap"
 
-        def grade(self, record: TrialRecord, scene: Scene) -> None:
+        def grade(self, record: Record, scene: Scene) -> None:
             record.operator_judgement = "y"
 
     def factory(**kwargs: object) -> _ArgcapGrader:

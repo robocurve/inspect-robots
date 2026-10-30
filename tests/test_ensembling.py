@@ -1,4 +1,4 @@
-"""Temporal-ensembling controller: blend math, cadence, eviction, semantics."""
+"""Temporal-ensembling action manager: blend math, cadence, eviction, semantics."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.controller import EnsemblingController
+from inspect_robots.action_manager import EnsemblingActionManager
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
@@ -39,7 +39,7 @@ class _FixedChunkPolicy:
 
 def test_blend_uniform_is_mean_at_overlap() -> None:
     policy = _FixedChunkPolicy([1.0, 0.0], [0.0, 1.0])
-    ctrl = EnsemblingController(_DELTA_SPACE, m=0.0)
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.0)
     store: dict[str, object] = {}
     obs = Observation()
     a0 = ctrl.next_action(policy, obs, 0, store)
@@ -51,7 +51,7 @@ def test_blend_uniform_is_mean_at_overlap() -> None:
 
 def test_large_m_favors_oldest() -> None:
     policy = _FixedChunkPolicy([1.0, 0.0], [0.0, 1.0])
-    ctrl = EnsemblingController(_DELTA_SPACE, m=50.0)
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=50.0)
     store: dict[str, object] = {}
     obs = Observation()
     ctrl.next_action(policy, obs, 0, store)
@@ -62,7 +62,7 @@ def test_large_m_favors_oldest() -> None:
 
 def test_buffer_eviction_bounded_by_chunk_len() -> None:
     policy = _FixedChunkPolicy([0.1, 0.0], [0.0, 0.1], chunk_len=3)
-    ctrl = EnsemblingController(_DELTA_SPACE, m=0.1)
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.1)
     store: dict[str, object] = {}
     obs = Observation()
     for t in range(10):
@@ -72,33 +72,33 @@ def test_buffer_eviction_bounded_by_chunk_len() -> None:
 
 def test_inference_every_step() -> None:
     policy = _FixedChunkPolicy([0.1, 0.0], [0.0, 0.1])
-    ctrl = EnsemblingController(_DELTA_SPACE, m=0.1)
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.1)
     store: dict[str, object] = {}
     obs = Observation()
     for t in range(6):
         ctrl.next_action(policy, obs, t, store)
-    assert policy.num_inferences == 6  # re-infers every step (vs DefaultController)
+    assert policy.num_inferences == 6  # re-infers every step (vs DefaultActionManager)
 
 
 def test_rejects_unaverageable_semantics() -> None:
     with pytest.raises(ValueError, match="rotation_repr"):
-        EnsemblingController(
+        EnsemblingActionManager(
             Box(shape=(7,), semantics=ActionSemantics("eef_abs_pose", rotation_repr="quat_wxyz"))
         )
     with pytest.raises(ValueError, match="binary gripper"):
-        EnsemblingController(
+        EnsemblingActionManager(
             Box(shape=(3,), semantics=ActionSemantics("eef_delta_pos", gripper="binary"))
         )
 
 
 def test_accepts_joint_delta_semantics() -> None:
     # joint_delta is linearly averageable; the constructor must not refuse it.
-    EnsemblingController(Box(shape=(2,), semantics=ActionSemantics("joint_delta")))
+    EnsemblingActionManager(Box(shape=(2,), semantics=ActionSemantics("joint_delta")))
 
 
 def test_warns_when_semantics_missing() -> None:
     with pytest.warns(RuntimeWarning, match="no semantics"):
-        EnsemblingController(Box(shape=(2,)))
+        EnsemblingActionManager(Box(shape=(2,)))
 
 
 def test_eval_with_ensembling_succeeds(tmp_path: object) -> None:
@@ -108,12 +108,12 @@ def test_eval_with_ensembling_succeeds(tmp_path: object) -> None:
         scorer=success_at_end(),
         max_steps=120,
     )
-    ctrl = EnsemblingController(CubePickEmbodiment().info.action_space, m=0.01)
+    ctrl = EnsemblingActionManager(CubePickEmbodiment().info.action_space, m=0.01)
     logs = eval(
         task,
         ScriptedPolicy(),
         CubePickEmbodiment(),
-        controller=ctrl,
+        action_manager=ctrl,
         log_dir=str(tmp_path),
     )
     assert logs[0].status == "success"
@@ -139,7 +139,7 @@ def test_empty_chunk_raises_policy_error() -> None:
             object.__setattr__(chunk, "meta", {})
             return chunk
 
-    ctrl = EnsemblingController(_DELTA_SPACE, m=0.1)
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.1)
     store: dict[str, object] = {}
     obs = Observation()
     with pytest.raises(PolicyError, match=r"empty-chunk-policy.*empty ActionChunk"):
@@ -149,4 +149,4 @@ def test_empty_chunk_raises_policy_error() -> None:
 @pytest.mark.parametrize("bad_m", [-0.1, -1.0, float("nan"), float("inf"), True, False])
 def test_ensembling_controller_rejects_invalid_m(bad_m: float) -> None:
     with pytest.raises(ValueError, match="m must be a finite number >= 0"):
-        EnsemblingController(_DELTA_SPACE, m=bad_m)
+        EnsemblingActionManager(_DELTA_SPACE, m=bad_m)

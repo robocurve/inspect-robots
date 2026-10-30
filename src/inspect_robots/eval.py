@@ -26,9 +26,8 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from inspect_robots import __version__
-from inspect_robots.approver import Approver, AutoApprover
+from inspect_robots.action_manager import ActionManager, DefaultActionManager
 from inspect_robots.compat import assert_compatible
-from inspect_robots.controller import Controller, DefaultController
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
     ConfigError,
@@ -39,6 +38,7 @@ from inspect_robots.errors import (
 )
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
+from inspect_robots.guard import Guard, PassThroughGuard
 from inspect_robots.log import (
     EvalLog,
     EvalResults,
@@ -48,7 +48,7 @@ from inspect_robots.log import (
     _json_safe_scene_metadata,
 )
 from inspect_robots.policy import Policy
-from inspect_robots.rollout import TrialRecord, derive_seed, rollout
+from inspect_robots.rollout import Record, derive_seed, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import (
     Score,
@@ -69,8 +69,8 @@ if TYPE_CHECKING:
 
 def _grading_hook(
     grader: Grader | str | None,
-    before_scoring: Callable[[TrialRecord, Scene], None] | None,
-) -> tuple[Callable[[TrialRecord, Scene], None] | None, Grader | None]:
+    before_scoring: Callable[[Record, Scene], None] | None,
+) -> tuple[Callable[[Record, Scene], None] | None, Grader | None]:
     """Resolve ``grader``/``before_scoring`` into the pre-scoring hook and its grader.
 
     The two arguments write to the same seam, so passing both is always a
@@ -133,7 +133,7 @@ def _now_iso() -> str:
 
 
 def _write_action_log(
-    record: TrialRecord,
+    record: Record,
     log_dir: str,
     run_stamp: str,
     action_space: Box,
@@ -358,7 +358,7 @@ class _Broadcast:
     ) -> None:
         self._fan_out("log_step", t, observation, action, result)
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         self._fan_out("on_trial_end", record)
 
     def on_eval_end(self, log: EvalLog) -> None:
@@ -393,13 +393,13 @@ def eval(
     sinks: list[LogSink] | None = None,
     seed: int | None = 0,
     fail_on_error: bool | float = False,
-    controller: Controller | None = None,
-    approver: Approver | None = None,
+    action_manager: ActionManager | None = None,
+    guard: Guard | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
     operator_input: OperatorInput | None = None,
-    before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
+    before_scoring: Callable[[Record, Scene], None] | None = None,
     grader: Grader | str | None = None,
     environment_id: str | None = None,
     environment_revision: str | None = None,
@@ -460,8 +460,8 @@ def eval(
     ``before_scoring`` is called exactly once per trial that will be scored
     (never for errored or cancelled trials, which are recorded but not
     scored), after the rollout returns and before the scorers run. It may
-    mutate the record — e.g. capture ``TrialRecord.operator_judgement`` (R6)
-    so the ``operator`` scorer can read it, and ``TrialRecord.operator_note``
+    mutate the record — e.g. capture ``Record.operator_judgement`` (R6)
+    so the ``operator`` scorer can read it, and ``Record.operator_note``
     alongside it, which is recorded but never scored. Exceptions it raises
     propagate to the caller. Note this fires on the *other* side of scoring
     from ``LogSink.on_trial_end``.
@@ -515,8 +515,8 @@ def eval(
             sinks=sinks,
             seed=seed,
             fail_on_error=fail_on_error,
-            controller=controller,
-            approver=approver,
+            action_manager=action_manager,
+            guard=guard,
             remap=remap,
             store_frames=store_frames,
             store_actions=store_actions,
@@ -543,13 +543,13 @@ def _run_eval(
     sinks: list[LogSink] | None,
     seed: int | None,
     fail_on_error: bool | float,
-    controller: Controller | None,
-    approver: Approver | None,
+    action_manager: ActionManager | None,
+    guard: Guard | None,
     remap: dict[str, str] | None,
     store_frames: bool,
     store_actions: bool,
     operator_input: OperatorInput | None,
-    before_scoring: Callable[[TrialRecord, Scene], None] | None,
+    before_scoring: Callable[[Record, Scene], None] | None,
     grader_identity: tuple[str | None, dict[str, Any]],
     environment_id: str | None = None,
     environment_revision: str | None = None,
@@ -610,8 +610,8 @@ def _run_eval(
 
     sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
     bus = _Broadcast(sink_list)
-    controller = controller or DefaultController(policy.config.replan_interval)
-    approver = approver or AutoApprover()
+    action_manager = action_manager or DefaultActionManager(policy.config.replan_interval)
+    guard = guard or PassThroughGuard()
 
     # One subdirectory per run: trial ids repeat across runs (scene-epoch),
     # so a shared directory would silently overwrite the previous run's
@@ -691,7 +691,7 @@ def _run_eval(
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
             bus.on_trial_start(scene.id, epoch)
-            record: TrialRecord | None = None
+            record: Record | None = None
             policy_start_failed = False
             on_trial_start = getattr(policy, "on_trial_start", None)
             if callable(on_trial_start):
@@ -702,7 +702,7 @@ def _run_eval(
                     error_count += 1
                     scene_status = "error"
                     scene_error = f"policy.on_trial_start failed: {exc}"
-                    record = TrialRecord(
+                    record = Record(
                         scene_id=scene.id,
                         epoch=epoch,
                         seed=trial_seed,
@@ -718,8 +718,8 @@ def _run_eval(
                         max_steps=task_envelope.max_steps,
                         seed=trial_seed,
                         epoch=epoch,
-                        controller=controller,
-                        approver=approver,
+                        action_manager=action_manager,
+                        guard=guard,
                         sink=bus,
                         frame_store=frame_store,
                         operator_input=operator_input,
@@ -745,7 +745,7 @@ def _run_eval(
                     error_count += 1
                     scene_status = "error"
                     scene_error = f"{type(exc).__name__}: {exc}"
-                    record = exc.record or TrialRecord(
+                    record = exc.record or Record(
                         scene_id=scene.id,
                         epoch=epoch,
                         seed=trial_seed,
@@ -1099,13 +1099,13 @@ def eval_set(
     sinks: list[LogSink] | None = None,
     seed: int | None = 0,
     fail_on_error: bool | float = False,
-    controller: Controller | None = None,
-    approver: Approver | None = None,
+    action_manager: ActionManager | None = None,
+    guard: Guard | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
     operator_input: OperatorInput | None = None,
-    before_scoring: Callable[[TrialRecord, Scene], None] | None = None,
+    before_scoring: Callable[[Record, Scene], None] | None = None,
     grader: Grader | str | None = None,
     retry_attempts: int = 0,
     max_workers: int = 1,
@@ -1147,7 +1147,7 @@ def eval_set(
     ``max_workers > 1`` runs independent simulated tasks in threads. Tasks,
     policy, embodiment and optional grader must be registered names whose
     factories return fresh instances safe to run concurrently. Caller-owned
-    sinks, controllers, approvers and hooks are rejected. Each task owns its
+    sinks, action_managers, guards and hooks are rejected. Each task owns its
     resources and logs; returned logs retain input order. An escaping halt or
     interrupt stops admission and waits for active tasks to finish and close.
     Threads do not accelerate CPU-bound Python code or interrupt blocked calls.
@@ -1177,11 +1177,11 @@ def eval_set(
             )
         if any(
             value is not None
-            for value in (sinks, controller, approver, operator_input, before_scoring)
+            for value in (sinks, action_manager, guard, operator_input, before_scoring)
         ):
             raise ConfigError(
-                "parallel eval_set does not accept shared sinks, controller, "
-                "approver, operator_input or before_scoring"
+                "parallel eval_set does not accept shared sinks, action_manager, "
+                "guard, operator_input or before_scoring"
             )
         from inspect_robots.registry import registered, resolve
 
@@ -1258,8 +1258,8 @@ def eval_set(
                     sinks=sinks,
                     seed=seed,
                     fail_on_error=fail_on_error,
-                    controller=controller,
-                    approver=approver,
+                    action_manager=action_manager,
+                    guard=guard,
                     remap=remap,
                     store_frames=store_frames,
                     store_actions=store_actions,

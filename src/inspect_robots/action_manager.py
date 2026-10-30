@@ -1,15 +1,15 @@
 """Controllers — the rollout middleware layer (Inspect's ``@solver`` analog).
 
-A [`Controller`][inspect_robots.controller.Controller] owns the per-control-step decision
+A [`ActionManager`][inspect_robots.action_manager.ActionManager] owns the per-control-step decision
 of which action to send
 to the embodiment. It internally decides *when* to call ``policy.act()`` (a slow
 VLA inference returning an [`ActionChunk`][inspect_robots.types.ActionChunk]), buffers the
 returned chunk, and pops the next action each step. This single-method, stateful
-shape (R3) is what lets advanced controllers — e.g. a temporal-ensembling
-controller that re-infers every step and blends overlapping predictions —
+shape (R3) is what lets advanced action_managers — e.g. a temporal-ensembling
+action_manager that re-infers every step and blends overlapping predictions —
 compose without forking the rollout loop.
 
-``DefaultController`` plays the first ``replan_interval`` actions of each chunk,
+``DefaultActionManager`` plays the first ``replan_interval`` actions of each chunk,
 then re-infers (``replan_interval=None`` ⇒ play the whole chunk before replanning).
 """
 
@@ -34,17 +34,17 @@ _INFER_KEY = "_controller_inferences"
 
 
 @runtime_checkable
-class Controller(Protocol):
+class ActionManager(Protocol):
     """Decides the next action to execute, calling the policy as needed."""
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
-        """Choose step ``t``'s action, using ``store`` for trial-local controller state."""
+        """Choose step ``t``'s action, using ``store`` for trial-local action manager state."""
         ...
 
 
-class DefaultController:
+class DefaultActionManager:
     """Open-loop chunk execution with periodic replanning."""
 
     def __init__(self, replan_interval: int | None = None):
@@ -81,21 +81,21 @@ _SMOOTH_KEY = "_smoothing_prev_action"
 _smooth_serial = count()
 
 
-class SmoothingController:
-    """Wrap another controller and exponentially smooth its action stream.
+class SmoothingActionManager:
+    """Wrap another action manager and exponentially smooth its action stream.
 
     Demonstrates the middleware composition the single-method interface enables:
-    the wrapped controller owns inference/replanning while this layer applies an
+    the wrapped action manager owns inference/replanning while this layer applies an
     exponential moving average (``alpha`` toward the new action) on top. Only
     valid for additive/continuous action spaces (the caller's responsibility).
     """
 
-    def __init__(self, inner: Controller, alpha: float = 0.5):
+    def __init__(self, inner: ActionManager, alpha: float = 0.5):
         if not 0.0 < alpha <= 1.0:
             raise ValueError("alpha must be in (0, 1]")
         self.inner = inner
         self.alpha = alpha
-        # Per instance, not per module: this is the one controller state written
+        # Per instance, not per module: this is the one action manager state written
         # destructively rather than appended to, so two smoothing layers in the
         # same chain would otherwise overwrite each other's previous action.
         self._store_key = f"{_SMOOTH_KEY}:{next(_smooth_serial)}"
@@ -103,7 +103,7 @@ class SmoothingController:
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action:
-        """Apply an exponential moving average to the wrapped controller's output."""
+        """Apply an exponential moving average to the wrapped action manager's output."""
         action = self.inner.next_action(policy, observation, t, store)
         raw = np.asarray(action.data, dtype=np.float64)
         prev = store.get(self._store_key)
@@ -123,7 +123,7 @@ _AVERAGEABLE_MODES = frozenset(
 _AVERAGEABLE_ROT = frozenset({"none", "rot6d"})
 
 
-class EnsemblingController:
+class EnsemblingActionManager:
     """ACT/ALOHA-style temporal ensembling over overlapping action chunks.
 
     Queries the policy every control step and blends, for the current step, the
@@ -145,7 +145,7 @@ class EnsemblingController:
         sem = action_space.semantics
         if sem is None:
             warnings.warn(
-                "EnsemblingController: action space has no semantics; cannot "
+                "EnsemblingActionManager: action space has no semantics; cannot "
                 "verify that actions are safe to average.",
                 RuntimeWarning,
                 stacklevel=2,
@@ -154,16 +154,16 @@ class EnsemblingController:
             if sem.control_mode not in _AVERAGEABLE_MODES:  # pragma: no cover
                 # Defensive: every valid ControlMode literal is currently averageable.
                 raise ValueError(
-                    f"EnsemblingController cannot average control_mode {sem.control_mode!r}"
+                    f"EnsemblingActionManager cannot average control_mode {sem.control_mode!r}"
                 )
             if sem.rotation_repr not in _AVERAGEABLE_ROT:
                 raise ValueError(
-                    f"EnsemblingController cannot linearly average rotation_repr "
+                    f"EnsemblingActionManager cannot linearly average rotation_repr "
                     f"{sem.rotation_repr!r}; only {sorted(_AVERAGEABLE_ROT)} are safe"
                 )
             if sem.gripper == "binary":
                 raise ValueError(
-                    "EnsemblingController cannot average a binary gripper; threshold "
+                    "EnsemblingActionManager cannot average a binary gripper; threshold "
                     "it downstream or use a continuous gripper"
                 )
 

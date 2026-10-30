@@ -131,9 +131,9 @@ is seeded again from observed proprioception.
 
 Interpolation uses `max_speed_frac / control_hz` of each action-box range per
 step, capped by the same native-dtype 5 percent backstop as the core
-`DeltaLimitApprover`. This prevents default guardrails from silently rewriting
+`DeltaLimitGuard`. This prevents default guardrails from silently rewriting
 steps within a chunk. A lagging arm can still make the first target of the next
-turn differ from the last approved action, so the approver may clamp that turn
+turn differ from the last approved action, so the guard may clamp that turn
 boundary.
 
 After execution, the LLM receives its code, captured stdout, and captured
@@ -158,22 +158,22 @@ returns that motion chunk, while the error remains counted for the next turn.
 > a security sandbox. Run untrusted models inside a container or another
 > external isolation boundary.
 
-Every queued robot action still passes through the rollout approver. CLI runs
-install `ClampApprover` plus `DeltaLimitApprover` by default. The Python
-`eval()` API defaults to the permissive `AutoApprover`, so programmatic real
+Every queued robot action still passes through the rollout guard. CLI runs
+install `ClampGuard` plus `DeltaLimitGuard` by default. The Python
+`eval()` API defaults to the permissive `PassThroughGuard`, so programmatic real
 robot runs must wire guardrails explicitly:
 
 ```python
 from inspect_robots import eval
-from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.guard import GuardChain, ClampGuard, DeltaLimitGuard
 from inspect_robots_capx import CapxPolicy
 
 # `embodiment` is your constructed joint-space adapter.
 space = embodiment.info.action_space
-guardrails = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
+guardrails = GuardChain(ClampGuard(space), DeltaLimitGuard(space))
 policy = CapxPolicy(model="anthropic/claude-fable-5")
 
-eval(task, policy, embodiment, approver=guardrails)
+eval(task, policy, embodiment, guard=guardrails)
 ```
 
 Guardrails constrain robot actions. They do not constrain what executed Python

@@ -91,10 +91,10 @@ from inspect_robots.session import ECHO_INTERVAL_S, OperatorSession
 from inspect_robots.types import OPERATOR_END
 
 if TYPE_CHECKING:
-    from inspect_robots.approver import Approver
     from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.grader import Grader
+    from inspect_robots.guard import Guard
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box
@@ -257,7 +257,7 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--disable-guardrails",
         action="store_true",
-        help="turn off the default safety approvers (bounds clamp + per-step "
+        help="turn off the default safety guards (bounds clamp + per-step "
         "delta limit); actions reach the embodiment unchecked",
     )
     parser.add_argument(
@@ -793,57 +793,57 @@ def _build_guardrails(
     space: Box,
     max_action_delta: float | None,
     embodiment: Embodiment | None = None,
-) -> tuple[Approver, list[str], list[str]]:
+) -> tuple[Guard, list[str], list[str]]:
     """The default CLI safety chain for an action space (plan 0008 §3e).
 
-    Returns ``(approver, active, warnings)``. Degrades per component instead
+    Returns ``(guard, active, warnings)``. Degrades per component instead
     of blocking: a component that cannot apply to this space is skipped with
     a warning naming the actual refusal reason (the constructor's message),
     so the CLI is never *less* protective than running without guardrails —
     and never silently unprotected either.
     """
-    from inspect_robots.approver import (
-        AutoApprover,
-        ChainApprover,
-        ClampApprover,
-        DeltaLimitApprover,
-        GuardrailContribution,
+    from inspect_robots.guard import (
+        ClampGuard,
+        DeltaLimitGuard,
+        GuardChain,
+        GuardContribution,
+        PassThroughGuard,
     )
 
-    parts: list[Approver] = []
+    parts: list[Guard] = []
     active: list[str] = []
     warnings: list[str] = []
     if space.low is None and space.high is None:
         warnings.append("bounds clamp skipped: the action space declares no low/high bounds")
     else:
-        parts.append(ClampApprover(space))
+        parts.append(ClampGuard(space))
         active.append("clamp")
     try:
         # Catch the constructor's refusal generically — whatever the §3a
         # reason — rather than pre-checking an enumerated list.
-        parts.append(DeltaLimitApprover(space, max_delta=max_action_delta))
+        parts.append(DeltaLimitGuard(space, max_delta=max_action_delta))
         active.append("delta-limit")
     except ValueError as exc:
         warnings.append(f"delta limit skipped: {exc}")
 
     missing = object()
-    hook = getattr(embodiment, "contribute_guardrails", missing)
+    hook = getattr(embodiment, "contribute_guards", missing)
     if hook is not missing:
         if not callable(hook):
             assert embodiment is not None
             raise SystemExit(
-                f"embodiment {embodiment.info.name!r} contribute_guardrails is "
+                f"embodiment {embodiment.info.name!r} contribute_guards is "
                 f"not callable (got {type(hook).__name__})"
             )
         contribution = hook(space)
-        if not isinstance(contribution, GuardrailContribution):
+        if not isinstance(contribution, GuardContribution):
             assert embodiment is not None
             raise SystemExit(
-                f"embodiment {embodiment.info.name!r} contribute_guardrails returned "
-                f"{type(contribution).__name__}, expected GuardrailContribution"
+                f"embodiment {embodiment.info.name!r} contribute_guards returned "
+                f"{type(contribution).__name__}, expected GuardContribution"
             )
-        for name, approver in contribution.approvers:
-            parts.append(approver)
+        for name, guard in contribution.guards:
+            parts.append(guard)
             active.append(name)
         warnings.extend(contribution.warnings)
 
@@ -852,8 +852,8 @@ def _build_guardrails(
             "no guardrails are active for this action space; declare bounds/semantics "
             "on the embodiment or pass --max-action-delta"
         )
-        return AutoApprover(), active, warnings
-    return ChainApprover(*parts), active, warnings
+        return PassThroughGuard(), active, warnings
+    return GuardChain(*parts), active, warnings
 
 
 def _attended(args: argparse.Namespace) -> bool:
@@ -1572,10 +1572,10 @@ def _announce_components(resolved: _ResolvedComponents) -> None:
 
 def _build_and_announce_guardrails(
     args: argparse.Namespace, action_space: Box, embodiment: Embodiment
-) -> Approver | None:
+) -> Guard | None:
     """Build the default guardrail chain for a run, announcing what is active.
 
-    Guardrails are on by default (plan 0008 §3e): the approver chain sits below
+    Guardrails are on by default (plan 0008 §3e): the guard chain sits below
     the policy in rollout, so nothing the policy emits — a wild VLA action or a
     misbehaving LLM — reaches hardware unchecked. Returns ``None`` (the eval's
     own default) only when ``--disable-guardrails`` is given.
@@ -1588,13 +1588,13 @@ def _build_and_announce_guardrails(
         )
         print("guardrails: disabled (--disable-guardrails)")
         return None
-    approver, active, guard_warnings = _build_guardrails(
+    guard, active, guard_warnings = _build_guardrails(
         action_space, args.max_action_delta, embodiment
     )
     for warning in guard_warnings:
         print(f"guardrails warning: {warning}", file=sys.stderr)
     print(f"guardrails: {' + '.join(active) if active else 'none active'}")
-    return approver
+    return guard
 
 
 def _headless_session(env: Mapping[str, str], platform: str = sys.platform) -> bool:
@@ -1766,7 +1766,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             task = _apply_epochs_or_exit(task, args.epochs)
 
         _announce_components(resolved)
-        approver = _build_and_announce_guardrails(
+        guard = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
         _announce_live_view(args, resolved)
@@ -1847,7 +1847,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 seed=args.seed,
                 sinks=sinks,
                 fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-                approver=approver,
+                guard=guard,
                 store_frames=(
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
@@ -2017,7 +2017,7 @@ def _run_cli_eval_set(
         with _EVAL_SET_OUTPUT_LOCK:
             _announce_components(resolved)
             print(f"tasks: {', '.join(task_names)}")
-            approver = _build_and_announce_guardrails(
+            guard = _build_and_announce_guardrails(
                 args, embodiment.info.action_space, resolved.embodiment
             )
             _announce_live_view(args, resolved)
@@ -2058,7 +2058,7 @@ def _run_cli_eval_set(
             sinks=sinks,
             seed=args.seed,
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-            approver=approver,
+            guard=guard,
             store_frames=(
                 args.store_frames if args.store_frames is not None else defaults.store_frames
             ),

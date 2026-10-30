@@ -7,14 +7,14 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from inspect_robots.approver import AutoApprover
+from inspect_robots.action_manager import DefaultActionManager
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorInput
-from inspect_robots.controller import DefaultController
 from inspect_robots.errors import EmbodimentFault, _CancelledTrial
+from inspect_robots.guard import PassThroughGuard
 from inspect_robots.logging.sink import LogSink, NullSink
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.policy import PolicyConfig, PolicyInfo
-from inspect_robots.rollout import TrialRecord, rollout
+from inspect_robots.rollout import Record, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.session import OperatorSession
 from inspect_robots.spaces import ActionSemantics, Box
@@ -224,7 +224,7 @@ def _run(
     max_steps: int,
     sink: LogSink | None = None,
     operator_input: OperatorInput | None = None,
-) -> TrialRecord:
+) -> Record:
     return rollout(
         policy,
         embodiment,
@@ -232,8 +232,8 @@ def _run(
         max_steps=max_steps,
         seed=0,
         epoch=0,
-        controller=DefaultController(),
-        approver=AutoApprover(),
+        action_manager=DefaultActionManager(),
+        guard=PassThroughGuard(),
         sink=sink or NullSink(),
         operator_input=operator_input,
     )

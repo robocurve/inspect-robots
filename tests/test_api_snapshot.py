@@ -20,7 +20,7 @@ EXPECTED = {
     "EvalSpec",
     "EvalStats",
     "SceneResult",
-    "TrialRecord",
+    "Record",
     # tasks, scenes, scoring
     "Task",
     "TaskEnvelope",

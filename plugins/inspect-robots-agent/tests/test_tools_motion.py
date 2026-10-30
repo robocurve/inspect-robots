@@ -10,7 +10,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
+from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardChain
 from inspect_robots.mock import CubePickEmbodiment
 from inspect_robots.spaces import (
     ActionSemantics,
@@ -391,7 +391,7 @@ def test_build_rejects_degenerate_derivations() -> None:
         build_toolset(huge, _absolute_obs_space(), control_hz=10.0)
 
     # float32 bounds whose difference overflows only in the native dtype:
-    # DeltaLimitApprover subtracts without promoting, so this must reject too.
+    # DeltaLimitGuard subtracts without promoting, so this must reject too.
     huge32 = _absolute_space(
         low=np.array([-3e38], dtype=np.float32), high=np.array([3e38], dtype=np.float32)
     )
@@ -427,7 +427,7 @@ def test_build_rejects_degenerate_derivations() -> None:
 
 
 def test_low_precision_bounds_never_outrun_native_backstop() -> None:
-    # DeltaLimitApprover derives 0.05 * (high - low) in the box's dtype;
+    # DeltaLimitGuard derives 0.05 * (high - low) in the box's dtype;
     # float16 rounds that to 0.0999755859375, below the float64 0.1. Every
     # emitted step must respect the *native* value or the backstop clamps.
     space = Box(
@@ -445,7 +445,7 @@ def test_low_precision_bounds_never_outrun_native_backstop() -> None:
         _obs({"q": np.array([0.0])}),
     )
     assert result.chunk is not None
-    chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
+    chain = GuardChain(ClampGuard(space), DeltaLimitGuard(space))
     store: dict[str, Any] = {}
     for action in result.chunk.actions:
         assert chain.review(action, store) is action
@@ -571,11 +571,11 @@ def test_declared_step_chunks_pass_the_default_delta_approver_unmodified() -> No
     )
     assert result.chunk is not None
 
-    approver = DeltaLimitApprover(space)
+    guard = DeltaLimitGuard(space)
     store: dict[str, Any] = {}
-    approver.review(Action(data=start), store)
+    guard.review(Action(data=start), store)
     for action in result.chunk.actions:
-        assert approver.review(action, store) is action
+        assert guard.review(action, store) is action
 
 
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
@@ -1007,7 +1007,7 @@ def test_absolute_chunks_pass_default_approvers_across_calls() -> None:
     # the backstop boundary (the 0.1 default runs far below it, and its
     # full-range second move would hit the per-call playout cap).
     toolset = build_toolset(space, _absolute_obs_space(), control_hz=10.0, max_speed_frac=0.5)
-    chain = ChainApprover(ClampApprover(space), DeltaLimitApprover(space))
+    chain = GuardChain(ClampGuard(space), DeltaLimitGuard(space))
     store: dict[str, Any] = {}
 
     first = toolset.execute(

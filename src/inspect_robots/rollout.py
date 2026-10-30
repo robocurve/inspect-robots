@@ -1,10 +1,11 @@
 """The rollout engine — the closed control loop at the heart of Inspect Robots.
 
 One [`rollout`][inspect_robots.rollout.rollout] runs a single trial (one scene, one epoch): it
-drives the policy↔embodiment loop through the [`Controller`][inspect_robots.controller.Controller]
-(open-loop chunk execution) and the [`Approver`][inspect_robots.approver.Approver] safety
-gate, logging each step to the sinks, and returns an immutable
-[`TrialRecord`][inspect_robots.rollout.TrialRecord] that scorers consume.
+drives the policy↔embodiment loop through the
+[`ActionManager`][inspect_robots.action_manager.ActionManager] (open-loop chunk execution)
+and the [`Guard`][inspect_robots.guard.Guard] safety gate, logging each step to the sinks,
+and returns an immutable
+[`Record`][inspect_robots.rollout.Record] that scorers consume.
 """
 
 from __future__ import annotations
@@ -18,8 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from inspect_robots.approver import Approver
-from inspect_robots.controller import _INFER_KEY, Controller
+from inspect_robots.action_manager import _INFER_KEY, ActionManager
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
     EmbodimentFault,
@@ -29,6 +29,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.frames import FrameRef, FrameStore
+from inspect_robots.guard import Guard
 from inspect_robots.policy import Policy
 from inspect_robots.scene import Scene
 from inspect_robots.transcript import (
@@ -83,14 +84,14 @@ class StepRecord:
 
 
 @dataclass
-class TrialRecord:
+class Record:
     """The full record of one trial — the unit scorers consume."""
 
     scene_id: str
     epoch: int
     seed: int | None
     steps: list[StepRecord] = field(default_factory=list)
-    # In-memory only: EvalLog embeds SceneResult aggregates and never TrialRecord,
+    # In-memory only: EvalLog embeds SceneResult aggregates and never Record,
     # so no asdict path reaches the numpy images and the log schema is untouched.
     parked_observation: Observation | None = None
     terminated: bool = False
@@ -141,7 +142,7 @@ def _collect_transcript(policy: object) -> Any:
         return {"transcript_error": detail}
 
 
-def _record_failure(record: TrialRecord, exc: InspectRobotsError, t: int) -> InspectRobotsError:
+def _record_failure(record: Record, exc: InspectRobotsError, t: int) -> InspectRobotsError:
     """Mark ``record`` failed and attach it to ``exc`` (see ``InspectRobotsError.record``).
 
     The partial record — steps walked and transcript events up to the failure —
@@ -253,28 +254,28 @@ def rollout(
     max_steps: int,
     seed: int | None,
     epoch: int,
-    controller: Controller,
-    approver: Approver,
+    action_manager: ActionManager,
+    guard: Guard,
     sink: LogSink,
     frame_store: FrameStore | None = None,
     operator_input: OperatorInput | None = None,
-) -> TrialRecord:
+) -> Record:
     """Run a single trial and return its record.
 
     Generic exceptions raised by the policy, or a non-finite action, are
     reported as [`PolicyError`][inspect_robots.errors.PolicyError]; generic
     exceptions raised by the embodiment are reported as
-    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault]; by the approver as
-    [`SafetyAbort`][inspect_robots.errors.SafetyAbort] (an approver that crashed cannot
-    vouch for safety), as is a non-finite action introduced by the approver.
+    [`EmbodimentFault`][inspect_robots.errors.EmbodimentFault]; by the guard as
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort] (a guard that crashed cannot
+    vouch for safety), as is a non-finite action introduced by the guard.
     Already-typed Inspect Robots errors (incl.
     [`SafetyAbort`][inspect_robots.errors.SafetyAbort]) propagate unchanged, so the
     eval orchestrator can apply the correct continue-vs-halt policy. Every error
-    raised from inside the trial carries the partial ``TrialRecord`` on
+    raised from inside the trial carries the partial ``Record`` on
     ``exc.record`` for the orchestrator to preserve.
 
     The loop applies no wall-clock pacing of its own: ``embodiment.step()`` is
-    called as fast as the policy/controller/approver can produce actions. An
+    called as fast as the policy/action_manager/guard can produce actions. An
     embodiment that needs real-time cadence paces itself inside ``step()`` and
     declares the ``"self_paced"`` capability to document that it does (see
     [`Embodiment`][inspect_robots.embodiment.Embodiment]).
@@ -282,7 +283,7 @@ def rollout(
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps < 1:
         raise ValueError(f"max_steps must be an integer >= 1, got {max_steps!r}")
     trial_id = f"{scene.id}-e{epoch}"
-    record = TrialRecord(scene_id=scene.id, epoch=epoch, seed=seed)
+    record = Record(scene_id=scene.id, epoch=epoch, seed=seed)
     record.events.append(reset_event(seed))
     store: dict[str, Any] = {}
     expected_dim = embodiment.info.action_space.dim
@@ -380,7 +381,7 @@ def rollout(
                     obs,
                     extra=policy_extra,
                 )
-                action = controller.next_action(policy, obs_with_extra, t, store)
+                action = action_manager.next_action(policy, obs_with_extra, t, store)
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -410,7 +411,7 @@ def rollout(
                         )
 
             # A malformed action is the policy's fault; catching it here keeps it
-            # from surfacing inside the approver/embodiment as a halting fault.
+            # from surfacing inside the guard/embodiment as a halting fault.
             emitted_dim = int(np.asarray(action.data).size)
             if emitted_dim != expected_dim:
                 raise _record_failure(
@@ -433,15 +434,15 @@ def rollout(
                 )
 
             # Policy-requested stop (plan 0008 §3d), captured from the
-            # PRE-review action so an approver rewrite cannot erase the
-            # intent. Note: EnsemblingController rebuilds actions with chunk
-            # meta, so this channel works under Default/SmoothingController
+            # PRE-review action so a guard rewrite cannot erase the
+            # intent. Note: EnsemblingActionManager rebuilds actions with chunk
+            # meta, so this channel works under Default/SmoothingActionManager
             # (which preserve per-action meta), not under ensembling.
             requested_stop = bool(action.meta.get("request_stop"))
             stop_reason = str(action.meta.get("stop_reason", "policy_stop"))
 
             try:
-                reviewed = approver.review(action, store)  # may raise SafetyAbort
+                reviewed = guard.review(action, store)  # may raise SafetyAbort
             except InspectRobotsError as exc:
                 _record_failure(record, exc, t)
                 raise
@@ -454,13 +455,13 @@ def rollout(
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 
-            # Recheck because an approver may mutate the array in place or return a new action.
+            # Recheck because a guard may mutate the array in place or return a new action.
             reviewed_dim = int(np.asarray(action.data).size)
             if reviewed_dim != expected_dim:
                 raise _record_failure(
                     record,
                     SafetyAbort(
-                        f"approver {type(approver).__name__} returned a {reviewed_dim}-D "
+                        f"guard {type(guard).__name__} returned a {reviewed_dim}-D "
                         f"action but embodiment {embodiment.info.name!r} expects {expected_dim}-D"
                     ),
                     t,
@@ -470,7 +471,7 @@ def rollout(
                 raise _record_failure(
                     record,
                     SafetyAbort(
-                        f"approver {type(approver).__name__} returned a non-finite "
+                        f"guard {type(guard).__name__} returned a non-finite "
                         f"action ({non_finite_detail})"
                     ),
                     t,
