@@ -18,7 +18,6 @@ import math
 import os
 import sys
 import time
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -32,9 +31,15 @@ import numpy.typing as npt
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import (
+    ToolAdapter,
+    observation_lines,
+    state_lines,
+)
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
 from inspect_robots.task import TaskEnvelope
+from inspect_robots.tools import PreCheck, ToolLibrary
 from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation
 
 if TYPE_CHECKING:
@@ -50,14 +55,12 @@ from inspect_robots_agent._llm import (
     ChatClient,
     ContentFilteredError,
     Provider,
-    ToolCall,
     _direct_claim,
     _has_openrouter_variant,
     resolve_provider,
 )
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
-from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 
 from ._capture import WireCapture, _safe
 
@@ -902,7 +905,7 @@ class LLMAgentPolicy(PolicyBase):
         self.info = PolicyInfo(
             name="agent", action_space=Box(shape=(1,)), terminal_actions=_TERMINAL_ACTIONS
         )
-        self._toolset: Toolset | None = None
+        self._adapter: ToolAdapter | None = None
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
@@ -922,16 +925,14 @@ class LLMAgentPolicy(PolicyBase):
 
     def bind(self, embodiment_info: EmbodimentInfo) -> None:
         """Adopt the embodiment's spaces and build the tool surface from them."""
-        toolset = build_toolset(
-            embodiment_info.action_space,
-            embodiment_info.observation_space,
-            embodiment_info.control_hz,
-            self._max_speed_frac,
+        adapter = ToolAdapter(
+            max_speed_frac=self._max_speed_frac,
             images=self._images,
             pre_check=self._pre_check,
         )
-        self._toolset = toolset
-        self._state_labels = toolset.state_labels()
+        adapter.bind(embodiment_info)
+        self._adapter = adapter
+        self._state_labels = adapter.control.state_labels()
         self._embodiment_name = embodiment_info.name
         self._embodiment_docs = getattr(embodiment_info, "docs", None)
         self.info = PolicyInfo(
@@ -942,6 +943,12 @@ class LLMAgentPolicy(PolicyBase):
             terminal_actions=_TERMINAL_ACTIONS,
         )
 
+    def bind_tools(self, tools: ToolLibrary) -> None:
+        """Offer the embodiment's contributed tools to the model, after the built-in ones."""
+        if self._adapter is None:
+            raise RuntimeError("bind_tools() before bind(); eval() binds the embodiment first")
+        self._adapter.add_tools(tools)
+
     def bind_task(self, envelope: TaskEnvelope) -> None:
         """Learn the trial's rollout horizon from the task envelope."""
         self._max_steps = envelope.max_steps
@@ -951,23 +958,14 @@ class LLMAgentPolicy(PolicyBase):
         if isinstance(self._client, ResponsesClient):
             self._client._reset_cache_tracking()
         self._hindsight = None
-        if self._toolset is not None:
-            self._toolset.start_trial()
+        if self._adapter is not None:
+            self._adapter.start_trial()
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
             formatted += _PRE_CHECK_PROMPT_CLAUSE
-        docs = self._embodiment_docs
-        if docs is not None and docs.strip():
-            formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
-        if self._toolset is not None:
-            formatted += f"\n\nEmbodiment bounds:\n{self._toolset.bounds_text}"
-            pinned = self._toolset.pinned_labels
-            if pinned:
-                formatted += (
-                    "\nPinned dimensions: "
-                    f"{', '.join(pinned)} (fixed; do not attempt to move them)."
-                )
+        if self._adapter is not None:
+            formatted += "\n\n" + self._adapter.instructions()
         if self._max_steps is not None:
             formatted += (
                 f"\n\nEnvironment step budget:\nYou have {self._max_steps} environment steps "
@@ -1063,8 +1061,8 @@ class LLMAgentPolicy(PolicyBase):
 
     def act(self, observation: Observation) -> ActionChunk:
         """Run LLM turns until one validated tool call yields an action chunk."""
-        toolset = self._toolset
-        if toolset is None:
+        adapter = self._adapter
+        if adapter is None:
             raise RuntimeError(
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
@@ -1110,7 +1108,7 @@ class LLMAgentPolicy(PolicyBase):
             reveal=reveal,
             narration=narration,
             depth=depth,
-            setpoint_lines=toolset.setpoint_lines(observation),
+            setpoint_lines=adapter.control.setpoint_lines(observation),
             wall_s=None if self._trial_started is None else self._clock() - self._trial_started,
         )
         if self._images == "on_demand":
@@ -1125,7 +1123,7 @@ class LLMAgentPolicy(PolicyBase):
         summary = f"{len(observation.images)} camera(s)"
         if self._images == "on_demand":
             summary += " available"
-        state_summary = " | ".join(_state_lines(observation, self._state_labels))
+        state_summary = " | ".join(state_lines(observation, self._state_labels))
         if state_summary:
             summary = f"{summary}, {state_summary}"
         step_label = _step_label(observation, self._max_steps)
@@ -1137,7 +1135,7 @@ class LLMAgentPolicy(PolicyBase):
         rejections = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
-                return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
+                return self._forced_give_up(adapter, observation, "LLM call budget exhausted")
             outgoing = self._messages
             if self._image_horizon is not None:
                 outgoing = _evicted_view(
@@ -1148,13 +1146,13 @@ class LLMAgentPolicy(PolicyBase):
             try:
                 message = self._client.complete(
                     outgoing,
-                    toolset.schemas(),
+                    adapter.tools.schemas(),
                     temperature=self._temperature,
                     reasoning_effort=self._effort,
                 )
             except ContentFilteredError as exc:
                 self._calls_used += 1
-                return self._forced_give_up(toolset, observation, str(exc))
+                return self._forced_give_up(adapter, observation, str(exc))
             self._calls_used += 1
             if message.usage is not None:
                 for key, value in message.usage.items():
@@ -1210,7 +1208,7 @@ class LLMAgentPolicy(PolicyBase):
                 echo_text: str | None = None
                 is_capture = self._images == "on_demand" and call.name == "take_pic"
                 if not closed:
-                    result = toolset.execute(call, observation)
+                    result = adapter.tools.execute(call.name, call.arguments, observation)
                     if is_capture:
                         closed = True
                         if result.error is not None:
@@ -1304,7 +1302,7 @@ class LLMAgentPolicy(PolicyBase):
                     # The closed-state exception validates only the capture
                     # that may ride behind a motion. A failed validation keeps
                     # the queue slot open for a later call in this same turn.
-                    result = toolset.execute(call, observation)
+                    result = adapter.tools.execute(call.name, call.arguments, observation)
                     if result.error is not None:
                         result_text = result.error
                     elif result.capture == ():
@@ -1362,12 +1360,13 @@ class LLMAgentPolicy(PolicyBase):
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
 
-    def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
+    def _forced_give_up(
+        self, adapter: ToolAdapter, observation: Observation, why: str
+    ) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not
         # model output, so it stays out of the transcript.
         self._echo(f"[agent] -- {why}; forcing give_up")
-        synthetic = ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))
-        result = toolset.execute(synthetic, observation)
+        result = adapter.tools.execute("give_up", json.dumps({"reason": why}), observation)
         if result.chunk is None:  # pragma: no cover - synthetic stop is structurally valid
             raise RuntimeError(f"forced give_up failed: {result.error}")
         return result.chunk
@@ -1400,9 +1399,9 @@ class LLMAgentPolicy(PolicyBase):
         else:
             narration = "This observation follows the motion."
 
-        toolset = self._toolset
-        if motion.target is not None and toolset is not None:
-            residual = toolset.residual(motion.target, observation)
+        adapter = self._adapter
+        if motion.target is not None and adapter is not None:
+            residual = adapter.control.residual(motion.target, observation)
             if residual is not None:
                 label, magnitude = residual
                 if magnitude > _TARGET_REACHED_TOLERANCE:
@@ -1419,27 +1418,6 @@ class LLMAgentPolicy(PolicyBase):
             print(text, file=sys.stderr, flush=True)
 
 
-def _state_lines(
-    observation: Observation,
-    state_labels: tuple[str, tuple[str, ...]] | None = None,
-) -> list[str]:
-    """One state[key] line per state entry, shared by prompt and echo so they never drift."""
-    lines: list[str] = []
-    for key, value in observation.state.items():
-        array = np.asarray(value, dtype=np.float64)
-        rounded = np.round(array, 4).tolist()
-        if state_labels is not None and key == state_labels[0]:
-            labels = state_labels[1]
-            if array.shape == (len(labels),):
-                labeled = " ".join(
-                    f"{label}={item}" for label, item in zip(labels, rounded, strict=True)
-                )
-                lines.append(f"state[{key}]: {labeled}")
-                continue
-        lines.append(f"state[{key}]: {rounded}")
-    return lines
-
-
 def _step_label(observation: Observation, max_steps: int | None = None) -> str:
     """Shared prompt/echo step gate: "step {n}" (or "step {n}/{max_steps}"), else ""."""
     step = observation.extra.get("env_step")
@@ -1448,47 +1426,6 @@ def _step_label(observation: Observation, max_steps: int | None = None) -> str:
     if max_steps is not None:
         return f"step {step}/{max_steps}"
     return f"step {step}"
-
-
-def _approvals_line(observation: Observation) -> str | None:
-    approvals = observation.extra.get("approvals")
-    if not isinstance(approvals, list) or not approvals:
-        return None
-    total = len(approvals)
-    details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
-    if not details:
-        return f"approver: {total} step(s) modified."
-    counts = Counter(details)
-    formatted: list[str] = []
-    for flag, count in counts.items():
-        if count > 1:
-            formatted.append(f"{flag} \u00d7{count}")
-        else:
-            formatted.append(flag)
-    detail_str = f" ({', '.join(formatted)})"
-    return f"approver: {total} step(s) modified{detail_str}."
-
-
-def _extra_lines(observation: Observation, key: str) -> list[str]:
-    """Render ``extra[key]["lines"]``, tolerating absent or malformed data.
-
-    The convention is embodiment-agnostic: a mapping whose ``lines`` are
-    plain-language strings written for the policy (the YAM plugin's per-arm
-    IK diagnosis under ``motion_report``, its hottest-motor line under
-    ``motor_temps``). Anything else is ignored silently.
-    """
-    report = observation.extra.get(key)
-    if not isinstance(report, Mapping):
-        return []
-    lines = report.get("lines")
-    if not isinstance(lines, list):
-        return []
-    return [line.strip() for line in lines if isinstance(line, str) and line.strip()]
-
-
-def _motion_report_lines(observation: Observation) -> list[str]:
-    """Render an embodiment's ``extra["motion_report"]["lines"]``."""
-    return _extra_lines(observation, "motion_report")
 
 
 def _thermal_status(observation: Observation) -> _ThermalStatus | None:
@@ -1535,23 +1472,6 @@ def _sleep_narration(slept: _PendingSleep, after: _ThermalStatus | None) -> str:
     return narration
 
 
-def _operator_lines(observation: Observation) -> list[str]:
-    """Render only well-formed feedback entries from the framework-reserved channel."""
-    messages = observation.extra.get("operator_messages")
-    if not isinstance(messages, list):
-        return []
-    lines: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        step = message.get("t")
-        text = message.get("text")
-        if not isinstance(step, int) or not isinstance(text, str):
-            continue
-        lines.append(f"operator feedback (step {step}): {text}")
-    return lines
-
-
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None = None,
@@ -1565,7 +1485,7 @@ def _observation_content(
 ) -> list[dict[str, Any]]:
     """State as readable text plus camera frames as inline PNG data URLs.
 
-    ``setpoint_lines`` (from ``Toolset.setpoint_lines``) follow the state
+    ``setpoint_lines`` (from ``ControlTools.setpoint_lines``) follow the state
     lines so the readback and the setpoint it is compared against sit
     together. ``wall_s`` is the wall-clock time since the trial began; it
     follows the step budget so the model can pace motion against real time.
@@ -1579,14 +1499,7 @@ def _observation_content(
         lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
     if wall_s is not None:
         lines.append(f"Wall clock: {max(0.0, wall_s):.0f} s since the trial began.")
-    lines.extend(_state_lines(observation, state_labels))
-    lines.extend(setpoint_lines)
-    app_line = _approvals_line(observation)
-    if app_line is not None:
-        lines.append(app_line)
-    lines.extend(_motion_report_lines(observation))
-    lines.extend(_extra_lines(observation, "motor_temps"))
-    lines.extend(_operator_lines(observation))
+    lines.extend(observation_lines(observation, state_labels, setpoint_lines))
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]

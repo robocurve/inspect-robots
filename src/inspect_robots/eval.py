@@ -710,6 +710,7 @@ def _run_eval(
     bind = getattr(policy, "bind", None)
     if callable(bind):
         bind(embodiment.info)
+    _bind_contributed_tools(policy, embodiment)
 
     # Fail fast on incompatible pairings before touching any hardware/sim.
     # This also validates the embodiment rate needed by a seconds-based task
@@ -1255,6 +1256,28 @@ def _run_eval(
     if cancelled_exc is not None:
         raise cancelled_exc
     return [log]
+
+
+def _bind_contributed_tools(policy: Policy, embodiment: Embodiment) -> None:
+    """Hand the embodiment's optional ``contribute_tools`` library to a policy that takes tools.
+
+    Both hooks are duck-typed: an embodiment may offer
+    ``contribute_tools(action_space) -> ToolLibrary`` and a tool-using policy
+    ``bind_tools(library)``. Nothing happens unless both exist.
+    """
+    from inspect_robots.tools import ToolLibrary
+
+    contribute = getattr(embodiment, "contribute_tools", None)
+    bind_tools = getattr(policy, "bind_tools", None)
+    if not callable(contribute) or not callable(bind_tools):
+        return
+    tools = contribute(embodiment.info.action_space)
+    if not isinstance(tools, ToolLibrary):
+        raise ConfigError(
+            f"embodiment {embodiment.info.name!r}: contribute_tools returned "
+            f"{type(tools).__name__}; expected ToolLibrary"
+        )
+    bind_tools(tools)
 
 
 _EVALUATION_HOOKS = ("health", "prepare_trial", "home", "park")

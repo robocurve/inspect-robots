@@ -42,6 +42,7 @@ from inspect_robots.log import (
     read_eval_log,
 )
 from inspect_robots.policy import Policy, PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import PolicyAdapter, ToolAdapter
 from inspect_robots.registry import (
     embodiment,
     grader,
@@ -78,6 +79,7 @@ from inspect_robots.spaces import (
 )
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.taskgen import generate_scene
+from inspect_robots.tools import Tool, ToolLibrary, ToolResult
 from inspect_robots.types import (
     DONE,
     GIVE_UP,
@@ -126,6 +128,7 @@ __all__ = [
     "OperatorInput",
     "OperatorSession",
     "Policy",
+    "PolicyAdapter",
     "PolicyBase",
     "PolicyConfig",
     "PolicyInfo",
@@ -143,6 +146,10 @@ __all__ = [
     "Task",
     "TaskEnvelope",
     "Termination",
+    "Tool",
+    "ToolAdapter",
+    "ToolLibrary",
+    "ToolResult",
     "__version__",
     "defaults",
     "embodiment",

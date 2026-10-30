@@ -43,11 +43,11 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.task import Task
+from inspect_robots.tools import ToolResult
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
-from inspect_robots_agent._tools import ToolResult
 from inspect_robots_agent.policy import (
     _EVAL_NOTES_TEXT_LIMIT,
     _ON_DEMAND_SYSTEM_TEMPLATE,
@@ -56,7 +56,6 @@ from inspect_robots_agent.policy import (
     AgentPolicyConfig,
     _image_parts,
     _observation_content,
-    _operator_lines,
     _PendingMotion,
     _PendingSleep,
     _sleep_narration,
@@ -652,19 +651,19 @@ def test_success_without_action_chunk_retries_the_model(
     policy = _policy(script)
     policy.bind(CubePickEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="stop"))
-    toolset = policy._toolset
-    assert toolset is not None
-    execute = toolset.execute
+    assert policy._adapter is not None
+    library = policy._adapter.tools
+    execute = library.execute
     calls = 0
 
-    def no_chunk_once(call: Any, observation: Observation) -> ToolResult:
+    def no_chunk_once(name: str, arguments: str, observation: Observation) -> ToolResult:
         nonlocal calls
         calls += 1
         if calls == 1:
             return ToolResult(note="accepted without an action")
-        return execute(call, observation)
+        return execute(name, arguments, observation)
 
-    monkeypatch.setattr(toolset, "execute", no_chunk_once)
+    monkeypatch.setattr(library, "execute", no_chunk_once)
 
     chunk = policy.act(Observation())
 
@@ -683,9 +682,8 @@ def test_pending_narration_handles_absent_target_and_residual(
         without_target, observation, with_frames=True
     )
 
-    toolset = policy._toolset
-    assert toolset is not None
-    monkeypatch.setattr(toolset, "residual", lambda target, current: None)
+    assert policy._adapter is not None
+    monkeypatch.setattr(policy._adapter.control, "residual", lambda target, current: None)
     with_target = replace(without_target, target=np.array([0.1]))
     narration = policy._motion_narration(with_target, observation, with_frames=True)
     assert "remaining offset" not in narration
@@ -750,27 +748,6 @@ def test_observation_content_renders_operator_messages(
 
     assert [line for line in lines if line.startswith("operator feedback")] == expected
     assert lines.index(expected[-1]) < lines.index("motion finished")
-
-
-def test_operator_lines_skip_malformed_values_and_entries() -> None:
-    malformed: list[object] = [
-        None,
-        "feedback",
-        {"t": "2", "text": "wrong step type"},
-        {"t": 2, "text": 3},
-        {"t": 2},
-        {"text": "missing step"},
-        {"t": 5, "text": "valid feedback"},
-    ]
-
-    assert _operator_lines(Observation(extra={"operator_messages": malformed})) == [
-        "operator feedback (step 5): valid feedback"
-    ]
-    assert _operator_lines(Observation(extra={"operator_messages": {"t": 1}})) == []
-
-
-def test_operator_lines_are_empty_when_observation_has_no_reserved_key() -> None:
-    assert _operator_lines(Observation()) == []
 
 
 def test_agent_opts_in_to_framework_operator_messages() -> None:
@@ -1140,11 +1117,11 @@ def test_depth_off_preserves_pre_depth_observation_message() -> None:
         observation,
         extra={**observation.extra, "top_depth": depth_thunk},
     )
-    assert policy._toolset is not None
+    assert policy._adapter is not None
     expected = _observation_content(
         observation,
         policy._state_labels,
-        setpoint_lines=policy._toolset.setpoint_lines(observation),
+        setpoint_lines=policy._adapter.control.setpoint_lines(observation),
         wall_s=0.0,
     )
 
@@ -1160,11 +1137,11 @@ def test_missing_depth_key_preserves_pre_depth_observation_message() -> None:
     policy.bind(_VisionAbsoluteEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="inspect rgb"))
     observation = _vision_observation(env_step=5)
-    assert policy._toolset is not None
+    assert policy._adapter is not None
     expected = _observation_content(
         observation,
         policy._state_labels,
-        setpoint_lines=policy._toolset.setpoint_lines(observation),
+        setpoint_lines=policy._adapter.control.setpoint_lines(observation),
         wall_s=0.0,
     )
 

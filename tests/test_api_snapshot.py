@@ -29,6 +29,12 @@ EXPECTED = {
     "Analysis",
     "Analyzer",
     "rescore",
+    # policy adapters and tool libraries
+    "PolicyAdapter",
+    "ToolAdapter",
+    "Tool",
+    "ToolLibrary",
+    "ToolResult",
     # tasks, scenes, scoring
     "Task",
     "TaskEnvelope",

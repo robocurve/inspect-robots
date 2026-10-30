@@ -26,6 +26,7 @@ import numpy as np
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import embodiment_notes, state_lines
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
 from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation, Termination
@@ -308,7 +309,7 @@ class CapxPolicy(PolicyBase):
         self._state_key: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
         self._embodiment_name = "(unbound)"
-        self._embodiment_docs: str | None = None
+        self._embodiment_notes: str | None = None
         self._action_summary = "unbound; call bind() before act()"
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
@@ -392,7 +393,7 @@ class CapxPolicy(PolicyBase):
         self._state_key = state_key
         self._state_labels = (state_key, labels) if labels is not None else None
         self._embodiment_name = embodiment_info.name
-        self._embodiment_docs = getattr(embodiment_info, "docs", None)
+        self._embodiment_notes = embodiment_notes(embodiment_info)
         arm_labels = [
             labels[index] if labels is not None else str(index)
             for index in range(space.dim)
@@ -425,8 +426,8 @@ class CapxPolicy(PolicyBase):
                 extrinsics_key=self._extrinsics_key,
             ),
         )
-        if self._embodiment_docs is not None and self._embodiment_docs.strip():
-            system += "\n\nEmbodiment notes:\n" + self._embodiment_docs.strip()
+        if self._embodiment_notes is not None:
+            system += "\n\n" + self._embodiment_notes
         if self._prior_learnings_text is not None:
             system = (
                 system
@@ -579,27 +580,6 @@ def _execution_report(code: str, result: ExecutionResult) -> str:
     return _REPORT_TRUNCATION_MARKER + report[-tail_size:]
 
 
-def _state_lines(
-    observation: Observation,
-    state_labels: tuple[str, tuple[str, ...]] | None,
-) -> list[str]:
-    """Render observation state with action labels when the bound vector aligns."""
-    lines: list[str] = []
-    for key, value in observation.state.items():
-        array = np.asarray(value, dtype=np.float64)
-        rounded = np.round(array, 4).tolist()
-        if state_labels is not None and key == state_labels[0]:
-            labels = state_labels[1]
-            if array.shape == (len(labels),):
-                labeled = " ".join(
-                    f"{label}={item}" for label, item in zip(labels, rounded, strict=True)
-                )
-                lines.append(f"state[{key}]: {labeled}")
-                continue
-        lines.append(f"state[{key}]: {rounded}")
-    return lines
-
-
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None,
@@ -608,7 +588,7 @@ def _observation_content(
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
-    lines.extend(_state_lines(observation, state_labels))
+    lines.extend(state_lines(observation, state_labels))
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
     for name, image in observation.images.items():
         parts.append({"type": "text", "text": f"camera {name!r}:"})

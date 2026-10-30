@@ -76,6 +76,74 @@ same step, and ending a trial is never a claim of success: scoring stays with
 the task's scorers. A kind the policy did not declare fails the trial with a
 `PolicyError`, so a typo cannot pass for a refusal.
 
+## A language-model policy: the policy adapter
+
+A multimodal language model becomes a policy through a
+[`PolicyAdapter`](../../src/inspect_robots/policy_adapter.py), which supplies
+what the paper lists: instructions for operating the current embodiment,
+preprocessed observations, a library of control tools and a library of
+termination tools. The policy keeps only its model: prompting, the provider's
+wire format and the conversation. The `agent` plugin is built this way.
+
+[`ToolAdapter`](../../src/inspect_robots/policy_adapter.py) is the reference
+adapter. Bound to an embodiment, it builds tools from the declared spaces:
+
+```python
+from inspect_robots import ToolAdapter
+
+adapter = ToolAdapter(max_speed_frac=0.1, images="always")
+adapter.bind(embodiment.info)
+
+adapter.tools.names           # ("move_joints", "done", "give_up", "sleep")
+adapter.tools.schemas()       # OpenAI-format tool definitions for the model
+adapter.instructions()        # embodiment notes, bounds, pinned dimensions
+adapter.observation_lines(obs)  # state, setpoint, guard and embodiment reports
+
+result = adapter.tools.execute("move_joints", '{"targets": {"j0": 0.2}, "note": "..."}', obs)
+result.chunk  # an ActionChunk, or None with result.error for the model to read
+```
+
+The control tools come from
+[`control_tools`](../../src/inspect_robots/tools.py): a speed-limited move tool
+(`move_joints`, `move_to` or `move_by`, depending on the control mode), `sleep`,
+and `take_pic` when images are on demand. The termination tools come from
+[`termination_tools`](../../src/inspect_robots/tools.py): `done` and `give_up`,
+which hold the current setpoint and end the trial with the model's stated
+reason. A [`ToolLibrary`](../../src/inspect_robots/tools.py) lists tools by
+their `order`, so the model always sees the same list.
+
+An embodiment can add its own tools. Define `contribute_tools(action_space)`
+returning a `ToolLibrary`; `eval()` passes it to any policy with a
+`bind_tools(library)` method, and the adapter lists the tools after the
+built-in ones. Each [`Tool`](../../src/inspect_robots/tools.py) is a schema plus
+a function from the call's arguments and the current observation to a
+[`ToolResult`](../../src/inspect_robots/tools.py):
+
+```python
+from inspect_robots import Tool, ToolLibrary, ToolResult
+from inspect_robots.types import Action, ActionChunk
+
+
+class MyArm:
+    ...
+
+    def contribute_tools(self, action_space):
+        def open_gripper(arguments, observation):
+            target = observation.state["joint_pos"].copy()
+            target[-1] = 1.0
+            return ToolResult(chunk=ActionChunk(actions=[Action(data=target)]), note="opening")
+
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "open_gripper",
+                "description": "Open the gripper fully.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        return ToolLibrary([Tool("open_gripper", schema, open_gripper)])
+```
+
 ## An embodiment (robot or sim)
 
 An [`Embodiment`](../../src/inspect_robots/embodiment.py) produces observations and executes

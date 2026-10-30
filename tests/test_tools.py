@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any
 
@@ -20,9 +21,15 @@ from inspect_robots.spaces import (
     StateField,
     StateSpec,
 )
+from inspect_robots.tools import (
+    ControlTools,
+    ToolError,
+    ToolLibrary,
+    ToolResult,
+    control_tools,
+    termination_tools,
+)
 from inspect_robots.types import Action, Observation, Termination
-from inspect_robots_agent._llm import ToolCall
-from inspect_robots_agent._tools import ToolResult, ToolsetError, build_toolset
 
 _ARM_LABELS = tuple(
     f"{side}_{part}"
@@ -31,6 +38,36 @@ _ARM_LABELS = tuple(
 )
 _DEFAULT_MOVE_NOTE = "The robot state is visible, so I chose this motion to make progress."
 _NOTE_ERROR = "note is required: describe what you observe and why you chose this motion"
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A model's tool call as a policy receives it."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+class _Tools:
+    """Control and termination tools together, called the way a policy calls them."""
+
+    def __init__(self, control: ControlTools) -> None:
+        self.control = control
+        self.library: ToolLibrary = control.library + termination_tools(control)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.control, name)
+
+    def schemas(self) -> list[dict[str, Any]]:
+        return self.library.schemas()
+
+    def execute(self, call: ToolCall, observation: Observation) -> ToolResult:
+        return self.library.execute(call.name, call.arguments, observation)
+
+
+def build_toolset(*args: Any, **kwargs: Any) -> _Tools:
+    return _Tools(control_tools(*args, **kwargs))
 
 
 def _bimanual_space() -> Box:
@@ -135,7 +172,7 @@ def _execute_absolute(
 
 def test_build_refuses_unsupported_configurations() -> None:
     no_sem = Box(shape=(2,), low=np.zeros(2), high=np.ones(2))
-    with pytest.raises(ToolsetError, match="semantics"):
+    with pytest.raises(ToolError, match="semantics"):
         build_toolset(no_sem, _bimanual_obs_space(), control_hz=10.0)
 
     vel = Box(
@@ -144,7 +181,7 @@ def test_build_refuses_unsupported_configurations() -> None:
         high=np.ones(2),
         semantics=ActionSemantics("joint_vel"),
     )
-    with pytest.raises(ToolsetError, match="joint_vel"):
+    with pytest.raises(ToolError, match="joint_vel"):
         build_toolset(vel, _bimanual_obs_space(), control_hz=10.0)
 
     quat = Box(
@@ -153,7 +190,7 @@ def test_build_refuses_unsupported_configurations() -> None:
         high=np.ones(7),
         semantics=ActionSemantics("eef_abs_pose", rotation_repr="quat_wxyz"),
     )
-    with pytest.raises(ToolsetError, match="rotation_repr"):
+    with pytest.raises(ToolError, match="rotation_repr"):
         build_toolset(quat, _bimanual_obs_space(), control_hz=10.0)
 
 
@@ -161,7 +198,7 @@ def test_pre_check_refuses_displacement_modes_only_when_configured() -> None:
     def allow(waypoints: npt.NDArray[np.float64]) -> str | None:
         return None
 
-    with pytest.raises(ToolsetError, match=r"displacement.*plan 0031"):
+    with pytest.raises(ToolError, match=r"displacement.*plan 0031"):
         build_toolset(
             _delta_space(),
             ObservationSpace(),
@@ -180,17 +217,17 @@ def test_pre_check_refuses_displacement_modes_only_when_configured() -> None:
 
 def test_absolute_mode_requires_exactly_one_aligned_state_field() -> None:
     space = _bimanual_space()
-    with pytest.raises(ToolsetError, match="StateSpec"):
+    with pytest.raises(ToolError, match="StateSpec"):
         build_toolset(space, ObservationSpace(), control_hz=10.0)
 
     none_match = ObservationSpace(state=StateSpec(fields=(StateField(key="eef", shape=(3,)),)))
-    with pytest.raises(ToolsetError, match="exactly one"):
+    with pytest.raises(ToolError, match="exactly one"):
         build_toolset(space, none_match, control_hz=10.0)
 
     two_match = ObservationSpace(
         state=StateSpec(fields=(StateField(key="a", shape=(14,)), StateField(key="b", shape=(14,))))
     )
-    with pytest.raises(ToolsetError, match="exactly one"):
+    with pytest.raises(ToolError, match="exactly one"):
         build_toolset(space, two_match, control_hz=10.0)
 
 
@@ -317,7 +354,7 @@ def test_absolute_mode_requires_finite_bounds(
         high=high,
         semantics=ActionSemantics("joint_pos", dim_labels=("joint",)),
     )
-    with pytest.raises(ToolsetError, match="finite low and high bounds"):
+    with pytest.raises(ToolError, match="finite low and high bounds"):
         build_toolset(space, _absolute_obs_space(), control_hz=10.0)
 
 
@@ -341,7 +378,7 @@ def test_displacement_mode_requires_finite_zero_containing_bounds(
         high=high,
         semantics=ActionSemantics("eef_delta_pos"),
     )
-    with pytest.raises(ToolsetError, match=message):
+    with pytest.raises(ToolError, match=message):
         build_toolset(space, ObservationSpace(), control_hz=10.0)
 
 
@@ -358,7 +395,7 @@ def test_zero_width_and_zero_sided_bounds_bind() -> None:
 
 @pytest.mark.parametrize("control_hz", [0.0, -1.0, float("inf"), float("-inf"), float("nan")])
 def test_declared_control_hz_must_be_finite_and_positive(control_hz: float) -> None:
-    with pytest.raises(ToolsetError, match="control_hz must be finite and > 0"):
+    with pytest.raises(ToolError, match="control_hz must be finite and > 0"):
         build_toolset(_delta_space(), ObservationSpace(), control_hz=control_hz)
 
 
@@ -367,10 +404,10 @@ def test_control_hz_none_binds() -> None:
 
 
 def test_build_rejects_degenerate_derivations() -> None:
-    with pytest.raises(ToolsetError, match="too large to derive a playout cap"):
+    with pytest.raises(ToolError, match="too large to derive a playout cap"):
         build_toolset(_delta_space(), ObservationSpace(), control_hz=1e308)
 
-    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
+    with pytest.raises(ToolError, match="underflows the derived per-step limit"):
         build_toolset(
             _absolute_space(),
             _absolute_obs_space(),
@@ -378,7 +415,7 @@ def test_build_rejects_degenerate_derivations() -> None:
             max_speed_frac=5e-324,
         )
 
-    with pytest.raises(ToolsetError, match="underflows to a zero per-step limit"):
+    with pytest.raises(ToolError, match="underflows to a zero per-step limit"):
         build_toolset(
             _delta_space(),
             ObservationSpace(),
@@ -387,7 +424,7 @@ def test_build_rejects_degenerate_derivations() -> None:
         )
 
     huge = _absolute_space(low=np.array([-1e308]), high=np.array([1e308]))
-    with pytest.raises(ToolsetError, match=r"range .* overflows"):
+    with pytest.raises(ToolError, match=r"range .* overflows"):
         build_toolset(huge, _absolute_obs_space(), control_hz=10.0)
 
     # float32 bounds whose difference overflows only in the native dtype:
@@ -395,20 +432,20 @@ def test_build_rejects_degenerate_derivations() -> None:
     huge32 = _absolute_space(
         low=np.array([-3e38], dtype=np.float32), high=np.array([3e38], dtype=np.float32)
     )
-    with pytest.raises(ToolsetError, match=r"range .* overflows"):
+    with pytest.raises(ToolError, match=r"range .* overflows"):
         build_toolset(huge32, _absolute_obs_space(), control_hz=10.0)
 
     offset = _absolute_space(low=np.array([1e16]), high=np.array([1e16 + 2.0]))
-    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+    with pytest.raises(ToolError, match="too coarse at this magnitude"):
         build_toolset(offset, _absolute_obs_space(), control_hz=10.0)
 
     subnormal_range = _absolute_space(low=np.array([0.0]), high=np.array([5e-324]))
-    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+    with pytest.raises(ToolError, match="too coarse at this magnitude"):
         build_toolset(subnormal_range, _absolute_obs_space(), control_hz=10.0)
 
     # frac/hz is nonzero but multiplying by a small range underflows the
     # derived limit to zero; the dimension must not be misreported as fixed.
-    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
+    with pytest.raises(ToolError, match="underflows the derived per-step limit"):
         build_toolset(
             _absolute_space(low=np.array([0.0]), high=np.array([0.1])),
             _absolute_obs_space(),
@@ -422,7 +459,7 @@ def test_build_rejects_degenerate_derivations() -> None:
         high=np.ones((2, 2)),
         semantics=ActionSemantics("joint_pos"),
     )
-    with pytest.raises(ToolsetError, match="only 1-D"):
+    with pytest.raises(ToolError, match="only 1-D"):
         build_toolset(matrix, _absolute_obs_space(dim=4), control_hz=10.0)
 
 
@@ -536,7 +573,7 @@ def test_declared_step_is_the_float_spacing_guard_budget() -> None:
         ),
     )
 
-    with pytest.raises(ToolsetError, match="too coarse at this magnitude"):
+    with pytest.raises(ToolError, match="too coarse at this magnitude"):
         build_toolset(space, _absolute_obs_space(), control_hz=10.0)
 
 
@@ -552,7 +589,7 @@ def test_declared_step_pacing_underflow_hits_movable_zero_limit_guard() -> None:
         ),
     )
 
-    with pytest.raises(ToolsetError, match="underflows the derived per-step limit"):
+    with pytest.raises(ToolError, match="underflows the derived per-step limit"):
         build_toolset(
             space,
             _absolute_obs_space(),
@@ -580,7 +617,7 @@ def test_declared_step_chunks_pass_the_default_delta_approver_unmodified() -> No
 
 @pytest.mark.parametrize("max_speed_frac", [0.0, -0.1, float("inf"), float("nan")])
 def test_build_rejects_invalid_max_speed_frac(max_speed_frac: float) -> None:
-    with pytest.raises(ToolsetError, match="max_speed_frac must be finite and > 0"):
+    with pytest.raises(ToolError, match="max_speed_frac must be finite and > 0"):
         build_toolset(
             _absolute_space(),
             _absolute_obs_space(),
@@ -689,7 +726,7 @@ def test_take_pic_schema_is_exposed_only_on_demand() -> None:
 
 
 def test_on_demand_requires_a_declared_camera_at_bind_time() -> None:
-    with pytest.raises(ToolsetError, match=r"fix: drop -P images=on_demand"):
+    with pytest.raises(ToolError, match=r"fix: drop -P images=on_demand"):
         build_toolset(
             _absolute_space(),
             _absolute_obs_space(),

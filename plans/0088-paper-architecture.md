@@ -1,6 +1,6 @@
 # 0088: The paper architecture
 
-Status: in progress (phases 1, 2, 3, 4, 8 and 9 built). One breaking release, built and tested phase by phase.
+Status: in progress (phases 1, 2, 3, 4, 5, 8 and 9 built). One breaking release, built and tested phase by phase.
 
 Inspect Robots accompanies a paper that defines an evaluation framework for
 physical AI safety in eight extensible abstractions around one fixed backbone.
@@ -87,7 +87,12 @@ change is non-trivial, changelog fragments, tests at 100% coverage, and
    `PolicyAdapter` protocol owning observation preprocessing, embodiment
    instructions and the two tool libraries. Embodiments may
    `contribute_tools()`. The agent plugin keeps only its provider wire formats;
-   CaP-X moves onto the same adapter.
+   CaP-X moves onto the same adapter. As built: the agent keeps its prompts and
+   conversation as well as its wire formats, and gets tools, embodiment
+   instructions and observation text from the core `ToolAdapter`; CaP-X,
+   whose model writes code rather than calling tools, shares the adapter's
+   embodiment-notes and state-line helpers. Golden request bodies are
+   byte-identical across the move.
 6. **Replanning on observation.** An optional `ReplanTrigger` protocol on the
    default action manager (built in: chunk end, unreachable target, gripper
    slip), with the reason recorded.

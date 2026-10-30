@@ -1,23 +1,34 @@
-"""The agent's speed-limited tool surface over a bound action space.
+"""Tool libraries: what a language-model policy can call to act, and to end a trial.
 
-Tools are generated from the embodiment's spaces, so the plugin never needs
-embodiment-specific motion knowledge. Absolute targets are interpolated with a
-declared per-dimension limit where available and a range-derived backstop
-otherwise. Dimensions a call leaves unnamed keep the last target commanded in
-the trial (the measured state before the first move), so tracking sag never
-becomes the next command. Displacements are split by the available box side,
-which the plugin treats as the embodiment author's per-action limit.
+The paper's policy adapter gives a language model two libraries of tools: control
+tools, each of which yields a sequence of actions, and termination tools (done,
+give up with a stated reason) that end the trial. A [`Tool`][inspect_robots.tools.Tool]
+pairs a JSON tool schema with the function that runs it, and a
+[`ToolLibrary`][inspect_robots.tools.ToolLibrary] is an ordered set of tools that
+validates a call and turns it into a [`ToolResult`][inspect_robots.tools.ToolResult]:
+an action chunk, or an error string the model can correct.
 
-Tool mistakes come back as structured error strings the LLM can correct.
+[`control_tools`][inspect_robots.tools.control_tools] builds the speed-limited
+motion tools from an embodiment's spaces, so no embodiment-specific motion
+knowledge is needed. Absolute targets are interpolated with a declared
+per-dimension limit where available and a range-derived backstop otherwise.
+Dimensions a call leaves unnamed keep the last target commanded in the trial (the
+measured state before the first move), so tracking sag never becomes the next
+command. Displacements are split by the available box side, which is treated as
+the embodiment author's per-action limit.
+[`termination_tools`][inspect_robots.tools.termination_tools] builds ``done`` and
+``give_up``, which hold the current setpoint and end the trial with a
+[`Termination`][inspect_robots.types.Termination].
+
 Broken observations still raise, and unsupported configurations fail at build
-(bind) time with a clear message.
+time with a [`ToolError`][inspect_robots.tools.ToolError].
 """
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,8 +73,12 @@ _HINDSIGHT_DESCRIPTION = (
 PreCheck = Callable[[npt.NDArray[np.float64]], str | None]
 
 
-class ToolsetError(Exception):
-    """An action space / observation space this toolset cannot drive."""
+CONTROL = "control"
+TERMINATION = "termination"
+
+
+class ToolError(Exception):
+    """An action space / observation space these tools cannot drive."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -88,8 +103,88 @@ class ToolResult:
     sleep: float | None = None
 
 
-class Toolset:
-    """Schemas and execution for one embodiment, built via ``build_toolset``."""
+#: Runs one tool call: its decoded arguments object and the current observation.
+ToolRun = Callable[[dict[str, Any], Observation], ToolResult]
+
+
+@dataclass(frozen=True)
+class Tool:
+    """One tool a language-model policy can call.
+
+    ``schema`` is the tool definition in the OpenAI function format
+    (``{"type": "function", "function": {"name", "description", "parameters"}}``);
+    wire formats convert it for other providers. ``run`` receives the decoded
+    arguments object and the current observation. ``kind`` is ``"control"`` or
+    ``"termination"``. Libraries list tools by ascending ``order``, then in the
+    order they were added, so a model always sees the same tool list.
+    """
+
+    name: str
+    schema: Mapping[str, Any]
+    run: ToolRun
+    kind: str = CONTROL
+    order: int = 100
+
+
+class ToolLibrary:
+    """An ordered set of uniquely named tools that turns calls into results."""
+
+    def __init__(self, tools: Iterable[Tool] = ()) -> None:
+        ordered = sorted(tools, key=lambda tool: tool.order)
+        names = [tool.name for tool in ordered]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ToolError(f"duplicate tool name(s): {', '.join(duplicates)}")
+        self._tools = tuple(ordered)
+        self._by_name = {tool.name: tool for tool in ordered}
+
+    def __iter__(self) -> Iterator[Tool]:
+        return iter(self._tools)
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._by_name
+
+    def __add__(self, other: ToolLibrary) -> ToolLibrary:
+        return ToolLibrary((*self._tools, *other._tools))
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Tool names in listing order."""
+        return tuple(tool.name for tool in self._tools)
+
+    def schemas(self) -> list[dict[str, Any]]:
+        """The tool definitions, in listing order, as fresh dictionaries."""
+        return [json.loads(json.dumps(tool.schema)) for tool in self._tools]
+
+    def execute(self, name: str, arguments: str, observation: Observation) -> ToolResult:
+        """Decode ``arguments`` (a JSON object) and run tool ``name`` on ``observation``.
+
+        A malformed call or an unknown tool returns a ``ToolResult`` whose
+        ``error`` the model can read and correct.
+        """
+        try:
+            decoded = json.loads(arguments)
+        except (TypeError, ValueError):
+            return ToolResult(error=f"arguments for {name} are not valid JSON")
+        if not isinstance(decoded, dict):
+            return ToolResult(error=f"arguments for {name} must be a JSON object")
+        tool = self._by_name.get(name)
+        if tool is None:
+            return ToolResult(error=f"unknown tool {name!r}; available: {', '.join(self.names)}")
+        return tool.run(decoded, observation)
+
+
+class ControlTools:
+    """The motion tools for one embodiment and the trial state they share.
+
+    Build with [`control_tools`][inspect_robots.tools.control_tools]. ``library``
+    holds the tools (``move_*``, ``sleep`` and, for on-demand images,
+    ``take_pic``); the methods expose what an adapter reports around them: the
+    held setpoint, bounds, pinned dimensions and the residual after a move.
+    """
 
     def __init__(
         self,
@@ -227,8 +322,30 @@ class Toolset:
             if pos == 0 and neg == 0
         )
 
-    def schemas(self) -> list[dict[str, Any]]:
-        """Return OpenAI-format tool definitions for this embodiment."""
+    @property
+    def library(self) -> ToolLibrary:
+        """The control tools: the move tool, ``sleep``, and ``take_pic`` for on-demand images."""
+        tools = [
+            Tool(self._move_tool, self._move_schema(), self._move, CONTROL, order=0),
+            Tool("sleep", self._sleep_schema(), self._sleep, CONTROL, order=20),
+        ]
+        if self._images == "on_demand":
+            tools.append(
+                Tool("take_pic", self._take_pic_schema(), self._take_pic, CONTROL, order=30)
+            )
+        return ToolLibrary(tools)
+
+    @property
+    def control_hz(self) -> float | None:
+        """The declared control rate stamped on every chunk (``None`` if undeclared)."""
+        return self._hz
+
+    def hold_target(self, observation: Observation) -> npt.NDArray[np.float64]:
+        """The setpoint the controller is tracking: the last absolute target, else the readback."""
+        held = self._held_target
+        return self._current_state(observation) if held is None else held.copy()
+
+    def _move_schema(self) -> dict[str, Any]:
         if self._absolute and self._pose:
             move_description = (
                 "Move to absolute Cartesian end-effector targets (meters for "
@@ -295,87 +412,43 @@ class Toolset:
                 },
             },
         }
-        done = {
+        return move
+
+    def _take_pic_schema(self) -> dict[str, Any]:
+        return {
             "type": "function",
             "function": {
-                "name": "done",
+                "name": "take_pic",
                 "description": (
-                    "Declare the task finished. The trial ends; a scorer judges success."
+                    "Capture the current frame from one or more cameras. "
+                    "Omit cameras to capture every available camera. "
+                    "Declared cameras: " + ", ".join(self._cameras) + "."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "summary": {"type": "string"},
-                        "hindsight": {
+                        "cameras": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Camera names to capture. Valid declared names: "
+                                + ", ".join(self._cameras)
+                            ),
+                        },
+                        "note": {
                             "type": "string",
-                            "description": _HINDSIGHT_DESCRIPTION,
+                            "description": (
+                                "What you need to inspect and why seeing a camera "
+                                "frame is necessary before the next decision. The "
+                                "user reads these notes live and in the saved "
+                                "transcript."
+                            ),
                         },
                     },
-                    "required": ["summary", "hindsight"],
+                    "required": ["note"],
                 },
             },
         }
-        give_up = {
-            "type": "function",
-            "function": {
-                "name": "give_up",
-                "description": (
-                    "Stop trying; the task cannot be completed. The trial ends. "
-                    "If a workspace limit is what stops you, say so in your reason: "
-                    "operators can widen limits between trials."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reason": {"type": "string"},
-                        "hindsight": {
-                            "type": "string",
-                            "description": _HINDSIGHT_DESCRIPTION,
-                        },
-                    },
-                    "required": ["reason", "hindsight"],
-                },
-            },
-        }
-        schemas = [move, done, give_up, self._sleep_schema()]
-        if self._images == "on_demand":
-            schemas.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "take_pic",
-                        "description": (
-                            "Capture the current frame from one or more cameras. "
-                            "Omit cameras to capture every available camera. "
-                            "Declared cameras: " + ", ".join(self._cameras) + "."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "cameras": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "Camera names to capture. Valid declared names: "
-                                        + ", ".join(self._cameras)
-                                    ),
-                                },
-                                "note": {
-                                    "type": "string",
-                                    "description": (
-                                        "What you need to inspect and why seeing a camera "
-                                        "frame is necessary before the next decision. The "
-                                        "user reads these notes live and in the saved "
-                                        "transcript."
-                                    ),
-                                },
-                            },
-                            "required": ["note"],
-                        },
-                    },
-                }
-            )
-        return schemas
 
     def _sleep_schema(self) -> dict[str, Any]:
         return {
@@ -405,27 +478,6 @@ class Toolset:
                 },
             },
         }
-
-    def execute(self, call: Any, observation: Observation) -> ToolResult:
-        """Turn one tool call into an action chunk or an error string for the LLM."""
-        try:
-            arguments = json.loads(call.arguments)
-        except (TypeError, ValueError):
-            return ToolResult(error=f"arguments for {call.name} are not valid JSON")
-        if not isinstance(arguments, dict):
-            return ToolResult(error=f"arguments for {call.name} must be a JSON object")
-        if call.name in ("done", "give_up"):
-            return self._stop(call.name, arguments, observation)
-        if call.name == "take_pic" and self._images == "on_demand":
-            return self._take_pic(arguments, observation)
-        if call.name == "sleep":
-            return self._sleep(arguments, observation)
-        if call.name != self._move_tool:
-            available = f"{self._move_tool}, done, give_up, sleep"
-            if self._images == "on_demand":
-                available += ", take_pic"
-            return ToolResult(error=f"unknown tool {call.name!r}; available: {available}")
-        return self._move(arguments, observation)
 
     def residual(
         self, target: npt.NDArray[np.float64], observation: Observation
@@ -457,30 +509,6 @@ class Toolset:
         if self._state_key is None:
             return np.zeros(len(self._labels))
         return np.asarray(observation.state[self._state_key], dtype=np.float64)
-
-    def _stop(self, name: str, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        # Ending the trial must not move anything: re-send the setpoint the
-        # controller is already tracking (a gripper squeeze included) rather
-        # than the measured state, which lags it by the tracking sag.
-        held = self._held_target
-        data = self._current_state(observation) if held is None else held.copy()
-        detail = str(arguments.get("summary") or arguments.get("reason") or "")
-        meta: dict[str, Any] = {}
-        hindsight = arguments.get("hindsight")
-        # The schema's "say 'none'" escape hatch must not pollute harvested
-        # metadata with literal sentinels.
-        if isinstance(hindsight, str) and hindsight.strip() and hindsight.strip().lower() != "none":
-            meta["stop_hindsight"] = hindsight.strip()
-        action = Action(
-            data=data,
-            meta=meta,
-        )
-        return ToolResult(
-            chunk=ActionChunk(
-                actions=[action], control_hz=self._hz, terminal=Termination(name, detail)
-            ),
-            note=f"{name}: {detail}",
-        )
 
     def _take_pic(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         call_note = arguments.get("note")
@@ -712,9 +740,9 @@ class Toolset:
         *,
         target: npt.NDArray[np.float64] | None = None,
     ) -> ToolResult:
-        if actions:
-            last = actions[-1]
-            actions[-1] = Action(data=last.data, meta={**last.meta, "chunk_final": True})
+        # Both callers build at least one step, so there is always a last action.
+        last = actions[-1]
+        actions[-1] = Action(data=last.data, meta={**last.meta, "chunk_final": True})
         note = f"executing {self._move_tool} over {steps} steps"
         if self._hz is not None:
             note += f" ({steps / self._hz:.1f}s)"
@@ -725,58 +753,61 @@ class Toolset:
         )
 
 
-def build_toolset(
+def control_tools(
     action_space: Box,
     observation_space: ObservationSpace,
     control_hz: float | None,
     max_speed_frac: float = 0.1,
     images: str = "always",
     pre_check: PreCheck | None = None,
-) -> Toolset:
-    """Validate an embodiment's spaces and build its agent-facing tools.
+) -> ControlTools:
+    """Validate an embodiment's spaces and build its control tools.
 
-    Raises [`ToolsetError`][inspect_robots_agent._tools.ToolsetError] for
-    configurations the motion layer cannot drive, before a trial begins.
+    ``max_speed_frac`` caps motion speed as a fraction of each dimension's range
+    per second. ``images="on_demand"`` adds ``take_pic``. ``pre_check`` vets
+    each absolute move's waypoints before it is accepted. Raises
+    [`ToolError`][inspect_robots.tools.ToolError] for configurations the motion
+    layer cannot drive, before a trial begins.
     """
     if images == "on_demand" and not observation_space.cameras:
-        raise ToolsetError(
+        raise ToolError(
             "images='on_demand' needs at least one camera declared by the embodiment.\n"
             "fix: drop -P images=on_demand"
         )
     semantics = action_space.semantics
     if semantics is None:
-        raise ToolsetError(
+        raise ToolError(
             "the embodiment's action space declares no semantics; the agent cannot "
             "tell absolute targets from displacements"
         )
     mode = semantics.control_mode
     if mode in _POSE_MODES and semantics.rotation_repr not in _SAFE_ROT:
-        raise ToolsetError(
+        raise ToolError(
             f"rotation_repr {semantics.rotation_repr!r} cannot be driven per-dimension; "
             f"only {sorted(_SAFE_ROT)} are supported"
         )
     if mode not in ABSOLUTE_CONTROL_MODES | _DISPLACEMENT_MODES:
-        raise ToolsetError(f"control_mode {mode!r} is not supported by the agent policy yet")
+        raise ToolError(f"control_mode {mode!r} is not supported by the agent policy yet")
     if pre_check is not None and mode in _DISPLACEMENT_MODES:
-        raise ToolsetError(
+        raise ToolError(
             "pre_check cannot be used with displacement control modes: they emit "
             "per-step delta vectors that a configuration checker would misread "
             "(plan 0031)"
         )
     if control_hz is not None and (not np.isfinite(control_hz) or control_hz <= 0):
-        raise ToolsetError("control_hz must be finite and > 0 when declared")
+        raise ToolError("control_hz must be finite and > 0 when declared")
     if not np.isfinite(max_speed_frac) or max_speed_frac <= 0:
-        raise ToolsetError("max_speed_frac must be finite and > 0")
+        raise ToolError("max_speed_frac must be finite and > 0")
     resolved_hz = control_hz if control_hz is not None else _FALLBACK_HZ
     if not math.isfinite(_MAX_DURATION_S * resolved_hz):
-        raise ToolsetError(f"control_hz {control_hz!r} is too large to derive a playout cap")
+        raise ToolError(f"control_hz {control_hz!r} is too large to derive a playout cap")
     if mode in _DISPLACEMENT_MODES and max_speed_frac / resolved_hz == 0.0:
-        raise ToolsetError(
+        raise ToolError(
             f"max_speed_frac {max_speed_frac!r} underflows to a zero per-step "
             f"limit at control_hz {resolved_hz!r}"
         )
     if len(action_space.shape) != 1:
-        raise ToolsetError(
+        raise ToolError(
             f"only 1-D (vector) action spaces are supported, got shape {action_space.shape}"
         )
 
@@ -786,7 +817,7 @@ def build_toolset(
     state_spec = observation_space.state
     if absolute:
         if state_spec is None:
-            raise ToolsetError(
+            raise ToolError(
                 "absolute-target control needs a StateSpec on the embodiment's "
                 "observation space to locate the proprioceptive reference"
             )
@@ -804,7 +835,7 @@ def build_toolset(
             if len(preferred) == 1:
                 matching = preferred
         if len(matching) != 1:
-            raise ToolsetError(
+            raise ToolError(
                 f"absolute-target control needs exactly one state field with shape "
                 f"({dim},); found {matching or 'none'}"
             )
@@ -817,7 +848,7 @@ def build_toolset(
         or not bool(np.all(np.isfinite(low)) and np.all(np.isfinite(high)))
     ):
         mode_name = "absolute-target" if absolute else "displacement"
-        raise ToolsetError(f"{mode_name} control needs finite low and high bounds")
+        raise ToolError(f"{mode_name} control needs finite low and high bounds")
     low64 = np.asarray(low, dtype=np.float64)
     high64 = np.asarray(high, dtype=np.float64)
     # The range must be finite in the box's native dtype, not just in float64:
@@ -826,9 +857,9 @@ def build_toolset(
     with np.errstate(over="ignore"):
         native_range = np.asarray(high - low, dtype=np.float64)
     if not bool(np.all(np.isfinite(native_range)) and np.all(np.isfinite(high64 - low64))):
-        raise ToolsetError("action-space range (high - low) overflows; bounds are too large")
+        raise ToolError("action-space range (high - low) overflows; bounds are too large")
     if not absolute and (bool(np.any(low64 > 0)) or bool(np.any(high64 < 0))):
-        raise ToolsetError("displacement control bounds must contain zero in every dimension")
+        raise ToolError("displacement control bounds must contain zero in every dimension")
     # DeltaLimitGuard derives undeclared dimensions in the box's native
     # dtype; reproduce that arithmetic exactly before substituting declarations.
     native_backstop = np.asarray(_BACKSTOP_STEP_FRAC * (high - low), dtype=np.float64)
@@ -850,7 +881,7 @@ def build_toolset(
         spacing = np.spacing(np.maximum(np.abs(low64), np.abs(high64)))
         movable = high64 > low64
         if bool(np.any(movable & (spacing > 5e-7 * effective_budget))):
-            raise ToolsetError(
+            raise ToolError(
                 "bounds are too coarse at this magnitude for speed-limited "
                 "interpolation (float spacing exceeds the per-step budget)"
             )
@@ -863,7 +894,7 @@ def build_toolset(
         # limit once multiplied by a small range or declared max_step; a
         # movable dimension with a zero limit would be misreported as fixed.
         if bool(np.any(movable & (step_limits == 0))):
-            raise ToolsetError(
+            raise ToolError(
                 f"max_speed_frac {max_speed_frac!r} underflows the derived "
                 "per-step limit for a movable dimension; increase it"
             )
@@ -888,7 +919,7 @@ def build_toolset(
     )
     bounds_text = f"Per-dimension bounds: {pairs}."
 
-    return Toolset(
+    return ControlTools(
         absolute=absolute,
         labels=labels,
         state_key=state_key,
@@ -902,4 +933,88 @@ def build_toolset(
         images=images,
         cameras=tuple(camera.name for camera in observation_space.cameras),
         pre_check=pre_check,
+    )
+
+
+def termination_tools(control: ControlTools) -> ToolLibrary:
+    """``done`` and ``give_up``: end the trial, holding the setpoint ``control`` is tracking.
+
+    Ending a trial must not move anything, so each re-sends the setpoint the
+    controller already tracks (a gripper squeeze included) rather than the
+    measured state, which lags it by the tracking sag. The call's ``summary``
+    or ``reason`` becomes the stated reason of the
+    [`Termination`][inspect_robots.types.Termination]; a ``hindsight`` other
+    than ``"none"`` is kept in the action's ``meta["stop_hindsight"]``.
+    """
+
+    def stop(name: str) -> ToolRun:
+        def run(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+            detail = str(arguments.get("summary") or arguments.get("reason") or "")
+            meta: dict[str, Any] = {}
+            hindsight = arguments.get("hindsight")
+            # The schema's "say 'none'" escape hatch must not pollute harvested
+            # metadata with literal sentinels.
+            if (
+                isinstance(hindsight, str)
+                and hindsight.strip()
+                and hindsight.strip().lower() != "none"
+            ):
+                meta["stop_hindsight"] = hindsight.strip()
+            action = Action(data=control.hold_target(observation), meta=meta)
+            return ToolResult(
+                chunk=ActionChunk(
+                    actions=[action],
+                    control_hz=control.control_hz,
+                    terminal=Termination(name, detail),
+                ),
+                note=f"{name}: {detail}",
+            )
+
+        return run
+
+    done = {
+        "type": "function",
+        "function": {
+            "name": "done",
+            "description": ("Declare the task finished. The trial ends; a scorer judges success."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "hindsight": {
+                        "type": "string",
+                        "description": _HINDSIGHT_DESCRIPTION,
+                    },
+                },
+                "required": ["summary", "hindsight"],
+            },
+        },
+    }
+    give_up = {
+        "type": "function",
+        "function": {
+            "name": "give_up",
+            "description": (
+                "Stop trying; the task cannot be completed. The trial ends. "
+                "If a workspace limit is what stops you, say so in your reason: "
+                "operators can widen limits between trials."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string"},
+                    "hindsight": {
+                        "type": "string",
+                        "description": _HINDSIGHT_DESCRIPTION,
+                    },
+                },
+                "required": ["reason", "hindsight"],
+            },
+        },
+    }
+    return ToolLibrary(
+        [
+            Tool("done", done, stop("done"), TERMINATION, order=10),
+            Tool("give_up", give_up, stop("give_up"), TERMINATION, order=11),
+        ]
     )
