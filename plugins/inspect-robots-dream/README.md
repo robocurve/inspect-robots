@@ -104,11 +104,11 @@ retries, rows beyond the joint limits) and how closely the arms tracked the rows
 
 ## Status
 
-Dream-1 beta was run on `yam_sim` (Isaac Sim 5.1, L40S) on 2026-10-30 with a pre-release build that
-used the same request protocol. An 80 s trial made 33 requests of about 0.4 s each with no errors,
-and the arms tracked Dream's rows to within 0.03 rad. Dream reached the cube with the right arm and
-kept trying to grasp it, but did not lift it. `yam_sim`'s overhead camera sits lower and looks less
-steeply than the station camera Dream was trained with, which may matter.
+Dream-1 beta was run on `yam_sim` (Isaac Sim 5.1, L40S) through the bridge on 2026-10-30. An 80 s
+trial made 33 requests (0.38 s median round trip, no retries), and the arms tracked Dream's rows to
+within 0.06 rad. Dream reached the cube with the right arm and kept trying to grasp it, but did not
+lift it. `yam_sim`'s overhead camera sits lower and looks less steeply than the station camera Dream
+was trained with, which may matter.
 
 ## Development
 
