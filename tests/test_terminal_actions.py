@@ -185,9 +185,8 @@ def test_empty_reason_is_recorded_as_no_detail() -> None:
 @pytest.mark.parametrize("moves", [0, 1], ids=["terminal-only", "with-actions"])
 def test_undeclared_terminal_kind_is_a_policy_error(moves: int) -> None:
     policy = _TerminalPolicy(Termination("refuse", "unsafe"), moves=moves)
-    with pytest.raises(
-        PolicyError, match=r"terminal action 'refuse'.*declared: \['done', 'give_up'\]"
-    ):
+    expected = r"(?s)terminal action 'refuse'.*declared: \['done', 'give_up'\].*forward the inner"
+    with pytest.raises(PolicyError, match=expected):
         _run(policy)
 
 

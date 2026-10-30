@@ -129,7 +129,8 @@ def _declared_terminal(
             PolicyError(
                 f"policy {policy.info.name!r} ended the trial with terminal action "
                 f"{terminal.kind!r}, which it does not declare; declared: {sorted(declared)}.\n"
-                "fix: list it in PolicyInfo.terminal_actions"
+                "fix: list it in PolicyInfo.terminal_actions; a policy that wraps another "
+                "must forward the inner policy's terminal_actions"
             ),
             t,
         )
