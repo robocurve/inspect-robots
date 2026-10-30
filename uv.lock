@@ -11,6 +11,7 @@ members = [
     "inspect-robots",
     "inspect-robots-agent",
     "inspect-robots-capx",
+    "inspect-robots-dream",
     "inspect-robots-isaacsim",
     "inspect-robots-ros",
     "inspect-robots-voice",
@@ -417,6 +418,18 @@ wheels = [
 ]
 
 [[package]]
+name = "dreamlabs-client"
+version = "1.0.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "websockets" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/e0/5a5a37a5eab98dacf4c771a0eb113f9a88878377eaef195de8d60c39fcbc/dreamlabs_client-1.0.14-py3-none-any.whl", hash = "sha256:deeaea8063cac2a63a13c0814389b8316944647c3520017ece86c654500802cb", size = 458485, upload-time = "2026-10-29T20:50:36.589Z" },
+]
+
+[[package]]
 name = "espeakng-loader"
 version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
@@ -691,6 +704,42 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "inspect-robots-dream"
+version = "0.1.0"
+source = { editable = "plugins/inspect-robots-dream" }
+dependencies = [
+    { name = "inspect-robots" },
+    { name = "numpy" },
+    { name = "pillow" },
+]
+
+[package.optional-dependencies]
+client = [
+    { name = "dreamlabs-client" },
+]
+dev = [
+    { name = "dreamlabs-client" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dreamlabs-client", marker = "extra == 'client'", specifier = ">=1.0.14" },
+    { name = "inspect-robots", editable = "." },
+    { name = "inspect-robots-dream", extras = ["client"], marker = "extra == 'dev'" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pillow", specifier = ">=10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["client", "dev"]
 
 [[package]]
 name = "inspect-robots-isaacsim"

@@ -387,6 +387,42 @@ jobs:
           uv run --no-sync python -m pytest plugins/inspect-robots-capx/tests -q
           --cov=inspect_robots_capx --cov-report=term-missing --cov-fail-under=0
 
+  # The Dream-1 suite needs no Dream account or network: fakes stand in for the
+  # Dream client, a loopback bridge carries bridged episodes, and the real
+  # dream.DreamClient runs with only its HTTP transport stubbed.
+  plugin-dream:
+    name: plugin · dream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: Sync workspace (core + plugins, dev extras)
+        run: uv sync --locked --python 3.11 --all-packages --extra dev
+      - name: Ruff (plugin, lint)
+        run: uv run --no-sync ruff check plugins/inspect-robots-dream
+      - name: Ruff (plugin, format check)
+        run: uv run --no-sync ruff format --check plugins/inspect-robots-dream
+      - name: Mypy (plugin, strict)
+        run: >
+          uv run --no-sync mypy
+          --config-file plugins/inspect-robots-dream/pyproject.toml
+          plugins/inspect-robots-dream/src/inspect_robots_dream
+          plugins/inspect-robots-dream/tests
+      - name: Pytest (plugin, with coverage)
+        # Report-only, like the other plugin jobs. The root 100% gate remains
+        # scoped to the numpy-only inspect_robots core package.
+        run: >
+          uv run --no-sync python -m pytest plugins/inspect-robots-dream/tests -q
+          --cov=inspect_robots_dream --cov-report=term-missing --cov-fail-under=0
+
   # Guard against the #208/#212 accident class: eval outputs (or any large
   # blob) swept into a commit by git add -A. Per-file pre-commit hooks are
   # local-only and GitHub's own limit is 100 MB per file, so 3 GB of small
@@ -425,7 +461,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: ${{ always() }}
-    needs: [issue-bot, quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, repo-hygiene]
+    needs: [issue-bot, quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, plugin-dream, repo-hygiene]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every needed job succeeded
@@ -438,7 +474,7 @@ jobs:
   alert-red-main:
     name: alert on red main
     if: ${{ failure() && github.event_name == 'push' }}
-    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx]
+    needs: [quality, test, test-rerun, test-extra, core-only-import, plugin-isaacsim, plugin-xpolicylab, plugin-voice, plugin-ros, plugin-agent, plugin-capx, plugin-dream]
     runs-on: ubuntu-latest
     permissions:
       issues: write

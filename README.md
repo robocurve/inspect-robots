@@ -357,8 +357,9 @@ envelope, camera wiring, and reset behavior are worth encoding once.
 
 Policies are swappable independently of all of this. `agent` (a frontier LLM)
 and `xpolicylab` (40+ served VLAs) adapt to whichever embodiment they are paired
-with; `capx` (code-as-policy) needs a joint-space one. A mismatch is caught by
-the compatibility check before anything moves, not mid-rollout.
+with; `capx` (code-as-policy) needs a joint-space one, and `dream` (Dream Labs'
+hosted Dream-1) the bimanual YAM layout. A mismatch is caught by the
+compatibility check before anything moves, not mid-rollout.
 
 ## Why Inspect Robots
 
@@ -412,6 +413,11 @@ shipped from this repo as separate packages:
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
   then queues approver-checked joint targets behind `--policy capx`.
+- **[inspect-robots-dream](plugins/inspect-robots-dream/)**: run Dream Labs'
+  hosted [Dream-1](https://dreamlabs.ai/research/dream-1/) on the bimanual YAM
+  (`yam_arms`, `yam_sim`) behind `--policy dream`, in-process or through a
+  loopback bridge where the Dream client cannot be installed next to the
+  simulator.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
   microphone speech into operator feedback during attended runs with
   `--voice`, or narrate streamed policy notes and terminal summaries with

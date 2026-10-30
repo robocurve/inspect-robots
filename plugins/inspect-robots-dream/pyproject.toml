@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling>=1.18", "hatch-fancy-pypi-readme>=24.1"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-robots-dream"
+version = "0.1.0"
+description = "Dream Labs' Dream-1 as an Inspect Robots policy for the bimanual YAM."
+dynamic = ["readme"]
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Inspect Robots contributors" }]
+keywords = ["robotics", "vla", "dream-1", "yam", "inspect_robots", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# The Dream client is an extra: Isaac Sim 5.1 pins websockets 12 and the client
+# needs 13 or newer, so under Isaac Sim the client runs in its own venv as
+# `inspect-robots-dream-bridge`. Pillow is already in every Isaac Sim 5.1 env.
+dependencies = ["inspect-robots>=0.60", "numpy>=1.24", "pillow>=10"]
+
+[project.optional-dependencies]
+client = ["dreamlabs-client>=1.0.14"]
+dev = ["inspect-robots-dream[client]", "pytest>=8.0", "pytest-cov>=5.0", "mypy>=1.11", "ruff>=0.6"]
+
+[project.scripts]
+inspect-robots-dream-bridge = "inspect_robots_dream.bridge:main"
+
+[project.entry-points."inspect_robots.policies"]
+dream = "inspect_robots_dream:dream_policy"
+
+[project.urls]
+Homepage = "https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-dream"
+Repository = "https://github.com/robocurve/inspect-robots"
+
+# In the Inspect Robots monorepo this resolves the `inspect_robots` dependency to the
+# in-repo core package instead of PyPI. Harmless in a standalone checkout.
+[tool.uv.sources]
+inspect-robots = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_robots_dream"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/inspect_robots_dream", "tests", "README.md"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.isort]
+known-first-party = ["inspect_robots", "inspect_robots_dream"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D1"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+
+# PyPI readme: identical to README.md except GitHub-only alert syntax
+# (e.g. `> [!NOTE]`) is rewritten to bold blockquotes, which PyPI renders.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!NOTE\][ \t]*$'
+replacement = '> **Note:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!TIP\][ \t]*$'
+replacement = '> **Tip:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!IMPORTANT\][ \t]*$'
+replacement = '> **Important:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!WARNING\][ \t]*$'
+replacement = '> **Warning:**'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?m)^> \[!CAUTION\][ \t]*$'
+replacement = '> **Caution:**'
