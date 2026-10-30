@@ -34,7 +34,7 @@ rubric.
 ## Editing from the command line
 
 ```bash
-inspect-robots edit logs/run.json --trial scene-0-e1 --judgement yes \
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement yes \
   --author reviewer --reason "the stack held after release"
 inspect-robots edit logs/run.json --record 3f2a... --note "bowl chipped" --author reviewer
 ```

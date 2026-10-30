@@ -6,6 +6,10 @@ A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded
 read the *recorded* trajectory (never a live environment), so scoring is
 reproducible from a saved log.
 
+A task attaches scorers through [rubrics](writing-a-benchmark.md#rubrics): named
+criteria (capability or safety), each with its scorer. Results and metrics are
+keyed by rubric name.
+
 ## Builtin scorers
 
 ```python
@@ -98,3 +102,23 @@ scores operator-graded trials as failures; pair attended operator-graded runs
 with a judgement-reading scorer instead. From the Python API, pass
 `eval(..., grader="operator")` (or any `Grader` object); unattended runs and
 `eval()` without a grader stay prompt-free.
+
+## Correcting a verdict after the run
+
+A verdict captured during the run can be corrected later without rewriting the
+log: `inspect-robots edit` appends a judgement
+[annotation](../../src/inspect_robots/annotation.py) beside the log, and
+`inspect-robots score` re-scores from it and compares the result with the
+stored metrics.
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no \
+  --author reviewer --reason "the top bowl slid off after release"
+inspect-robots score logs/run.json --out rescored.json
+```
+
+A scorer takes part in re-scoring by offering
+`score_annotations(annotations, record_id, rubric)`, which scores a trial from
+the judgement that counts; the `operator` scorer does. Scorers without it, such
+as `success_at_end`, keep their stored scores. See
+[Re-scoring](editing-and-analysis.md#re-scoring).

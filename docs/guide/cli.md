@@ -792,7 +792,7 @@ stored metrics, and `analyze NAME LOG...` runs a registered analyzer
 never rewritten. See [Editing and analyzing records](editing-and-analysis.md).
 
 ```bash
-inspect-robots edit logs/run.json --trial scene-0-e1 --judgement no --author reviewer
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no --author reviewer
 inspect-robots score logs/run.json
 inspect-robots analyze terminations logs/*.json
 ```

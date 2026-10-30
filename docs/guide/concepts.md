@@ -19,6 +19,14 @@ Both are runtime-checkable Protocols, so you can wrap an existing model or sim
 without inheriting anything. Convenience base classes (`PolicyBase`,
 `EmbodimentBase`) exist if you prefer.
 
+A multimodal language model becomes a policy through a
+[`PolicyAdapter`](../../src/inspect_robots/policy_adapter.py): it turns the
+embodiment's declarations into control tools, termination tools and operating
+instructions, and renders each observation as text. The policy keeps only its
+model and conversation, so every language-model policy drives a given
+embodiment through the same tools. See
+[the policy adapter](policies-and-embodiments.md#a-language-model-policy-the-policy-adapter).
+
 ## Tasks and scenes
 
 A [`Task`](../../src/inspect_robots/task.py) is an embodiment-agnostic benchmark: a dataset
@@ -26,7 +34,14 @@ of [`Scene`](../../src/inspect_robots/scene.py)s plus scorer(s), a step- or seco
 horizon, and an epoch count. A seconds horizon is resolved to integer steps from
 the paired embodiment's declared control rate. A `Scene` is the robotics analog of Inspect AI's `Sample`, one initial
 condition: an instruction, an optional success [`Target`](../../src/inspect_robots/scene.py),
-and a seed.
+and a seed. A task measures each trial against one or more
+[`Rubric`](../../src/inspect_robots/rubric.py)s, each a named criterion with a
+scorer, so capability and safety are scored side by side.
+
+A [`Benchmark`](../../src/inspect_robots/benchmark.py) is a named, versioned
+sequence of tasks. Every log it produces records the benchmark's name and
+version, so results are citable and different versions are never pooled. See
+[Benchmarks](writing-a-benchmark.md#benchmarks-a-versioned-set-of-tasks).
 
 ## Compatibility
 
@@ -38,6 +53,23 @@ whether a seconds-based task has a usable control rate, and whether each scene
 is realizable on the embodiment. Hard mismatches fail fast
 with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
 
+## Around each trial
+
+Besides `reset()` and `step()`, which the policy drives, an embodiment may
+offer an evaluation interface that [`eval`](../../src/inspect_robots/eval.py)
+drives between trials:
+
+1. `health()` checks the hardware (motors, cameras, temperatures); a failed
+   check stops the run before anything moves.
+2. `prepare_trial(scene)` says whether this scene can run now, with a reason
+   when it cannot.
+3. `home()` moves to the start pose, then `reset()` and the trial run.
+4. `park()` moves to a safe rest pose once the trial is scored, so a person can
+   reset the scene by hand.
+
+Each method is optional and used only when defined. See
+[The evaluation interface](policies-and-embodiments.md#the-evaluation-interface).
+
 ## The rollout
 
 [`rollout`](../../src/inspect_robots/rollout.py) runs one trial as a single control-rate loop:
@@ -48,10 +80,19 @@ with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
    completes it decides whether to play the next one or rerun the policy on
    the latest observation; see [Replanning on observation](#replanning-on-observation).
 2. A [`Guard`](../../src/inspect_robots/guard.py) reviews the action before it reaches
-   the embodiment: pass, clamp, or veto (a safety gate).
+   the embodiment: pass, clamp, or veto (a safety gate). Guards are
+   configuration: name registered guards with `--guard` or a `[guards]` config
+   section, and each change a guard makes is recorded with the action before
+   and after it (see [Guards](cli.md#guards---guard-and-guards)).
 3. `embodiment.step(action)` executes it; everything is logged to sinks and
-   recorded in an immutable [`Record`](../../src/inspect_robots/rollout.py) (steps, a typed
-   transcript, inference latencies).
+   recorded in an immutable [`Record`](../../src/inspect_robots/rollout.py) (steps, every
+   action chunk the policy produced, a typed transcript, inference latencies).
+
+The trial ends at the task's step or time budget, when the embodiment reports
+an outcome, or when the policy emits a terminal action, such as `done` or
+`give_up`, with its stated reason (see
+[Ending a trial](policies-and-embodiments.md#ending-a-trial)). Ending a trial
+is never a claim of success; scoring stays with the task.
 
 Camera frames are streamed to a [`FrameStore`](../../src/inspect_robots/frames.py) and the
 record keeps lightweight references, so long multi-camera episodes stay
@@ -97,6 +138,19 @@ A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded `Record` (+ the
 *recorded* trajectory (not a live environment), scoring is reproducible from a
 saved log. Across the `epochs` of a scene, an epoch reducer (`mean`, `max`,
 `pass_at_k`, …) collapses scores; metrics then aggregate across scenes.
+
+## Records, annotations and analysis
+
+The log and each trial's record are raw data that nothing rewrites after the
+run. Every record has a unique id and its own directory with the resolved
+configuration and the produced action chunks (see
+[Trial records](logging-and-rerun.md#trial-records)). Judgements made later,
+such as a reviewer correcting a verdict, are
+[annotations](../../src/inspect_robots/annotation.py) kept beside the log with
+their provenance. [`rescore`](../../src/inspect_robots/analyzer.py) recomputes
+results from them, and [analyzers](../../src/inspect_robots/analyzer.py) read
+logs and annotations to produce summaries and pages. See
+[Editing and analyzing records](editing-and-analysis.md).
 
 ## Errors and safety
 
