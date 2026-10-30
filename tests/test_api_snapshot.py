@@ -26,6 +26,7 @@ EXPECTED = {
     "TaskEnvelope",
     "Epochs",
     "Scene",
+    "Rubric",
     "Target",
     "Scorer",
     "Score",

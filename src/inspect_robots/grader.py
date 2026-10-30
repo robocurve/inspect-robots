@@ -251,15 +251,20 @@ class _VLMGrader:
         )
 
     def _rubric_for(self, scene: Scene) -> str:
-        """Prefer a generated per-scene rubric over the run-level one.
+        """Choose the rubric text this trial is judged against.
 
-        ``scene.metadata["rubric"]`` is the documented hand-off from task
-        generation (plan 0070); it wins over the constructed
-        ``rubric``/``rubric_file`` whenever it is a non-blank string.
+        In order: ``scene.metadata["rubric"]``, the hand-off from task
+        generation (plan 0070); then the first of the scene's effective rubrics
+        with text (``eval()`` passes the task's rubrics merged with the scene's);
+        then the constructed ``rubric``/``rubric_file``. A grader makes one
+        judgement per trial, so only one rubric text is judged.
         """
         scene_rubric = scene.metadata.get("rubric")
         if isinstance(scene_rubric, str) and scene_rubric.strip():
             return scene_rubric
+        for rubric in scene.rubrics:
+            if rubric.text.strip():
+                return rubric.text
         return self._rubric
 
     def _messages(

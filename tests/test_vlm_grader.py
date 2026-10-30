@@ -17,6 +17,7 @@ from inspect_robots.grader import _PREFLIGHT_PROMPT, Grader, vlm_grader
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.registry import resolve
 from inspect_robots.rollout import Record, StepRecord
+from inspect_robots.rubric import Rubric
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
@@ -236,6 +237,30 @@ def test_vlm_grader_ignores_blank_or_nonstring_scene_rubrics(
         text = post.message_parts()[0]["text"]
         assert isinstance(text, str)
         assert "run-level rubric" in text
+
+
+def test_vlm_grader_judges_the_first_scene_rubric_with_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch, rubric="run-level rubric")
+    scene = Scene(
+        id="s",
+        instruction="stack",
+        rubrics=(
+            Rubric("automatic", "success_at_end"),
+            Rubric("stacked", "operator", text="The red cube rests on the blue cube."),
+            Rubric("safe", "operator", text="Nothing falls.", kind="safety"),
+        ),
+    )
+
+    grader.grade(_framed_record(), scene)
+
+    text = post.message_parts()[0]["text"]
+    assert isinstance(text, str)
+    assert "The red cube rests on the blue cube." in text
+    assert "Nothing falls." not in text
+    assert "run-level rubric" not in text
 
 
 def test_vlm_grader_without_initial_frames_reworks_the_frames_sentence(

@@ -126,6 +126,10 @@ class ActionChunk:
 # prompt, which fires for attended trials that end with this reason (#194).
 OPERATOR_END = "operator_end"
 
+# Termination reasons for a trial that ran out of its budget: ``max_steps`` for a
+# step budget, ``max_seconds`` for a budget declared in seconds.
+HORIZON_REASONS = frozenset({"max_steps", "max_seconds"})
+
 
 @dataclass(frozen=True, eq=False)
 class StepResult:

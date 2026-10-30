@@ -17,7 +17,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
@@ -588,7 +588,16 @@ def _run_eval(
         policy_bind_task(task_envelope)
 
     epoch_spec = task.epoch_spec
-    scorers = task.scorers
+    # Resolve every scene's rubric scorers before any rollout, so a bad registry
+    # name or a duplicate fails fast instead of after robot time is spent.
+    scene_rubrics = {scene.id: task.rubrics_for(scene) for scene in task.scenes}
+    scene_scorers = {
+        scene_id: [(rubric.name, rubric.resolve_scorer()) for rubric in rubrics]
+        for scene_id, rubrics in scene_rubrics.items()
+    }
+    rubric_names = list(
+        dict.fromkeys(name for pairs in scene_scorers.values() for name, _ in pairs)
+    )
     # Fail fast on an unknown/invalid epoch reducer, before any rollout runs.
     try:
         get_reducer(epoch_spec.reducer)
@@ -641,6 +650,7 @@ def _run_eval(
         seed=seed,
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
+        rubrics=[rubric.describe() for rubric in task.task_rubrics],
         environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
         environment_revision=environment_revision
         or getattr(embodiment.info, "environment_revision", None),
@@ -675,7 +685,12 @@ def _run_eval(
     # made the first error 1/1 = 100%, which trips any threshold below 1.
     planned_trials = len(task.scenes) * epoch_spec.count
     for scene in task.scenes:
-        per_scorer_scores: dict[str, list[Score]] = {s.name: [] for s in scorers}
+        rubrics = scene_rubrics[scene.id]
+        # Graders read the scene's effective rubrics, the task's merged with its own.
+        graded_scene = replace(scene, rubrics=rubrics)
+        per_scorer_scores: dict[str, list[Score]] = {
+            name: [] for name, _ in scene_scorers[scene.id]
+        }
         epoch_dicts: list[dict[str, float | None]] = []
         judgements: list[str | None] = []
         judgement_sources: list[str | None] = []
@@ -717,6 +732,9 @@ def _run_eval(
                         embodiment,
                         scene,
                         max_steps=task_envelope.max_steps,
+                        horizon_reason=(
+                            "max_seconds" if task.max_seconds is not None else "max_steps"
+                        ),
                         seed=trial_seed,
                         epoch=epoch,
                         action_manager=action_manager,
@@ -801,7 +819,7 @@ def _run_eval(
                                             RuntimeWarning,
                                             stacklevel=2,
                                         )
-                        before_scoring(record, scene)
+                        before_scoring(record, graded_scene)
                         graded_attempts += 1
                         grading_error = record.metadata.get("grading_error")
                         if grading_error and record.operator_judgement is None:
@@ -809,7 +827,7 @@ def _run_eval(
                             if first_grading_error is None:
                                 first_grading_error = str(grading_error)
                     epoch_values: dict[str, float | None] = {}
-                    for scorer in scorers:
+                    for rubric_name, scorer in scene_scorers[scene.id]:
                         try:
                             score = scorer(record, scene.target)
                             value = value_to_float(score.value)
@@ -821,7 +839,13 @@ def _run_eval(
                         except Exception as exc:
                             # A scorer failure degrades to an error log - it must
                             # never crash the eval and lose the trials that ran.
-                            detail = f"scorer {scorer.name!r} failed: {exc}"
+                            # Shorthand rubrics carry their scorer's name: say it once.
+                            subject = (
+                                f"scorer {scorer.name!r}"
+                                if rubric_name == scorer.name
+                                else f"rubric {rubric_name!r} (scorer {scorer.name!r})"
+                            )
+                            detail = f"{subject} failed: {exc}"
                             scene_status = "error"
                             scene_error = (
                                 detail if scene_error is None else f"{scene_error}; {detail}"
@@ -830,10 +854,10 @@ def _run_eval(
                                 status = "error"
                                 error = detail
                             continue
-                        per_scorer_scores[scorer.name].append(score)
-                        epoch_values[scorer.name] = value
+                        per_scorer_scores[rubric_name].append(score)
+                        epoch_values[rubric_name] = value
                         if value is None:
-                            abstentions[scorer.name] = abstentions.get(scorer.name, 0) + 1
+                            abstentions[rubric_name] = abstentions.get(rubric_name, 0) + 1
                     epoch_dicts.append(epoch_values)
                     # Captured at the same instant as the judgement, on purpose:
                     # these fields are documented as strictly parallel, so a later
@@ -912,7 +936,7 @@ def _run_eval(
                 # A reducer failure (e.g. pass_at_k over fewer epochs than k
                 # after a halt, or mean over categorical scores) degrades to an
                 # error log — it must never crash the eval and lose the log.
-                detail = f"reducer {epoch_spec.reducer!r} failed for scorer {name!r}: {exc}"
+                detail = f"reducer {epoch_spec.reducer!r} failed for rubric {name!r}: {exc}"
                 scene_status = "error"
                 scene_error = detail if scene_error is None else f"{scene_error}; {detail}"
                 if status == "success":
@@ -934,6 +958,7 @@ def _run_eval(
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
                 termination_details=tuple(termination_details),
+                rubrics=tuple(rubric.describe() for rubric in rubrics),
                 operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
             )
@@ -961,13 +986,13 @@ def _run_eval(
             error = "; ".join(part for part in (error, count) if part)
 
     metrics: dict[str, float | None] = {}
-    for scorer in scorers:
-        vals = [sr.reduced[scorer.name] for sr in scene_results if scorer.name in sr.reduced]
+    for name in rubric_names:
+        vals = [sr.reduced[name] for sr in scene_results if name in sr.reduced]
         if vals:
             # Abstentions carry no verdict, so they are left out of the mean;
-            # a scorer that abstained on every scene reports None, not 0.0.
+            # a rubric whose scorer abstained on every scene reports None, not 0.0.
             voted = [v for v in vals if v is not None]
-            metrics[scorer.name] = mean(voted) if voted else None
+            metrics[name] = mean(voted) if voted else None
 
     stats = EvalStats(
         started_at=started_iso,

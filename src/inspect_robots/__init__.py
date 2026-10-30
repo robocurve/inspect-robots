@@ -49,6 +49,7 @@ from inspect_robots.registry import (
     task,
 )
 from inspect_robots.rollout import Record
+from inspect_robots.rubric import Rubric
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import (
     Score,
@@ -117,6 +118,7 @@ __all__ = [
     "PolicyConfig",
     "PolicyInfo",
     "Record",
+    "Rubric",
     "Scene",
     "SceneResult",
     "Score",

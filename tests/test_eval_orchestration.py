@@ -1034,7 +1034,7 @@ def test_eval_resolves_seconds_horizon_into_envelope_rollout_and_log(tmp_path: P
     (log,) = eval(task, ScriptedPolicy(), aware, log_dir=str(tmp_path))
 
     assert aware.envelopes == [TaskEnvelope(name="timed", max_steps=1)]
-    assert log.samples[0].termination_reasons == ("max_steps",)
+    assert log.samples[0].termination_reasons == ("max_seconds",)
     assert log.eval.max_seconds == 0.1
     assert log.eval.max_steps == 1
 

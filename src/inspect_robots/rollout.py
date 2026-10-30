@@ -299,6 +299,7 @@ def rollout(
     sink: LogSink,
     frame_store: FrameStore | None = None,
     operator_input: OperatorInput | None = None,
+    horizon_reason: str = "max_steps",
 ) -> Record:
     """Run a single trial and return its record.
 
@@ -319,6 +320,10 @@ def rollout(
     embodiment that needs real-time cadence paces itself inside ``step()`` and
     declares the ``"self_paced"`` capability to document that it does (see
     [`Embodiment`][inspect_robots.embodiment.Embodiment]).
+
+    ``horizon_reason`` is the termination reason recorded when the step budget
+    runs out: ``"max_steps"``, or ``"max_seconds"`` for a task whose budget was
+    declared in seconds and resolved to ``max_steps`` at the embodiment's rate.
     """
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps < 1:
         raise ValueError(f"max_steps must be an integer >= 1, got {max_steps!r}")
@@ -576,7 +581,7 @@ def rollout(
             refs = result_refs
         else:
             record.truncated = True
-            record.termination_reason = "max_steps"
+            record.termination_reason = horizon_reason
     except KeyboardInterrupt as exc:
         record.status = "cancelled"
         record.error = "cancelled by user (KeyboardInterrupt)"

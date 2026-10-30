@@ -50,7 +50,12 @@ def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     return safe
 
 
-SCHEMA_VERSION = 1
+# Version 2 (the paper release) adds rubrics (EvalSpec.rubrics, SceneResult.rubrics)
+# and the policy's stated termination detail (SceneResult.termination_details).
+# Version 1 logs still read: their new fields are empty and their result keys,
+# which were scorer names, are unchanged.
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,10 @@ class EvalSpec:
     # ``metadata["rubric"]`` overrides it for that scene, and that value is
     # already persisted in ``SceneResult.scene_metadata``.
     grader_config: dict[str, Any] = field(default_factory=dict)
+    # The task's rubrics (name, kind, text, scorer, metadata), in declared order;
+    # a scene's own additions and overrides are in its SceneResult.rubrics.
+    # Empty in schema-1 logs.
+    rubrics: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -155,6 +164,10 @@ class SceneResult:
     # Strictly parallel to ``epochs``: the policy's stated reason when its
     # terminal action (done, give_up, ...) ended the trial, else ``None``.
     termination_details: tuple[str | None, ...] = ()
+    # The scene's effective rubrics (name, kind, text, scorer, metadata), the
+    # task's merged with the scene's own; results are keyed by these names.
+    # Empty in schema-1 logs, whose result keys are scorer names.
+    rubrics: tuple[dict[str, Any], ...] = ()
     # Strictly parallel to ``epochs``: the policy's audit record per trial,
     # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
     policy_transcripts: tuple[Any, ...] = ()
@@ -198,10 +211,10 @@ class EvalLog:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalLog:
         """Reconstruct an immutable log, rejecting unsupported schema versions."""
-        if data.get("version") != SCHEMA_VERSION:
+        if data.get("version") not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported eval-log schema version {data.get('version')!r}; "
-                f"this Inspect Robots reads version {SCHEMA_VERSION}"
+                f"this Inspect Robots reads versions {sorted(READABLE_SCHEMA_VERSIONS)}"
             )
         samples = []
         for raw in data.get("samples", ()):
@@ -220,6 +233,7 @@ class EvalLog:
             sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
             sample["termination_details"] = tuple(sample.get("termination_details", ()))
+            sample["rubrics"] = tuple(sample.get("rubrics", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
             samples.append(SceneResult(**sample))
         return cls(

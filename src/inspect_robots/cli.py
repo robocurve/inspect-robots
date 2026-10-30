@@ -88,7 +88,7 @@ from inspect_robots.defaults import (
 )
 from inspect_robots.registry import registered
 from inspect_robots.session import ECHO_INTERVAL_S, OperatorSession
-from inspect_robots.types import OPERATOR_END
+from inspect_robots.types import HORIZON_REASONS, OPERATOR_END
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -129,6 +129,7 @@ _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
     "max_steps": "hit step limit",
+    "max_seconds": "hit time limit",
     OPERATOR_END: "ended by operator",
     "give_up": "gave up",
     "done": "reported done",
@@ -1072,7 +1073,9 @@ def _connect_grader_session(grader: Grader | None, session: OperatorSession | No
 def _step_limit_count(log: EvalLog) -> int:
     """Count recorded trials whose termination reason is the step horizon."""
     return sum(
-        reason == "max_steps" for scene in log.samples for reason in scene.termination_reasons
+        isinstance(reason, str) and reason in HORIZON_REASONS
+        for scene in log.samples
+        for reason in scene.termination_reasons
     )
 
 
@@ -2134,10 +2137,14 @@ def _cmd_inspect(
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
-        step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
+        step_limit_count = sum(
+            isinstance(reason, str) and reason in HORIZON_REASONS
+            for reason in scene.termination_reasons
+        )
         details = [reduced] if reduced else []
         if step_limit_count:
-            details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit max_steps)")
+            budget = "max_seconds" if log.eval.max_seconds is not None else "max_steps"
+            details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit {budget})")
         print(f"  [{scene.status}] {scene.scene_id}: {'  '.join(details)}")
         if not shared and scene.instruction:
             _print_degraded(f"      instruction: {scene.instruction}")

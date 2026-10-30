@@ -27,6 +27,7 @@ from inspect_robots.console import (
     _stdin_readable,
 )
 from inspect_robots.errors import EmbodimentFault
+from inspect_robots.types import HORIZON_REASONS
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import Record
@@ -710,8 +711,14 @@ class OperatorSession:
             self.write_line("rubric:")
             for line in rubric.splitlines():
                 self.write_line(f"  {line}")
-        if record.truncated and record.termination_reason == "max_steps":
-            self.write_line("note: this trial hit the step limit before terminating")
+        for judged in scene.rubrics:
+            if judged.text.strip():
+                self.write_line(f"rubric {judged.name} ({judged.kind}):")
+                for line in judged.text.splitlines():
+                    self.write_line(f"  {line}")
+        if record.truncated and record.termination_reason in HORIZON_REASONS:
+            limit = "time limit" if record.termination_reason == "max_seconds" else "step limit"
+            self.write_line(f"note: this trial hit the {limit} before terminating")
         elif record.truncated and record.termination_reason is not None:
             # Neutral on purpose: the record cannot distinguish a
             # policy-requested stop from an embodiment truncation, so the

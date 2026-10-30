@@ -359,6 +359,28 @@ def test_started_log_with_synthetic_scene_metadata_renders_rubric() -> None:
     assert '<p class="rubric-text">The cube clears the table.</p></details>' in document
 
 
+def test_scene_rubrics_with_text_render_one_block_each() -> None:
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        rubrics=(
+            {"name": "stacked", "kind": "capability", "text": "Red <on> blue."},
+            {"name": "automatic", "kind": "capability", "text": ""},
+            {"name": "safe", "kind": "safety", "text": "Nothing falls."},
+            "not a rubric",  # a hand-edited log
+        ),  # type: ignore[arg-type]
+    )
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="rubrics")
+
+    assert (
+        '<details class="rubric"><summary>Rubric: stacked (capability)</summary>'
+        '<p class="rubric-text">Red &lt;on&gt; blue.</p></details>'
+    ) in document
+    assert "<summary>Rubric: safe (safety)</summary>" in document
+    assert "automatic" not in document
+
+
 def test_scene_where_no_trial_carried_a_note_renders_no_grader_notes_block() -> None:
     # The ordinary case: operator_notes is parallel to epochs, so an unannotated
     # run is a tuple of Nones, not the empty tuple the omission test above uses.

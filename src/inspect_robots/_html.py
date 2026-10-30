@@ -1033,6 +1033,20 @@ def _render_transcript(
     return f"<pre>{_escape(dumped)}</pre>"
 
 
+def _rubric_details(entry: object) -> str:
+    """One scene rubric with text as a collapsed block; automatic checks have none."""
+    if not isinstance(entry, dict):
+        return ""
+    text = entry.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    label = f"Rubric: {entry.get('name')} ({entry.get('kind')})"
+    return (
+        f'<details class="rubric"><summary>{_escape(label)}</summary>'
+        f'<p class="rubric-text">{_escape(text)}</p></details>'
+    )
+
+
 def _score_chips(values: Mapping[str, float | None], *, prefix: str = "") -> str:
     """Render sorted score values as compact escaped chips."""
     return "".join(
@@ -1527,6 +1541,7 @@ def _scene_section(
         if isinstance(rubric_value, str) and rubric_value.strip()
         else ""
     )
+    rubric += "".join(_rubric_details(entry) for entry in scene.rubrics)
     error = "" if scene.error is None else f'<p class="error">{_escape(scene.error)}</p>'
 
     reduced = _score_chips(scene.reduced)

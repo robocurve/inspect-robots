@@ -73,3 +73,32 @@ record now carries `termination_detail` (the stated reason), logs carry
 new form. CaP-X's `FINISH` and `GIVE_UP` now end trials with the reasons `done`
 and `give_up` instead of `FINISH` and `GIVE_UP`; update any analysis that
 filters on the old strings.
+
+## Rubrics and log schema 2
+
+Tasks measure trials against named [rubrics](../src/inspect_robots/rubric.py).
+Existing tasks need no change: `scorer=` is shorthand for one rubric per scorer,
+named after the scorer, so their results keep the same keys. To add rubric
+text, a safety criterion, or per-scene criteria, switch to `rubrics=`:
+
+```python
+# before
+Task(name="t", scenes=[Scene(id="s", instruction="...", metadata={"rubric": "Bowls stacked."})],
+     scorer=operator_scorer(), max_steps=600)
+
+# after
+Task(name="t", scenes=[Scene(id="s", instruction="...")],
+     rubrics=[Rubric("stacked", operator_scorer(), text="Bowls stacked.")], max_steps=600)
+```
+
+`scene.metadata["rubric"]` still works and still takes precedence for the VLM
+grader. A grader judges one rubric per trial: the first of the scene's rubrics
+with text.
+
+Logs are written as schema version 2, which adds `EvalSpec.rubrics`,
+`SceneResult.rubrics` and `SceneResult.termination_details`. Version 1 logs
+still read, with empty new fields and unchanged score keys. Tools that parse the
+JSON directly should accept `"version": 2`.
+
+A task with a `max_seconds` budget now ends an out-of-budget trial with the
+reason `max_seconds` instead of `max_steps`.
