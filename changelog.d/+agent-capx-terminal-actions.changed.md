@@ -1,0 +1,1 @@
+**Agent and CaP-X plugins:** `done` and `give_up` (CaP-X: `FINISH` and `GIVE_UP`) end the trial with terminal actions and declare them in `PolicyInfo.terminal_actions`; the stated summary or reason is recorded as the termination detail. CaP-X trials now end with the reasons `done` and `give_up` instead of `FINISH` and `GIVE_UP`. What the model sees is unchanged.

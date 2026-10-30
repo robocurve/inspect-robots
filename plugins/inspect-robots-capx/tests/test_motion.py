@@ -9,7 +9,7 @@ import pytest
 
 from inspect_robots.guard import DeltaLimitGuard
 from inspect_robots.spaces import ActionSemantics, Box
-from inspect_robots.types import Action
+from inspect_robots.types import DONE, Action, Termination
 from inspect_robots_capx._motion import MotionQueue
 
 
@@ -170,11 +170,12 @@ def test_hold_chunk_has_one_full_state_action_and_stop_metadata() -> None:
     motion = _motion()
     state = np.array([0.3, -0.2, 0.8])
 
-    chunk = motion.hold_chunk(state, stop_reason="FINISH", inference_latency_s=0.25)
+    chunk = motion.hold_chunk(state, terminal=Termination(DONE), inference_latency_s=0.25)
 
     assert len(chunk.actions) == 1
     assert np.array_equal(chunk.actions[0].data, state)
-    assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": "FINISH"}
+    assert chunk.terminal == Termination(DONE)
+    assert chunk.actions[0].meta == {}
     assert chunk.inference_latency_s == 0.25
 
 

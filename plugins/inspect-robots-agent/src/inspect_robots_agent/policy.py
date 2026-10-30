@@ -35,7 +35,7 @@ from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
 from inspect_robots.task import TaskEnvelope
-from inspect_robots.types import ActionChunk, Observation
+from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import Record
@@ -102,6 +102,8 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
     {"anthropic"}
     | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
 )
+# The terminal part of the agent's action space: its done and give_up tools.
+_TERMINAL_ACTIONS = frozenset({DONE, GIVE_UP})
 _SPEEDS = frozenset({"fast"})
 _SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
 _INTERACTIONS_SERVICE_TIERS = frozenset({"standard", "flex", "priority"})
@@ -897,7 +899,9 @@ class LLMAgentPolicy(PolicyBase):
             eval_notes=eval_notes_text,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
-        self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
+        self.info = PolicyInfo(
+            name="agent", action_space=Box(shape=(1,)), terminal_actions=_TERMINAL_ACTIONS
+        )
         self._toolset: Toolset | None = None
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
@@ -935,6 +939,7 @@ class LLMAgentPolicy(PolicyBase):
             action_space=embodiment_info.action_space,
             observation_space=embodiment_info.observation_space,
             control_hz=embodiment_info.control_hz,
+            terminal_actions=_TERMINAL_ACTIONS,
         )
 
     def bind_task(self, envelope: TaskEnvelope) -> None:
@@ -1291,7 +1296,7 @@ class LLMAgentPolicy(PolicyBase):
                                 chunk = result.chunk
                                 target = result.target
                                 sleep_request = result.sleep
-                                stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                stopped = chunk.terminal is not None
                                 if stopped:
                                     self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
                                 closed = True

@@ -45,8 +45,36 @@ class MyVLA:
 ```
 
 The policy owns model-specific spatial preprocessing; the embodiment emits raw
-frames. Temporal concerns (history, smoothing, ensembling) live in a
+frames. Temporal concerns (history, smoothing, ensembling) live in an
 [ActionManager](../guide/concepts.md).
+
+### Ending a trial
+
+A policy's action space includes terminal actions: choices that end the trial,
+such as declaring the task done or giving up. Declare the kinds the policy can
+emit in `PolicyInfo.terminal_actions`, then return a chunk whose `terminal` is a
+[`Termination`](../../src/inspect_robots/types.py) with that kind and the
+policy's stated reason:
+
+```python
+from inspect_robots.types import DONE, GIVE_UP, Termination
+
+self.info = PolicyInfo(name="my-vla", action_space=..., terminal_actions=frozenset({DONE, GIVE_UP}))
+
+# Finish the last motion, then end the trial.
+return ActionChunk(actions=actions, terminal=Termination(DONE, "all three bowls are stacked"))
+
+# End the trial without moving.
+return ActionChunk(actions=[], terminal=Termination(GIVE_UP, "the lid is out of reach"))
+```
+
+The trial ends after the last action the action manager executes from that
+chunk. The kind becomes the record's termination reason and the reason its
+termination detail; a `policy_terminal` event marks the step. The embodiment's
+own termination (a success sensor, a fault) still wins when both happen on the
+same step, and ending a trial is never a claim of success: scoring stays with
+the task's scorers. A kind the policy did not declare fails the trial with a
+`PolicyError`, so a typo cannot pass for a refusal.
 
 ## An embodiment (robot or sim)
 

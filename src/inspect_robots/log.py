@@ -152,6 +152,9 @@ class SceneResult:
     # Strictly parallel to ``epochs``: why each recorded trial ended, or
     # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
     termination_reasons: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: the policy's stated reason when its
+    # terminal action (done, give_up, ...) ended the trial, else ``None``.
+    termination_details: tuple[str | None, ...] = ()
     # Strictly parallel to ``epochs``: the policy's audit record per trial,
     # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
     policy_transcripts: tuple[Any, ...] = ()
@@ -216,6 +219,7 @@ class EvalLog:
             )
             sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
+            sample["termination_details"] = tuple(sample.get("termination_details", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
             samples.append(SceneResult(**sample))
         return cls(

@@ -52,6 +52,9 @@ class PolicyInfo:
     control_hz: float | None = None
     # Policy checkpoint hash, revision, or identifier.
     checkpoint: str | None = None
+    # Terminal actions the policy can emit (``ActionChunk.terminal.kind``): the
+    # part of its action space that ends a trial, such as "done" or "give_up".
+    terminal_actions: frozenset[str] = frozenset()
 
 
 @runtime_checkable

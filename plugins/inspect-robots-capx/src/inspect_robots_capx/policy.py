@@ -28,7 +28,7 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
-from inspect_robots.types import ActionChunk, Observation
+from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation, Termination
 from inspect_robots_agent import (
     ENV_MODEL,
     AssistantMessage,
@@ -61,6 +61,9 @@ _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _FENCED_CODE = re.compile(r"^```(?:python)?[ \t]*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCED_ANYWHERE = re.compile(r"```(?:python)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+# The model ends a program with a control word; each maps to a standard terminal kind.
+_TERMINAL_KINDS = {"FINISH": DONE, "GIVE_UP": GIVE_UP}
+_TERMINAL_ACTIONS = frozenset(_TERMINAL_KINDS.values())
 _CONTROL_WORD = re.compile(r"(FINISH|GIVE_UP)[.!]?", re.IGNORECASE)
 
 _HELPER_DOCS = """Helpers available in the persistent namespace:
@@ -297,7 +300,9 @@ class CapxPolicy(PolicyBase):
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
         )
-        self.info = PolicyInfo(name="capx", action_space=Box(shape=(1,)))
+        self.info = PolicyInfo(
+            name="capx", action_space=Box(shape=(1,)), terminal_actions=_TERMINAL_ACTIONS
+        )
         self._motion: MotionQueue | None = None
         self._sandbox: CodeSandbox | None = None
         self._state_key: str | None = None
@@ -405,6 +410,7 @@ class CapxPolicy(PolicyBase):
             action_space=space,
             observation_space=embodiment_info.observation_space,
             control_hz=embodiment_info.control_hz,
+            terminal_actions=_TERMINAL_ACTIONS,
         )
 
     def reset(self, scene: Scene) -> None:
@@ -474,7 +480,7 @@ class CapxPolicy(PolicyBase):
                 self._echo("[capx] -- LLM call budget exhausted; forcing GIVE_UP")
                 return motion.hold_chunk(
                     state,
-                    stop_reason="GIVE_UP",
+                    terminal=Termination(GIVE_UP, "LLM call budget exhausted"),
                     inference_latency_s=llm_latency,
                 )
             started = time.monotonic()
@@ -494,7 +500,7 @@ class CapxPolicy(PolicyBase):
             if control is not None:
                 return motion.hold_chunk(
                     state,
-                    stop_reason=control.group(1).upper(),
+                    terminal=Termination(_TERMINAL_KINDS[control.group(1).upper()]),
                     inference_latency_s=llm_latency,
                 )
 

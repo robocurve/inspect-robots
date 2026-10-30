@@ -142,8 +142,9 @@ characters when truncation is needed, since exceptions appear at the tail.
 The report is appended to the transcript before `act()` returns. The full,
 untruncated code is also stored in the first queued action's `meta["code"]`.
 
-`FINISH` and `GIVE_UP` return a one-action hold with the core policy-stop
-metadata. A clean turn with no queued motion continues inside the same
+`FINISH` and `GIVE_UP` return a one-action hold that ends the trial with the
+core terminal actions `done` and `give_up` (an exhausted `max_llm_calls` budget
+gives up with that reason). A clean turn with no queued motion continues inside the same
 `act()` call. `max_llm_calls` bounds all turns in a trial.
 `max_code_failures` counts consecutive Python exceptions across `act()` calls.
 A clean Python turn resets it. Code that queues motion and then raises still

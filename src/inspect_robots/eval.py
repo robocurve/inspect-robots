@@ -682,6 +682,7 @@ def _run_eval(
         notes: list[str | None] = []
         trial_metadatas: list[dict[str, Any]] = []
         termination_reasons: list[str | None] = []
+        termination_details: list[str | None] = []
         operator_messages: list[tuple[dict[str, Any], ...]] = []
         policy_transcripts: list[Any] = []
         scene_metadata = _json_safe_scene_metadata(scene.metadata)
@@ -873,6 +874,7 @@ def _run_eval(
 
                 trial_metadatas.append(record.metadata)
                 termination_reasons.append(record.termination_reason)
+                termination_details.append(record.termination_detail)
                 operator_messages.append(
                     tuple(
                         {
@@ -931,6 +933,7 @@ def _run_eval(
                 operator_notes=tuple(notes),
                 trial_metadata=tuple(trial_metadatas),
                 termination_reasons=tuple(termination_reasons),
+                termination_details=tuple(termination_details),
                 operator_messages=tuple(operator_messages),
                 policy_transcripts=tuple(policy_transcripts),
             )

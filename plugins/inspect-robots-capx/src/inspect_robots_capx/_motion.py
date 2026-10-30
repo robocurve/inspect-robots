@@ -16,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from inspect_robots.spaces import Box
-from inspect_robots.types import Action, ActionChunk
+from inspect_robots.types import Action, ActionChunk, Termination
 
 _BACKSTOP_STEP_FRAC = 0.05
 _DEFAULT_SPEED_FRAC = 0.1
@@ -177,21 +177,18 @@ class MotionQueue:
         self,
         state: npt.NDArray[Any],
         *,
-        stop_reason: str,
+        terminal: Termination,
         inference_latency_s: float | None = None,
     ) -> ActionChunk:
-        """Return the required one-action stop chunk at the observed full config."""
+        """Return the one-action terminal chunk that holds the observed full config."""
         value = np.asarray(state, dtype=np.float64).reshape(-1)
         if value.shape != (self._dim,):
             raise ValueError(f"hold state has shape {value.shape}, expected ({self._dim},)")
-        action = Action(
-            data=value.copy(),
-            meta={"request_stop": True, "stop_reason": stop_reason},
-        )
         return ActionChunk(
-            actions=[action],
+            actions=[Action(data=value.copy())],
             control_hz=self.control_hz,
             inference_latency_s=inference_latency_s,
+            terminal=terminal,
         )
 
     def _require_cursor(self) -> npt.NDArray[np.float64]:

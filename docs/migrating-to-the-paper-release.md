@@ -50,3 +50,26 @@ type:
 def contribute_guards(self, action_space: Box) -> GuardContribution:
     return GuardContribution(guards=(("my-collision", MyCollisionGuard(...)),))
 ```
+
+## Terminal actions
+
+A policy ends a trial with a terminal action instead of flags in action
+metadata. Declare the kinds in `PolicyInfo.terminal_actions` and return a chunk
+with `terminal` set:
+
+```python
+# before
+Action(data=hold, meta={"request_stop": True, "stop_reason": "done", "stop_detail": summary})
+
+# after
+ActionChunk(actions=[Action(data=hold)], terminal=Termination(DONE, summary))
+```
+
+The old metadata still ends the trial the same way, so existing policies keep
+working, but it is deprecated and is not checked against declared kinds. The
+record now carries `termination_detail` (the stated reason), logs carry
+`termination_details` beside `termination_reasons`, and the transcript has a
+`policy_terminal` event. The agent plugin's `done` and `give_up` tools use the
+new form. CaP-X's `FINISH` and `GIVE_UP` now end trials with the reasons `done`
+and `give_up` instead of `FINISH` and `GIVE_UP`; update any analysis that
+filters on the old strings.

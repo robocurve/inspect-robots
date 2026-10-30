@@ -382,8 +382,8 @@ def test_policy_text_turn_takes_existing_nudge_path_end_to_end(
 
     chunk = policy.act(embodiment.reset(scene, seed=0))
 
-    assert chunk.actions[0].meta["request_stop"] is True
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert chunk.terminal is not None
+    assert getattr(chunk.terminal, "kind", None) == "done"
     assert any(
         message.get("clientContent", {}).get("turns", [{}])[0].get("parts", [{}])[0].get("text")
         == "Respond with exactly one tool call."

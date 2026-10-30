@@ -30,7 +30,7 @@ from inspect_robots.spaces import (
     Box,
     ObservationSpace,
 )
-from inspect_robots.types import Action, ActionChunk, Observation
+from inspect_robots.types import Action, ActionChunk, Observation, Termination
 
 _DISPLACEMENT_MODES = frozenset({"eef_delta_pos", "eef_delta_pose", "joint_delta"})
 _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
@@ -465,7 +465,7 @@ class Toolset:
         held = self._held_target
         data = self._current_state(observation) if held is None else held.copy()
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
-        meta = {"request_stop": True, "stop_reason": name, "stop_detail": detail}
+        meta: dict[str, Any] = {}
         hindsight = arguments.get("hindsight")
         # The schema's "say 'none'" escape hatch must not pollute harvested
         # metadata with literal sentinels.
@@ -476,7 +476,9 @@ class Toolset:
             meta=meta,
         )
         return ToolResult(
-            chunk=ActionChunk(actions=[action], control_hz=self._hz),
+            chunk=ActionChunk(
+                actions=[action], control_hz=self._hz, terminal=Termination(name, detail)
+            ),
             note=f"{name}: {detail}",
         )
 

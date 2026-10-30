@@ -668,7 +668,7 @@ def test_success_without_action_chunk_retries_the_model(
 
     chunk = policy.act(Observation())
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert len(script.requests) == 2
 
 
@@ -1743,8 +1743,8 @@ def test_stop_and_forced_give_up_never_call_pre_check() -> None:
     first = policy.act(Observation(state={"q": np.array([0.0])}))
     forced = policy.act(Observation(state={"q": np.array([0.0])}))
 
-    assert first.actions[0].meta["stop_reason"] == "done"
-    assert forced.actions[0].meta["stop_reason"] == "give_up"
+    assert getattr(first.terminal, "kind", None) == "done"
+    assert getattr(forced.terminal, "kind", None) == "give_up"
     assert calls == 0
 
 
@@ -1893,7 +1893,7 @@ def test_immediate_capture_appends_results_then_frames_and_redecides() -> None:
 
     chunk = policy.act(_vision_observation(env_step=7))
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert len(script.requests) == 2
     history = script.requests[1]["messages"]
     assistant_index = next(
@@ -1981,7 +1981,7 @@ def test_imageless_capture_is_rejected_without_ending_the_trial() -> None:
 
     chunk = policy.act(_vision_observation(cameras=()))
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     assert len(script.requests) == 2
     results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
     assert results[:2] == [
@@ -2009,7 +2009,7 @@ def test_a_dropout_rejection_does_not_count_toward_the_three_strike_guard() -> N
 
     chunk = policy.act(_vision_observation(cameras=()))
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
     assert results[1] == "no camera images are available in this observation"
     assert results[0] == results[2]
@@ -2057,7 +2057,7 @@ def test_take_pic_before_move_short_circuits_with_contiguous_results() -> None:
 
     chunk = policy.act(_vision_observation())
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     history = script.requests[1]["messages"]
     results = [message for message in history if message.get("role") == "tool"]
     assert results == [
@@ -2467,7 +2467,7 @@ def test_take_pic_after_done_is_ignored_because_the_trial_ends() -> None:
 
     chunk = policy.act(_vision_observation())
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert [message["content"] for message in policy._messages[-2:]] == [
         "done: finished",
         "ignored: the trial ends with this call",

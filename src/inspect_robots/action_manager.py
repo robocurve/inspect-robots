@@ -1,16 +1,23 @@
-"""Controllers — the rollout middleware layer (Inspect's ``@solver`` analog).
+"""Action managers: the rollout middleware layer (Inspect's ``@solver`` analog).
 
-A [`ActionManager`][inspect_robots.action_manager.ActionManager] owns the per-control-step decision
-of which action to send
-to the embodiment. It internally decides *when* to call ``policy.act()`` (a slow
-VLA inference returning an [`ActionChunk`][inspect_robots.types.ActionChunk]), buffers the
-returned chunk, and pops the next action each step. This single-method, stateful
-shape (R3) is what lets advanced action_managers — e.g. a temporal-ensembling
-action_manager that re-infers every step and blends overlapping predictions —
-compose without forking the rollout loop.
+An [`ActionManager`][inspect_robots.action_manager.ActionManager] owns the
+per-control-step decision of which action to send to the embodiment. It decides
+*when* to call ``policy.act()`` (a slow VLA inference returning an
+[`ActionChunk`][inspect_robots.types.ActionChunk]), buffers the returned chunk,
+and pops the next action each step. This single-method, stateful shape (R3) is
+what lets advanced action managers, such as a temporal-ensembling manager that
+re-infers every step and blends overlapping predictions, compose without forking
+the rollout loop.
+
+A terminal chunk (``chunk.terminal`` set) ends the trial: the manager marks the
+last action it executes from that chunk with ``Action.terminal``, or, for a
+chunk with no actions, returns the [`Termination`][inspect_robots.types.Termination]
+itself so the rollout ends the trial without stepping the embodiment.
 
 ``DefaultActionManager`` plays the first ``replan_interval`` actions of each chunk,
 then re-infers (``replan_interval=None`` ⇒ play the whole chunk before replanning).
+A terminal chunk ends the trial after the actions it plays, so a short
+``replan_interval`` never drops the policy's decision to stop.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ import numpy as np
 
 from inspect_robots.policy import Policy
 from inspect_robots.spaces import Box
-from inspect_robots.types import Action, Observation
+from inspect_robots.types import Action, ActionChunk, Observation, Termination
 
 _BUFFER_KEY = "_controller_action_buffer"
 # Each entry is (inference_latency_s | None, chunk_len): one per policy.act() call.
@@ -39,9 +46,26 @@ class ActionManager(Protocol):
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
-    ) -> Action:
-        """Choose step ``t``'s action, using ``store`` for trial-local action manager state."""
+    ) -> Action | Termination:
+        """Choose step ``t``'s action, using ``store`` for trial-local action manager state.
+
+        Returns a [`Termination`][inspect_robots.types.Termination] instead of an
+        action when the policy ends the trial without another action to execute.
+        """
         ...
+
+
+def _empty_chunk(policy: Policy) -> Exception:
+    from inspect_robots.errors import PolicyError
+
+    return PolicyError(f"policy {policy.info.name!r} returned an empty ActionChunk")
+
+
+def _terminal_actions(chunk: ActionChunk, actions: list[Action]) -> list[Action]:
+    """Mark the last action this manager will execute from a terminal chunk."""
+    if chunk.terminal is not None and actions:
+        actions[-1] = replace(actions[-1], terminal=chunk.terminal)
+    return actions
 
 
 class DefaultActionManager:
@@ -58,17 +82,18 @@ class DefaultActionManager:
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
-    ) -> Action:
+    ) -> Action | Termination:
         """Reuse buffered chunk actions until the configured replanning boundary."""
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
         if not buffer:
             chunk = policy.act(observation)
             if not chunk.actions:
-                from inspect_robots.errors import PolicyError
-
-                raise PolicyError(f"policy {policy.info.name!r} returned an empty ActionChunk")
+                if chunk.terminal is None:
+                    raise _empty_chunk(policy)
+                store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, 0))
+                return chunk.terminal
             take = self.replan_interval or len(chunk)
-            taken = list(chunk.actions)[:take]
+            taken = _terminal_actions(chunk, list(chunk.actions)[:take])
             buffer.extend(taken)
             # Record the number of actions actually buffered (the chunk may be
             # shorter than replan_interval), so the transcript never overstates.
@@ -102,9 +127,11 @@ class SmoothingActionManager:
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
-    ) -> Action:
+    ) -> Action | Termination:
         """Apply an exponential moving average to the wrapped action manager's output."""
         action = self.inner.next_action(policy, observation, t, store)
+        if isinstance(action, Termination):
+            return action
         raw = np.asarray(action.data, dtype=np.float64)
         prev = store.get(self._store_key)
         smoothed = raw if prev is None else self.alpha * raw + (1 - self.alpha) * prev
@@ -169,13 +196,18 @@ class EnsemblingActionManager:
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
-    ) -> Action:
-        """Query once for step ``t`` and blend every retained prediction for that step."""
+    ) -> Action | Termination:
+        """Query once for step ``t`` and blend every retained prediction for that step.
+
+        A terminal chunk ends the trial after this step's blended action, or at
+        once when it has no actions.
+        """
         chunk = policy.act(observation)
         if not chunk.actions:
-            from inspect_robots.errors import PolicyError
-
-            raise PolicyError(f"policy {policy.info.name!r} returned an empty ActionChunk")
+            if chunk.terminal is None:
+                raise _empty_chunk(policy)
+            store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, 0))
+            return chunk.terminal
         store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(chunk)))
 
         buffer: list[tuple[int, list[Any], dict[str, Any]]] = store.setdefault(_ENSEMBLE_KEY, [])
@@ -196,4 +228,4 @@ class EnsemblingActionManager:
         weights = weights / weights.sum()
         blended = np.average(np.stack(predictions), axis=0, weights=weights)
         newest_meta = buffer[-1][2]  # largest query time = newest chunk
-        return Action(data=blended, meta=newest_meta)
+        return Action(data=blended, meta=newest_meta, terminal=chunk.terminal)

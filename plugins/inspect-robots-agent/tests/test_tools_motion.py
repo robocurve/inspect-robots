@@ -20,7 +20,7 @@ from inspect_robots.spaces import (
     StateField,
     StateSpec,
 )
-from inspect_robots.types import Action, Observation
+from inspect_robots.types import Action, Observation, Termination
 from inspect_robots_agent._llm import ToolCall
 from inspect_robots_agent._tools import ToolResult, ToolsetError, build_toolset
 
@@ -1211,18 +1211,17 @@ def test_done_and_give_up_emit_control_mode_hold() -> None:
         assert result.error is None and result.chunk is not None
         (action,) = result.chunk.actions
         assert np.array_equal(action.data, state)
-        assert action.meta["request_stop"] is True
-        assert action.meta["stop_reason"] == name
+        assert result.chunk.terminal == Termination(name, "fork placed")
     assert calls == 0
 
     displacement = build_toolset(_delta_space(), ObservationSpace(), control_hz=10.0)
     result = displacement.execute(_call("give_up", reason="cannot see"), _obs({}))
     assert result.chunk is not None
     assert np.array_equal(result.chunk.actions[0].data, np.zeros(2))
-    assert result.chunk.actions[0].meta["stop_reason"] == "give_up"
+    assert getattr(result.chunk.terminal, "kind", None) == "give_up"
 
 
-def test_done_carries_hindsight_in_stop_meta() -> None:
+def test_done_carries_its_summary_and_hindsight() -> None:
     toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
     hindsight = "the jar lid needs two approach angles"
 
@@ -1233,12 +1232,8 @@ def test_done_carries_hindsight_in_stop_meta() -> None:
 
     assert result.error is None and result.chunk is not None
     (action,) = result.chunk.actions
-    assert action.meta == {
-        "request_stop": True,
-        "stop_reason": "done",
-        "stop_detail": "jar opened",
-        "stop_hindsight": hindsight,
-    }
+    assert result.chunk.terminal == Termination("done", "jar opened")
+    assert action.meta == {"stop_hindsight": hindsight}
 
 
 @pytest.mark.parametrize(
@@ -1251,11 +1246,8 @@ def test_give_up_accepts_absent_or_blank_hindsight(arguments: dict[str, object])
     result = toolset.execute(_call("give_up", **arguments), _obs({}))
 
     assert result.error is None and result.chunk is not None
-    assert result.chunk.actions[0].meta == {
-        "request_stop": True,
-        "stop_reason": "give_up",
-        "stop_detail": "cannot see",
-    }
+    assert result.chunk.terminal == Termination("give_up", "cannot see")
+    assert result.chunk.actions[0].meta == {}
     assert result.note == "give_up: cannot see"
 
 
@@ -1537,7 +1529,7 @@ def test_stop_actions_resend_the_held_target_rather_than_the_measured_state(name
     )
     assert after.chunk is not None
     assert np.array_equal(after.chunk.actions[0].data, np.array([0.2, 0.0]))
-    assert after.chunk.actions[0].meta["request_stop"] is True
+    assert after.chunk.terminal is not None
 
 
 # --- setpoint lines ------------------------------------------------------------

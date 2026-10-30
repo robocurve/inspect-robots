@@ -41,8 +41,9 @@ from inspect_robots.transcript import (
     operator_message_event,
     reset_event,
     step_event,
+    terminal_event,
 )
-from inspect_robots.types import OPERATOR_END, Action, Observation, StepResult
+from inspect_robots.types import OPERATOR_END, Action, Observation, StepResult, Termination
 
 if TYPE_CHECKING:
     from inspect_robots.console import OperatorInput
@@ -97,6 +98,8 @@ class Record:
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
+    # The policy's stated reason when a terminal action ended the trial.
+    termination_detail: str | None = None
     status: str = "success"  # "success" (ran to completion) | "error" | "cancelled"
     error: str | None = None
     inference_latencies: list[float] = field(default_factory=list)
@@ -113,6 +116,43 @@ class Record:
     # collected via the duck-typed transcript() hook and normalized to plain
     # JSON types by _collect_transcript. None when the policy has no hook.
     policy_transcript: Any = None
+
+
+def _declared_terminal(
+    policy: Policy, terminal: Termination, record: Record, t: int
+) -> Termination:
+    """Return ``terminal`` if the policy declared its kind; otherwise fail the trial."""
+    declared: frozenset[str] = getattr(policy.info, "terminal_actions", frozenset())
+    if terminal.kind not in declared:
+        raise _record_failure(
+            record,
+            PolicyError(
+                f"policy {policy.info.name!r} ended the trial with terminal action "
+                f"{terminal.kind!r}, which it does not declare; declared: {sorted(declared)}.\n"
+                "fix: list it in PolicyInfo.terminal_actions"
+            ),
+            t,
+        )
+    return terminal
+
+
+def _legacy_stop(action: Action) -> Termination | None:
+    """Read the pre-Termination stop request from ``action.meta``, if any."""
+    if not action.meta.get("request_stop"):
+        return None
+    detail = action.meta.get("stop_detail")
+    return Termination(
+        kind=str(action.meta.get("stop_reason") or "policy_stop"),
+        reason=detail if isinstance(detail, str) else "",
+    )
+
+
+def _end_by_policy(record: Record, terminal: Termination, t: int) -> None:
+    """Record that the policy's terminal action ended the trial at step ``t``."""
+    record.truncated = True
+    record.termination_reason = terminal.kind
+    record.termination_detail = terminal.reason or None
+    record.events.append(terminal_event(t, terminal.kind, terminal.reason))
 
 
 def _collect_transcript(policy: object) -> Any:
@@ -410,6 +450,11 @@ def rollout(
                             stacklevel=2,
                         )
 
+            if isinstance(action, Termination):
+                # A terminal chunk with no actions: end without stepping.
+                _end_by_policy(record, _declared_terminal(policy, action, record, t), t)
+                break
+
             # A malformed action is the policy's fault; catching it here keeps it
             # from surfacing inside the guard/embodiment as a halting fault.
             emitted_dim = int(np.asarray(action.data).size)
@@ -433,13 +478,15 @@ def rollout(
                     t,
                 )
 
-            # Policy-requested stop (plan 0008 §3d), captured from the
-            # PRE-review action so a guard rewrite cannot erase the
-            # intent. Note: EnsemblingActionManager rebuilds actions with chunk
-            # meta, so this channel works under Default/SmoothingActionManager
-            # (which preserve per-action meta), not under ensembling.
-            requested_stop = bool(action.meta.get("request_stop"))
-            stop_reason = str(action.meta.get("stop_reason", "policy_stop"))
+            # The policy's terminal action, captured from the PRE-review action
+            # so a guard rewrite cannot erase the intent. The legacy channel,
+            # meta["request_stop"] (plan 0008 §3d), still ends the trial the same
+            # way; it is not checked against the declared terminal actions.
+            terminal = (
+                _declared_terminal(policy, action.terminal, record, t)
+                if action.terminal is not None
+                else _legacy_stop(action)
+            )
 
             try:
                 reviewed = guard.review(action, store)  # may raise SafetyAbort
@@ -517,12 +564,12 @@ def rollout(
                 record.truncated = True
                 record.termination_reason = result.termination_reason or "truncated"
                 break
-            if requested_stop:
+            if terminal is not None:
                 # Embodiment-reported termination above wins (ground truth);
-                # otherwise the policy's stop ends the trial as a truncation —
-                # scoring stays the scorer's job, done() is not success.
-                record.truncated = True
-                record.termination_reason = stop_reason
+                # otherwise the policy's terminal action ends the trial as a
+                # truncation: scoring stays the scorer's job, done is not success.
+                # ``t`` already counts the executed step; the event names that step.
+                _end_by_policy(record, terminal, t - 1)
                 break
             obs = result.observation
             obs_rec = result_obs_rec

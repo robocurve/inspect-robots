@@ -52,6 +52,11 @@ def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
     return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
 
 
+def terminal_event(t: int, kind: str, reason: str) -> Event:
+    """Record the policy's terminal action (``done``, ``give_up``, ...) at step ``t``."""
+    return Event(kind="policy_terminal", t=t, data={"kind": kind, "reason": reason})
+
+
 def operator_message_event(t: int, text: str, source: str = "console") -> Event:
     """Record live feedback typed at the console or spoken in voice mode.
 

@@ -72,13 +72,24 @@ from inspect_robots.spaces import (
 )
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.taskgen import generate_scene
-from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation, StepResult
+from inspect_robots.types import (
+    DONE,
+    GIVE_UP,
+    OPERATOR_END,
+    Action,
+    ActionChunk,
+    Observation,
+    StepResult,
+    Termination,
+)
 
 # The public, stability-guaranteed API. Anything not listed here (or prefixed
 # with ``_``) is private. Authoring a benchmark, policy, or embodiment should only
 # need these names.
 __all__ = [
     "ABSOLUTE_CONTROL_MODES",
+    "DONE",
+    "GIVE_UP",
     "OPERATOR_END",
     "Action",
     "ActionChunk",
@@ -116,6 +127,7 @@ __all__ = [
     "Target",
     "Task",
     "TaskEnvelope",
+    "Termination",
     "__version__",
     "defaults",
     "embodiment",

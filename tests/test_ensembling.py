@@ -13,7 +13,14 @@ from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.task import Task
-from inspect_robots.types import Action, ActionChunk, Observation
+from inspect_robots.types import Action, ActionChunk, Observation, Termination
+
+
+def _action(result: Action | Termination) -> Action:
+    """Narrow an action manager's result to the action these tests expect."""
+    assert isinstance(result, Action)
+    return result
+
 
 _DELTA_SPACE = Box(shape=(2,), semantics=ActionSemantics(control_mode="eef_delta_pos"))
 
@@ -42,9 +49,9 @@ def test_blend_uniform_is_mean_at_overlap() -> None:
     ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.0)
     store: dict[str, object] = {}
     obs = Observation()
-    a0 = ctrl.next_action(policy, obs, 0, store)
+    a0 = _action(ctrl.next_action(policy, obs, 0, store))
     assert np.allclose(a0.data, [1.0, 0.0])  # only the fresh chunk's actions[0]
-    a1 = ctrl.next_action(policy, obs, 1, store)
+    a1 = _action(ctrl.next_action(policy, obs, 1, store))
     # overlap: chunk@0 -> actions[1]=[0,1]; chunk@1 -> actions[0]=[1,0]; mean
     assert np.allclose(a1.data, [0.5, 0.5])
 
@@ -55,7 +62,7 @@ def test_large_m_favors_oldest() -> None:
     store: dict[str, object] = {}
     obs = Observation()
     ctrl.next_action(policy, obs, 0, store)
-    a1 = ctrl.next_action(policy, obs, 1, store)
+    a1 = _action(ctrl.next_action(policy, obs, 1, store))
     # oldest contribution at t=1 is chunk@0 -> actions[1] = [0,1]
     assert np.allclose(a1.data, [0.0, 1.0], atol=1e-6)
 

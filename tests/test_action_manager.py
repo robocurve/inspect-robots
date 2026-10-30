@@ -13,7 +13,13 @@ from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import ActionSemantics, Box
-from inspect_robots.types import Action, ActionChunk, Observation
+from inspect_robots.types import Action, ActionChunk, Observation, Termination
+
+
+def _action(result: Action | Termination) -> Action:
+    """Narrow an action manager's result to the action these tests expect."""
+    assert isinstance(result, Action)
+    return result
 
 
 def _obs(embodiment: CubePickEmbodiment) -> Observation:
@@ -84,8 +90,8 @@ def test_smoothing_controller_composes() -> None:
     store: dict[str, object] = {}
     inner = DefaultActionManager()
     smooth = SmoothingActionManager(inner, alpha=0.5)
-    a0 = smooth.next_action(policy, obs, 0, store)
-    a1 = smooth.next_action(policy, obs, 1, store)
+    a0 = _action(smooth.next_action(policy, obs, 0, store))
+    a1 = _action(smooth.next_action(policy, obs, 1, store))
     # First action passes through; the second is the EMA of raw and previous.
     assert isinstance(a0.data, np.ndarray)
     assert a1.data.shape == (2,)
@@ -127,7 +133,9 @@ def test_stacked_smoothing_controllers_keep_separate_state() -> None:
 
     store: dict[str, object] = {}
     policy = _VaryingPolicy(values)
-    actual = [float(outer.next_action(policy, obs, t, store).data[0]) for t in range(len(values))]
+    actual = [
+        float(_action(outer.next_action(policy, obs, t, store)).data[0]) for t in range(len(values))
+    ]
 
     inner_prev: float | None = None
     outer_prev: float | None = None

@@ -785,7 +785,7 @@ def test_policy_act_chains_delta_and_capture_round_trips_blobs(tmp_path: Path) -
     next_observation = embodiment.step(first_chunk.actions[-1]).observation
     stop_chunk = policy.act(next_observation)
 
-    assert stop_chunk.actions[0].meta["request_stop"] is True
+    assert stop_chunk.terminal is not None
     second = raw_requests[1]
     assert second["previous_interaction_id"] == "i1"
     assert second["input"][0]["type"] == "function_result"
@@ -847,7 +847,7 @@ def test_policy_text_turn_takes_existing_nudge_path_end_to_end() -> None:
 
     chunk = policy.act(embodiment.reset(scene, seed=0))
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert bodies[1]["previous_interaction_id"] == "i1"
     assert bodies[1]["input"] == [{"type": "text", "text": "Respond with exactly one tool call."}]
     assert "I should use a tool" not in json.dumps(bodies[1]["input"])
