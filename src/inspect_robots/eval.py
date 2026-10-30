@@ -796,6 +796,7 @@ def _run_eval(
         max_steps=task_envelope.max_steps,
         max_seconds=task.max_seconds,
         rubrics=[rubric.describe() for rubric in task.task_rubrics],
+        reducer=epoch_spec.reducer,
         environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
         environment_revision=environment_revision
         or getattr(embodiment.info, "environment_revision", None),

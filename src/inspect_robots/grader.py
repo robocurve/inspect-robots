@@ -40,6 +40,11 @@ class Grader(Protocol):
     ``operator`` scorer then abstains on the trial instead of scoring it as a
     failure, and the run ends with ``status == "error"`` naming the count.
 
+    What a grader captures is the run's judgement for each trial; the log
+    keeps it, and [`read_annotations`][inspect_robots.annotation.read_annotations]
+    returns it as an annotation with the grader as author. Later edits are
+    annotations beside the log, so a grader's own output is never rewritten.
+
     A grader may also define an optional ``preflight()`` method, duck-typed
     like ``config()``. It is called before any rollout (by the CLI before the
     robot is touched, and by ``eval()`` and ``eval_set()``) and should raise

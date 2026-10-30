@@ -20,6 +20,8 @@ except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed t
     __version__ = "0.0.0+unknown"
 
 from inspect_robots import defaults
+from inspect_robots.analyzer import Analysis, Analyzer, AnnotatedLog, rescore
+from inspect_robots.annotation import Annotation, read_annotations
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.embodiment import (
     Embodiment,
@@ -98,6 +100,10 @@ __all__ = [
     "Action",
     "ActionChunk",
     "ActionSemantics",
+    "Analysis",
+    "Analyzer",
+    "AnnotatedLog",
+    "Annotation",
     "Box",
     "CameraSpec",
     "ChunkRecord",
@@ -152,8 +158,10 @@ __all__ = [
     "operator_scorer",
     "policy",
     "reached_goal_state",
+    "read_annotations",
     "read_eval_log",
     "registered",
+    "rescore",
     "resolve",
     "scorer",
     "sink",

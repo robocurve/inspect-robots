@@ -25,6 +25,13 @@ Subcommands:
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
+- ``inspect-robots edit LOG.json --trial SCENE-eEPOCH --judgement V --author NAME``
+  — append an annotation (a judgement or note, with provenance) beside a saved
+  log, which itself is never rewritten.
+- ``inspect-robots score LOG.json [--out PATH]`` — re-score a saved log from its
+  annotations and compare with the stored results.
+- ``inspect-robots analyze NAME LOG.json ...`` — run a registered analyzer
+  (``scores``, ``terminations``, ``digest``, ``html`` or a plugin's) over saved logs.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -146,6 +153,7 @@ _KIND_BY_PLURAL = {
     "graders": "grader",
     "sinks": "sink",
     "operator_inputs": "operator_input",
+    "analyzers": "analyzer",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -161,6 +169,9 @@ _SUBCOMMANDS = (
     "config",
     "setup",
     "doctor",
+    "edit",
+    "score",
+    "analyze",
 )
 
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
@@ -451,6 +462,43 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SCENE-eEPOCH",
         help="select a captured trial for --wire CALL",
+    )
+
+    p_edit = sub.add_parser(
+        "edit",
+        help="append a judgement or note about one trial beside a saved log",
+    )
+    p_edit.add_argument("log", help="path to an EvalLog JSON file")
+    target = p_edit.add_mutually_exclusive_group(required=True)
+    target.add_argument("--record", default=None, help="the trial's record id")
+    target.add_argument(
+        "--trial", default=None, metavar="SCENE-eEPOCH", help="the trial by scene and epoch"
+    )
+    content = p_edit.add_mutually_exclusive_group(required=True)
+    content.add_argument("--judgement", default=None, help="a verdict such as yes, no, partial")
+    content.add_argument("--note", default=None, help="a free-text note")
+    p_edit.add_argument(
+        "--rubric", default=None, help="the rubric a judgement is for (default: all of them)"
+    )
+    p_edit.add_argument("--author", required=True, help="who is making this edit")
+    p_edit.add_argument("--reason", default=None, help="why, recorded with a judgement as its note")
+
+    p_score = sub.add_parser(
+        "score", help="re-score a saved log from its annotations and compare with its results"
+    )
+    p_score.add_argument("log", help="path to an EvalLog JSON file")
+    p_score.add_argument(
+        "--out",
+        default=None,
+        help="write the re-scored log here (a new file; the input log is never rewritten)",
+    )
+
+    p_analyze = sub.add_parser("analyze", help="run a registered analyzer over saved logs")
+    p_analyze.add_argument("analyzer", help="analyzer name (see `inspect-robots list analyzers`)")
+    p_analyze.add_argument("logs", nargs="+", help="EvalLog JSON files")
+    p_analyze.add_argument("--json", action="store_true", help="print the analysis data as JSON")
+    p_analyze.add_argument(
+        "--out", default=None, help="directory for the files an analyzer produces"
     )
 
     p_summarize = sub.add_parser(
@@ -2918,6 +2966,112 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
     return ["run", "--instruction", argv[0], *argv[1:]]
 
 
+def _resolve_trial(log: EvalLog, record: str | None, trial: str | None) -> str:
+    """The annotation key for ``--record`` or ``--trial SCENE-eEPOCH``, checked against the log."""
+    from inspect_robots.annotation import trial_key
+
+    keys = {
+        trial_key(sample, index): f"{sample.scene_id}-e{index}"
+        for sample in log.samples
+        for index in range(len(sample.epochs))
+    }
+    if record is not None:
+        if record not in keys:
+            raise SystemExit(f"--record {record!r} is not a trial in this log")
+        return record
+    by_trial = {name: key for key, name in keys.items()}
+    if trial not in by_trial:
+        choices = ", ".join(sorted(by_trial)) or "(none)"
+        raise SystemExit(f"--trial {trial!r} is not a trial in this log; trials: {choices}")
+    return by_trial[str(trial)]
+
+
+def _cmd_edit(args: argparse.Namespace) -> int:
+    """Append one annotation beside a saved log and print its id."""
+    from inspect_robots.annotation import (
+        JUDGEMENT,
+        NOTE,
+        Annotation,
+        append_annotations,
+        current,
+        read_annotations,
+    )
+    from inspect_robots.log import read_eval_log
+
+    log = read_eval_log(args.log)
+    key = _resolve_trial(log, args.record, args.trial)
+    kind = JUDGEMENT if args.judgement is not None else NOTE
+    previous = current(read_annotations(args.log, log), key, kind, args.rubric)
+    annotation = Annotation(
+        record_id=key,
+        kind=kind,
+        value=args.judgement if args.judgement is not None else args.note,
+        author=args.author,
+        source="editor",
+        rubric=args.rubric,
+        note=args.reason,
+        supersedes=previous.annotation_id if previous is not None else None,
+    )
+    path = append_annotations(args.log, [annotation])
+    replaced = f" (supersedes {previous.annotation_id})" if previous is not None else ""
+    print(f"annotation {annotation.annotation_id} written to {path}{replaced}")
+    return 0
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    """Re-score a saved log from its annotations; print stored versus re-scored metrics."""
+    from inspect_robots.analyzer import AnnotatedLog, rescore
+
+    item = AnnotatedLog.load(args.log)
+    rescored = rescore(item.log, item.annotations)
+    stored = item.log.results.metrics
+    for name in sorted(set(stored) | set(rescored.results.metrics)):
+        before, after = stored.get(name), rescored.results.metrics.get(name)
+        marker = "" if before == after else "  (changed)"
+        print(f"{name}: {_fmt_metric(before)} -> {_fmt_metric(after)}{marker}")
+    if args.out is not None:
+        out = Path(args.out)
+        if out.resolve() == Path(args.log).resolve():
+            raise SystemExit(f"--out {out} would overwrite the input log; pass a different path")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rescored.to_dict(), indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {out}")
+    return 0
+
+
+def _fmt_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    """Run one registered analyzer over saved logs and print or save what it found."""
+    from inspect_robots.analyzer import Analysis, AnnotatedLog
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.registry import resolve
+
+    try:
+        analyzer = resolve("analyzer", args.analyzer)
+    except (KeyError, ConfigError, ValueError) as exc:
+        names = ", ".join(sorted(registered("analyzer"))) or "(none)"
+        raise SystemExit(f"unknown analyzer {args.analyzer!r}; registered: {names}") from exc
+    analysis = analyzer.analyze([AnnotatedLog.load(path) for path in args.logs])
+    if not isinstance(analysis, Analysis):
+        raise SystemExit(
+            f"analyzer {args.analyzer!r} returned {type(analysis).__name__}; expected Analysis"
+        )
+    if args.json:
+        print(json.dumps(dict(analysis.data), indent=2, default=str))
+    else:
+        sys.stdout.write(analysis.text)
+    if analysis.files:
+        out_dir = Path(args.out) if args.out is not None else Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in analysis.files.items():
+            (out_dir / Path(name).name).write_text(content, encoding="utf-8")
+            print(f"wrote {out_dir / Path(name).name}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, dispatch one subcommand, and return its process exit code."""
     init_dotenv(os.environ)
@@ -2957,6 +3111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "edit":
+        return _cmd_edit(args)
+    if args.command == "score":
+        return _cmd_score(args)
+    if args.command == "analyze":
+        return _cmd_analyze(args)
     parser.print_help()
     return 0
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from inspect_robots.grader import operator_grader, vlm_grader
 from inspect_robots.logging import JsonLogSink, LiveLogSink, RerunSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
-from inspect_robots.registry import embodiment, grader, policy, scorer, sink, task
+from inspect_robots.registry import analyzer, embodiment, grader, policy, scorer, sink, task
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import (
     episode_length,
@@ -57,3 +57,35 @@ def _cubepick_reach(num_scenes: int = 4, max_steps: int = 80) -> Task:
         scorer=success_at_end(),
         max_steps=max_steps,
     )
+
+
+@analyzer("scores")
+def _scores_analyzer() -> object:
+    """Stored versus re-scored metrics for each log, with the number of edits."""
+    from inspect_robots.analyzer import _ScoresAnalyzer
+
+    return _ScoresAnalyzer()
+
+
+@analyzer("terminations")
+def _terminations_analyzer() -> object:
+    """Termination reasons counted across logs, with each stated reason."""
+    from inspect_robots.analyzer import _TerminationsAnalyzer
+
+    return _TerminationsAnalyzer()
+
+
+@analyzer("digest")
+def _digest_analyzer() -> object:
+    """The offline run digest that ``summarize`` produces without a model."""
+    from inspect_robots.analyzer import _DigestAnalyzer
+
+    return _DigestAnalyzer()
+
+
+@analyzer("html")
+def _html_analyzer() -> object:
+    """The HTML viewer page for each log."""
+    from inspect_robots.analyzer import _HtmlAnalyzer
+
+    return _HtmlAnalyzer()

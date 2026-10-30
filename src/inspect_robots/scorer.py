@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from inspect_robots.scene import Target
 
 if TYPE_CHECKING:
+    from inspect_robots.annotation import Annotation
     from inspect_robots.rollout import Record
 
 ScoreValue = bool | int | float | str
@@ -57,7 +58,15 @@ def value_to_float(value: ScoreValue | None) -> float | None:
 
 @runtime_checkable
 class Scorer(Protocol):
-    """Maps a recorded trajectory + scene target to a [`Score`][inspect_robots.scorer.Score]."""
+    """Maps a recorded trajectory + scene target to a [`Score`][inspect_robots.scorer.Score].
+
+    A scorer that reads a judgement rather than the trajectory may also offer
+    ``score_annotations(annotations, record_id, rubric) -> Score`` (outside
+    this Protocol), scoring a trial from its
+    [annotations][inspect_robots.annotation.Annotation] exactly as it would
+    score the record. [`rescore`][inspect_robots.analyzer.rescore] uses it to
+    re-score a saved log after an edit; the ``operator`` scorer offers it.
+    """
 
     @property
     def name(self) -> str:
@@ -293,6 +302,30 @@ class _OperatorScorer:
                 # robot failure that never happened (plan 0085).
                 return Score(value=None, explanation=f"ungraded: grader failed: {grading_error}")
             return Score(value=False, explanation="no operator judgement recorded")
+        return Score(
+            value=is_affirmative_verdict(verdict),
+            explanation=f"operator verdict: {verdict!r}",
+        )
+
+    def score_annotations(
+        self, annotations: Sequence[Annotation], record_id: str, rubric: str
+    ) -> Score:
+        """Score one trial from its annotations, exactly as ``__call__`` scores the record.
+
+        The judgement that counts for ``rubric`` decides; without one, a
+        recorded grading error abstains and anything else scores as failure.
+        """
+        from inspect_robots.annotation import GRADING_ERROR, JUDGEMENT, current
+
+        judgement = current(annotations, record_id, JUDGEMENT, rubric)
+        if judgement is None:
+            grading_error = current(annotations, record_id, GRADING_ERROR, rubric)
+            if grading_error is not None:
+                return Score(
+                    value=None, explanation=f"ungraded: grader failed: {grading_error.value}"
+                )
+            return Score(value=False, explanation="no operator judgement recorded")
+        verdict = str(judgement.value)
         return Score(
             value=is_affirmative_verdict(verdict),
             explanation=f"operator verdict: {verdict!r}",

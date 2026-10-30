@@ -1,6 +1,6 @@
 # 0088: The paper architecture
 
-Status: in progress. One breaking release, built and tested phase by phase.
+Status: in progress (phases 1, 2, 3, 4, 8 and 9 built). One breaking release, built and tested phase by phase.
 
 Inspect Robots accompanies a paper that defines an evaluation framework for
 physical AI safety in eight extensible abstractions around one fixed backbone.
@@ -103,7 +103,12 @@ change is non-trivial, changelog fragments, tests at 100% coverage, and
 9. **Record editors and analyzers.** Raw records become immutable; edits are
    annotations beside them with provenance; graders become editors that write
    annotations only; `inspect-robots edit`, `score` and `analyze`;
-   `summarize` and `view` become analyzers.
+   `summarize` and `view` become analyzers. As built: the `Grader` API is
+   unchanged, and the judgement it captures is read back as an annotation
+   authored by the grader, which is what makes old logs score the same way
+   (decision 2). Edits go to an append-only `<log>.annotations.jsonl`.
+   `summarize`'s offline digest and `view`'s page ship as the `digest` and
+   `html` analyzers, and both commands stay.
 10. **Benchmark.** `Benchmark(name, tasks, version, metadata)`, registry kind
     `benchmark`, `run --benchmark`. Example benchmarks ship outside core.
 

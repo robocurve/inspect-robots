@@ -22,6 +22,13 @@ EXPECTED = {
     "SceneResult",
     "Record",
     "ChunkRecord",
+    # record editors and analyzers
+    "Annotation",
+    "read_annotations",
+    "AnnotatedLog",
+    "Analysis",
+    "Analyzer",
+    "rescore",
     # tasks, scenes, scoring
     "Task",
     "TaskEnvelope",

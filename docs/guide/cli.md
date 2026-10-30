@@ -745,6 +745,20 @@ overridden with `--fps N`. A stream that fails to encode is reported on
 stderr and the remaining streams still encode; the exit code is 1 if any
 stream failed.
 
+## `inspect-robots edit`, `score` and `analyze`
+
+`edit` appends a judgement or note about one trial beside a saved log,
+`score` re-scores a log from its annotations and compares the result with the
+stored metrics, and `analyze NAME LOG...` runs a registered analyzer
+(`scores`, `terminations`, `digest`, `html`, or a plugin's). The log itself is
+never rewritten. See [Editing and analyzing records](editing-and-analysis.md).
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e1 --judgement no --author reviewer
+inspect-robots score logs/run.json
+inspect-robots analyze terminations logs/*.json
+```
+
 ## `inspect-robots --version`
 
 ```bash

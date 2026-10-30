@@ -29,7 +29,8 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
-Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
+# "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input" | "analyzer"
+Kind = str
 KINDS: tuple[Kind, ...] = (
     "task",
     "policy",
@@ -38,6 +39,7 @@ KINDS: tuple[Kind, ...] = (
     "grader",
     "sink",
     "operator_input",
+    "analyzer",
 )
 
 # Any non-empty value opts out of entry-point plugin autoloading (see module
@@ -52,6 +54,7 @@ _GROUPS: dict[Kind, str] = {
     "grader": "inspect_robots.graders",
     "sink": "inspect_robots.sinks",
     "operator_input": "inspect_robots.operator_inputs",
+    "analyzer": "inspect_robots.analyzers",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -104,6 +107,11 @@ def grader(name: str | None = None) -> Callable[[F], F]:
 def sink(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a log-sink factory under ``name``."""
     return register("sink", name)
+
+
+def analyzer(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register an analyzer factory under ``name``."""
+    return register("analyzer", name)
 
 
 def operator_input(name: str | None = None) -> Callable[[F], F]:

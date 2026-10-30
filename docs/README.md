@@ -23,13 +23,15 @@ to the module that defines it.
    viewer.
 9. [Logging & Rerun](guide/logging-and-rerun.md): the eval log, sinks and
    Rerun visualization.
-10. [Plugins & the registry](guide/plugins.md): register components and
+10. [Editing and analyzing records](guide/editing-and-analysis.md): annotate
+    trials after a run, re-score, and write analyzers.
+11. [Plugins & the registry](guide/plugins.md): register components and
     resolve them by name.
-11. [Voice operator input](guide/voice-mode.md): speak operator feedback during
+12. [Voice operator input](guide/voice-mode.md): speak operator feedback during
     attended runs.
-12. [Authoring an embodiment adapter](guide/adapters.md): declare spaces and
+13. [Authoring an embodiment adapter](guide/adapters.md): declare spaces and
     pass conformance.
-13. [Command-line interface](guide/cli.md): every `inspect-robots` command.
+14. [Command-line interface](guide/cli.md): every `inspect-robots` command.
 
 ## Upgrading
 
