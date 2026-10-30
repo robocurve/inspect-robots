@@ -3428,3 +3428,17 @@ def test_invalid_timeout_s_is_a_guided_error(timeout_s: Any) -> None:
         LLMAgentPolicy(
             model="test/model", base_url="http://llm.test/v1", env={}, timeout_s=timeout_s
         )
+
+
+def test_motion_narration_says_why_a_motion_was_cut_short() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = replace(
+        _vision_observation(env_step=2),
+        extra={"env_step": 2, "replan": {"trigger": "gripper_slip", "reason": "the grasp slipped"}},
+    )
+    motion = _PendingMotion(issued_step=1, chunk_len=5, target=None)
+    narration = policy._motion_narration(motion, observation, with_frames=True)
+    assert narration.endswith("The motion was cut short to look again: the grasp slipped.")
+    malformed = replace(observation, extra={"env_step": 2, "replan": {"reason": 3}})
+    assert "cut short" not in policy._motion_narration(motion, malformed, with_frames=True)

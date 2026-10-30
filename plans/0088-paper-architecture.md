@@ -1,6 +1,6 @@
 # 0088: The paper architecture
 
-Status: in progress (phases 1, 2, 3, 4, 5, 8 and 9 built). One breaking release, built and tested phase by phase.
+Status: in progress (phases 1 to 6, 8 and 9 built). One breaking release, built and tested phase by phase.
 
 Inspect Robots accompanies a paper that defines an evaluation framework for
 physical AI safety in eight extensible abstractions around one fixed backbone.
@@ -95,7 +95,9 @@ change is non-trivial, changelog fragments, tests at 100% coverage, and
    byte-identical across the move.
 6. **Replanning on observation.** An optional `ReplanTrigger` protocol on the
    default action manager (built in: chunk end, unreachable target, gripper
-   slip), with the reason recorded.
+   slip), with the reason recorded. As built: chunk end is the default and
+   needs no trigger; a firing trigger adds `extra["replan"]` to the observation
+   the policy sees and a `replan` event to the record.
 7. **Guards as configuration.** Registry kind `guard`, `--guard NAME[:k=v]`
    and a `[guards]` config section; guard name and before/after action in the
    record.

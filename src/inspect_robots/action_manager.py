@@ -18,6 +18,16 @@ itself so the rollout ends the trial without stepping the embodiment.
 then re-infers (``replan_interval=None`` ⇒ play the whole chunk before replanning).
 A terminal chunk ends the trial after the actions it plays, so a short
 ``replan_interval`` never drops the policy's decision to stop.
+
+The paper's action manager also decides, each time an action completes, whether
+to rerun the policy on the latest observation. ``DefaultActionManager`` asks its
+[`ReplanTrigger`][inspect_robots.action_manager.ReplanTrigger]s before playing
+the next buffered action; when one fires, the rest of the chunk is dropped, the
+policy is called on the current observation (which carries the trigger's
+``extra["replan"]``), and the rollout records a ``replan`` event with the reason.
+Built in: [`UnreachableTarget`][inspect_robots.action_manager.UnreachableTarget]
+and [`GripperSlip`][inspect_robots.action_manager.GripperSlip]. Reaching the end
+of a chunk always replans and needs no trigger.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import replace
 from itertools import count
 from typing import Any, Protocol, runtime_checkable
@@ -38,6 +49,13 @@ from inspect_robots.types import Action, ActionChunk, Observation, Termination
 _BUFFER_KEY = "_controller_action_buffer"
 # Each entry is (inference_latency_s | None, chunk_len): one per policy.act() call.
 _INFER_KEY = "_controller_inferences"
+# Guard modifications, {"t", "detail"}, appended by the rollout.
+_APPROVALS_KEY = "_rollout_approvals"
+# Replans a trigger caused, {"t", "trigger", "reason"}; the rollout records each as an event.
+_REPLAN_KEY = "_controller_replans"
+# The action most recently returned for execution, and the step its chunk began.
+_LAST_ACTION_KEY = "_controller_last_action"
+_CHUNK_START_KEY = "_controller_chunk_start"
 
 
 @runtime_checkable
@@ -68,24 +86,164 @@ def _terminal_actions(chunk: ActionChunk, actions: list[Action]) -> list[Action]
     return actions
 
 
-class DefaultActionManager:
-    """Open-loop chunk execution with periodic replanning."""
+@runtime_checkable
+class ReplanTrigger(Protocol):
+    """Decides, before the next buffered action plays, that the policy must look again."""
 
-    def __init__(self, replan_interval: int | None = None):
+    name: str
+
+    def should_replan(self, observation: Observation, t: int, store: dict[str, Any]) -> str | None:
+        """Return why the policy should rerun on ``observation`` now, or ``None`` to continue.
+
+        ``store`` is the trial's action-manager state; a trigger keeps its own
+        state there under a key unique to it.
+        """
+        ...
+
+
+class UnreachableTarget:
+    """Replan when the guard clamped an action of the current chunk to the action bounds.
+
+    A clamped action means the policy asked for a target outside what the
+    embodiment allows, so the rest of the chunk is heading somewhere it cannot
+    go. Speed-limit (delta) clamps alone do not count.
+    """
+
+    name = "unreachable_target"
+
+    def should_replan(self, observation: Observation, t: int, store: dict[str, Any]) -> str | None:
+        """Fire on the first bounds clamp since the current chunk began."""
+        start = store.get(_CHUNK_START_KEY, 0)
+        for approval in store.get(_APPROVALS_KEY, []):
+            detail = approval.get("detail") or ""
+            if approval.get("t", -1) >= start and "clamped" in detail.split(", "):
+                return (
+                    f"the guard clamped the action at step {approval['t']} to the action "
+                    "bounds; the target is out of reach"
+                )
+        return None
+
+
+class GripperSlip:
+    """Replan when a gripper moves toward its command although no new command was sent.
+
+    Holding an object, a gripper rests short of its closing command. If, after
+    ``settle_steps`` steps of an unchanged command, the measured value moves
+    more than ``threshold`` toward the command, the object has likely slipped
+    out. ``state_key`` and ``index`` locate the gripper in the observation
+    state and in the action vector, which must be absolute targets.
+    """
+
+    def __init__(
+        self,
+        state_key: str,
+        index: int,
+        *,
+        label: str = "gripper",
+        threshold: float = 0.05,
+        settle_steps: int = 5,
+    ) -> None:
+        if not math.isfinite(threshold) or threshold <= 0:
+            raise ValueError("threshold must be finite and > 0")
+        if isinstance(settle_steps, bool) or not isinstance(settle_steps, int) or settle_steps < 0:
+            raise ValueError("settle_steps must be an integer >= 0")
+        self.name = "gripper_slip"
+        self.state_key = state_key
+        self.index = index
+        self.label = label
+        self.threshold = threshold
+        self.settle_steps = settle_steps
+        self._key = f"_gripper_slip:{state_key}:{index}"
+
+    @classmethod
+    def for_embodiment(
+        cls, action_space: Box, state_key: str, *, threshold: float = 0.05, settle_steps: int = 5
+    ) -> list[GripperSlip]:
+        """One trigger per action dimension whose label contains ``"gripper"``."""
+        labels = action_space.semantics.dim_labels if action_space.semantics else None
+        return [
+            cls(state_key, index, label=label, threshold=threshold, settle_steps=settle_steps)
+            for index, label in enumerate(labels or ())
+            if "gripper" in label.lower()
+        ]
+
+    def should_replan(self, observation: Observation, t: int, store: dict[str, Any]) -> str | None:
+        """Compare the gripper with its reading once the unchanged command has settled."""
+        last = store.get(_LAST_ACTION_KEY)
+        state = observation.state.get(self.state_key)
+        if last is None or state is None:
+            return None
+        command = float(np.asarray(last.data, dtype=np.float64).ravel()[self.index])
+        measured = float(np.asarray(state, dtype=np.float64).ravel()[self.index])
+        tracked = store.get(self._key)
+        if tracked is None or tracked["command"] != command:
+            store[self._key] = {"command": command, "steady": 0, "baseline": None}
+            return None
+        tracked["steady"] += 1
+        if tracked["steady"] < self.settle_steps:
+            return None
+        if tracked["baseline"] is None:
+            tracked["baseline"] = measured
+            return None
+        closer = abs(tracked["baseline"] - command) - abs(measured - command)
+        if closer > self.threshold:
+            tracked["baseline"] = measured
+            return (
+                f"{self.label} moved {closer:.3f} toward its command of {command:g} with no "
+                "new command; the grasp may have slipped"
+            )
+        return None
+
+
+class DefaultActionManager:
+    """Open-loop chunk execution with periodic replanning and optional replan triggers."""
+
+    def __init__(
+        self,
+        replan_interval: int | None = None,
+        triggers: Sequence[ReplanTrigger] = (),
+    ):
         if replan_interval is not None and (
             not isinstance(replan_interval, int)
             or isinstance(replan_interval, bool)
             or replan_interval < 1
         ):
             raise ValueError("replan_interval must be an integer >= 1 or None")
+        for trigger in triggers:
+            if not callable(getattr(trigger, "should_replan", None)):
+                raise ValueError(f"replan trigger {trigger!r} has no should_replan method")
         self.replan_interval = replan_interval
+        self.triggers = tuple(triggers)
+
+    def _triggered(
+        self, observation: Observation, t: int, store: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        for trigger in self.triggers:
+            reason = trigger.should_replan(observation, t, store)
+            if reason:
+                replan = {"t": t, "trigger": trigger.name, "reason": reason}
+                store.setdefault(_REPLAN_KEY, []).append(replan)
+                return replan
+        return None
 
     def next_action(
         self, policy: Policy, observation: Observation, t: int, store: dict[str, Any]
     ) -> Action | Termination:
-        """Reuse buffered chunk actions until the configured replanning boundary."""
+        """Play buffered actions until the chunk or interval ends, or a trigger fires."""
         buffer: deque[Action] = store.setdefault(_BUFFER_KEY, deque())
+        if buffer and self.triggers:
+            replan = self._triggered(observation, t, store)
+            if replan is not None:
+                buffer.clear()
+                observation = replace(
+                    observation,
+                    extra={
+                        **observation.extra,
+                        "replan": {"trigger": replan["trigger"], "reason": replan["reason"]},
+                    },
+                )
         if not buffer:
+            store[_CHUNK_START_KEY] = t
             chunk = policy.act(observation)
             if not chunk.actions:
                 if chunk.terminal is None:
@@ -98,7 +256,9 @@ class DefaultActionManager:
             # Record the number of actions actually buffered (the chunk may be
             # shorter than replan_interval), so the transcript never overstates.
             store.setdefault(_INFER_KEY, []).append((chunk.inference_latency_s, len(taken)))
-        return buffer.popleft()
+        action = buffer.popleft()
+        store[_LAST_ACTION_KEY] = action
+        return action
 
 
 _SMOOTH_KEY = "_smoothing_prev_action"

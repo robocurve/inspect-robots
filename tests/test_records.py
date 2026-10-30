@@ -161,6 +161,7 @@ def test_the_configuration_is_resolved_per_trial_with_credentials_redacted(
     assert config["action_manager"] == {
         "type": "inspect_robots.action_manager.DefaultActionManager",
         "replan_interval": 3,
+        "triggers": [],
     }
     assert config["guard"]["type"] == "inspect_robots.guard.PassThroughGuard"
     assert config["scene"]["instruction"] == "reach the cube"

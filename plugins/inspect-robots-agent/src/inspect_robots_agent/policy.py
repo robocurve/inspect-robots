@@ -1411,6 +1411,9 @@ class LLMAgentPolicy(PolicyBase):
                     )
                 else:
                     narration += " Target reached."
+        replan = observation.extra.get("replan")
+        if isinstance(replan, Mapping) and isinstance(replan.get("reason"), str):
+            narration += f" The motion was cut short to look again: {replan['reason']}."
         return narration
 
     def _echo(self, text: str) -> None:

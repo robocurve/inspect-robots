@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
-from inspect_robots.action_manager import _INFER_KEY, ActionManager
+from inspect_robots.action_manager import _APPROVALS_KEY, _INFER_KEY, _REPLAN_KEY, ActionManager
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
     EmbodimentFault,
@@ -41,6 +41,7 @@ from inspect_robots.transcript import (
     inference_event,
     operator_event,
     operator_message_event,
+    replan_event,
     reset_event,
     step_event,
     terminal_event,
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     from inspect_robots.logging.sink import LogSink
 
 _TRANSCRIPT_BYTE_LIMIT = 2 * 1024 * 1024
-_APPROVALS_KEY = "_rollout_approvals"
 _OPERATOR_MSGS_KEY = "_rollout_operator_messages"
 
 
@@ -503,6 +503,11 @@ def rollout(
                 raise
             except Exception as exc:
                 raise _record_failure(record, _policy_error(policy, exc), t) from exc
+
+            replans = store.get(_REPLAN_KEY, [])
+            for replan in replans[store.get("_rollout_replans_seen", 0) :]:
+                record.events.append(replan_event(replan["t"], replan["trigger"], replan["reason"]))
+            store["_rollout_replans_seen"] = len(replans)
 
             inferences = store.get(_INFER_KEY, [])
             if len(inferences) > prev_inferences:

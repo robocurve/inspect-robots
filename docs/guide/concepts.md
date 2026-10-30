@@ -44,7 +44,9 @@ with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
 
 1. An [`ActionManager`](../../src/inspect_robots/action_manager.py) decides the next action, internally
    calling `policy.act()` and buffering the chunk (so open-loop execution and
-   temporal ensembling compose without forking the loop).
+   temporal ensembling compose without forking the loop). Each time an action
+   completes it decides whether to play the next one or rerun the policy on
+   the latest observation; see [Replanning on observation](#replanning-on-observation).
 2. A [`Guard`](../../src/inspect_robots/guard.py) reviews the action before it reaches
    the embodiment: pass, clamp, or veto (a safety gate).
 3. `embodiment.step(action)` executes it; everything is logged to sinks and
@@ -54,6 +56,39 @@ with a [`CompatibilityError`](../../src/inspect_robots/errors.py).
 Camera frames are streamed to a [`FrameStore`](../../src/inspect_robots/frames.py) and the
 record keeps lightweight references, so long multi-camera episodes stay
 memory-safe.
+
+## Replanning on observation
+
+[`DefaultActionManager`](../../src/inspect_robots/action_manager.py) replans
+when a chunk runs out (or after `replan_interval` actions). Give it
+[`ReplanTrigger`](../../src/inspect_robots/action_manager.py)s to replan
+earlier when the observation calls for it:
+
+```python
+from inspect_robots.action_manager import DefaultActionManager, GripperSlip, UnreachableTarget
+
+space = embodiment.info.action_space
+manager = DefaultActionManager(
+    triggers=[UnreachableTarget(), *GripperSlip.for_embodiment(space, "joint_pos")]
+)
+eval(task, policy, embodiment, action_manager=manager)
+```
+
+Before each buffered action plays, the manager asks every trigger in turn.
+When one returns a reason, the rest of the chunk is dropped, the policy is
+called on the current observation with `extra["replan"]` set to the trigger
+and reason, and the record gets a `replan` event. Built in:
+
+- `UnreachableTarget`: the guard clamped an action of the current chunk to the
+  action bounds, so the chunk is heading somewhere the embodiment cannot go.
+  Speed-limit clamps alone do not count.
+- `GripperSlip`: with an unchanged command, after `settle_steps`, a gripper's
+  reading moves more than `threshold` toward its command, which is what a
+  closed gripper does when the object leaves it. Absolute control only.
+
+A trigger is any object with a `name` and
+`should_replan(observation, t, store) -> str | None`; keep per-trial state in
+`store` under a key of your own.
 
 ## Scoring
 

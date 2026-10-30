@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from inspect_robots.rollout import Record
 
-EventKind = str  # Includes reset, inference, step, approval, operator_message, operator, error.
+# reset, inference, step, approval, replan, policy_terminal, operator_message, operator, error.
+EventKind = str
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,11 @@ def step_event(t: int, terminated: bool, truncated: bool, reason: str | None) ->
 def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
     """Record whether the safety gate changed the proposed action at step ``t``."""
     return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
+
+
+def replan_event(t: int, trigger: str, reason: str) -> Event:
+    """Record that ``trigger`` cut a chunk short at step ``t`` so the policy could look again."""
+    return Event(kind="replan", t=t, data={"trigger": trigger, "reason": reason})
 
 
 def terminal_event(t: int, kind: str, reason: str) -> Event:
