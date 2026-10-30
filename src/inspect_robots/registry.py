@@ -30,7 +30,7 @@ from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
 # "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
-# | "analyzer" | "guard"
+# | "analyzer" | "guard" | "benchmark"
 Kind = str
 KINDS: tuple[Kind, ...] = (
     "task",
@@ -42,6 +42,7 @@ KINDS: tuple[Kind, ...] = (
     "operator_input",
     "analyzer",
     "guard",
+    "benchmark",
 )
 
 # Any non-empty value opts out of entry-point plugin autoloading (see module
@@ -58,6 +59,7 @@ _GROUPS: dict[Kind, str] = {
     "operator_input": "inspect_robots.operator_inputs",
     "analyzer": "inspect_robots.analyzers",
     "guard": "inspect_robots.guards",
+    "benchmark": "inspect_robots.benchmarks",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -110,6 +112,11 @@ def grader(name: str | None = None) -> Callable[[F], F]:
 def sink(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a log-sink factory under ``name``."""
     return register("sink", name)
+
+
+def benchmark(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register a benchmark factory (returns a ``Benchmark``) under ``name``."""
+    return register("benchmark", name)
 
 
 def guard(name: str | None = None) -> Callable[[F], F]:

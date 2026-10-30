@@ -22,6 +22,7 @@ except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed t
 from inspect_robots import defaults
 from inspect_robots.analyzer import Analysis, Analyzer, AnnotatedLog, rescore
 from inspect_robots.annotation import Annotation, read_annotations
+from inspect_robots.benchmark import Benchmark, eval_benchmark
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.embodiment import (
     Embodiment,
@@ -106,6 +107,7 @@ __all__ = [
     "Analyzer",
     "AnnotatedLog",
     "Annotation",
+    "Benchmark",
     "Box",
     "CameraSpec",
     "ChunkRecord",
@@ -155,6 +157,7 @@ __all__ = [
     "embodiment",
     "episode_length",
     "eval",
+    "eval_benchmark",
     "eval_set",
     "generate_scene",
     "grader",

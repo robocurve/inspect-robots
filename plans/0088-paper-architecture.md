@@ -1,6 +1,6 @@
 # 0088: The paper architecture
 
-Status: in progress (phases 1 to 9 built). One breaking release, built and tested phase by phase.
+Status: built (all ten phases); release preparation in progress. One breaking release, built and tested phase by phase.
 
 Inspect Robots accompanies a paper that defines an evaluation framework for
 physical AI safety in eight extensible abstractions around one fixed backbone.
@@ -118,6 +118,9 @@ change is non-trivial, changelog fragments, tests at 100% coverage, and
    `html` analyzers, and both commands stay.
 10. **Benchmark.** `Benchmark(name, tasks, version, metadata)`, registry kind
     `benchmark`, `run --benchmark`. Example benchmarks ship outside core.
+    As built: `eval_benchmark` and `eval-set --benchmark` as well, every log
+    records `EvalSpec.benchmark` (name and version), and a `benchmarks`
+    analyzer groups results by benchmark and version.
 
 Order: 1, 3, 2, 4, 8, 9, 5, 6, 7, 10.
 

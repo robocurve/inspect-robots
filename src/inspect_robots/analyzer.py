@@ -234,6 +234,40 @@ class _TerminationsAnalyzer:
         )
 
 
+class _BenchmarksAnalyzer:
+    """Results grouped by benchmark and version: each task's status and metrics."""
+
+    name = "benchmarks"
+
+    def analyze(self, logs: Sequence[AnnotatedLog]) -> Analysis:
+        groups: dict[str, dict[str, Any]] = {}
+        for item in logs:
+            benchmark = item.log.eval.benchmark
+            if not benchmark:
+                continue
+            key = f"{benchmark.get('name')} v{benchmark.get('version')}"
+            rescored = rescore(item.log, item.annotations)
+            groups.setdefault(key, {"benchmark": dict(benchmark), "tasks": []})["tasks"].append(
+                {
+                    "task": item.log.eval.task,
+                    "status": item.log.status,
+                    "metrics": dict(rescored.results.metrics),
+                    "log": str(item.path),
+                }
+            )
+        if not groups:
+            return Analysis(name=self.name, text="no benchmark runs among these logs\n")
+        lines: list[str] = []
+        for key, group in groups.items():
+            lines.append(f"{key}: {len(group['tasks'])} task(s)")
+            for task in group["tasks"]:
+                metrics = ", ".join(
+                    f"{name} {_format_metric(value)}" for name, value in task["metrics"].items()
+                )
+                lines.append(f"  {task['task']} [{task['status']}] {metrics}".rstrip())
+        return Analysis(name=self.name, text="\n".join(lines) + "\n", data=groups)
+
+
 class _DigestAnalyzer:
     """The offline digest ``inspect-robots summarize`` writes without a model, per log."""
 

@@ -29,6 +29,9 @@ EXPECTED = {
     "Analysis",
     "Analyzer",
     "rescore",
+    # benchmarks
+    "Benchmark",
+    "eval_benchmark",
     # policy adapters and tool libraries
     "PolicyAdapter",
     "ToolAdapter",

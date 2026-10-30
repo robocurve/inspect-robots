@@ -109,7 +109,9 @@ Every trial now has a record with a unique id, the action chunks the policy
 produced, and a per-trial directory under `records/` (see
 [Trial records](guide/logging-and-rerun.md#trial-records)). Logs are written as
 schema version 3, which adds `SceneResult.record_ids`, `SceneResult.record_dirs`,
-`SceneResult.events` and `EvalStats.records_dir`. Versions 1 and 2 still read,
+`SceneResult.events`, `EvalStats.records_dir`, `EvalSpec.reducer` (the epoch
+reducer, so a log can be re-scored) and `EvalSpec.benchmark` (the benchmark's
+name and version, or null). Versions 1 and 2 still read,
 with empty new fields. Tools that parse the JSON directly should accept
 `"version": 3`.
 

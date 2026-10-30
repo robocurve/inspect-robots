@@ -98,6 +98,7 @@ from inspect_robots.session import ECHO_INTERVAL_S, OperatorSession
 from inspect_robots.types import HORIZON_REASONS, OPERATOR_END
 
 if TYPE_CHECKING:
+    from inspect_robots.benchmark import Benchmark
     from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.grader import Grader
@@ -155,6 +156,7 @@ _KIND_BY_PLURAL = {
     "operator_inputs": "operator_input",
     "analyzers": "analyzer",
     "guards": "guard",
+    "benchmarks": "benchmark",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -347,6 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run an evaluation")
     p_run.add_argument("--task", help="registered task name")
     p_run.add_argument(
+        "--benchmark",
+        default=None,
+        metavar="NAME",
+        help="run every task of a registered benchmark (see `inspect-robots list benchmarks`)",
+    )
+    p_run.add_argument(
         "--instruction",
         help="run a single ad-hoc scene with this language instruction "
         "(instead of a registered --task)",
@@ -431,9 +439,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
     p_eval_set.add_argument(
         "tasks",
-        nargs="+",
+        nargs="*",
         metavar="TASK",
         help="registered task name(s); shell-quoted globs match by prefix, e.g. 'kitchenbench/*'",
+    )
+    p_eval_set.add_argument(
+        "--benchmark",
+        default=None,
+        metavar="NAME",
+        help="run every task of a registered benchmark instead of named tasks",
     )
     _add_shared_eval_args(p_eval_set)
     _add_config_arg(p_eval_set)
@@ -1735,6 +1749,16 @@ def _announce_live_view(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.benchmark is not None:
+        if args.task is not None or args.instruction is not None or args.auto_task:
+            raise SystemExit(
+                "--benchmark runs its own tasks: drop --task, --instruction and --auto-task"
+            )
+        # A benchmark is a set of tasks, so it runs through eval-set's path.
+        args.tasks = []
+        args.max_workers = 1
+        args.retry_attempts = 0
+        return _cmd_eval_set(args)
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
             "--rerun-port spawns a local viewer and --rerun-connect streams "
@@ -2049,17 +2073,35 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
     if args.max_workers > 1 and (not args.no_prompt or args.voice):
         raise SystemExit("--max-workers > 1 requires --no-prompt and does not support --voice")
-    task_names = _match_tasks(args.tasks)
+    benchmark = None
+    entries: Sequence[Task | str]
+    if args.benchmark is not None:
+        from inspect_robots.benchmark import resolve_benchmark
+
+        if args.tasks:
+            raise SystemExit("pass task names or --benchmark, not both")
+        try:
+            benchmark = resolve_benchmark(args.benchmark)
+        except ConfigError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"benchmark: {benchmark.name} v{benchmark.version}")
+        entries = list(benchmark.tasks)
+    elif not args.tasks:
+        raise SystemExit("eval-set needs task names or --benchmark NAME")
+    else:
+        entries = _match_tasks(args.tasks)
     defaults = load_defaults(os.environ)
     try:
         if args.max_workers == 1:
-            success, logs = _run_cli_eval_set(args, defaults, task_names)
+            success, logs = _run_cli_eval_set(args, defaults, entries, benchmark=benchmark)
         else:
 
-            def run_task(name: str) -> tuple[bool, list[EvalLog]]:
-                return _run_cli_eval_set(args, defaults, [name], parallel=True)
+            def run_task(entry: Task | str) -> tuple[bool, list[EvalLog]]:
+                return _run_cli_eval_set(
+                    args, defaults, [entry], parallel=True, benchmark=benchmark
+                )
 
-            results = run_parallel(task_names, run_task, args.max_workers)
+            results = run_parallel(entries, run_task, args.max_workers)
             success = all(result[0] for result in results)
             logs = [log for _, task_logs in results for log in task_logs]
     except KeyboardInterrupt:
@@ -2079,16 +2121,21 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
 def _run_cli_eval_set(
     args: argparse.Namespace,
     defaults: Defaults,
-    task_names: Sequence[str],
+    entries: Sequence[Task | str],
     *,
     parallel: bool = False,
+    benchmark: Benchmark | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Own components and sinks for one sequential set, or one parallel task."""
     from inspect_robots import eval_set
     from inspect_robots._parallel import HaltPreservingExitStack
     from inspect_robots.logging import JsonLogSink, LiveLogSink
+    from inspect_robots.task import Task
 
-    tasks = [_resolve_or_exit("task", name) for name in task_names]
+    tasks = [
+        entry if isinstance(entry, Task) else _resolve_or_exit("task", entry) for entry in entries
+    ]
+    task_names = [task.name for task in tasks]
     if args.epochs is not None:
         tasks = [_apply_epochs_or_exit(t, args.epochs, attribute_task=True) for t in tasks]
 
@@ -2149,6 +2196,7 @@ def _run_cli_eval_set(
             tasks,
             resolved.policy,
             embodiment,
+            benchmark=benchmark,
             log_dir=args.log_dir,
             sinks=sinks,
             seed=args.seed,

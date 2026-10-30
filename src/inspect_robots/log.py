@@ -56,7 +56,8 @@ def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
 # Version 3 gives every trial a record: SceneResult.record_ids and record_dirs name
 # each trial's record directory (EvalStats.records_dir), and SceneResult.events
 # keeps each trial's full event transcript, including the policy_terminal event.
-# EvalSpec.reducer records the epoch reducer so a log can be re-scored.
+# EvalSpec.reducer records the epoch reducer so a log can be re-scored, and
+# EvalSpec.benchmark names the benchmark (and version) a task ran in.
 # Older logs still read: their new fields are empty and their result keys,
 # which were scorer names in version 1, are unchanged.
 SCHEMA_VERSION = 3
@@ -119,6 +120,8 @@ class EvalSpec:
     # The epoch reducer that combined each scene's trial scores ("mean" by
     # default), so a log can be re-scored after the fact. None before schema 3.
     reducer: str | None = None
+    # The benchmark this task ran as part of, {"name", "version"}, or None.
+    benchmark: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

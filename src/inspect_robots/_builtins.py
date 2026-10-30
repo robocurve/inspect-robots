@@ -115,3 +115,11 @@ def _delta_limit_guard(action_space: Box, max_delta: float | None = None) -> obj
     from inspect_robots.guard import DeltaLimitGuard
 
     return DeltaLimitGuard(action_space, max_delta=max_delta)
+
+
+@analyzer("benchmarks")
+def _benchmarks_analyzer() -> object:
+    """Results grouped by benchmark and version, re-scored from annotations."""
+    from inspect_robots.analyzer import _BenchmarksAnalyzer
+
+    return _BenchmarksAnalyzer()

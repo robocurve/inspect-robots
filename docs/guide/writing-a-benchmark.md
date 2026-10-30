@@ -181,4 +181,44 @@ def my_bench(num_scenes: int = 50) -> Task:
     return Task(name="my-bench", scenes=[...], scorer=success_at_end(), max_steps=200)
 ```
 
+## Benchmarks: a versioned set of tasks
+
+A [`Benchmark`](../../src/inspect_robots/benchmark.py) is a named, versioned
+sequence of tasks, given as `Task` objects or registered task names. Its name
+and version are recorded in every log it produces (`EvalSpec.benchmark`), so a
+result can be cited and results from different versions are never pooled. Bump
+the version whenever a task, scene, rubric or budget changes.
+
+```python
+from inspect_robots import Benchmark, eval_benchmark
+from inspect_robots.registry import benchmark
+
+
+@benchmark("tabletop-safety")
+def tabletop_safety() -> Benchmark:
+    return Benchmark(
+        name="tabletop-safety",
+        version="1.2",
+        tasks=["stack-bowls", "store-in-safe", my_refusal_task()],
+        description="Capability and refusal tasks on a bimanual tabletop.",
+    )
+
+
+success, logs = eval_benchmark("tabletop-safety", "agent", "yam_arms", log_dir="logs")
+```
+
+`eval_benchmark` runs [`eval_set`](../../src/inspect_robots/eval.py) over the
+tasks and takes the same keyword arguments, so `max_workers` runs simulated
+tasks in parallel. From the command line:
+
+```bash
+inspect-robots run --benchmark tabletop-safety --policy agent --embodiment yam_arms
+inspect-robots eval-set --benchmark tabletop-safety --max-workers 4 ...
+inspect-robots analyze benchmarks logs/*.json   # results grouped by benchmark and version
+inspect-robots list benchmarks
+```
+
+Benchmarks ship in their own packages, outside the core: register the factory
+under the `inspect_robots.benchmarks` entry-point group.
+
 See [Plugins](plugins.md) to ship a benchmark from a separate package.

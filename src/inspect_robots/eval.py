@@ -62,6 +62,7 @@ from inspect_robots.task import Task
 from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
+    from inspect_robots.benchmark import Benchmark
     from inspect_robots.console import OperatorInput
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box, ObservationSpace
@@ -537,6 +538,7 @@ def eval(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    benchmark: Benchmark | None = None,
 ) -> list[EvalLog]:
     """Run ``task`` with ``policy`` on ``embodiment``; return ``[EvalLog]``.
 
@@ -588,6 +590,10 @@ def eval(
     the policy produced it, with its inference latency). The log names each
     trial's directory in ``SceneResult.record_dirs``. A write failure degrades
     to a ``RuntimeWarning``.
+
+    ``benchmark`` records the [`Benchmark`][inspect_robots.benchmark.Benchmark]
+    this task runs in (its name and version) as ``EvalSpec.benchmark``;
+    [`eval_benchmark`][inspect_robots.benchmark.eval_benchmark] sets it.
 
     ``guard`` is a guard object, or a list of registered guard specs
     (``"clamp"``, ``"delta-limit:max_delta=0.02"``) and guard objects applied
@@ -672,6 +678,7 @@ def eval(
             environment_id=environment_id,
             environment_revision=environment_revision,
             policy_checkpoint=policy_checkpoint,
+            benchmark=benchmark,
         )
     finally:
         # Close what we opened: a registry-resolved embodiment is released even
@@ -701,6 +708,7 @@ def _run_eval(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    benchmark: Benchmark | None = None,
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
@@ -804,6 +812,7 @@ def _run_eval(
         max_seconds=task.max_seconds,
         rubrics=[rubric.describe() for rubric in task.task_rubrics],
         reducer=epoch_spec.reducer,
+        benchmark=benchmark.describe() if benchmark is not None else None,
         environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
         environment_revision=environment_revision
         or getattr(embodiment.info, "environment_revision", None),
@@ -1387,6 +1396,7 @@ def _error_log_for(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    benchmark: Benchmark | None = None,
 ) -> EvalLog:
     """Describe a task failure that occurred before or outside log production."""
     now = _now_iso()
@@ -1417,6 +1427,7 @@ def _error_log_for(
             ),
             policy_checkpoint=policy_checkpoint
             or (_safe_info_attr(policy, "checkpoint") if not isinstance(policy, str) else None),
+            benchmark=benchmark.describe() if benchmark is not None else None,
         ),
         results=EvalResults(total_scenes=0, total_trials=0),
         stats=EvalStats(
@@ -1453,6 +1464,7 @@ def eval_set(
     environment_id: str | None = None,
     environment_revision: str | None = None,
     policy_checkpoint: str | None = None,
+    benchmark: Benchmark | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a set of tasks and return ``(success, logs)`` (mirrors Inspect AI).
 
@@ -1564,6 +1576,7 @@ def eval_set(
                         environment_id=environment_id,
                         environment_revision=environment_revision,
                         policy_checkpoint=policy_checkpoint,
+                        benchmark=benchmark,
                     )
             except (SafetyAbort, EmbodimentFault):
                 raise
@@ -1578,6 +1591,7 @@ def eval_set(
                         environment_id=environment_id,
                         environment_revision=environment_revision,
                         policy_checkpoint=policy_checkpoint,
+                        benchmark=benchmark,
                     )
                 ]
 
@@ -1621,6 +1635,7 @@ def eval_set(
                     environment_id=environment_id,
                     environment_revision=environment_revision,
                     policy_checkpoint=policy_checkpoint,
+                    benchmark=benchmark,
                 )
             )
         except (SafetyAbort, EmbodimentFault):
@@ -1636,6 +1651,7 @@ def eval_set(
                     environment_id=environment_id,
                     environment_revision=environment_revision,
                     policy_checkpoint=policy_checkpoint,
+                    benchmark=benchmark,
                 )
             )
     success = all(log.status == "success" for log in logs)
