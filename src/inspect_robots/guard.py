@@ -3,19 +3,27 @@
 Every action passes through ``Guard.review`` before ``embodiment.step``. This
 is the robotics analog of Inspect AI's ``ApprovalPolicy`` and is more
 safety-critical: a guard may pass, clamp, or veto an action (a veto raises
-[`SafetyAbort`][inspect_robots.errors.SafetyAbort]). In the tracer slice the default guard
-passes everything through; clamping/operator approval land in rollout hardening.
+[`SafetyAbort`][inspect_robots.errors.SafetyAbort]).
+
+Guards are also configuration. ``guard`` is a registry kind whose factories
+take the action space plus keyword parameters (``clamp`` and ``delta-limit``
+are built in), and a guard spec ``NAME`` or ``NAME:key=value,key=value``
+names one. [`build_guard`][inspect_robots.guard.build_guard] turns specs into a
+[`GuardChain`][inspect_robots.guard.GuardChain], which records which guard
+changed an action and the action before and after, so the record shows every
+intervention.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.errors import SafetyAbort
+from inspect_robots.errors import ConfigError, SafetyAbort
 from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box, RotationRepr
 from inspect_robots.types import Action
 
@@ -66,6 +74,8 @@ class GuardContribution:
 class PassThroughGuard:
     """Approve every action unchanged (the permissive default)."""
 
+    name = "pass_through"
+
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Pass the action through without modifying its identity."""
         return action
@@ -73,6 +83,8 @@ class PassThroughGuard:
 
 class ClampGuard:
     """Clamp actions to a box's ``low``/``high`` bounds before they reach hardware.
+
+    Registered as the ``clamp`` guard.
 
     One-sided boxes are honored: a ``low``-only box clamps from below, a
     ``high``-only box from above. A modified action is flagged via
@@ -88,6 +100,8 @@ class ClampGuard:
     is *not* an abort: it clamps to the finite bound on that side like any other
     out-of-range value (and passes through if that side is unbounded).
     """
+
+    name = "clamp"
 
     def __init__(self, action_space: Box):
         self._space = action_space
@@ -169,6 +183,8 @@ class DeltaLimitGuard:
     same object (rollout detects modification by identity). The reference
     lives in the rollout ``store`` (fresh per trial) under a namespaced key.
     """
+
+    name = "delta-limit"
 
     def __init__(self, action_space: Box, max_delta: float | Any | None = None):
         sem = action_space.semantics
@@ -319,6 +335,21 @@ def _intersect(
     return result
 
 
+# Where a GuardChain lists the guards that changed the action under review, as
+# {"guard", "before", "after"}; the rollout moves them into the approval event.
+_GUARD_TRACE_KEY = "_guard_trace"
+
+
+def guard_name(guard: object) -> str:
+    """A guard's ``name`` attribute, or its class name when it has none."""
+    name = getattr(guard, "name", None)
+    return name if isinstance(name, str) and name else type(guard).__name__
+
+
+def _values(action: Action) -> list[float]:
+    return [float(value) for value in np.asarray(action.data, dtype=np.float64).ravel()]
+
+
 class GuardChain:
     """Run guards in sequence, feeding each the previous one's result.
 
@@ -326,16 +357,82 @@ class GuardChain:
     ``GuardChain(ClampGuard(space), DeltaLimitGuard(space))``.
     Identity is preserved end to end: if no guard modifies the action, the
     original object comes back, so the rollout's modification check still works.
+    ``names`` labels the guards in the record (default: each guard's
+    [`guard_name`][inspect_robots.guard.guard_name]). Each guard that changes the
+    action is noted with the action before and after it.
     """
 
-    def __init__(self, *guards: Guard):
+    name = "chain"
+
+    def __init__(self, *guards: Guard, names: Sequence[str] | None = None):
         for guard in guards:
             if not callable(getattr(guard, "review", None)):
                 raise ValueError(f"GuardChain element must have a callable review, got {guard!r}")
-        self._approvers = guards
+        if names is not None and len(names) != len(guards):
+            raise ValueError(f"GuardChain got {len(names)} names for {len(guards)} guards")
+        self.guards = guards
+        self.names = tuple(names) if names is not None else tuple(guard_name(g) for g in guards)
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Apply each configured gate in order to the preceding gate's output."""
-        for guard in self._approvers:
-            action = guard.review(action, store)
+        trace: list[dict[str, Any]] = store.setdefault(_GUARD_TRACE_KEY, [])
+        for name, guard in zip(self.names, self.guards, strict=True):
+            reviewed = guard.review(action, store)
+            if reviewed is not action:
+                trace.append({"guard": name, "before": _values(action), "after": _values(reviewed)})
+            action = reviewed
         return action
+
+
+def parse_guard_spec(spec: str) -> tuple[str, dict[str, Any]]:
+    """Split ``NAME`` or ``NAME:key=value,key=value`` into a name and parsed parameters.
+
+    Values are parsed like CLI ``-P k=v`` values (booleans, numbers, ``none``,
+    quoted strings).
+    """
+    from inspect_robots.defaults import _parse_value
+
+    name, _, rest = spec.partition(":")
+    name = name.strip()
+    if not name:
+        raise ConfigError(f"guard spec {spec!r} has no name.\nfix: write NAME or NAME:k=v,k=v")
+    params: dict[str, Any] = {}
+    for item in filter(None, (part.strip() for part in rest.split(","))):
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise ConfigError(
+                f"guard spec {spec!r}: {item!r} is not key=value.\nfix: write NAME:k=v,k=v"
+            )
+        params[key.strip()] = _parse_value(value.strip())
+    return name, params
+
+
+def build_guard(specs: Sequence[str | Guard], action_space: Box) -> Guard:
+    """One guard from specs or guard objects, applied in order.
+
+    A string is a registered guard spec (``NAME`` or ``NAME:k=v,...``); its
+    factory is called with ``action_space`` and the parameters. An unknown
+    name or a factory that rejects its parameters raises ``ConfigError``.
+    """
+    from inspect_robots.registry import registered, resolve
+
+    guards: list[Guard] = []
+    names: list[str] = []
+    for spec in specs:
+        if not isinstance(spec, str):
+            guards.append(spec)
+            names.append(guard_name(spec))
+            continue
+        name, params = parse_guard_spec(spec)
+        if name not in registered("guard"):
+            known = ", ".join(sorted(registered("guard"))) or "(none)"
+            raise ConfigError(f"unknown guard {name!r}; registered guards: {known}")
+        try:
+            guard = resolve("guard", name, action_space=action_space, **params)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"guard {spec!r}: {exc}") from exc
+        if not callable(getattr(guard, "review", None)):
+            raise ConfigError(f"guard {name!r} factory returned {guard!r}, which has no review")
+        guards.append(guard)
+        names.append(name)
+    return GuardChain(*guards, names=names)

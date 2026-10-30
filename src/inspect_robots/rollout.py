@@ -31,7 +31,7 @@ from inspect_robots.errors import (
     _CancelledTrial,
 )
 from inspect_robots.frames import FrameRef, FrameStore
-from inspect_robots.guard import Guard
+from inspect_robots.guard import _GUARD_TRACE_KEY, Guard, _values, guard_name
 from inspect_robots.policy import Policy
 from inspect_robots.scene import Scene
 from inspect_robots.transcript import (
@@ -569,6 +569,7 @@ def rollout(
                 else _legacy_stop(action)
             )
 
+            store.pop(_GUARD_TRACE_KEY, None)
             try:
                 reviewed = guard.review(action, store)  # may raise SafetyAbort
             except InspectRobotsError as exc:
@@ -576,10 +577,20 @@ def rollout(
                 raise
             except Exception as exc:
                 raise _record_failure(record, SafetyAbort(str(exc)), t) from exc
+            trace = store.pop(_GUARD_TRACE_KEY, None)
             if reviewed is not action:
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
                 detail = ", ".join(flags) or None
-                record.events.append(approval_event(t, modified=True, detail=detail))
+                changes = trace or [
+                    {
+                        "guard": guard_name(guard),
+                        "before": _values(action),
+                        "after": _values(reviewed),
+                    }
+                ]
+                record.events.append(
+                    approval_event(t, modified=True, detail=detail, guards=changes)
+                )
                 store.setdefault(_APPROVALS_KEY, []).append({"t": t, "detail": detail})
             action = reviewed
 

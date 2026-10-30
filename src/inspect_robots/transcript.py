@@ -48,9 +48,20 @@ def step_event(t: int, terminated: bool, truncated: bool, reason: str | None) ->
     )
 
 
-def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
-    """Record whether the safety gate changed the proposed action at step ``t``."""
-    return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
+def approval_event(
+    t: int,
+    modified: bool,
+    detail: str | None = None,
+    guards: list[dict[str, Any]] | None = None,
+) -> Event:
+    """Record whether the safety gate changed the proposed action at step ``t``.
+
+    ``guards`` lists each guard that changed it, as ``{"guard", "before", "after"}``.
+    """
+    data: dict[str, Any] = {"modified": modified, "detail": detail}
+    if guards is not None:
+        data["guards"] = guards
+    return Event(kind="approval", t=t, data=data)
 
 
 def replan_event(t: int, trigger: str, reason: str) -> Event:

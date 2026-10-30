@@ -154,6 +154,7 @@ _KIND_BY_PLURAL = {
     "sinks": "sink",
     "operator_inputs": "operator_input",
     "analyzers": "analyzer",
+    "guards": "guard",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -271,6 +272,15 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="turn off the default safety guards (bounds clamp + per-step "
         "delta limit); actions reach the embodiment unchecked",
+    )
+    parser.add_argument(
+        "--guard",
+        action="append",
+        default=None,
+        metavar="NAME[:k=v,...]",
+        help="add a registered guard after the default guardrails (repeatable; "
+        "see `inspect-robots list guards`), e.g. --guard delta-limit:max_delta=0.02; "
+        "a [guards] config section adds guards the same way",
     )
     parser.add_argument(
         "--max-action-delta",
@@ -842,6 +852,9 @@ def _build_guardrails(
     space: Box,
     max_action_delta: float | None,
     embodiment: Embodiment | None = None,
+    extra: Sequence[str] = (),
+    *,
+    defaults: bool = True,
 ) -> tuple[Guard, list[str], list[str]]:
     """The default CLI safety chain for an action space (plan 0008 §3e).
 
@@ -851,17 +864,45 @@ def _build_guardrails(
     so the CLI is never *less* protective than running without guardrails —
     and never silently unprotected either.
     """
-    from inspect_robots.guard import (
-        ClampGuard,
-        DeltaLimitGuard,
-        GuardChain,
-        GuardContribution,
-        PassThroughGuard,
-    )
+    from inspect_robots.guard import GuardChain, PassThroughGuard
 
     parts: list[Guard] = []
     active: list[str] = []
     warnings: list[str] = []
+    if defaults:
+        _default_guardrails(space, max_action_delta, embodiment, parts, active, warnings)
+    if extra:
+        from inspect_robots.errors import ConfigError
+        from inspect_robots.guard import build_guard
+
+        try:
+            configured = build_guard(list(extra), space)
+        except ConfigError as exc:
+            raise SystemExit(str(exc)) from exc
+        assert isinstance(configured, GuardChain)
+        parts.extend(configured.guards)
+        active.extend(configured.names)
+
+    if not parts:
+        warnings.append(
+            "no guardrails are active for this action space; declare bounds/semantics "
+            "on the embodiment or pass --max-action-delta"
+        )
+        return PassThroughGuard(), active, warnings
+    return GuardChain(*parts, names=active), active, warnings
+
+
+def _default_guardrails(
+    space: Box,
+    max_action_delta: float | None,
+    embodiment: Embodiment | None,
+    parts: list[Guard],
+    active: list[str],
+    warnings: list[str],
+) -> None:
+    """Append the bounds clamp, the delta limit and the embodiment's contributed guards."""
+    from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardContribution
+
     if space.low is None and space.high is None:
         warnings.append("bounds clamp skipped: the action space declares no low/high bounds")
     else:
@@ -895,14 +936,6 @@ def _build_guardrails(
             parts.append(guard)
             active.append(name)
         warnings.extend(contribution.warnings)
-
-    if not parts:
-        warnings.append(
-            "no guardrails are active for this action space; declare bounds/semantics "
-            "on the embodiment or pass --max-action-delta"
-        )
-        return PassThroughGuard(), active, warnings
-    return GuardChain(*parts), active, warnings
 
 
 def _attended(args: argparse.Namespace) -> bool:
@@ -1631,16 +1664,27 @@ def _build_and_announce_guardrails(
     misbehaving LLM — reaches hardware unchecked. Returns ``None`` (the eval's
     own default) only when ``--disable-guardrails`` is given.
     """
+    extra = [*load_defaults(os.environ).guards, *(getattr(args, "guard", None) or [])]
     if args.disable_guardrails:
+        if not extra:
+            print(
+                "WARNING: guardrails disabled (--disable-guardrails); actions "
+                "reach the embodiment unchecked.",
+                file=sys.stderr,
+            )
+            print("guardrails: disabled (--disable-guardrails)")
+            return None
         print(
-            "WARNING: guardrails disabled (--disable-guardrails); actions "
-            "reach the embodiment unchecked.",
+            "WARNING: default guardrails disabled (--disable-guardrails); only the "
+            "configured guards below check actions.",
             file=sys.stderr,
         )
-        print("guardrails: disabled (--disable-guardrails)")
-        return None
     guard, active, guard_warnings = _build_guardrails(
-        action_space, args.max_action_delta, embodiment
+        action_space,
+        args.max_action_delta,
+        embodiment,
+        extra,
+        defaults=not args.disable_guardrails,
     )
     for warning in guard_warnings:
         print(f"guardrails warning: {warning}", file=sys.stderr)

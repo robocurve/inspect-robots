@@ -9,7 +9,16 @@ from __future__ import annotations
 from inspect_robots.grader import operator_grader, vlm_grader
 from inspect_robots.logging import JsonLogSink, LiveLogSink, RerunSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
-from inspect_robots.registry import analyzer, embodiment, grader, policy, scorer, sink, task
+from inspect_robots.registry import (
+    analyzer,
+    embodiment,
+    grader,
+    guard,
+    policy,
+    scorer,
+    sink,
+    task,
+)
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import (
     episode_length,
@@ -18,6 +27,7 @@ from inspect_robots.scorer import (
     reached_goal_state,
     success_at_end,
 )
+from inspect_robots.spaces import Box
 from inspect_robots.task import Task
 
 # Embodiments
@@ -89,3 +99,19 @@ def _html_analyzer() -> object:
     from inspect_robots.analyzer import _HtmlAnalyzer
 
     return _HtmlAnalyzer()
+
+
+@guard("clamp")
+def _clamp_guard(action_space: Box) -> object:
+    """Clamp every action to the action space's bounds."""
+    from inspect_robots.guard import ClampGuard
+
+    return ClampGuard(action_space)
+
+
+@guard("delta-limit")
+def _delta_limit_guard(action_space: Box, max_delta: float | None = None) -> object:
+    """Cap each step's change; ``max_delta`` in the space's native units (default: derived)."""
+    from inspect_robots.guard import DeltaLimitGuard
+
+    return DeltaLimitGuard(action_space, max_delta=max_delta)

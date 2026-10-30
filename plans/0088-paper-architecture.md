@@ -1,6 +1,6 @@
 # 0088: The paper architecture
 
-Status: in progress (phases 1 to 6, 8 and 9 built). One breaking release, built and tested phase by phase.
+Status: in progress (phases 1 to 9 built). One breaking release, built and tested phase by phase.
 
 Inspect Robots accompanies a paper that defines an evaluation framework for
 physical AI safety in eight extensible abstractions around one fixed backbone.

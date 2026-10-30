@@ -434,6 +434,44 @@ The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
 scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
+### Guards: `--guard` and `[guards]`
+
+Every run checks actions with the default guardrails: a bounds clamp, a
+per-step delta limit, and any guards the embodiment contributes. Add more with
+`--guard NAME[:key=value,...]` (repeatable), or list them in a `[guards]`
+config section, one guard per line with its parameters as the value:
+
+```bash
+inspect-robots run ... --guard delta-limit:max_delta=0.02
+```
+
+```ini
+[guards]
+delta-limit = max_delta=0.02
+clamp =
+```
+
+Configured guards run after the defaults, config file first, in the order
+listed; the `guardrails:` banner names every active guard. With
+`--disable-guardrails`, only the configured guards run. `inspect-robots list
+guards` shows the registered guards; `clamp` and `delta-limit` are built in.
+Plugins register more through the `inspect_robots.guards` entry-point group,
+with a factory that takes the action space and keyword parameters:
+
+```python
+from inspect_robots.registry import guard
+
+
+@guard("workspace-box")
+def workspace_box(action_space, low: float = -0.5, high: float = 0.5):
+    return MyBoxGuard(action_space, low, high)
+```
+
+Programmatic runs take the same specs: `eval(..., guard=["clamp",
+"delta-limit:max_delta=0.02"])`. Each time a guard changes an action, the
+trial's `approval` event names the guard and records the action before and
+after it.
+
 ### Automatic task generation: `--auto-task`
 
 Use `--auto-task` in place of `--task` or `--instruction` to have a

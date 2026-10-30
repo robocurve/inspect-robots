@@ -39,7 +39,7 @@ from inspect_robots.errors import (
 )
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
-from inspect_robots.guard import Guard, PassThroughGuard
+from inspect_robots.guard import Guard, PassThroughGuard, build_guard
 from inspect_robots.log import (
     EvalLog,
     EvalResults,
@@ -526,7 +526,7 @@ def eval(
     seed: int | None = 0,
     fail_on_error: bool | float = False,
     action_manager: ActionManager | None = None,
-    guard: Guard | None = None,
+    guard: Guard | Sequence[str | Guard] | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
@@ -588,6 +588,10 @@ def eval(
     the policy produced it, with its inference latency). The log names each
     trial's directory in ``SceneResult.record_dirs``. A write failure degrades
     to a ``RuntimeWarning``.
+
+    ``guard`` is a guard object, or a list of registered guard specs
+    (``"clamp"``, ``"delta-limit:max_delta=0.02"``) and guard objects applied
+    in order; ``None`` passes every action through.
 
     ``operator_input`` supplies attended-console input; ``None`` disables the channel.
 
@@ -686,7 +690,7 @@ def _run_eval(
     seed: int | None,
     fail_on_error: bool | float,
     action_manager: ActionManager | None,
-    guard: Guard | None,
+    guard: Guard | Sequence[str | Guard] | None,
     remap: dict[str, str] | None,
     store_frames: bool,
     store_actions: bool,
@@ -764,7 +768,9 @@ def _run_eval(
     sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
     bus = _Broadcast(sink_list)
     action_manager = action_manager or DefaultActionManager(policy.config.replan_interval)
-    guard = guard or PassThroughGuard()
+    if isinstance(guard, (list, tuple)):
+        guard = build_guard(guard, embodiment.info.action_space)
+    guard = cast(Guard | None, guard) or PassThroughGuard()
 
     # One subdirectory per run: trial ids repeat across runs (scene-epoch),
     # so a shared directory would silently overwrite the previous run's
@@ -1434,7 +1440,7 @@ def eval_set(
     seed: int | None = 0,
     fail_on_error: bool | float = False,
     action_manager: ActionManager | None = None,
-    guard: Guard | None = None,
+    guard: Guard | Sequence[str | Guard] | None = None,
     remap: dict[str, str] | None = None,
     store_frames: bool = False,
     store_actions: bool = True,
@@ -1510,13 +1516,18 @@ def eval_set(
                 "parallel eval_set requires registered task, policy, embodiment "
                 "and grader names; live objects cannot be shared"
             )
+        # Guard specs are names, so each worker builds its own guards from them.
+        guard_specs_only = isinstance(guard, (list, tuple)) and all(
+            isinstance(spec, str) for spec in guard
+        )
+        shared_guard = None if guard_specs_only else guard
         if any(
             value is not None
-            for value in (sinks, action_manager, guard, operator_input, before_scoring)
+            for value in (sinks, action_manager, shared_guard, operator_input, before_scoring)
         ):
             raise ConfigError(
                 "parallel eval_set does not accept shared sinks, action_manager, "
-                "guard, operator_input or before_scoring"
+                "guard objects, operator_input or before_scoring"
             )
         from inspect_robots.registry import registered, resolve
 
@@ -1548,6 +1559,7 @@ def eval_set(
                         store_frames=store_frames,
                         store_actions=store_actions,
                         store_records=store_records,
+                        guard=guard,
                         grader=task_grader,
                         environment_id=environment_id,
                         environment_revision=environment_revision,
