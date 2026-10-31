@@ -97,8 +97,11 @@ endpoint support:
 
 Motion tool calls state where to go, not how long to move. For absolute modes,
 the move tool (`move_joints` for joint spaces, `move_to` for Cartesian pose
-modes) interpolates named partial targets from the observed state at a fixed
-safe speed. The default `max_speed_frac=0.1` allows a tenth of each
+modes) interpolates named partial targets from the last commanded target at a
+fixed safe speed, and unnamed dimensions hold that target. The observed state
+is the starting point only until a trial's first accepted move, because a
+position-controlled gripper commanded to its observed opening stops squeezing
+what it holds (see [plan 0087](../../plans/0087-agent-hold-commanded-target.md)). The default `max_speed_frac=0.1` allows a tenth of each
 dimension's range per second, subject to a 5%-of-range per-step ceiling that
 matches the core's default delta backstop. At that default a near-full-range
 move exceeds the 10 s per-call playout cap, so the agent receives a

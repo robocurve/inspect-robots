@@ -2972,3 +2972,22 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
 
     # Assert wire directory stem and transcript stem agree
     assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem
+
+
+def test_each_trial_starts_from_the_measured_state_not_the_last_trials_command() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.3}}),
+            _tool_response("done", {"summary": "second trial"}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="move"))
+    moved = policy.act(_vision_observation(q=0.0))
+    assert float(moved.actions[-1].data[0]) == pytest.approx(0.3)
+
+    policy.reset(Scene(id="s1", instruction="stop"))
+    stop = policy.act(_vision_observation(q=-0.2))
+    assert stop.actions[0].meta["request_stop"] is True
+    assert float(stop.actions[0].data[0]) == -0.2

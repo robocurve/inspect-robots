@@ -1408,3 +1408,87 @@ def test_toolset_pinned_labels_displacement_modes() -> None:
     )
     toolset = build_toolset(space, ObservationSpace(), control_hz=10.0)
     assert toolset.pinned_labels == ("fixed_dim",)
+
+
+# --- the last commanded target holds a grasp -------------------------------------
+# A position-controlled gripper closed on a part stops at the part's width. Commanding
+# that measured opening ends the squeeze, so moves hold and start from the last command.
+
+
+def _grip_toolset(**kwargs: Any) -> Any:
+    return build_toolset(_declaring_space(), _absolute_obs_space(dim=2), control_hz=10.0, **kwargs)
+
+
+def _close_on_part(toolset: Any) -> None:
+    closed = toolset.execute(
+        _call("move_joints", targets={"gripper": 0.0}), _obs({"q": np.array([0.0, 0.5])})
+    )
+    assert closed.error is None
+
+
+def test_unnamed_gripper_holds_the_last_command_not_the_measured_opening() -> None:
+    toolset = _grip_toolset()
+    _close_on_part(toolset)
+    # The fingers stopped on the part at 0.21; the arm reading lags its command.
+    lift = toolset.execute(
+        _call("move_joints", targets={"joint": 0.4}), _obs({"q": np.array([0.1, 0.21])})
+    )
+    assert lift.error is None and lift.chunk is not None
+    assert [float(a.data[1]) for a in lift.chunk.actions] == [0.0] * len(lift.chunk.actions)
+    # The arm interpolates from its last command (0.0), not from the lagging reading.
+    steps = len(lift.chunk.actions)
+    assert float(lift.chunk.actions[0].data[0]) == pytest.approx(0.4 / steps)
+    assert lift.target is not None and float(lift.target[1]) == 0.0
+
+
+def test_a_restated_closed_gripper_never_ramps_through_the_measured_opening() -> None:
+    toolset = _grip_toolset()
+    _close_on_part(toolset)
+    again = toolset.execute(
+        _call("move_joints", targets={"joint": 0.4, "gripper": 0.0}),
+        _obs({"q": np.array([0.0, 0.21])}),
+    )
+    assert again.chunk is not None
+    assert max(float(a.data[1]) for a in again.chunk.actions) == 0.0
+
+
+def test_reset_returns_unnamed_dimensions_to_the_measured_state() -> None:
+    toolset = _grip_toolset()
+    _close_on_part(toolset)
+    toolset.reset()
+    fresh = toolset.execute(
+        _call("move_joints", targets={"joint": 0.4}), _obs({"q": np.array([0.0, 0.7])})
+    )
+    assert fresh.chunk is not None
+    assert float(fresh.chunk.actions[-1].data[1]) == 0.7
+
+
+def test_rejected_moves_keep_the_last_command() -> None:
+    reject = {"on": False}
+
+    def pre_check(waypoints: npt.NDArray[np.float64]) -> str | None:
+        return "blocked" if reject["on"] else None
+
+    toolset = _grip_toolset(pre_check=pre_check)
+    _close_on_part(toolset)
+    reading = _obs({"q": np.array([0.0, 0.21])})
+    reject["on"] = True
+    assert toolset.execute(_call("move_joints", targets={"gripper": 1.0}), reading).error
+    reject["on"] = False
+    assert toolset.execute(_call("move_joints", targets={"gripper": 2.0}), reading).error
+    lift = toolset.execute(_call("move_joints", targets={"joint": 0.4}), reading)
+    assert lift.chunk is not None
+    assert max(float(a.data[1]) for a in lift.chunk.actions) == 0.0
+
+
+def test_stop_holds_the_last_command_and_uses_the_measured_state_before_any_move() -> None:
+    toolset = _grip_toolset()
+    before = toolset.execute(
+        _call("give_up", reason="nothing yet"), _obs({"q": np.array([0.2, 0.5])})
+    )
+    assert before.chunk is not None
+    np.testing.assert_array_equal(before.chunk.actions[0].data, [0.2, 0.5])
+    _close_on_part(toolset)
+    stop = toolset.execute(_call("give_up", reason="stuck"), _obs({"q": np.array([0.0, 0.21])}))
+    assert stop.chunk is not None
+    np.testing.assert_array_equal(stop.chunk.actions[0].data, [0.0, 0.0])

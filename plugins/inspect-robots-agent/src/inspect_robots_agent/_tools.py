@@ -122,12 +122,21 @@ class Toolset:
         self._images = images
         self._cameras = cameras
         self._pre_check = pre_check
+        self._setpoint: npt.NDArray[np.float64] | None = None
         if absolute:
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
         else:
             self._positive_limits = high
             self._negative_limits = np.abs(low)
+
+    def reset(self) -> None:
+        """Forget the last commanded target; the policy calls this at the start of every trial.
+
+        Until the trial's first accepted absolute move, unnamed dimensions and stop
+        actions use the measured state.
+        """
+        self._setpoint = None
 
     def state_labels(self) -> tuple[str, tuple[str, ...]] | None:
         """Return the state field and per-element labels selected at build time."""
@@ -163,7 +172,8 @@ class Toolset:
                 "positions, radians for rotations, per the dimension labels). "
                 "The motion is a straight line interpolated at a fixed safe "
                 "speed and the result reports its step count. Unnamed "
-                "dimensions hold their current value. Coordinates are absolute "
+                "dimensions hold their last commanded value (the measured value "
+                "before the first move of a trial). Coordinates are absolute "
                 "in the embodiment's declared frame; on multi-arm embodiments "
                 "each arm uses its own base frame and axes may differ between "
                 "arms depending on mounting. Rotation dimensions are absolute "
@@ -177,7 +187,8 @@ class Toolset:
             move_description = (
                 "Move to absolute joint/dimension targets. The motion is smoothly "
                 "interpolated at a fixed safe speed and the result reports its step "
-                "count. Unnamed dimensions hold their current value. " + self._bounds_text
+                "count. Unnamed dimensions hold their last commanded value (the "
+                "measured value before the first move of a trial). " + self._bounds_text
             )
             values_key = "targets"
         else:
@@ -350,7 +361,9 @@ class Toolset:
         return np.asarray(observation.state[self._state_key], dtype=np.float64)
 
     def _stop(self, name: str, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        data = self._current_state(observation)
+        # The rollout steps this action once before scoring, so it holds the last
+        # commanded target too: commanding a gripper's measured opening releases a grasp.
+        data = self._current_state(observation) if self._setpoint is None else self._setpoint.copy()
         detail = str(arguments.get("summary") or arguments.get("reason") or "")
         meta = {"request_stop": True, "stop_reason": name, "stop_detail": detail}
         hindsight = arguments.get("hindsight")
@@ -452,7 +465,12 @@ class Toolset:
         named_indices: list[int],
         current: npt.NDArray[np.float64],
     ) -> ToolResult:
-        target = current.copy()
+        # Motion starts from, and unnamed dimensions hold, the last commanded target:
+        # the setpoint the embodiment has been holding. A position-controlled gripper
+        # commanded to its measured opening stops squeezing what it holds. The measured
+        # state is the reference only until the trial's first accepted move.
+        start = current if self._setpoint is None else self._setpoint
+        target = start.copy()
         for label, index in zip(values, named_indices, strict=True):
             value = vector[index]
             if self._step_limits[index] == 0:
@@ -472,7 +490,7 @@ class Toolset:
         ratios: list[float] = []
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             for index in named_indices:
-                distance = np.abs(np.subtract(target[index], current[index]))
+                distance = np.abs(np.subtract(target[index], start[index]))
                 limit = self._step_limits[index]
                 if distance > 0 and limit > 0:
                     ratios.append(float(np.divide(distance, limit)))
@@ -484,7 +502,7 @@ class Toolset:
 
         fractions = np.linspace(1.0 / steps, 1.0, steps)
         actions = [
-            Action(data=np.clip(current + (target - current) * fraction, self._low, self._high))
+            Action(data=np.clip(start + (target - start) * fraction, self._low, self._high))
             for fraction in fractions
         ]
         actions[-1] = Action(data=np.clip(target.copy(), self._low, self._high))
@@ -497,6 +515,7 @@ class Toolset:
             waypoints.flags.writeable = False
             if message := self._pre_check(waypoints):
                 return ToolResult(error="pre-check rejected this motion: " + message)
+        self._setpoint = clipped_target.copy()
         return self._success(actions, steps, target=clipped_target)
 
     def _move_displacement(

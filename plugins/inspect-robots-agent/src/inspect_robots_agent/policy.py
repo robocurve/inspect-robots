@@ -855,6 +855,8 @@ class LLMAgentPolicy(PolicyBase):
         if docs is not None and docs.strip():
             formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
         if self._toolset is not None:
+            # A new trial starts from the measured state, not the last trial's targets.
+            self._toolset.reset()
             formatted += f"\n\nEmbodiment bounds:\n{self._toolset.bounds_text}"
             pinned = self._toolset.pinned_labels
             if pinned:
