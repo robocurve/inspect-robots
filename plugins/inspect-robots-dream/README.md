@@ -47,8 +47,9 @@ Install the policy with the Dream client:
 pip install "inspect-robots-dream[client]"
 ```
 
-Under Isaac Sim, which pins websockets 12 while the Dream client needs 13 or newer, install the
-policy alone next to Isaac Sim and the client in its own venv:
+Isaac Sim 6.1 (Isaac Lab-Arena 0.3) takes the client in its own environment. Under Isaac Sim 5.1,
+which pins websockets 12 while the Dream client needs 13 or newer, install the policy alone next to
+Isaac Sim and the client in its own venv:
 
 ```bash
 uv pip install --python /data/env_isaaclab/bin/python inspect-robots-dream
@@ -66,7 +67,7 @@ inspect-robots run --embodiment yam_sim --policy dream \
 inspect-robots view ~/yam-eval/dream
 ```
 
-Under Isaac Sim, start the bridge first and point the policy at it:
+Under Isaac Sim 5.1, start the bridge first and point the policy at it:
 
 ```bash
 ~/dream-venv/bin/inspect-robots-dream-bridge --warm
@@ -104,11 +105,13 @@ retries, rows beyond the joint limits) and how closely the arms tracked the rows
 
 ## Status
 
-Dream-1 beta was run on `yam_sim` (Isaac Sim 5.1, L40S) through the bridge on 2026-10-30. An 80 s
-trial made 33 requests (0.38 s median round trip, no retries), and the arms tracked Dream's rows to
-within 0.06 rad. Dream reached the cube with the right arm and kept trying to grasp it, but did not
-lift it. `yam_sim`'s overhead camera sits lower and looks less steeply than the station camera Dream
-was trained with, which may matter.
+On 2026-10-31, Dream-1 beta ran in-process on an Isaac Lab-Arena replica of Dream's calibrated YAM
+station (Isaac Sim 6.1, L40S, 20 Hz, up to 120 s per trial). It put the apple into the bowl in 5 of 6
+trials, the orange into the bowl in 6 of 6 and the banana on the plate in 1 of 6. Median round trips
+were 0.5 to 0.7 s, and one session that Dream expired mid-trial was reopened without losing the
+trial. On scenes that do not look like Dream's station (`yam_sim` through the bridge on 2026-10-30,
+and the same table ported to Arena), Dream reached the cube and closed the gripper beside it but
+never lifted it, in 0 of 6 trials.
 
 ## Development
 

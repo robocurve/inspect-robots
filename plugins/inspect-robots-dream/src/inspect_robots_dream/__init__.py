@@ -6,7 +6,7 @@
         --instruction "put the red cube on the plate"
 
 The policy is registered as ``dream`` through the ``inspect_robots.policies`` entry point.
-Where the Dream client cannot be installed next to the embodiment (Isaac Sim), run
+Where the Dream client cannot be installed next to the embodiment (Isaac Sim 5.1), run
 ``inspect-robots-dream-bridge`` in its own environment and pass ``-P server_url=...``.
 """
 

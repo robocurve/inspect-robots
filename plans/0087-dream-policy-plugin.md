@@ -43,8 +43,9 @@ checked against the live API on 2026-10-30:
   minutes. `DreamSessionExpired`, `DreamTimeout` and `DreamProtocolError` are
   safe to repeat.
 - The client needs websockets 13 or newer. Isaac Sim 5.1 pins websockets 12
-  (and the full `dreamlabs` library needs NumPy 2), so under Isaac Sim the
-  client cannot share the simulator's environment.
+  (and the full `dreamlabs` library needs NumPy 2), so under Isaac Sim 5.1 the
+  client cannot share the simulator's environment. Isaac Sim 6.1 (Isaac
+  Lab-Arena 0.3, websockets 16, NumPy 2) can.
 - `yam_sim`'s URDF matches Dream's YAM URDF: fitted over 30 random joint
   configurations, the flange poses agree to 0.002 mm after a fixed base offset
   and tool frame, so joint zeros and signs carry over unchanged.

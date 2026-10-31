@@ -54,9 +54,9 @@ class DreamPolicy:
     """Dream-1 on a bimanual YAM, one action per control step.
 
     The Dream client runs in this process unless ``server_url`` names an
-    ``inspect-robots-dream-bridge``, as it must under Isaac Sim. ``rows_per_request`` rows of each
-    48-row chunk play before Dream is asked again. ``dry_run`` asks Dream as usual but holds the
-    arms still, to inspect its replies before they move a robot.
+    ``inspect-robots-dream-bridge``, as it must under Isaac Sim 5.1. ``rows_per_request`` rows of
+    each 48-row chunk play before Dream is asked again. ``dry_run`` asks Dream as usual but holds
+    the arms still, to inspect its replies before they move a robot.
     """
 
     def __init__(
@@ -139,7 +139,7 @@ class DreamPolicy:
             warnings.warn(
                 f"{name!r} runs at {self._hz:g} Hz; Dream's YAM station plays Dream-1's "
                 f"{_station.TRAINED_HZ:g} Hz rows at {_station.STATION_HZ:g} Hz "
-                "(yam_sim: -E control_hz=20)",
+                "(yam_arena, yam_sim: -E control_hz=20)",
                 stacklevel=2,
             )
         aspect = _station.FRAME_WIDTH / _station.FRAME_HEIGHT
@@ -152,7 +152,7 @@ class DreamPolicy:
             warnings.warn(
                 f"{name!r} cameras {', '.join(stretched)} will be stretched to Dream's "
                 f"{_station.FRAME_WIDTH}x{_station.FRAME_HEIGHT} frames "
-                "(yam_sim: -E cam_width=320 -E cam_height=176)",
+                "(yam_arena, yam_sim: -E cam_width=320 -E cam_height=176)",
                 stacklevel=2,
             )
         self._open_session().check(self._episode)

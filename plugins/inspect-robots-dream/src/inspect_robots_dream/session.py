@@ -254,7 +254,7 @@ def _dream_client() -> _Client:
     except (ImportError, AttributeError) as error:
         raise ImportError(
             "the Dream client is not installed: pip install dreamlabs-client (`pip install dream` "
-            "is another project). Where it cannot be installed (Isaac Sim), run "
+            "is another project). Where it cannot be installed (Isaac Sim 5.1), run "
             "inspect-robots-dream-bridge in its own venv and pass -P server_url=..."
         ) from error
     warnings.filterwarnings("ignore", category=dream.DreamSlowNetworkWarning)

@@ -20,8 +20,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 # The Dream client is an extra: Isaac Sim 5.1 pins websockets 12 and the client
-# needs 13 or newer, so under Isaac Sim the client runs in its own venv as
-# `inspect-robots-dream-bridge`. Pillow is already in every Isaac Sim 5.1 env.
+# needs 13 or newer, so under Isaac Sim 5.1 the client runs in its own venv as
+# `inspect-robots-dream-bridge`. Pillow is already in every Isaac Sim env.
 dependencies = ["inspect-robots>=0.60", "numpy>=1.24", "pillow>=10"]
 
 [project.optional-dependencies]
