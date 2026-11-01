@@ -1,12 +1,14 @@
 # inspect-robots-dream
 
 Run Dream Labs' [Dream-1](https://dreamlabs.ai/research/dream-1/) on a bimanual YAM as an
-[Inspect Robots](https://github.com/robocurve/inspect-robots) policy, in simulation (`yam_sim`) or
-on the real arms (`yam_arms`), and evaluate it like any other policy. Not affiliated with Dream Labs.
+[Inspect Robots](https://github.com/robocurve/inspect-robots) policy, in simulation (`yam_arena`,
+from [yam-isaac-lab-arena](https://github.com/kairosiann/yam-isaac-lab-arena)) or on the real arms
+(`yam_arms`, from [inspect-robots-yam](https://github.com/robocurve/inspect-robots-yam)), and
+evaluate it like any other policy. Not affiliated with Dream Labs.
 
 ```bash
-inspect-robots run --embodiment yam_sim --policy dream -E control_hz=20 \
-  --instruction "put the red cube on the plate"
+inspect-robots run --embodiment yam_arena --policy dream -E scene=station -E control_hz=20 \
+  --instruction "put apple into the bowl"
 ```
 
 ## How it works
@@ -59,11 +61,14 @@ uv pip install --python ~/dream-venv/bin/python "inspect-robots-dream[client]"
 
 ## Run
 
+In `yam_arena`'s `station` scene, a replica of Dream's calibrated YAM station, the run is scored
+automatically:
+
 ```bash
-inspect-robots run --embodiment yam_sim --policy dream \
-  -E control_hz=20 -E cam_width=320 -E cam_height=176 \
-  --instruction "put the red cube on the plate" \
-  --max-steps 1600 --store-frames --log-dir ~/yam-eval/dream
+inspect-robots run --embodiment yam_arena --policy dream \
+  -E scene=station -E control_hz=20 -E cam_width=320 -E cam_height=176 \
+  --instruction "put apple into the bowl" --scorer success_at_end \
+  --max-steps 2400 --store-frames --log-dir ~/yam-eval/dream
 inspect-robots view ~/yam-eval/dream
 ```
 
@@ -71,7 +76,7 @@ Under Isaac Sim 5.1, start the bridge first and point the policy at it:
 
 ```bash
 ~/dream-venv/bin/inspect-robots-dream-bridge --warm
-inspect-robots run --embodiment yam_sim --policy dream -P server_url=http://127.0.0.1:8210 ...
+inspect-robots run --policy dream -P server_url=http://127.0.0.1:8210 ...
 ```
 
 `--warm` asks for one chunk before serving, because a model that is not running can take many
@@ -109,9 +114,9 @@ On 2026-10-31, Dream-1 beta ran in-process on an Isaac Lab-Arena replica of Drea
 station (Isaac Sim 6.1, L40S, 20 Hz, up to 120 s per trial). It put the apple into the bowl in 5 of 6
 trials, the orange into the bowl in 6 of 6 and the banana on the plate in 1 of 6. Median round trips
 were 0.5 to 0.7 s, and one session that Dream expired mid-trial was reopened without losing the
-trial. On scenes that do not look like Dream's station (`yam_sim` through the bridge on 2026-10-30,
-and the same table ported to Arena), Dream reached the cube and closed the gripper beside it but
-never lifted it, in 0 of 6 trials.
+trial. On a plain tabletop that does not look like Dream's station (in Isaac Sim 5.1 through the
+bridge on 2026-10-30, and in `yam_arena`'s `tabletop` scene), Dream reached the cube and closed the
+gripper beside it but never lifted it, in 0 of 6 trials.
 
 ## Development
 

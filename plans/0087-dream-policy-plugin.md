@@ -4,11 +4,12 @@
 
 `plugins/inspect-robots-dream` registers `dream`, a policy that runs Dream Labs'
 hosted [Dream-1](https://dreamlabs.ai/research/dream-1/) on the 14-D bimanual
-YAM layout that `yam_arms` and `yam_sim` share:
+YAM layout that `yam_arms` and the simulated `yam_arena`
+([yam-isaac-lab-arena](https://github.com/kairosiann/yam-isaac-lab-arena)) share:
 
 ```bash
-inspect-robots run --embodiment yam_sim --policy dream -E control_hz=20 \
-    --instruction "put the red cube on the plate"
+inspect-robots run --embodiment yam_arena --policy dream -E scene=station -E control_hz=20 \
+    --instruction "put apple into the bowl"
 ```
 
 Dream-1 is a bimanual manipulation policy trained on YAM arms and served over
@@ -46,9 +47,9 @@ checked against the live API on 2026-10-30:
   (and the full `dreamlabs` library needs NumPy 2), so under Isaac Sim 5.1 the
   client cannot share the simulator's environment. Isaac Sim 6.1 (Isaac
   Lab-Arena 0.3, websockets 16, NumPy 2) can.
-- `yam_sim`'s URDF matches Dream's YAM URDF: fitted over 30 random joint
-  configurations, the flange poses agree to 0.002 mm after a fixed base offset
-  and tool frame, so joint zeros and signs carry over unchanged.
+- The YAM URDF that `yam_arena` uses matches Dream's YAM URDF: fitted over 30
+  random joint configurations, the flange poses agree to 0.002 mm after a fixed
+  base offset and tool frame, so joint zeros and signs carry over unchanged.
 
 ## Design
 
@@ -160,6 +161,3 @@ playback at two different round-trip times.
 
 - When Dream's own keys carry hand poses, switch from the deprecated station
   keys.
-- `yam_sim`'s overhead camera sits lower and looks less steeply than the station
-  camera Dream was trained with; a calibrated variant would make sim results
-  more comparable.

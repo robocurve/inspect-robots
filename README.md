@@ -415,7 +415,7 @@ shipped from this repo as separate packages:
   then queues approver-checked joint targets behind `--policy capx`.
 - **[inspect-robots-dream](plugins/inspect-robots-dream/)**: run Dream Labs'
   hosted [Dream-1](https://dreamlabs.ai/research/dream-1/) on the bimanual YAM
-  (`yam_arms`, `yam_sim`) behind `--policy dream`, in-process or through a
+  (`yam_arms`, `yam_arena`) behind `--policy dream`, in-process or through a
   loopback bridge where the Dream client cannot be installed next to the
   simulator.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local

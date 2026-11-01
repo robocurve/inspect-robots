@@ -2,8 +2,8 @@
 
 ::
 
-    inspect-robots run --embodiment yam_sim --policy dream -E control_hz=20 \\
-        --instruction "put the red cube on the plate"
+    inspect-robots run --embodiment yam_arena --policy dream -E scene=station -E control_hz=20 \\
+        --instruction "put apple into the bowl"
 
 The policy is registered as ``dream`` through the ``inspect_robots.policies`` entry point.
 Where the Dream client cannot be installed next to the embodiment (Isaac Sim 5.1), run
