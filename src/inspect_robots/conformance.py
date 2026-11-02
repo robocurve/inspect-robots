@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +31,10 @@ import numpy as np
 
 from inspect_robots.embodiment import Embodiment, EmbodimentInfo
 from inspect_robots.guard import GuardContribution
-from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box
+from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box, reference_state_fields
+
+# A slot value with a URL scheme (http://, rtsp://, ...) names a stream, not a device node.
+_STREAM_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 DEVICE_KINDS = ("v4l2", "can", "serial")
 
@@ -247,7 +251,9 @@ def check_device_slots(
 
     For each ``DEVICE_SLOTS`` slot with a string value in ``configured``, return an
     error finding when a camera or serial path does not exist or cannot be checked, or a CAN
-    interface is not present.
+    interface is not present. A non-CAN value with a URL scheme (a camera stream such as
+    ``http://host/api/stream.mjpeg?src=cam``) is skipped: there is no path to check, and the
+    embodiment's own health check probes the stream live.
 
     ``configured`` is the resolved ``[embodiment.args]``. A non-string or absent value is skipped by
     this check. CAN validation checks presence only.
@@ -275,6 +281,11 @@ def check_device_slots(
                         f"present: {present}",
                     )
                 )
+        elif _STREAM_URL.match(value):
+            # A camera slot may name a stream (e.g. an MJPEG URL from a camera
+            # hub) instead of a device node; it has no path to stat, and the
+            # embodiment's live health check is what probes it.
+            continue
         else:
             try:
                 exists = Path(value).exists()
@@ -348,8 +359,9 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
             error("dim_labels", "dim_labels contains duplicates")
 
         if semantics.control_mode in ABSOLUTE_CONTROL_MODES:
-            spec = info.observation_space.state
-            matching = [f.key for f in spec.fields if f.shape == (space.dim,)] if spec else []
+            matching = reference_state_fields(
+                info.observation_space.state, space.dim, semantics.control_mode
+            )
             if len(matching) != 1:
                 error(
                     "state_alignment",

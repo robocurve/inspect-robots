@@ -40,6 +40,7 @@ from inspect_robots.spaces import (
     CANONICAL_STATE_UNITS,
     Box,
     ObservationSpace,
+    reference_state_fields,
 )
 from inspect_robots.types import Action, ActionChunk, Observation, Termination
 
@@ -821,19 +822,7 @@ def control_tools(
                 "absolute-target control needs a StateSpec on the embodiment's "
                 "observation space to locate the proprioceptive reference"
             )
-        matching = [field.key for field in state_spec.fields if field.shape == (dim,)]
-        if len(matching) > 1:
-            # An embodiment may expose several same-shaped state fields — e.g.
-            # a 14-D joint_pos next to a 14-D Cartesian eef_state. Prefer the
-            # field whose key prefix matches the control mode's family before
-            # declaring the shape ambiguous. Every ABSOLUTE_CONTROL_MODES
-            # member today is eef_* or joint_*; a future mode outside both
-            # families falls back to "joint" and, absent a joint_* field,
-            # still reaches the ambiguity error below.
-            family = "eef" if mode.startswith("eef") else "joint"
-            preferred = [key for key in matching if key.startswith(family)]
-            if len(preferred) == 1:
-                matching = preferred
+        matching = reference_state_fields(state_spec, dim, mode)
         if len(matching) != 1:
             raise ToolError(
                 f"absolute-target control needs exactly one state field with shape "
