@@ -61,8 +61,8 @@ _LAST_ACTION_KEY = "_controller_last_action"
 # The action the rollout actually sent to the embodiment, after smoothing and
 # guard review; set by the rollout just before each step.
 _EXECUTED_ACTION_KEY = "_rollout_executed_action"
-# How close (as a share of GripperSlip.threshold) the executed gripper command
-# must be to the requested one before the grasp counts as held.
+# How little (as a share of GripperSlip.threshold) the executed gripper command
+# may move between steps for the grasp to count as held.
 _EXECUTED_TOLERANCE = 0.1
 _CHUNK_START_KEY = "_controller_chunk_start"
 
@@ -181,10 +181,10 @@ class GripperSlip:
 
         The command is the policy's requested gripper target. Settling counts
         only while the command the embodiment actually executed (after smoothing
-        and any guard) is within a small tolerance of it, so a delta limiter or
-        a smoother still walking the gripper toward the target is never read as
-        a slip, and an exponentially smoothed command that only approaches its
-        target still lets the check run.
+        and any guard) has stopped moving, so a delta limiter or a smoother still
+        walking the gripper is never read as a slip, while a smoothed command
+        that only approaches its target, or a clamp that holds an out-of-bounds
+        request at the bound, still lets the check run.
         """
         last = store.get(_LAST_ACTION_KEY)
         state = observation.state.get(self.state_key)
@@ -196,10 +196,17 @@ class GripperSlip:
         measured = float(np.asarray(state, dtype=np.float64).ravel()[self.index])
         tracked = store.get(self._key)
         if tracked is None or tracked["command"] != command:
-            store[self._key] = {"command": command, "steady": 0, "baseline": None}
+            store[self._key] = {
+                "command": command,
+                "executed": executed,
+                "steady": 0,
+                "baseline": None,
+            }
             return None
-        if abs(executed - command) > self.threshold * _EXECUTED_TOLERANCE:
-            # Still converging on the command: not yet a held grasp.
+        moved = abs(executed - tracked["executed"])
+        tracked["executed"] = executed
+        if moved > self.threshold * _EXECUTED_TOLERANCE:
+            # The executed command is still moving: not yet a held grasp.
             tracked["steady"] = 0
             tracked["baseline"] = None
             return None
@@ -208,10 +215,15 @@ class GripperSlip:
             return None
         if tracked["baseline"] is None:
             tracked["baseline"] = measured
+            tracked["baseline_executed"] = executed
             return None
-        closer = abs(tracked["baseline"] - command) - abs(measured - command)
+        # Movement the executed command itself made toward the target (a slow
+        # limiter creeping below the settle tolerance) is commanded, not slip.
+        commanded = abs(tracked["baseline_executed"] - command) - abs(executed - command)
+        closer = abs(tracked["baseline"] - command) - abs(measured - command) - commanded
         if closer > self.threshold:
             tracked["baseline"] = measured
+            tracked["baseline_executed"] = executed
             return (
                 f"{self.label} moved {closer:.3f} toward its command of {command:g} with no "
                 "new command; the grasp may have slipped"

@@ -342,3 +342,74 @@ def test_gripper_slip_still_fires_behind_a_smoothing_manager() -> None:
     replans = [event for event in record.events if event.kind == "replan"]
     assert replans and 60 <= replans[0].t <= 62
     assert "the grasp may have slipped" in replans[0].data["reason"]
+
+
+@pytest.mark.parametrize("requested", [0.0, -0.2])
+def test_gripper_slip_fires_when_a_clamp_holds_an_out_of_bounds_squeeze(requested: float) -> None:
+    from inspect_robots.guard import ClampGuard
+    from inspect_robots.logging import NullSink
+    from inspect_robots.rollout import rollout
+
+    space = Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=ActionSemantics("joint_pos", dim_labels=("joint", "gripper")),
+    )
+
+    class _HoldsAnObject(CubePickEmbodiment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = self.info.__class__(**{**self.info.__dict__, "action_space": space})
+            self.t = 0
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.t = 0
+            return Observation(state={"joint_pos": np.array([0.0, 1.0])})
+
+        def step(self, action: Action) -> Any:
+            from inspect_robots.types import StepResult
+
+            self.t += 1
+            commanded = float(np.asarray(action.data)[1])
+            gripper = commanded if self.t >= 60 else max(commanded, 0.4)
+            return StepResult(
+                observation=Observation(state={"joint_pos": np.array([0.0, gripper])})
+            )
+
+    class _Squeeze:
+        info = PolicyInfo(name="squeeze", action_space=space)
+        config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return ActionChunk(actions=[Action(data=np.array([0.0, requested]))] * 200)
+
+    record = rollout(
+        _Squeeze(),
+        _HoldsAnObject(),
+        Scene(id="s", instruction="hold"),
+        max_steps=100,
+        seed=0,
+        epoch=0,
+        action_manager=DefaultActionManager(triggers=[GripperSlip("joint_pos", 1)]),
+        guard=ClampGuard(space),
+        sink=NullSink(),
+    )
+    replans = [event for event in record.events if event.kind == "replan"]
+    assert replans and 60 <= replans[0].t <= 62
+
+
+def test_gripper_slip_ignores_a_limiter_creeping_below_the_settle_tolerance() -> None:
+    from inspect_robots.action_manager import _EXECUTED_ACTION_KEY
+
+    trigger = GripperSlip("joint_pos", 1, threshold=0.05, settle_steps=1)
+    store = _slip_store(command=0.0)
+    executed = 1.0
+    for t in range(60):
+        executed = max(0.0, executed - 0.004)  # under 0.1 * threshold per step
+        store[_EXECUTED_ACTION_KEY] = Action(data=np.array([0.0, executed]))
+        # The gripper tracks the creeping command exactly: nothing slipped.
+        assert trigger.should_replan(_gripper(executed), t, store) is None
