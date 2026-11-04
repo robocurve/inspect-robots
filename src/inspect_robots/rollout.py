@@ -356,7 +356,7 @@ def _meta_truthy(value: object) -> bool | None:
     ``Action.meta`` accepts arbitrary values, and some of them — e.g.
     multi-element NumPy arrays — have no scalar truth value: ``bool()`` raises
     instead. Approval reporting must neither crash on such values nor claim
-    them as approver reasons, so ambiguous values are reported as ``None``.
+    them as guard reasons, so ambiguous values are reported as ``None``.
     """
     try:
         return bool(value)
@@ -618,10 +618,10 @@ def rollout(
             trace = store.pop(_GUARD_TRACE_KEY, None)
             if reviewed is not action:
                 flags = [k for k in ("clamped", "delta_clamped") if reviewed.meta.get(k)]
-                # A third-party approver may record its reason under other meta
-                # keys (e.g. a collision approver's ``collision_detail``). Report
+                # A third-party guard may record its reason under other meta
+                # keys (e.g. a collision guard's ``collision_detail``). Report
                 # the keys it *newly* sets to a truthy value relative to the
-                # action it reviewed — approvers forward the policy's meta
+                # action it reviewed. Guards forward the policy's meta
                 # verbatim, so policy-written keys stay out of the detail.
                 # Metadata values are arbitrary, so truthiness is only consulted
                 # when it is unambiguous: a value without a scalar truth value

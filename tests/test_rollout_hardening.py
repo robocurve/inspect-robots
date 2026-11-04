@@ -570,7 +570,7 @@ class _CollisionApprover:
 
 
 def test_third_party_approver_reasons_reach_approval_detail() -> None:
-    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_CollisionApprover())
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_CollisionApprover())
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     # Boolean flags contribute their key name, string values render as
@@ -593,7 +593,7 @@ def test_approval_detail_excludes_policy_forwarded_meta() -> None:
     # The approver forwards the policy's meta verbatim (as the built-ins do), so
     # only keys it *newly* sets may appear in the detail — never policy keys
     # like ``chunk_final``, even though the approver copies them forward.
-    record = _run(_MetaStampingPolicy(), CubePickEmbodiment(), approver=_CollisionApprover())
+    record = _run(_MetaStampingPolicy(), CubePickEmbodiment(), guard=_CollisionApprover())
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["detail"] == (
@@ -617,7 +617,7 @@ def test_approval_detail_ignores_forwarded_array_meta() -> None:
     # multi-element NumPy array (``bool()`` raises on it) through a clamping
     # approver used to crash the rollout before the reviewed action executed.
     space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
-    record = _run(_ArrayMetaPolicy(), CubePickEmbodiment(), approver=ClampApprover(space))
+    record = _run(_ArrayMetaPolicy(), CubePickEmbodiment(), guard=ClampGuard(space))
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     # The unchanged policy metadata is not a reason; the clamp still is.
@@ -646,7 +646,7 @@ class _ArrayReasonApprover:
 def test_approval_detail_skips_array_valued_approver_meta() -> None:
     # A value without a scalar truth value can neither claim a reason nor crash
     # approval reporting; the unambiguous boolean reason is still reported.
-    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_ArrayReasonApprover())
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_ArrayReasonApprover())
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["detail"] == "collision_blocked"
@@ -673,7 +673,7 @@ class _FlagFlippingApprover:
 def test_approval_detail_reports_falsy_flag_flipped_by_approver() -> None:
     # A key present but falsy in the reviewed action counts as newly set to a
     # truthy value once the approver flips it, so it is reported as a reason.
-    record = _run(_FalsyFlagPolicy(), CubePickEmbodiment(), approver=_FlagFlippingApprover())
+    record = _run(_FalsyFlagPolicy(), CubePickEmbodiment(), guard=_FlagFlippingApprover())
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["detail"] == "collision_pending"
