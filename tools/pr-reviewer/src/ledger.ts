@@ -41,7 +41,17 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
     const author = this.ctx.storage.sql.exec<{ author_id: number }>('SELECT author_id FROM pr_authors WHERE pr=?', pr).toArray()[0]?.author_id;
     if (author === undefined || author === JAY_ID) return Number.MAX_SAFE_INTEGER;
     const spent = this.ctx.storage.sql.exec<{ amount: number }>('SELECT COALESCE(SUM(amount),0) AS amount FROM charges WHERE month=? AND pr IN (SELECT pr FROM pr_authors WHERE author_id=?)', month, author).one().amount;
-    return LIMITS.author - spent;
+    return this.authorLimit(author, month) - spent;
+  }
+  // Deployment-controlled monthly exceptions keyed `<authorId>-<YYYY-MM>`, so an
+  // authorized raise expires with its month. Values are microdollars.
+  private authorLimit(author: number, month: string): number {
+    const overrides = JSON.parse(this.env.REVIEW_AUTHOR_LIMITS_JSON ?? '{}');
+    if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') throw new Error('invalid_budget_config');
+    for (const [key, value] of Object.entries(overrides)) {
+      if (!/^[1-9][0-9]*-[0-9]{4}-(0[1-9]|1[0-2])$/.test(key) || !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > LIMITS.month) throw new Error('invalid_budget_config');
+    }
+    return overrides[`${author}-${month}`] ?? LIMITS.author;
   }
   async register(job: Omit<Job, 'status' | 'result' | 'notified' | 'created'>): Promise<boolean> {
     const old = this.ctx.storage.sql.exec('SELECT id FROM jobs WHERE id=?', job.id).toArray();

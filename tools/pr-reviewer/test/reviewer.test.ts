@@ -359,6 +359,19 @@ describe('per-author monthly review cap', () => {
       await expect(instance.recordAuthor(0, 5003)).rejects.toThrow('invalid_author');
     });
   });
+  it('applies a deployment author exception only in its month', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T12:00:00Z'));
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    for (const pr of [801, 802, 803, 804, 805, 806, 807]) await ledger.recordAuthor(pr, 5003);
+    for (const pr of [801, 802, 803, 804, 805]) expect(await ledger.reserve(`raised-${pr}`, `${pr}-${head}`, pr, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`806-${head}`, 806)).toBe(5_000_000);
+    expect(await ledger.reserve('raised-806', `806-${head}`, 806, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`807-${head}`, 807)).toBe(0);
+    vi.setSystemTime(new Date('2026-11-01T00:00:00Z'));
+    for (const pr of [801, 802, 803, 804]) expect(await ledger.reserve(`nov-${pr}`, `${pr}-${'d'.repeat(40)}`, pr, 5_000_000)).toBe(true);
+    expect(await ledger.remaining(`805-${'d'.repeat(40)}`, 805)).toBe(0);
+  });
   it('maps the contributor hold to its own public reason', () => {
     expect(holdReason(new Error('contributor_budget_exhausted'))).toEqual({ code: 'contributor_budget_exhausted' });
     expect(renderHold({ id: 'run', pr: 9, head, base, scope: '', status: 'held', result: null, notified: 0, created: 0 } as Job, { code: 'contributor_budget_exhausted' })).toContain('$20 monthly review allowance');

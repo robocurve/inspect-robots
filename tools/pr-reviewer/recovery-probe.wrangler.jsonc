@@ -10,7 +10,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    "REVIEW_HEAD_LIMITS_JSON": "{}"
+    "REVIEW_HEAD_LIMITS_JSON": "{}", "REVIEW_AUTHOR_LIMITS_JSON": "{}"
   },
   "services": [
     {

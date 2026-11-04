@@ -191,3 +191,11 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - Found because the reviewer approved #411 without seeing the maintainer's "Request changes" review, which asked for a version bump.
 - `tsc --noEmit` and 99 Workers/SQLite tests passed on the merged branch.
 - Publisher (allowlist for the two new read paths) deployed first: `1f418dbf-ecd2-4566-848b-2335d6688de7`. Reviewer: `37d6fbb7-b680-410b-8b35-a5980e1dc5e5`. Runner unchanged. `/health` reports policy 3, advisory, enabled.
+
+## PR #599 budget exception (2026-11-04)
+
+- Jay authorized enough budget for PR #599 (Chris Leet) to finish a review after two `budget_exhausted` holds.
+- Added `REVIEW_AUTHOR_LIMITS_JSON`: deployment-only monthly author caps keyed `<githubUserId>-<YYYY-MM>` in microdollars; exceptions expire with their month. Chris Leet (6877537) gets $50 for 2026-11.
+- PR #599 lifetime cap raised to $30; head `7ad8142f4d39fc5e837a815d2bbe07b9b1c7f3c3` to $20. Other limits unchanged.
+- TypeScript clean; 100 offline tests pass, including a new month-scoped author exception test.
+- Reviewer version: `89a6b7a0-4888-49dd-81bc-efab94d9f549`.
