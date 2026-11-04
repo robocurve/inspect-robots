@@ -91,7 +91,8 @@ def _scorer_for(rubric: Mapping[str, Any] | None, name: str) -> object | None:
 
 def _rescore_sample(
     sample: SceneResult, annotations: Sequence[Annotation], reducer: str
-) -> tuple[SceneResult, bool]:
+) -> tuple[SceneResult, set[str]]:
+    """``sample`` re-scored from ``annotations``, with the rubrics whose trial scores changed."""
     rubrics = {str(r.get("name")): r for r in sample.rubrics if isinstance(r, Mapping)}
     names = list(dict.fromkeys(name for epoch in sample.epochs for name in epoch))
     scorers = {name: _scorer_for(rubrics.get(name), name) for name in names}
@@ -110,12 +111,12 @@ def _rescore_sample(
                 changed_rubrics.add(name)
         epochs.append(updated)
     if not changed_rubrics:
-        return sample, False
+        return sample, changed_rubrics
     reduced = dict(sample.reduced)
     for name in changed_rubrics:
         scores = [Score(value=epoch[name]) for epoch in epochs if name in epoch]
         reduced[name] = value_to_float(reduce_scores(reducer, scores).value)
-    return replace(sample, epochs=tuple(epochs), reduced=reduced), True
+    return replace(sample, epochs=tuple(epochs), reduced=reduced), changed_rubrics
 
 
 def rescore(log: EvalLog, annotations: Sequence[Annotation]) -> EvalLog:
@@ -124,21 +125,17 @@ def rescore(log: EvalLog, annotations: Sequence[Annotation]) -> EvalLog:
     Each trial is re-scored by rubric scorers that offer
     ``score_annotations(annotations, record_id, rubric)``; other scores stay
     as stored. Scene reductions use the log's recorded reducer (``"mean"`` for
-    logs written before it was recorded), and a metric is recomputed only when
-    one of its scenes changed. Errored trials stay unscored.
+    logs written before it was recorded), and a metric and its abstention
+    count are recomputed only when one of its trial scores changed, even if
+    the scene reduction did not. Errored trials stay unscored.
     """
     reducer = log.eval.reducer or "mean"
     samples: list[SceneResult] = []
     changed: set[str] = set()
     for sample in log.samples:
-        rescored, did_change = _rescore_sample(sample, annotations, reducer)
+        rescored, changed_rubrics = _rescore_sample(sample, annotations, reducer)
         samples.append(rescored)
-        if did_change:
-            changed.update(
-                name
-                for name, value in rescored.reduced.items()
-                if value != sample.reduced.get(name)
-            )
+        changed.update(changed_rubrics)
     if not changed:
         return log
     metrics = dict(log.results.metrics)

@@ -243,6 +243,55 @@ def test_substitution_rewinds_the_next_delta_reference() -> None:
     assert np.allclose(out.data, [0.1, 0.0])
 
 
+def test_a_later_tighter_limiter_binds_after_a_looser_one() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.1),
+        DeltaLimitGuard(_abs_space(), max_delta=0.01),
+    )
+    store: dict[str, object] = {}
+    chain.review(Action(data=np.array([0.0, 0.0])), store)
+
+    first = chain.review(Action(data=np.array([1.0, 1.0])), store)
+    second = chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    assert np.allclose(first.data, [0.01, 0.01])
+    assert np.allclose(second.data, [0.02, 0.02])
+
+
+def test_a_later_looser_limiter_keeps_the_tighter_reference() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.01),
+        DeltaLimitGuard(_abs_space(), max_delta=0.1),
+    )
+    store: dict[str, object] = {}
+    chain.review(Action(data=np.array([0.0, 0.0])), store)
+    chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    out = chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    assert np.allclose(out.data, [0.02, 0.02])
+
+
+def test_a_chain_records_its_final_output_as_the_reference() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.5),
+        ClampGuard(Box(shape=(2,), low=np.array([-0.2, 0.0]), high=np.array([0.2, 1.0]))),
+    )
+    store: dict[str, object] = {}
+    out = chain.review(Action(data=np.array([0.9, 0.0])), store)
+
+    assert np.allclose(out.data, [0.2, 0.0])
+    reference = store["delta_limit:last"]
+    assert isinstance(reference, np.ndarray)
+    assert np.allclose(reference, [0.2, 0.0])
+
+
+def test_a_chain_without_a_limiter_leaves_no_reference() -> None:
+    store: dict[str, object] = {}
+    GuardChain(PassThroughGuard()).review(Action(data=np.array([0.1, 0.1])), store)
+    assert "delta_limit:last" not in store
+
+
 def test_absolute_derived_default_is_five_percent_of_range() -> None:
     guard = DeltaLimitGuard(_abs_space())  # ranges: 2.0 and 1.0
     store: dict[str, object] = {}

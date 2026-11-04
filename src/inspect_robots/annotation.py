@@ -216,9 +216,16 @@ def current(
 
     Superseded annotations do not count; of the rest, the last one wins. With
     a ``rubric``, an annotation for that rubric wins over one for every rubric
-    (``rubric=None``).
+    (``rubric=None``). Supersession is scoped: an annotation retires only one
+    with the same rubric, so a rubric-specific edit never retires a general
+    judgement that other rubrics still read.
     """
-    superseded = {a.supersedes for a in annotations if a.supersedes is not None}
+    rubric_of = {a.annotation_id: a.rubric for a in annotations}
+    superseded = {
+        a.supersedes
+        for a in annotations
+        if a.supersedes is not None and rubric_of.get(a.supersedes, a.rubric) == a.rubric
+    }
     live = [
         a
         for a in annotations

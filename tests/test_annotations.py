@@ -199,6 +199,57 @@ def test_an_edited_judgement_changes_only_what_it_should(tmp_path: Path) -> None
     assert read_eval_log(str(path)) == log  # the raw log is never rewritten
 
 
+def test_swapped_epoch_judgements_rescore_even_when_the_mean_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    path, log = _judged_log(tmp_path)
+    sample = log.samples[0]
+    assert [e["stacked"] for e in sample.epochs] == [1.0, 0.0]
+    append_annotations(
+        path,
+        [
+            Annotation(
+                record_id=trial_key(sample, index),
+                kind=JUDGEMENT,
+                value=value,
+                author="reviewer",
+                source="editor",
+            )
+            for index, value in enumerate(["no", "yes"])
+        ],
+    )
+    item = AnnotatedLog.load(path)
+    rescored = rescore(item.log, item.annotations)
+    assert [e["stacked"] for e in rescored.samples[0].epochs] == [0.0, 1.0]
+    assert rescored.samples[0].reduced == sample.reduced
+    assert rescored.results.metrics == log.results.metrics
+
+
+def test_a_judged_abstention_clears_even_when_the_mean_is_unchanged(tmp_path: Path) -> None:
+    _, log = _judged_log(tmp_path)
+    sample = log.samples[0]
+    # Stored: the first trial abstained, so the scene reduces over the second ("no") alone.
+    abstaining = replace(
+        sample,
+        epochs=({"stacked": None, "reached": sample.epochs[0]["reached"]}, sample.epochs[1]),
+        operator_judgements=(None, sample.operator_judgements[1]),
+        trial_metadata=({"grading_error": "judge down"}, sample.trial_metadata[1]),
+        reduced={**sample.reduced, "stacked": 0.0},
+    )
+    stored = replace(
+        log,
+        samples=(abstaining, log.samples[1]),
+        results=replace(log.results, abstentions={"stacked": 1}),
+    )
+    judged = Annotation(
+        record_id=trial_key(sample, 0), kind=JUDGEMENT, value="no", author="r", source="editor"
+    )
+    fixed = rescore(stored, [*lift_annotations(stored), judged])
+    assert fixed.samples[0].epochs[0]["stacked"] == 0.0
+    assert fixed.samples[0].reduced["stacked"] == 0.0
+    assert fixed.results.abstentions == {}
+
+
 def test_a_rubric_specific_edit_leaves_other_rubrics_alone(tmp_path: Path) -> None:
     path, log = _judged_log(tmp_path)
     key = trial_key(log.samples[1], 0)
@@ -444,6 +495,55 @@ def test_cli_edit_then_score_shows_the_change(
         == 0
     )
     assert "supersedes" not in capsys.readouterr().out
+
+
+def test_cli_rubric_edit_leaves_other_judgement_rubrics_alone(tmp_path: Path) -> None:
+    from inspect_robots.task import Epochs
+
+    verdicts = iter(["yes"])
+
+    def grade(record: Record, scene: Scene) -> None:
+        record.operator_judgement = next(verdicts)
+
+    task = Task(
+        name="two-judged",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=40,
+        epochs=Epochs(1, "mean"),
+        rubrics=[
+            Rubric("safety", operator_scorer(), text="Nothing hit."),
+            Rubric("capability", operator_scorer(), text="Bowls stacked."),
+        ],
+    )
+    (log,) = ir_eval(
+        task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=grade
+    )
+    (path,) = tmp_path.glob("*.json")
+    assert log.samples[0].epochs[0] == {"safety": 1.0, "capability": 1.0}
+    args = ["edit", str(path), "--trial", "s0-e0", "--judgement", "no", "--author", "r"]
+    assert main([*args, "--rubric", "safety"]) == 0
+    (edit,) = [a for a in read_annotations(path) if a.source == "editor"]
+    assert edit.supersedes is None
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations).samples[0].epochs[0] == {
+        "safety": 0.0,
+        "capability": 1.0,
+    }
+
+
+def test_a_cross_rubric_supersedes_does_not_retire_a_general_judgement() -> None:
+    general = Annotation(record_id="r", kind=JUDGEMENT, value="yes", author="a", source="run")
+    scoped = Annotation(
+        record_id="r",
+        kind=JUDGEMENT,
+        value="no",
+        author="b",
+        source="editor",
+        rubric="safety",
+        supersedes=general.annotation_id,
+    )
+    assert current([general, scoped], "r", JUDGEMENT, "capability") == general
+    assert current([general, scoped], "r", JUDGEMENT, "safety") == scoped
 
 
 def test_cli_edit_rejects_unknown_trials(tmp_path: Path) -> None:

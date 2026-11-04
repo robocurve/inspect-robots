@@ -374,13 +374,32 @@ class GuardChain:
         self.names = tuple(names) if names is not None else tuple(guard_name(g) for g in guards)
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
-        """Apply each configured gate in order to the preceding gate's output."""
+        """Apply each configured gate in order to the preceding gate's output.
+
+        Every member that limits absolute deltas measures against the same
+        reference: the action the previous chain review approved. Without this,
+        an earlier limiter would advance the shared reference to its own output
+        before a later, tighter limiter read it, so the tighter limit could never
+        bind. After the chain, the reference is the chain's final output.
+        """
         trace: list[dict[str, Any]] = store.setdefault(_GUARD_TRACE_KEY, [])
+        had_reference = _LAST_APPROVED_KEY in store
+        reference = store.get(_LAST_APPROVED_KEY)
+        limited = had_reference
         for name, guard in zip(self.names, self.guards, strict=True):
+            if had_reference:
+                store[_LAST_APPROVED_KEY] = reference
+            else:
+                store.pop(_LAST_APPROVED_KEY, None)
             reviewed = guard.review(action, store)
+            limited = limited or _LAST_APPROVED_KEY in store
             if reviewed is not action:
                 trace.append({"guard": name, "before": _values(action), "after": _values(reviewed)})
             action = reviewed
+        if limited:
+            # The chain's output is what executes, including a substituted hold
+            # target, so it is the next review's reference.
+            store[_LAST_APPROVED_KEY] = np.asarray(action.data, dtype=np.float64).copy()
         return action
 
 

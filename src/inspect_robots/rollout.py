@@ -135,7 +135,9 @@ class _ChunkTap:
         self._chunks.append(
             ChunkRecord(
                 t=self.t,
-                actions=tuple(np.asarray(action.data).ravel() for action in chunk.actions),
+                # Copied: a policy may reuse its output buffer across calls, and
+                # downstream stages may mutate it; the record keeps what was produced.
+                actions=tuple(np.array(action.data, copy=True).ravel() for action in chunk.actions),
                 terminal=chunk.terminal,
                 latency_s=chunk.inference_latency_s,
                 wall_s=wall_s,

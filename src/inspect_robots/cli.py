@@ -3094,6 +3094,10 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     key = _resolve_trial(log, args.record, args.trial)
     kind = JUDGEMENT if args.judgement is not None else NOTE
     previous = current(read_annotations(args.log, log), key, kind, args.rubric)
+    if previous is not None and previous.rubric != args.rubric:
+        # A rubric-specific edit overrides a general judgement for that rubric
+        # only; superseding it would change every other rubric too.
+        previous = None
     annotation = Annotation(
         record_id=key,
         kind=kind,

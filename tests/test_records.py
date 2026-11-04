@@ -289,3 +289,31 @@ def test_describe_keeps_records_json_safe() -> None:
     )
     assert _describe({"password": None}) == {"password": None}
     assert _describe(slice(1, 2)) == {"type": "builtins.slice"}
+
+
+class _BufferReuser:
+    """Returns the same mutable buffer on every call, filled with the call count minus one."""
+
+    def __init__(self) -> None:
+        self.info = PolicyInfo(name="reuser", action_space=CubePickEmbodiment().info.action_space)
+        self.config = PolicyConfig()
+        self.buffer = np.zeros(2)
+        self.calls = 0
+
+    def reset(self, scene: Scene) -> None:
+        self.calls = 0
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self.buffer[:] = 0.01 * self.calls
+        self.calls += 1
+        return ActionChunk(actions=[Action(data=self.buffer)])
+
+
+def test_chunks_copy_actions_from_a_reused_policy_buffer(tmp_path: Path) -> None:
+    (log,) = ir_eval(
+        _task(max_steps=2), _BufferReuser(), CubePickEmbodiment(), log_dir=str(tmp_path)
+    )
+    (record_dir,) = log.samples[0].record_dirs
+    assert record_dir is not None
+    _, lines = _record_files(tmp_path, record_dir)
+    assert [line["actions"] for line in lines[1:]] == [[[0.0, 0.0]], [[0.01, 0.01]]]
