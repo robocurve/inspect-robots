@@ -9,6 +9,7 @@ slice accepts already-constructed objects; registry-string resolution
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -233,6 +234,19 @@ def _describe(value: Any, depth: int = 0) -> Any:
     if isinstance(attributes, dict):
         public = {key: item for key, item in attributes.items() if not key.startswith("_")}
         described.update(_describe(public, depth))
+    # An optional config() reports settings held privately (a guard's resolved
+    # limits), so records of runs with different settings stay distinguishable.
+    config = getattr(value, "config", None)
+    if callable(config) and not isinstance(value, type):
+        try:
+            reported = config()
+        except Exception as exc:
+            described["config_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            if isinstance(reported, Mapping):
+                # A fresh depth budget: the hook's own (small) settings must
+                # survive even when the object sits deep in a guard chain.
+                described["config"] = _describe(reported)
     return described
 
 
@@ -885,6 +899,10 @@ def _run_eval(
     halted = False
     stopped = False
     cancelled_exc: _CancelledTrial | None = None
+    # A SafetyAbort/EmbodimentFault raised by an evaluation-interface hook
+    # (outside any trial) is re-raised once the log is written, so eval_set()
+    # stops admitting tasks to a platform that just faulted.
+    halt_exc: BaseException | None = None
     # A proportion threshold is a share of the whole eval, so the denominator is
     # every trial the run intends to attempt. Using the completed-so-far count
     # made the first error 1/1 = 100%, which trips any threshold below 1.
@@ -917,8 +935,9 @@ def _run_eval(
             # The evaluation interface runs before the trial exists: a failed
             # check stops the run with no trial recorded (a failed home() is
             # parked first, since it may have moved the platform).
-            not_ready = _before_trial(embodiment, scene, epoch)
+            not_ready, pre_trial_halt = _before_trial(embodiment, scene, epoch)
             if not_ready is not None:
+                halt_exc = halt_exc or pre_trial_halt
                 status = "error"
                 error = not_ready
                 scene_status = "error"
@@ -1018,6 +1037,7 @@ def _run_eval(
                                 try:
                                     parked_observation = observe_parked()
                                 except (SafetyAbort, EmbodimentFault):
+                                    _park_before_escape(embodiment)
                                     raise
                                 except Exception as exc:
                                     warnings.warn(
@@ -1038,7 +1058,11 @@ def _run_eval(
                                             RuntimeWarning,
                                             stacklevel=2,
                                         )
-                        before_scoring(record, graded_scene)
+                        try:
+                            before_scoring(record, graded_scene)
+                        except BaseException:
+                            _park_before_escape(embodiment)
+                            raise
                         graded_attempts += 1
                         grading_error = record.metadata.get("grading_error")
                         if grading_error and record.operator_judgement is None:
@@ -1054,6 +1078,7 @@ def _run_eval(
                             # Halt signals are not scoring errors: containing
                             # them here would let the next rollout start after
                             # an explicit safety abort or a hardware fault.
+                            _park_before_escape(embodiment)
                             raise
                         except Exception as exc:
                             # A scorer failure degrades to an error log - it must
@@ -1163,7 +1188,7 @@ def _run_eval(
             # Park after every trial that ran, so the scene can be reset by hand.
             # A cancelled run is left to close(): the operator asked it to stop.
             if not policy_start_failed and cancelled_exc is None:
-                park_failure = _park(embodiment)
+                park_failure, park_halt = _park(embodiment)
                 if park_failure is not None and halted:
                     warnings.warn(park_failure, RuntimeWarning, stacklevel=2)
                 elif park_failure is not None:
@@ -1173,6 +1198,7 @@ def _run_eval(
                     scene_error = (
                         park_failure if scene_error is None else f"{scene_error}; {park_failure}"
                     )
+                    halt_exc = halt_exc or park_halt
                     halted = True
 
             if halted:
@@ -1296,6 +1322,11 @@ def _run_eval(
         warnings.warn(survivor_warning, UserWarning, stacklevel=3)
     if cancelled_exc is not None:
         raise cancelled_exc
+    if halt_exc is not None:
+        # The log is written; the caller can still reach it from the halt.
+        with contextlib.suppress(AttributeError):
+            halt_exc.log = log  # type: ignore[attr-defined]
+        raise halt_exc
     return [log]
 
 
@@ -1329,36 +1360,65 @@ def _evaluation_interface(embodiment: Embodiment) -> list[str]:
     return [name for name in _EVALUATION_HOOKS if callable(getattr(embodiment, name, None))]
 
 
-def _before_trial(embodiment: Embodiment, scene: Scene, epoch: int) -> str | None:
+def _before_trial(
+    embodiment: Embodiment, scene: Scene, epoch: int
+) -> tuple[str | None, BaseException | None]:
     """Run ``health``, ``prepare_trial`` and ``home`` if offered; return why not to start.
 
     Any exception, a failed ``HealthReport`` or a not-ready ``Readiness`` stops
     the run: starting a trial on a platform that just said no is never safe.
+    The second value is a raised ``SafetyAbort``/``EmbodimentFault``, which
+    ``eval()`` re-raises after writing its log so ``eval_set()`` stops too.
     """
+    failure = _before_trial_message(embodiment, scene, epoch)
+    return (None, None) if failure is None else failure
+
+
+def _halt_of(exc: BaseException) -> BaseException | None:
+    """``exc`` when it is a halt signal (``SafetyAbort``/``EmbodimentFault``), else None."""
+    return exc if isinstance(exc, (SafetyAbort, EmbodimentFault)) else None
+
+
+def _before_trial_message(
+    embodiment: Embodiment, scene: Scene, epoch: int
+) -> tuple[str, BaseException | None] | None:
     trial = f"scene {scene.id!r} epoch {epoch}"
     health = getattr(embodiment, "health", None)
     if callable(health):
         try:
             report = health()
         except Exception as exc:
-            return f"embodiment.health() failed before {trial}: {type(exc).__name__}: {exc}"
+            return (
+                f"embodiment.health() failed before {trial}: {type(exc).__name__}: {exc}",
+                _halt_of(exc),
+            )
         if not isinstance(report, HealthReport):
-            return f"embodiment.health() returned {type(report).__name__}; expected HealthReport"
+            return (
+                f"embodiment.health() returned {type(report).__name__}; expected HealthReport",
+                None,
+            )
         if not report.ok:
-            return f"embodiment health check failed before {trial}: {report.summary()}"
+            return f"embodiment health check failed before {trial}: {report.summary()}", None
     prepare_trial = getattr(embodiment, "prepare_trial", None)
     if callable(prepare_trial):
         try:
             readiness = prepare_trial(scene)
         except Exception as exc:
-            return f"embodiment.prepare_trial() failed before {trial}: {type(exc).__name__}: {exc}"
+            return (
+                f"embodiment.prepare_trial() failed before {trial}: {type(exc).__name__}: {exc}",
+                _halt_of(exc),
+            )
         if not isinstance(readiness, Readiness):
             return (
                 f"embodiment.prepare_trial() returned {type(readiness).__name__}; "
-                "expected Readiness"
+                "expected Readiness",
+                None,
             )
         if not readiness.ready:
-            return f"embodiment not ready for {trial}: {readiness.reason or 'no reason given'}"
+            return (
+                f"embodiment not ready for {trial}: {readiness.reason or 'no reason given'}",
+                None,
+            )
     home = getattr(embodiment, "home", None)
     if callable(home):
         try:
@@ -1367,21 +1427,34 @@ def _before_trial(embodiment: Embodiment, scene: Scene, epoch: int) -> str | Non
             message = f"embodiment.home() failed before {trial}: {type(exc).__name__}: {exc}"
             # home() may have moved the platform before failing, so it is parked
             # like any trial that ran; park is documented as safe after a fault.
-            park_failure = _park(embodiment)
-            return message if park_failure is None else f"{message}; {park_failure}"
+            park_failure, park_halt = _park(embodiment)
+            text = message if park_failure is None else f"{message}; {park_failure}"
+            return text, _halt_of(exc) or park_halt
     return None
 
 
-def _park(embodiment: Embodiment) -> str | None:
-    """Call ``park`` if offered; return the failure as a message, or None."""
+def _park_before_escape(embodiment: Embodiment) -> None:
+    """Park after a trial whose grading or scoring is about to raise out of ``eval()``.
+
+    The robot moved during the trial, so it is parked as a completed trial
+    would be; a park failure is warned about, never allowed to replace the
+    exception that is escaping.
+    """
+    failure, _ = _park(embodiment)
+    if failure is not None:
+        warnings.warn(failure, RuntimeWarning, stacklevel=3)
+
+
+def _park(embodiment: Embodiment) -> tuple[str | None, BaseException | None]:
+    """Call ``park`` if offered; return the failure as a message and any halt it raised."""
     park = getattr(embodiment, "park", None)
     if not callable(park):
-        return None
+        return None, None
     try:
         park()
     except Exception as exc:
-        return f"embodiment.park() failed: {type(exc).__name__}: {exc}"
-    return None
+        return f"embodiment.park() failed: {type(exc).__name__}: {exc}", _halt_of(exc)
+    return None, None
 
 
 def _should_fail(fail_on_error: bool | float, errors: int, trials: int) -> bool:
@@ -1502,9 +1575,11 @@ def eval_set(
     A task that raises before or without producing a log contributes one
     ``status="error"`` log carrying the exception text, and the remaining
     tasks still run. A ``SafetyAbort`` or ``EmbodimentFault`` that escapes
-    ``eval()`` (raised outside a trial) and ``KeyboardInterrupt`` still
-    propagate. A halt inside a trial ends that task with an error log and the
-    set continues to the next task.
+    ``eval()`` (raised outside a trial, including from the embodiment's
+    ``health``/``prepare_trial``/``home``/``park`` hooks) and
+    ``KeyboardInterrupt`` still propagate and stop the set. A halt inside a
+    trial ends that task with an error log and the set continues to the next
+    task.
     ``CompatibilityError``, unknown policy or embodiment registry names, and
     task-factory ``ConfigError`` are therefore reported once per affected
     task. Only grading configuration errors raised before the task loop

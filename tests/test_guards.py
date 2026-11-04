@@ -557,3 +557,14 @@ def test_chain_approver_requires_callable_review() -> None:
 
     with pytest.raises(ValueError, match="callable review"):
         GuardChain(None)  # type: ignore[arg-type]
+
+
+def test_guards_report_their_resolved_limits() -> None:
+    assert DeltaLimitGuard(_abs_space(), max_delta=0.1).config() == {
+        "mode": "absolute",
+        "max_delta": [0.1, 0.1],
+    }
+    assert DeltaLimitGuard(_delta_space(), max_delta=0.05).config()["mode"] == "displacement"
+    assert ClampGuard(_abs_space()).config() == {"low": [-1.0, 0.0], "high": [1.0, 1.0]}
+    unbounded = Box(shape=(2,), semantics=ActionSemantics("joint_pos"))
+    assert ClampGuard(unbounded).config() == {"low": None, "high": None}

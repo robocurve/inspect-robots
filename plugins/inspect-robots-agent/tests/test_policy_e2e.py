@@ -3345,13 +3345,13 @@ def test_sleep_narration_pairs_before_and_after_only_when_both_exist() -> None:
         )
     )
     assert before is not None
-    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), None) == (
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), None, Observation()) == (
         "Slept 3 s holding the setpoint."
     )
-    assert _sleep_narration(_PendingSleep(seconds=3.0, before=None), before) == (
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=None), before, Observation()) == (
         "Slept 3 s holding the setpoint."
     )
-    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), before) == (
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), before, Observation()) == (
         "Slept 3 s holding the setpoint. Hottest motors: left_j1 50 C before, left_j1 50 C now."
     )
 
@@ -3473,3 +3473,46 @@ def test_motion_narration_says_why_a_motion_was_cut_short() -> None:
     assert narration.endswith("The motion was cut short to look again: the grasp slipped.")
     malformed = replace(observation, extra={"env_step": 2, "replan": {"reason": 3}})
     assert "cut short" not in policy._motion_narration(motion, malformed, with_frames=True)
+
+
+def test_sleep_narration_reports_a_sleep_a_replan_cut_short() -> None:
+    slept = _PendingSleep(seconds=3.0, before=None, issued_step=10, steps=30)
+    cut = Observation(
+        state={},
+        extra={"env_step": 12, "replan": {"trigger": "gripper_slip", "reason": "grasp slipped"}},
+    )
+    assert _sleep_narration(slept, None, cut) == (
+        "Slept 2 of 30 steps of the requested 3 s holding the setpoint; it did not run to "
+        "the end. The motion was cut short to look again: grasp slipped."
+    )
+    finished = Observation(state={}, extra={"env_step": 40})
+    assert _sleep_narration(slept, None, finished) == "Slept 3 s holding the setpoint."
+
+
+def test_a_triggered_replan_during_sleep_reaches_the_model(tmp_path: Path) -> None:
+    class _FiresOnce:
+        name = "test_trigger"
+
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def should_replan(self, observation: Observation, t: int, store: Any) -> str | None:
+            self.checks += 1
+            return "the grasp may have slipped" if self.checks == 2 else None
+
+    script = _Script(
+        [
+            _tool_response("sleep", {"seconds": 3, "note": "let it settle"}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    ir_eval(
+        _task(),
+        _policy(script),
+        _AbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        action_manager=DefaultActionManager(triggers=[_FiresOnce()]),
+    )
+    prompt = _last_user_text(script.requests[1])
+    assert "it did not run to the end" in prompt
+    assert "cut short to look again: the grasp may have slipped" in prompt

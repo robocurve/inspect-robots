@@ -356,6 +356,10 @@ class _PendingSleep:
 
     seconds: float
     before: _ThermalStatus | None
+    #: The rollout step the sleep was issued at and its hold length, so a sleep a
+    #: replan cut short is reported as such.
+    issued_step: int | None = None
+    steps: int | None = None
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -1074,7 +1078,7 @@ class LLMAgentPolicy(PolicyBase):
         slept = self._pending_sleep
         self._pending_sleep = None
         if slept is not None:
-            narration = _sleep_narration(slept, _thermal_status(observation))
+            narration = _sleep_narration(slept, _thermal_status(observation), observation)
         motion = self._pending_motion
         self._pending_motion = None
         if motion is not None:
@@ -1348,8 +1352,12 @@ class LLMAgentPolicy(PolicyBase):
                 )
             if chunk is not None:
                 if sleep_request is not None:
+                    issued = observation.extra.get("env_step")
                     self._pending_sleep = _PendingSleep(
-                        seconds=sleep_request, before=_thermal_status(observation)
+                        seconds=sleep_request,
+                        before=_thermal_status(observation),
+                        issued_step=issued if isinstance(issued, int) else None,
+                        steps=len(chunk),
                     )
                 elif not stopped:
                     # Narrated with the next observation in every image mode:
@@ -1417,10 +1425,7 @@ class LLMAgentPolicy(PolicyBase):
                     )
                 else:
                     narration += " Target reached."
-        replan = observation.extra.get("replan")
-        if isinstance(replan, Mapping) and isinstance(replan.get("reason"), str):
-            narration += f" The motion was cut short to look again: {replan['reason']}."
-        return narration
+        return narration + _replan_note(observation)
 
     def _echo(self, text: str) -> None:
         if self._transcript_echo:
@@ -1471,14 +1476,36 @@ def _thermal_status(observation: Observation) -> _ThermalStatus | None:
     return _ThermalStatus(limit=float(limit), margin=float(margin), hottest=hottest)
 
 
-def _sleep_narration(slept: _PendingSleep, after: _ThermalStatus | None) -> str:
-    """Describe a finished sleep, with the hottest motors before and after when reported."""
-    narration = f"Slept {slept.seconds:g} s holding the setpoint."
+def _sleep_narration(
+    slept: _PendingSleep, after: _ThermalStatus | None, observation: Observation
+) -> str:
+    """Describe a sleep, how much of it played, and the hottest motors before and after."""
+    arriving = observation.extra.get("env_step")
+    played = (
+        arriving - slept.issued_step
+        if isinstance(arriving, int) and isinstance(slept.issued_step, int)
+        else None
+    )
+    if played is not None and slept.steps is not None and 0 < played < slept.steps:
+        narration = (
+            f"Slept {played} of {slept.steps} steps of the requested {slept.seconds:g} s "
+            "holding the setpoint; it did not run to the end."
+        )
+    else:
+        narration = f"Slept {slept.seconds:g} s holding the setpoint."
     before = slept.before.text() if slept.before is not None else ""
     now = after.text() if after is not None else ""
     if before and now:
         narration += f" Hottest motors: {before} before, {now} now."
-    return narration
+    return narration + _replan_note(observation)
+
+
+def _replan_note(observation: Observation) -> str:
+    """The sentence telling the model a replan trigger cut the last chunk short, or ""."""
+    replan = observation.extra.get("replan")
+    if isinstance(replan, Mapping) and isinstance(replan.get("reason"), str):
+        return f" The motion was cut short to look again: {replan['reason']}."
+    return ""
 
 
 def _observation_content(

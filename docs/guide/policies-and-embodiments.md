@@ -249,7 +249,10 @@ also stops the run before the trial starts; after a failed `home()`, which may
 already have moved the platform, `park()` is called first. `park()` runs after every trial
 whatever its outcome, except a run cancelled with Ctrl-C, so it must be safe to
 call after a fault; it may decline by returning without moving. A failed park
-after a clean trial stops the run. The log lists the methods an embodiment
+after a clean trial stops the run. A `SafetyAbort` or `EmbodimentFault` raised by
+any of these methods is re-raised once the log is written (the log rides on the
+exception as `.log`), so `eval_set()` stops instead of starting the next task.
+Grading or scoring that raises after a trial still parks the platform first. The log lists the methods an embodiment
 offers under `embodiment_info["evaluation_interface"]`.
 
 Set `EmbodimentInfo.morphology` to name the physical platform. Two embodiments

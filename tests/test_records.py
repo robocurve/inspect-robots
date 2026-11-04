@@ -449,3 +449,42 @@ def test_non_finite_metadata_keeps_the_record(tmp_path: Path) -> None:
     assert record_dir is not None
     document, _ = _record_files(tmp_path, record_dir)
     assert "inf" in json.dumps(document["configuration"])
+
+
+def test_records_carry_resolved_guard_limits(tmp_path: Path) -> None:
+    from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardChain
+
+    space = CubePickEmbodiment().info.action_space
+    configured = []
+    for max_delta in (0.01, 0.1):
+        log_dir = tmp_path / str(max_delta)
+        guard = GuardChain(ClampGuard(space), DeltaLimitGuard(space, max_delta=max_delta))
+        (log,) = ir_eval(
+            _task(max_steps=2),
+            ScriptedPolicy(),
+            CubePickEmbodiment(),
+            log_dir=str(log_dir),
+            guard=guard,
+        )
+        (record_dir,) = log.samples[0].record_dirs
+        assert record_dir is not None
+        document, _ = _record_files(log_dir, record_dir)
+        configured.append(json.dumps(document["configuration"]["guard"]))
+    assert configured[0] != configured[1]
+    assert "0.01" in configured[0] and "0.1" in configured[1]
+    assert '"low"' in configured[0]  # the clamp box is recorded too
+
+
+def test_a_failing_config_hook_is_recorded_not_raised() -> None:
+    from inspect_robots.eval import _describe
+
+    class _Broken:
+        def config(self) -> dict[str, Any]:
+            raise RuntimeError("no settings")
+
+    class _NotAMapping:
+        def config(self) -> list[int]:
+            return [1]
+
+    assert _describe(_Broken())["config_error"] == "RuntimeError: no settings"
+    assert "config" not in _describe(_NotAMapping())

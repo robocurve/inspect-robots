@@ -11,7 +11,8 @@ import pytest
 from inspect_robots import HealthCheck, HealthReport, Readiness
 from inspect_robots import eval as ir_eval
 from inspect_robots.conformance import check_evaluation_interface, check_policy_interfaces
-from inspect_robots.errors import EmbodimentFault, PolicyError
+from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort
+from inspect_robots.log import read_eval_log
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
@@ -158,7 +159,7 @@ def test_a_failed_pre_trial_hook_stops_the_run_before_the_trial(
     tmp_path: Path, overrides: dict[str, Any], error: str
 ) -> None:
     embodiment = _Lifecycle(**overrides)
-    (log,) = ir_eval(_task(scenes=2), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    log = _run_or_halt(_task(scenes=2), embodiment, tmp_path, overrides)
     assert log.status == "error"
     assert log.error == error
     assert "reset" not in embodiment.calls
@@ -170,9 +171,28 @@ def test_a_failed_pre_trial_hook_stops_the_run_before_the_trial(
     assert sample.epochs == ()
 
 
+def _run_or_halt(task: Any, embodiment: Any, tmp_path: Path, overrides: dict[str, Any]) -> Any:
+    """Run ``task``; a hook that raised a halt signal re-raises it with the written log."""
+    halts = [v for v in overrides.values() if isinstance(v, (SafetyAbort, EmbodimentFault))]
+    if not halts:
+        (log,) = ir_eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+        return log
+    with pytest.raises(type(halts[0])) as raised:
+        ir_eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert raised.value is halts[0]
+    log = getattr(raised.value, "log")  # noqa: B009 - set on the instance by eval()
+    (written,) = tmp_path.glob("*.json")
+    assert read_eval_log(str(written)) == log
+    return log
+
+
 def test_a_failed_home_reports_a_failed_park_too(tmp_path: Path) -> None:
-    embodiment = _Lifecycle(home=EmbodimentFault("joint 3 stalled"), park=RuntimeError("brake"))
-    (log,) = ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    overrides: dict[str, Any] = {
+        "home": EmbodimentFault("joint 3 stalled"),
+        "park": RuntimeError("brake"),
+    }
+    embodiment = _Lifecycle(**overrides)
+    log = _run_or_halt(_task(), embodiment, tmp_path, overrides)
     assert log.error == (
         "embodiment.home() failed before scene 's0' epoch 0: EmbodimentFault: joint 3 stalled; "
         "embodiment.park() failed: RuntimeError: brake"
@@ -195,8 +215,9 @@ def test_a_later_unhealthy_check_keeps_the_trials_already_run(tmp_path: Path) ->
 
 
 def test_a_park_failure_after_a_clean_trial_stops_the_run(tmp_path: Path) -> None:
-    embodiment = _Lifecycle(park=EmbodimentFault("ramp stalled"))
-    (log,) = ir_eval(_task(scenes=2), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    overrides: dict[str, Any] = {"park": EmbodimentFault("ramp stalled")}
+    embodiment = _Lifecycle(**overrides)
+    log = _run_or_halt(_task(scenes=2), embodiment, tmp_path, overrides)
     assert log.status == "error"
     assert log.error == "embodiment.park() failed: EmbodimentFault: ramp stalled"
     assert log.results.total_trials == 1
@@ -339,3 +360,81 @@ def test_uninspectable_hooks_pass() -> None:
             return HealthReport()
 
     assert check_evaluation_interface(_Builtin()).ok
+
+
+@pytest.mark.parametrize("hook", ["health", "prepare_trial", "home", "park"])
+@pytest.mark.parametrize("halt", [EmbodimentFault("bus fault"), SafetyAbort("e-stop")])
+def test_a_hook_halt_stops_the_task_set(tmp_path: Path, hook: str, halt: Exception) -> None:
+    from inspect_robots import eval_set
+
+    embodiment = _Lifecycle(**{hook: halt})
+    tasks = [replace(_task(), name="first"), replace(_task(), name="second")]
+    with pytest.raises(type(halt)):
+        eval_set(tasks, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    # The first task's log is written; the second never touched the platform again.
+    (written,) = tmp_path.glob("*.json")
+    assert read_eval_log(str(written)).eval.task == "first"
+    assert embodiment.calls.count("reset") == (1 if hook == "park" else 0)
+
+
+def test_a_hook_failure_that_is_not_a_halt_lets_the_set_continue(tmp_path: Path) -> None:
+    from inspect_robots import eval_set
+
+    class _OnceBroken(_Lifecycle):
+        def health(self) -> HealthReport:
+            self.calls.append("health")
+            if self.calls.count("health") == 1:
+                raise RuntimeError("flaky probe")
+            return HealthReport()
+
+    tasks = [replace(_task(), name="first"), replace(_task(), name="second")]
+    success, logs = eval_set(tasks, ScriptedPolicy(), _OnceBroken(), log_dir=str(tmp_path))
+    assert not success
+    assert [log.status for log in logs] == ["error", "success"]
+
+
+@pytest.mark.parametrize("raised", [RuntimeError("grader crashed"), SafetyAbort("judge saw smoke")])
+def test_a_grading_exception_still_parks_the_robot(tmp_path: Path, raised: Exception) -> None:
+    def grade(record: Any, scene: Scene) -> None:
+        raise raised
+
+    embodiment = _Lifecycle()
+    with pytest.raises(type(raised)):
+        ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=grade)
+    assert embodiment.calls[-1] == "park"
+
+
+def test_a_scorer_halt_parks_and_a_failed_park_only_warns(tmp_path: Path) -> None:
+    from inspect_robots.scorer import Score
+
+    class _HaltingScorer:
+        name = "halting"
+
+        def __call__(self, record: Any, target: Any) -> Score:
+            raise SafetyAbort("scorer saw a collision")
+
+    task = replace(_task(), scorer=_HaltingScorer())
+    embodiment = _Lifecycle(park=RuntimeError("brake"))
+    with (
+        pytest.raises(SafetyAbort),
+        pytest.warns(RuntimeWarning, match="park\\(\\) failed: RuntimeError: brake"),
+    ):
+        ir_eval(task, ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert embodiment.calls[-1] == "park"
+
+
+def test_observe_parked_halts_park_before_escaping(tmp_path: Path) -> None:
+    class _BadParkedView(_Lifecycle):
+        def observe_parked(self) -> Observation:
+            raise EmbodimentFault("camera bus fault")
+
+    def grade(record: Any, scene: Scene) -> None:
+        record.operator_judgement = "yes"
+
+    embodiment = _BadParkedView()
+    unfinished = replace(_task(), max_steps=1)  # not a definitive success, so it is graded
+    with pytest.raises(EmbodimentFault):
+        ir_eval(
+            unfinished, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=grade
+        )
+    assert embodiment.calls[-1] == "park"

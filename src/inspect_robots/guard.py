@@ -106,6 +106,14 @@ class ClampGuard:
     def __init__(self, action_space: Box):
         self._space = action_space
 
+    def config(self) -> dict[str, Any]:
+        """The bounds this guard clamps to, as recorded in a trial's record."""
+        low, high = self._space.low, self._space.high
+        return {
+            "low": None if low is None else low.tolist(),
+            "high": None if high is None else high.tolist(),
+        }
+
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Reject NaNs and clamp bounded dimensions, preserving identity when unchanged."""
         data = np.asarray(action.data, dtype=np.float64)
@@ -262,6 +270,21 @@ class DeltaLimitGuard:
                 )
             self._low = low if explicit is None else _intersect(low, -explicit, np.maximum)
             self._high = high if explicit is None else _intersect(high, explicit, np.minimum)
+
+    def config(self) -> dict[str, Any]:
+        """The resolved limits, as recorded in a trial's record.
+
+        Absolute modes report the per-dimension ``max_delta`` around the last
+        approved action; displacement modes report the clamp box after
+        intersecting the space with ``max_delta``.
+        """
+        if self._absolute:
+            return {"mode": "absolute", "max_delta": self._delta.tolist()}
+        return {
+            "mode": "displacement",
+            "low": None if self._low is None else np.asarray(self._low).tolist(),
+            "high": None if self._high is None else np.asarray(self._high).tolist(),
+        }
 
     @staticmethod
     def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
