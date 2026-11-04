@@ -160,3 +160,14 @@ inspect-robots run --task my-task --policy xpolicylab --embodiment isaacsim \
 ```
 
 See each plugin's linked README for its full configuration reference.
+
+## Community plugins
+
+These plugins are maintained outside this repository by their authors. Each is
+installed with `pip` and registers through the same entry points as the
+first-party packages.
+
+- [`inspect-robots-wandb`](https://github.com/Galabavamsi/inspect-robots-wandb):
+  log each evaluation's spec and aggregate metrics to a
+  [Weights & Biases](https://wandb.ai/) run (`WandbSink`, registered as the
+  `wandb` sink). Pass it alongside `JsonLogSink` to keep the local log.
