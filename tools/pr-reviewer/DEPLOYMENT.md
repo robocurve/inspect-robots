@@ -217,3 +217,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: run 4503fcb8 on `5d77fff4` hit model_timeout after $21. For the final run Jay said "increase any cap comfortably": November exception +$100 for PR #599, PR/author caps $280 (validation now allows a PR cap up to its monthly limit and an author cap up to $100 over the shared ceiling), head `5d77fff4` $60.
 - 2026-11-04: ONE-OFF ultrafast run for PR #599 head `822f5cb4` (Jay: "ultrafast just for this time"). REVIEW_SERVICE_TIER=ultrafast, REVIEW_PRICE_MULTIPLIER=6 (gpt-6-astra ultrafast is $60/$300 per 1M vs $10/$50). Caps: head $160, PR #599 and author $450, November exception +$250. REVERT tier/multiplier to default/1 after this run.
 - 2026-11-04: ultrafast run done ($107.75 booked, no blockers); service tier back to default (vars removed).
+- 2026-11-04: November exception +$15 for release PR #600 (monthly ceiling exhausted).
