@@ -138,6 +138,9 @@ class Defaults:
     # a single fixed function, never registry-selected, so the issue #44
     # leak hazard cannot occur. Applies to every --auto-task run.
     taskgen_args: dict[str, Any] = field(default_factory=dict)
+    # [guards] lists extra guards as specs, in file order: each key is a guard
+    # name and its value the parameters ("max_delta=0.02"), or empty.
+    guards: tuple[str, ...] = ()
 
 
 def config_path(env: Mapping[str, str]) -> Path | None:
@@ -263,6 +266,10 @@ def _read_config(path: Path) -> Defaults:
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
         grader_args=_parse_args_section(parser, "grader.args"),
         taskgen_args=_parse_args_section(parser, "taskgen.args"),
+        guards=tuple(
+            f"{name}:{value.strip()}" if value.strip() else name
+            for name, value in (parser.items("guards") if parser.has_section("guards") else ())
+        ),
         policy_args_owner=policy,
         embodiment_args_owner=embodiment,
         sim_embodiment_args_owner=sim_embodiment,

@@ -2,7 +2,7 @@
 
 ## The eval log
 
-Every run produces an immutable [`EvalLog`](/api/#inspect_robots.log.EvalLog): the canonical,
+Every run produces an immutable [`EvalLog`](../../src/inspect_robots/log.py): the canonical,
 auditable record. It mirrors Inspect AI: `version`, `status`, an `eval` spec
 (task/policy/embodiment, created time, git revision, package versions), `results`
 (aggregate metrics), `stats` (timing, inference latency), per-scene `samples`, and
@@ -26,13 +26,13 @@ see [Watching a run live](live-view.md).
 
 ## Sinks
 
-A [`LogSink`](/api/#inspect_robots.logging.sink.LogSink) observes the run lifecycle
+A [`LogSink`](../../src/inspect_robots/logging/sink.py) observes the run lifecycle
 (`on_eval_start` → per trial `on_trial_start`/`log_step`/`on_trial_end` →
 `on_eval_end`). Builtins:
 
-- [`JsonLogSink`](/api/#inspect_robots.logging.json_log.JsonLogSink): the default; the canonical JSON record.
-- [`LiveLogSink`](/api/#inspect_robots.logging.live_log.LiveLogSink): a transient, schema-valid running snapshot.
-- [`RerunSink`](/api/#inspect_robots.logging.rerun_sink.RerunSink): optional, lazily imported.
+- [`JsonLogSink`](../../src/inspect_robots/logging/json_log.py): the default; the canonical JSON record.
+- [`LiveLogSink`](../../src/inspect_robots/logging/live_log.py): a transient, schema-valid running snapshot.
+- [`RerunSink`](../../src/inspect_robots/logging/rerun_sink.py): optional, lazily imported.
 
 Passing `sinks=` replaces the default `JsonLogSink`, it does not add to it.
 Include one in the list if you still want the JSON log:
@@ -144,6 +144,43 @@ and SDK versions must match for live connections. For a replayable file without
 a live connection, use `--rerun-save`. Hosts driving two rigs give each config
 its own `rerun_port` so each run spawns its own viewer window.
 
+## Trial records
+
+Every trial gets a [`Record`](../../src/inspect_robots/rollout.py) with a unique
+`record_id`. Besides the executed steps, a record keeps every action chunk the
+policy produced (`Record.chunks`), before the action manager chose which actions
+to play and before any guard changed them. Chunks are captured where the policy
+returns them, so the record is complete with any action manager.
+
+By default `eval()` writes one directory per trial:
+
+```
+records/<run_id>/<sanitized_scene_id>-e<epoch>/
+  record.json    record id, configuration, termination, events
+  chunks.jsonl   a header row, then one row per produced chunk
+```
+
+`record.json` holds the resolved configuration the trial ran with: task,
+scene, rubrics, run and trial seeds, budget, policy name and config,
+embodiment, action manager and guard (each with its parameters), and grader.
+Values under credential-like keys (`api_key`, `token`, `password`, ...) are
+written as `"<redacted>"`; keys ending in `_env`, which name an environment
+variable, are kept. The same redaction applies to `eval.policy_config` in the
+log. Each `chunks.jsonl` row has the step `t` at which the policy was called,
+its `actions`, its `terminal` action (kind and stated reason) if any, the
+policy's reported `latency_s`, and `wall_s`, the time `act()` took. Non-finite
+values are written as strings such as `"nan"`, so a chunk that failed a trial
+is still recorded as produced.
+
+The log points at these directories: `SceneResult.record_ids` and
+`SceneResult.record_dirs` run parallel to `epochs`, and `stats.records_dir` is
+the run's directory. `SceneResult.events` keeps each trial's full event
+transcript (reset, inference, approval, step, operator messages and verdicts,
+errors, and the `policy_terminal` event with the step at which the policy ended
+the trial). Pass `store_records=False` to skip the directories; record ids and
+events stay in the log. A filesystem failure emits a warning and does not
+change the eval status.
+
 ## Action side-cars
 
 Every delivered trial writes its executed action sequence to an atomic JSONL
@@ -171,8 +208,8 @@ trial.
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
 a per-run subdirectory of `<log_dir>/frames` through a
-[`FrameStore`](/api/#inspect_robots.frames.FrameStore) and the `TrialRecord` keeps lightweight
-[`FrameRef`](/api/#inspect_robots.frames.FrameRef) handles, so long, multi-camera episodes stay
+[`FrameStore`](../../src/inspect_robots/frames.py) and the `Record` keeps lightweight
+[`FrameRef`](../../src/inspect_robots/frames.py) handles, so long, multi-camera episodes stay
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's
 `stats.frames_dir` rather than globbing `<log_dir>/frames` directly.
@@ -181,7 +218,7 @@ The frame sequence includes both sides of every action. The reset observation
 is stored at index `0`; the result of step `t` is stored at `t + 1`. A camera
 present throughout a trial with `n` completed steps therefore produces `n + 1`
 files, including the terminal post-action state. In each
-[`StepRecord`](/api/#inspect_robots.rollout.StepRecord),
+[`StepRecord`](../../src/inspect_robots/rollout.py),
 `image_refs` points to the pre-action frames and `result_image_refs` points to
 the post-action frames. Both corresponding `Observation.images` mappings are
 empty while a frame store is active. Consumers must load the appropriate

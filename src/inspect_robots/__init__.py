@@ -20,11 +20,17 @@ except PackageNotFoundError:  # pragma: no cover - only hit in a non-installed t
     __version__ = "0.0.0+unknown"
 
 from inspect_robots import defaults
+from inspect_robots.analyzer import Analysis, Analyzer, AnnotatedLog, rescore
+from inspect_robots.annotation import Annotation, read_annotations
+from inspect_robots.benchmark import Benchmark, eval_benchmark
 from inspect_robots.console import ConsolePoll, EndRequest, OperatorConsole, OperatorInput
 from inspect_robots.embodiment import (
     Embodiment,
     EmbodimentBase,
     EmbodimentInfo,
+    HealthCheck,
+    HealthReport,
+    Readiness,
 )
 from inspect_robots.eval import eval, eval_set
 from inspect_robots.grader import Grader, operator_grader, vlm_grader
@@ -37,6 +43,7 @@ from inspect_robots.log import (
     read_eval_log,
 )
 from inspect_robots.policy import Policy, PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import PolicyAdapter, ToolAdapter
 from inspect_robots.registry import (
     embodiment,
     grader,
@@ -48,7 +55,8 @@ from inspect_robots.registry import (
     sink,
     task,
 )
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import ChunkRecord, Record
+from inspect_robots.rubric import Rubric
 from inspect_robots.scene import Scene, Target
 from inspect_robots.scorer import (
     Score,
@@ -72,19 +80,37 @@ from inspect_robots.spaces import (
 )
 from inspect_robots.task import Epochs, Task, TaskEnvelope
 from inspect_robots.taskgen import generate_scene
-from inspect_robots.types import OPERATOR_END, Action, ActionChunk, Observation, StepResult
+from inspect_robots.tools import Tool, ToolLibrary, ToolResult
+from inspect_robots.types import (
+    DONE,
+    GIVE_UP,
+    OPERATOR_END,
+    Action,
+    ActionChunk,
+    Observation,
+    StepResult,
+    Termination,
+)
 
 # The public, stability-guaranteed API. Anything not listed here (or prefixed
 # with ``_``) is private. Authoring a benchmark, policy, or embodiment should only
 # need these names.
 __all__ = [
     "ABSOLUTE_CONTROL_MODES",
+    "DONE",
+    "GIVE_UP",
     "OPERATOR_END",
     "Action",
     "ActionChunk",
     "ActionSemantics",
+    "Analysis",
+    "Analyzer",
+    "AnnotatedLog",
+    "Annotation",
+    "Benchmark",
     "Box",
     "CameraSpec",
+    "ChunkRecord",
     "ConsolePoll",
     "Embodiment",
     "EmbodimentBase",
@@ -96,15 +122,21 @@ __all__ = [
     "EvalSpec",
     "EvalStats",
     "Grader",
+    "HealthCheck",
+    "HealthReport",
     "Observation",
     "ObservationSpace",
     "OperatorConsole",
     "OperatorInput",
     "OperatorSession",
     "Policy",
+    "PolicyAdapter",
     "PolicyBase",
     "PolicyConfig",
     "PolicyInfo",
+    "Readiness",
+    "Record",
+    "Rubric",
     "Scene",
     "SceneResult",
     "Score",
@@ -115,12 +147,17 @@ __all__ = [
     "Target",
     "Task",
     "TaskEnvelope",
-    "TrialRecord",
+    "Termination",
+    "Tool",
+    "ToolAdapter",
+    "ToolLibrary",
+    "ToolResult",
     "__version__",
     "defaults",
     "embodiment",
     "episode_length",
     "eval",
+    "eval_benchmark",
     "eval_set",
     "generate_scene",
     "grader",
@@ -131,8 +168,10 @@ __all__ = [
     "operator_scorer",
     "policy",
     "reached_goal_state",
+    "read_annotations",
     "read_eval_log",
     "registered",
+    "rescore",
     "resolve",
     "scorer",
     "sink",

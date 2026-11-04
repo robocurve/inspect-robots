@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from inspect_robots.log import EvalLog, EvalSpec
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.spaces import Box, ObservationSpace
     from inspect_robots.types import Action, Observation, StepResult
 
@@ -763,7 +763,7 @@ class RerunSink:
         self._ensure_worker()
         self._enqueue(payload)
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Drain queued events between trials, bounding loss if the eval aborts mid-run.
 
         ``eval()`` does not guarantee ``on_eval_end`` on every failure path

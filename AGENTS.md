@@ -56,8 +56,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   (`--cov-fail-under=100`). Pre-commit runs ruff+mypy on commit and the coverage
   gate on push (`.pre-commit-config.yaml`). CI runs all gates on Linux+macOS /
   py3.11-3.12 as **blocking, required PR checks** (coverage below 100% fails the
-  build), plus a **non-blocking** `test-extra` tier for py3.10/py3.13, Windows,
-  and the NumPy floor — together covering the py3.10–3.13 range pyproject claims.
+  build), plus a **non-blocking** `test-extra` tier for py3.13, Windows,
+  and the NumPy floor (on py3.11) — together covering the py3.11–3.13 range
+  pyproject claims.
 - Ruff's D1 rules require a docstring on every public module, class, and function.
   State the contract or invariant the caller needs; do not restate the symbol name.
 - **Core stays NumPy-only.** New deps are optional extras, lazily imported; the
@@ -69,12 +70,9 @@ rollout, scores it, and writes an immutable `EvalLog`. Mirrors Inspect AI's
   `CHANGELOG.md`, move its entry into a fragment.
 - Public API is fenced by `inspect_robots.__all__` and guarded by
   `tests/test_api_snapshot.py` — update both together.
-- Documentation source lives in `docs/`, and the Docusaurus site lives in
-  `website/`. Generate the ignored API page first with `uv run python
-  scripts/gen_api_docs.py`, then run `npm ci` and `npm run build` from
-  `website/` (`npm run start` previews it). A fresh checkout has no
-  `docs/api/index.md`; the npm pre-scripts fail with the generation command
-  instead of a sidebar error.
+- Guides live in `docs/` as plain GitHub Markdown (index: `docs/README.md`);
+  there is no docs site or build. Link API symbols to their defining
+  `src/` file; `tests/test_docs_links.py` checks links, anchors and symbols.
 
 ## Out of scope (separate repos / plugins)
 
@@ -93,6 +91,9 @@ and its 100% coverage gate; `plugins/inspect-robots-isaacsim/` is the reference 
 - **`ci-ok` is the single required status check** — an aggregate job at the end
   of `ci.yml`. When adding a CI job, add it to `ci-ok`'s `needs` list, or it
   will not gate merges.
+- **Claude Code Review** (Anthropic's managed GitHub app) comments on every PR
+  push. It never approves; merges still follow the `robocurve-pr-reviewer`
+  verdict. Tune what it flags in `REVIEW.md`, which it reads from `main`.
 - **Red main is stop-the-line**: if CI fails on a push to main, the
   `alert-red-main` job opens an issue. Fix forward or revert before merging
   anything else; if the failure was transient, re-run the failed jobs and close

@@ -17,7 +17,7 @@ Wire format: one websocket **binary** message per frame, msgpack-encoded with
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -26,7 +26,7 @@ import msgpack_numpy
 import numpy as np
 
 
-class MessageType(str, Enum):
+class MessageType(str, Enum):  # noqa: UP042 - StrEnum changes str()/format() of wire values
     """Frame kinds; request/response pairs are in ``REQUEST_RESPONSE_PAIRS``."""
 
     HELLO = "hello"
@@ -79,7 +79,7 @@ class WsError(Exception):
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass(frozen=True)

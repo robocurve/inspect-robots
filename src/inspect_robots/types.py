@@ -46,17 +46,58 @@ class Observation:
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
+# Standard terminal-action kinds. A policy may define others; it declares the
+# kinds it can emit in ``PolicyInfo.terminal_actions``.
+DONE = "done"
+GIVE_UP = "give_up"
+
+
+@dataclass(frozen=True)
+class Termination:
+    """A policy's decision to end the trial: the terminal part of its action space.
+
+    ``kind`` names the terminal action (``"done"``, ``"give_up"``, or any other
+    kind the policy declares in ``PolicyInfo.terminal_actions``) and becomes the
+    record's termination reason; ``reason`` is the policy's stated explanation,
+    recorded verbatim as the termination detail. Ending a trial is not a claim of
+    success: scoring stays with the task's scorers.
+    """
+
+    kind: str
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or not self.kind.strip():
+            raise ValueError("Termination.kind must be a non-empty string")
+        if not isinstance(self.reason, str):
+            raise ValueError("Termination.reason must be a string")
+
+
 @dataclass(frozen=True, eq=False)
 class Action:
     """A single action to apply to an embodiment.
 
     Semantics (control mode, rotation representation, gripper kind, frame) live on
     the action *space*, not on every action instance —
-    see [`inspect_robots.spaces`][inspect_robots.spaces].
+    see [`inspect_robots.spaces`][inspect_robots.spaces]. ``terminal`` is set by
+    the action manager on the last action it executes from a terminal chunk: the
+    trial ends after this action, unless the embodiment ends it first.
     """
 
     data: StateArray
     meta: Mapping[str, Any] = field(default_factory=dict)
+    terminal: Termination | None = None
+
+    def __post_init__(self) -> None:
+        _check_terminal(self.terminal, "Action")
+
+
+def _check_terminal(terminal: object, owner: str) -> None:
+    """Reject a ``terminal`` that is not a ``Termination``, where the policy builds it."""
+    if terminal is not None and not isinstance(terminal, Termination):
+        raise TypeError(
+            f"{owner}.terminal must be a Termination or None, got {type(terminal).__name__}"
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -69,16 +110,23 @@ class ActionChunk:
     rate the chunk was intended to be played at — advisory metadata a consumer
     may honor (the rollout enforces no rate; ``None`` leaves it unspecified).
     ``inference_latency_s``, when measured, is logged.
+
+    ``terminal`` ends the trial after the chunk's actions: the policy chose a
+    terminal action (``done``, ``give_up``, ...). A terminal chunk may have no
+    actions, which ends the trial without moving the embodiment; every other
+    chunk needs at least one action.
     """
 
     actions: Sequence[Action]
     control_hz: float | None = None
     inference_latency_s: float | None = None
     meta: Mapping[str, Any] = field(default_factory=dict)
+    terminal: Termination | None = None
 
     def __post_init__(self) -> None:
-        if len(self.actions) == 0:
-            raise ValueError("ActionChunk must contain at least one action")
+        _check_terminal(self.terminal, "ActionChunk")
+        if len(self.actions) == 0 and self.terminal is None:
+            raise ValueError("ActionChunk must contain at least one action unless it is terminal")
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -89,6 +137,10 @@ class ActionChunk:
 # (y/n/partial/skip + optional grader note) is collected by the CLI's operator
 # prompt, which fires for attended trials that end with this reason (#194).
 OPERATOR_END = "operator_end"
+
+# Termination reasons for a trial that ran out of its budget: ``max_steps`` for a
+# step budget, ``max_seconds`` for a budget declared in seconds.
+HORIZON_REASONS = frozenset({"max_steps", "max_seconds"})
 
 
 @dataclass(frozen=True, eq=False)

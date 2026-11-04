@@ -19,13 +19,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
 
 class _CancelledTrial(KeyboardInterrupt):
     """Ctrl-C during a trial, carrying the partial record (mirrors exc.record)."""
 
-    def __init__(self, message: str, record: TrialRecord) -> None:
+    def __init__(self, message: str, record: Record) -> None:
         super().__init__(message)
         self.record = record
 
@@ -34,13 +34,13 @@ class InspectRobotsError(Exception):
     """Base class for all Inspect Robots errors.
 
     When an error is raised from inside a running trial, the rollout engine
-    attaches the partial [`TrialRecord`][inspect_robots.rollout.TrialRecord] — the
+    attaches the partial [`Record`][inspect_robots.rollout.Record] — the
     steps walked and the transcript events up to the failure — as ``record``,
     so the orchestrator can preserve it in logs. ``record`` is ``None`` for
     errors raised outside a rollout (configuration, compatibility, ...).
     """
 
-    record: TrialRecord | None = None
+    record: Record | None = None
 
 
 class ConfigError(InspectRobotsError):
@@ -63,4 +63,4 @@ class EmbodimentFault(InspectRobotsError):
 
 
 class SafetyAbort(InspectRobotsError):
-    """An approver vetoed an action / e-stop. Always halts the eval."""
+    """A guard vetoed an action / e-stop. Always halts the eval."""
