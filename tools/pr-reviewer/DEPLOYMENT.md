@@ -209,3 +209,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `06f74c33` $30.
 - 2026-11-04: PR #599 head `e2fc5ef8` $30; PR lifetime $235, author 2026-11 $250 (Jay's $250 total authorization; YAM has no reviewer bot).
 - 2026-11-04: caps above the $200 monthly ceiling are rejected (invalid_budget_config, run 1900896b errored); PR #599 and author caps set to $199. Head `5a3ddef3` $30.
+- 2026-11-04: PR #599 head `c18aff40` $30.
