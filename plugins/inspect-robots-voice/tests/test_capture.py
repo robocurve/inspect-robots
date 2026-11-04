@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import queue
 import sys
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -172,3 +173,70 @@ def test_missing_portaudio_error_carries_install_instructions(
 
     with pytest.raises(OSError, match="libportaudio2"):
         MicrophoneCapture(None, 16_000, audio_queue)
+
+
+def test_playback_aware_muting_callback() -> None:
+    from inspect_robots_voice._capture import (
+        AudioArray,
+        _active_speakers,
+        _is_playback_active,
+        _register_speaker,
+        _speakers_lock,
+        _unregister_speaker,
+    )
+
+    sounddevice = _SoundDevice(_DEVICES)
+    audio_queue: queue.Queue[AudioArray] = queue.Queue(maxsize=2)
+    capture = MicrophoneCapture(1, 16_000, audio_queue, _sounddevice=sounddevice)
+
+    # When no speakers are active and hangover has passed, blocks are preserved.
+    with _speakers_lock:
+        _active_speakers.clear()
+    _unregister_speaker(object())
+    time.sleep(0.35)
+
+    capture._callback(np.array([[5.0], [6.0]]), 2, object(), object())
+    assert np.array_equal(audio_queue.get_nowait(), np.array([5.0, 6.0], dtype=np.float32))
+
+    # When a speaker is active, blocks are dropped entirely (not enqueued).
+    dummy_speaker = object()
+    _register_speaker(dummy_speaker)
+    try:
+        assert _is_playback_active()
+        capture._callback(np.array([[5.0], [6.0]]), 2, object(), object())
+        assert audio_queue.empty()
+    finally:
+        _unregister_speaker(dummy_speaker)
+
+    # Echo tail hangover: immediately after unregistering, capture is still muted.
+    assert _is_playback_active()
+    capture._callback(np.array([[7.0], [8.0]]), 2, object(), object())
+    assert audio_queue.empty()
+
+    # After hangover period expires, capture resumes and preserves blocks.
+    time.sleep(0.35)
+    assert not _is_playback_active()
+    capture._callback(np.array([[9.0], [10.0]]), 2, object(), object())
+    assert np.array_equal(audio_queue.get_nowait(), np.array([9.0, 10.0], dtype=np.float32))
+
+
+def test_is_playback_active_with_explicit_timestamps() -> None:
+    from inspect_robots_voice._capture import (
+        _active_speakers,
+        _is_playback_active,
+        _register_speaker,
+        _speakers_lock,
+        _unregister_speaker,
+    )
+
+    with _speakers_lock:
+        _active_speakers.clear()
+
+    dummy = object()
+    _register_speaker(dummy)
+    assert _is_playback_active(now=100.0)
+
+    _unregister_speaker(dummy)
+    # Hangover lasts 0.3s
+    assert _is_playback_active(now=time.monotonic() + 0.1)
+    assert not _is_playback_active(now=time.monotonic() + 1.0)
