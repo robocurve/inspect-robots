@@ -7203,6 +7203,38 @@ def test_the_pre_paper_guardrail_hook_is_a_hard_error() -> None:
         _build_guardrails(embodiment.info.action_space, None, embodiment)
 
 
+def test_the_pre_paper_hook_on_an_embodiment_base_subclass_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.embodiment import EmbodimentBase
+    from inspect_robots.mock import CubePickEmbodiment
+
+    cube = CubePickEmbodiment()
+
+    class _UnmigratedBase(EmbodimentBase):
+        info = cube.info
+
+        def reset(self, scene: Any, *, seed: int | None = None) -> Any:
+            raise AssertionError("never called")
+
+        def step(self, action: Any) -> Any:
+            raise AssertionError("never called")
+
+        def contribute_guardrails(self, action_space: object) -> object:
+            raise AssertionError("never called")
+
+    class _Migrated(_UnmigratedBase):
+        def contribute_guards(self, action_space: Any) -> Any:
+            from inspect_robots.guard import GuardContribution
+
+            return GuardContribution()
+
+    with pytest.raises(SystemExit, match=r"contribute_guardrails.*contribute_guards"):
+        _build_guardrails(cube.info.action_space, None, _UnmigratedBase())
+    # An override of the new hook is a migrated adapter, even with the old name left behind.
+    _, active, _ = _build_guardrails(cube.info.action_space, None, _Migrated())
+    assert active == ["clamp", "delta-limit"]
+
+
 def test_none_guardrail_hook_is_a_hard_error() -> None:
     from inspect_robots.cli import _build_guardrails
     from inspect_robots.mock import CubePickEmbodiment

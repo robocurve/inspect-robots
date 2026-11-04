@@ -430,6 +430,37 @@ def test_done_hindsight_lands_in_trial_metadata(tmp_path: Path) -> None:
     assert logs[0].samples[0].trial_metadata[0]["hindsight"] == hindsight
 
 
+def test_a_contributed_terminal_tool_may_stop_without_an_action(tmp_path: Path) -> None:
+    from inspect_robots.tools import TERMINATION, Tool, ToolLibrary
+    from inspect_robots.types import GIVE_UP, Termination
+
+    def abort(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        stop = Termination(GIVE_UP, "operator e-stop pressed")
+        return ToolResult(chunk=ActionChunk(actions=[], terminal=stop), note="aborted")
+
+    class _AbortingCube(CubePickEmbodiment):
+        def contribute_tools(self, action_space: Box) -> ToolLibrary:
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": "abort",
+                    "description": "Stop now without moving.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            return ToolLibrary([Tool("abort", schema, abort, TERMINATION)])
+
+    script = _Script([_tool_response("abort", {})])
+    sink = _RecordingSink()
+    logs = ir_eval(_task(), _policy(script), _AbortingCube(), log_dir=str(tmp_path), sinks=[sink])
+
+    assert logs[0].status == "success"
+    (record,) = sink.records
+    assert record.termination_reason == GIVE_UP
+    assert record.steps == []
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
+
+
 def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> None:
     script = _Script([_tool_response("move_by", {"deltas": {"dx": 0.01}})])
 

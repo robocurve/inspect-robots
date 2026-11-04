@@ -1296,7 +1296,13 @@ class LLMAgentPolicy(PolicyBase):
                                 sleep_request = result.sleep
                                 stopped = chunk.terminal is not None
                                 if stopped:
-                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
+                                    # A terminal tool may stop without a hold action;
+                                    # only an action can carry hindsight.
+                                    self._hindsight = (
+                                        chunk.actions[0].meta.get("stop_hindsight")
+                                        if chunk.actions
+                                        else None
+                                    )
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture

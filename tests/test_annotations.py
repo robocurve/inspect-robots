@@ -546,6 +546,35 @@ def test_a_cross_rubric_supersedes_does_not_retire_a_general_judgement() -> None
     assert current([general, scoped], "r", JUDGEMENT, "safety") == scoped
 
 
+def test_cli_score_export_carries_its_corrections_so_rescoring_reproduces_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, _ = _judged_log(tmp_path)
+    edit = ["edit", str(path), "--trial", "s0-e1", "--judgement", "yes", "--author", "r"]
+    assert main(edit) == 0
+    out_path = tmp_path / "exported" / "log.json"
+    assert main(["score", str(path), "--out", str(out_path)]) == 0
+    assert f"wrote {annotations_path(out_path)}" in capsys.readouterr().out
+
+    exported = AnnotatedLog.load(out_path)
+    assert exported.log.results.metrics["stacked"] == 0.75
+    again = rescore(exported.log, exported.annotations)
+    assert again.results.metrics["stacked"] == 0.75
+    assert again.samples == exported.log.samples
+
+
+def test_cli_score_export_without_edits_clears_a_stale_sidecar(tmp_path: Path) -> None:
+    path, _ = _judged_log(tmp_path)
+    out_path = tmp_path / "exported" / "log.json"
+    out_path.parent.mkdir()
+    annotations_path(out_path).write_text("stale\n", encoding="utf-8")
+    assert main(["score", str(path), "--out", str(out_path)]) == 0
+    assert not annotations_path(out_path).exists()
+    AnnotatedLog.load(out_path)
+    assert main(["score", str(path), "--out", str(out_path)]) == 0  # nothing to clear
+    assert not annotations_path(out_path).exists()
+
+
 def test_cli_edit_rejects_unknown_trials(tmp_path: Path) -> None:
     path, _ = _judged_log(tmp_path)
     with pytest.raises(SystemExit, match="--trial 's9-e0' is not a trial in this log"):

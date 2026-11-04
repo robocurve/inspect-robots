@@ -514,7 +514,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_score.add_argument(
         "--out",
         default=None,
-        help="write the re-scored log here (a new file; the input log is never rewritten)",
+        help=(
+            "write the re-scored log here, with a copy of its annotations file beside it "
+            "(a new file; the input log is never rewritten)"
+        ),
     )
 
     p_analyze = sub.add_parser("analyze", help="run a registered analyzer over saved logs")
@@ -932,7 +935,9 @@ def _default_guardrails(
 
     missing = object()
     hook = getattr(embodiment, "contribute_guards", missing)
-    if hook is missing and getattr(embodiment, "contribute_guardrails", missing) is not missing:
+    if getattr(embodiment, "contribute_guardrails", missing) is not missing and (
+        hook is missing or _inherits_default_guard_hook(embodiment)
+    ):
         # The pre-paper hook name: running would silently drop the embodiment's
         # own safety guards, so refuse until the adapter is migrated.
         assert embodiment is not None
@@ -959,6 +964,14 @@ def _default_guardrails(
             parts.append(guard)
             active.append(name)
         warnings.extend(contribution.warnings)
+
+
+def _inherits_default_guard_hook(embodiment: object) -> bool:
+    """True when ``contribute_guards`` is ``EmbodimentBase``'s no-op, not an override."""
+    from inspect_robots.embodiment import EmbodimentBase
+
+    method = getattr(type(embodiment), "contribute_guards", None)
+    return method is EmbodimentBase.contribute_guards
 
 
 def _attended(args: argparse.Namespace) -> bool:
@@ -3126,6 +3139,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 def _cmd_score(args: argparse.Namespace) -> int:
     """Re-score a saved log from its annotations; print stored versus re-scored metrics."""
     from inspect_robots.analyzer import AnnotatedLog, rescore
+    from inspect_robots.annotation import annotations_path
 
     item = AnnotatedLog.load(args.log)
     rescored = rescore(item.log, item.annotations)
@@ -3141,6 +3155,15 @@ def _cmd_score(args: argparse.Namespace) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(rescored.to_dict(), indent=2) + "\n", encoding="utf-8")
         print(f"wrote {out}")
+        # The exported log keeps the run's original judgements (raw data is never
+        # rewritten), so its corrections travel beside it as its own annotations
+        # file; loading and re-scoring the export then reproduces these scores.
+        source, sidecar = annotations_path(args.log), annotations_path(out)
+        if source.exists():
+            sidecar.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"wrote {sidecar}")
+        elif sidecar.exists():
+            sidecar.unlink()
     return 0
 
 
