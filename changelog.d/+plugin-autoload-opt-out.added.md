@@ -1,1 +1,0 @@
-**Core:** `INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD` (any non-empty value) skips entry-point plugin discovery, so only builtins and hand-registered components resolve. It mirrors pytest's `PYTEST_DISABLE_PLUGIN_AUTOLOAD` and is a reproducibility switch, not a security boundary.

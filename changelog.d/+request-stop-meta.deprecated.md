@@ -1,1 +1,0 @@
-**Core:** ending a trial through `action.meta["request_stop"]` / `["stop_reason"]` is deprecated in favour of terminal actions (`ActionChunk.terminal`). It still ends the trial the same way and now also records `stop_detail` as the termination detail.

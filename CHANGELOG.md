@@ -10,6 +10,147 @@ and are compiled into a new version section at release.
 
 <!-- towncrier release notes start -->
 
+## [1.0.0] - 2026-11-04
+
+### Added
+
+- **Core/CLI:** `eval_set(max_workers=N)` and `eval-set --max-workers N` run
+  independent simulation tasks concurrently, with per-task resources and logs
+  returned in input order. The default remains sequential. Parallel CLI runs
+  require `--no-prompt`; the Python API requires registered component names.
+  Escaping safety halts and interrupts stop task admission even when resource
+  cleanup fails; secondary cleanup errors are reported as warnings. ([#361](https://github.com/robocurve/inspect-robots/issues/361))
+- **Agent plugin (0.29.0):** Surface embodiment action bounds and pinned axes in
+  system prompt, update `give_up` guidance for workspace limits, and report
+  "Target reached." when residual is within tolerance ([#408](https://github.com/robocurve/inspect-robots/issues/408)).
+- **Agent plugin (0.30.0):** every observation that follows a move now narrates how much of the motion played and the readback's largest remaining offset from the target (or `Target reached.`), in every image mode rather than only behind a `take_pic`. Observations carrying an embodiment `motion_report` extra (a mapping whose `lines` are plain-language strings, such as the YAM plugin's per-arm IK diagnosis) have those lines rendered after the guard line, so the model is told why a move fell short.
+- **Agent plugin (0.30.0):** new `-P eval_notes="..."` appends a short benchmark-level brief to the system prompt as an `Evaluation notes:` section, placed after the budget lines and before any prior learnings, and records it in the eval configuration. Use it to state the scoring regime (for example partial credit per milestone, so the agent spends its whole budget instead of giving up early) without editing task instructions or the shared prompt.
+- **Agent plugin (0.30.0):** observations in absolute modes now print the setpoint each dimension holds from the agent's commands under the state line, plus `readback minus setpoint:` for the dimensions that differ by 0.005 or more, so sag, drift, scatter, and a squeezed gripper are read off the observation rather than estimated. The system prompt announces the lines.
+- **Core:** `INSPECT_ROBOTS_DISABLE_PLUGIN_AUTOLOAD` (any non-empty value) skips entry-point plugin discovery, so only builtins and hand-registered components resolve. It mirrors pytest's `PYTEST_DISABLE_PLUGIN_AUTOLOAD` and is a reproducibility switch, not a security boundary.
+- **Core:** `inspect-robots doctor` checks the values written for
+  the embodiment's declared device slots before construction. Missing camera or serial
+  paths and missing CAN interfaces are reported together, and the command
+  exits nonzero when any are found. This catches stale configured device
+  references before the robot is run ([plan 0082](plans/0082-doctor-device-validation.md),
+  [#50](https://github.com/robocurve/inspect-robots/issues/50)).
+- **Core:** benchmarks, as in the paper. A `Benchmark(name, tasks, version, description, metadata)` is a named, versioned sequence of tasks (`Task` objects or registered names), and `benchmark` is a registry kind (`@benchmark`, entry-point group `inspect_robots.benchmarks`). `eval_benchmark` runs one through `eval_set`, as do `inspect-robots run --benchmark NAME` and `inspect-robots eval-set --benchmark NAME`; every log records the benchmark's name and version in `EvalSpec.benchmark`, and the `benchmarks` analyzer groups results by them. `Benchmark` and `eval_benchmark` are exported from `inspect_robots`.
+- **Core:** embodiments gain the paper's evaluation interface, four optional methods `eval()` calls between trials. `health()` returns a `HealthReport` of `HealthCheck`s, and a failed check stops the run before anything moves; `prepare_trial(scene)` returns a `Readiness`, and not ready stops the run with the stated reason; `home()` runs before each trial's `reset()`; `park()` runs after every trial once it is scored (not after a cancelled run). `EmbodimentInfo.morphology` names the physical platform, and the log records it with the offered methods under `embodiment_info`. The conformance kit adds `check_policy_interfaces` (embodiments sharing a morphology must offer different policy interfaces) and `check_evaluation_interface` (method signatures, checked without calling them). `HealthCheck`, `HealthReport` and `Readiness` are exported from `inspect_robots`.
+- **Core:** every trial is a record with an identity, as in the paper. `Record.record_id` is unique per trial, and `Record.chunks` keeps every action chunk the policy produced, with its inference latency and wall time, captured at the policy so any action manager is covered. `eval()` writes one directory per trial under `records/<run>/` with `record.json` (the resolved per-trial configuration with credential-like values redacted, the termination and every event) and `chunks.jsonl`; `store_records=False` turns this off. The log moves to schema 3, adding `SceneResult.record_ids`, `record_dirs` and `events` (including the `policy_terminal` event) and `EvalStats.records_dir`; versions 1 and 2 still read. The HTML viewer shows the policy's stated reason for each trial.
+- **Core:** guards are configuration, as in the paper. `guard` is a registry kind (`@guard`, entry-point group `inspect_robots.guards`) whose factories take the action space and keyword parameters; `clamp` and `delta-limit` are built in. A guard spec is `NAME` or `NAME:key=value,...`: `inspect-robots run --guard SPEC` (repeatable) and a `[guards]` config section add guards after the default guardrails, `--disable-guardrails` keeps only the configured ones, and `eval()` and `eval_set()` accept a list of specs (also in parallel runs). `build_guard` and `parse_guard_spec` are in `inspect_robots.guard`. Each `approval` event now lists the guards that changed the action, with the action before and after each.
+- **Core:** record editors and analyzers, as in the paper. Raw logs and records are never rewritten after a run: an `Annotation` (judgement, note or grading error, with author, source, time and an optional `supersedes`) records each later judgement in an append-only `<log>.annotations.jsonl` beside the log, and `read_annotations` returns them after the judgements captured during the run, lifted from any log schema. `rescore` recomputes results from annotations through the `operator` scorer, keeping every other stored score (a log records a scorer's name, not its configuration), so an unedited log re-scores to exactly its stored results. Analyzers are a new registry kind (`@analyzer`, entry-point group `inspect_robots.analyzers`) that receive read-only `AnnotatedLog` views and return an `Analysis`; `scores`, `terminations`, `digest` and `html` ship built in. New commands: `inspect-robots edit`, `score` and `analyze`. Logs record their epoch reducer in `EvalSpec.reducer`.
+- **Core:** replanning on observation, as in the paper. `DefaultActionManager(triggers=[...])` asks each `ReplanTrigger` before playing the next buffered action; when one fires, the rest of the chunk is dropped, the policy is called on the current observation with `extra["replan"]` naming the trigger and reason, and the record gets a `replan` event. Built in: `UnreachableTarget` (the guard clamped an action of the current chunk to the bounds) and `GripperSlip` (a settled gripper moves toward its command with no new command; `GripperSlip.for_embodiment` builds one per gripper dimension). **Agent:** tells the model when a motion was cut short and why.
+- **Core:** reports rendered by `inspect-robots view logs/` now start with an
+  "All runs" link back to the directory's `index.html`. Single-log reports are
+  unchanged.
+- **Core:** tasks measure trials against named rubrics, as in the paper. A `Rubric(name, scorer, text, kind, metadata)` names one criterion, with `kind` `capability` (default) or `safety`; `Task(rubrics=[...])` declares them and `Scene.rubrics` replaces a task rubric of the same name or adds one. Results and metrics are keyed by rubric name, so two rubrics may share a scorer type. `scorer=` remains as shorthand for one rubric per scorer, named after it, so existing tasks log the same keys. A trial gets one verdict: with several judgement rubrics it counts for the rubric the grader judged (the first with text, preferring operator-scored ones, or the safety rubric after a definitive embodiment outcome) and the others abstain until judged with `inspect-robots edit --rubric`. The VLM grader judges that rubric's text, the operator prompt and HTML viewer show every rubric's text, and compatibility checking warns when a `safety` rubric measures a policy that cannot `give_up`. `Rubric` is exported from `inspect_robots`.
+- **Core:** terminal actions are part of a policy's action space, as in the paper. A policy declares the kinds it can emit in `PolicyInfo.terminal_actions` and ends a trial by returning `ActionChunk(..., terminal=Termination(kind, reason))`; a terminal chunk may have no actions, which ends the trial without moving the embodiment. The kind is the record's termination reason, the stated reason is its new `termination_detail` (logged as `termination_details`), and a `policy_terminal` event marks the step. A terminal action on the last allowed step is reported as itself, not as `max_steps`, and an undeclared kind fails the trial with a `PolicyError`. `DONE`, `GIVE_UP` and `Termination` are exported from `inspect_robots`.
+- **Core:** the `vlm` grader sends one preflight request (exact model, endpoint
+  and effort, with a small test image) before any rollout, and the CLI runs it
+  before the policy loads or the robot connects. An HTTP 4xx rejection stops the
+  run with the provider's message; an outage only warns
+  ([plan 0085](plans/0085-grader-preflight-and-loud-ungraded.md)).
+- **Core:** the paper's policy adapter. `PolicyAdapter` is the protocol for what a language-model policy needs from its embodiment (instructions, preprocessed observation text, and control and termination tool libraries), and `ToolAdapter` is the reference implementation. `Tool` and `ToolLibrary` (in `inspect_robots.tools`) define tools as a schema plus a function, listed in a stable order; `control_tools` builds the speed-limited move, `sleep` and `take_pic` tools from an embodiment's spaces and `termination_tools` builds `done` and `give_up`. Embodiments may offer `contribute_tools(action_space)`, which `eval()` passes to a policy's `bind_tools`. `Tool`, `ToolLibrary`, `ToolResult`, `PolicyAdapter` and `ToolAdapter` are exported from `inspect_robots`.
+- **Docs:** a public rig reference (`docs/guide/rig-reference.md`) covering rig setup, live view over SSH, YAM geometry, health checks and control interfaces, a giant-Jenga worked example, and serving Pi 0.5 on YAM through OpenPI with the new `examples/pi05/serve_pi05_yam.py`.
+- Added `security@robocurve.org` as an email channel for vulnerability reports in `SECURITY.md`, and an `.oss-scanner/` Dockerfile and threat model for automated security scanning.
+- Agent plugin: observations' `extra["motor_temps"]["lines"]` are rendered for the model like the motion report, every observation carries the wall-clock time since the trial began, and a `sleep` tool holds the current setpoint for up to 180 s without spending an LLM call (plan 0087).
+- Agent: `-P timeout_s=` sets the per-request HTTP timeout on every wire (default: the wire's own), and the Interactions wire accepts `-P service_tier=standard|flex|priority`.
+
+### Changed
+
+- `inspect-robots setup` now warns when it cannot confirm which video devices are color cameras and is listing every device unfiltered. ([#71](https://github.com/robocurve/inspect-robots/issues/71))
+- `inspect-robots summarize` docs now note that `--model` requests for runs with many trials can exceed the model's context window. ([#496](https://github.com/robocurve/inspect-robots/issues/496))
+- **Repo:** changelog entries are now fragments in `changelog.d/`, compiled into
+  `CHANGELOG.md` with towncrier at release, so PRs no longer conflict on
+  `CHANGELOG.md`. The pre-fragment `[Unreleased]` log is retitled
+  `[0.7.0 to 0.60.0]: consolidated log`. ([#528](https://github.com/robocurve/inspect-robots/issues/528))
+- **Agent and CaP-X plugins:** `done` and `give_up` (CaP-X: `FINISH` and `GIVE_UP`) end the trial with terminal actions and declare them in `PolicyInfo.terminal_actions`; the stated summary or reason is recorded as the termination detail. CaP-X trials now end with the reasons `done` and `give_up` instead of `FINISH` and `GIVE_UP`. What the model sees is unchanged.
+- **Agent plugin (0.30.0):** `move_to` / `move_joints` calls that leave a dimension unnamed now keep that dimension's last commanded target for the rest of the trial instead of re-targeting its measured value, and `done` / `give_up` re-send the held target. Measured values lag commands by the tracking sag (a squeezed gripper reads wider than commanded, a loaded wrist droops), so every partial move used to turn that lag into the next command: pitch and roll crept over a trial, and carry moves that omitted the gripper loosened the squeeze until the object slipped. The first move of a trial still starts from the measured state.
+- **Agent:** the agent policy is built on the core `ToolAdapter`: its tools, embodiment instructions and observation text now come from `inspect_robots.tools` and `inspect_robots.policy_adapter`, and the plugin keeps its prompts, conversation and provider wire formats. Requests to the model are byte-identical. The agent accepts tools an embodiment contributes. **CaP-X:** renders embodiment notes and state lines through the same core helpers.
+- **Core:** a trial the grader tried and failed to judge no longer scores as a
+  robot failure. The grader records `grading_error` in the trial metadata, the
+  `operator` scorer abstains on it, and the run finishes every trial and then
+  ends with status `error` and an "N of M trial(s) ungraded" message
+  ([plan 0085](plans/0085-grader-preflight-and-loud-ungraded.md)).
+- **Core:** eval logs are written as schema version 2, which records rubrics (`EvalSpec.rubrics`, `SceneResult.rubrics`) and the policy's stated termination detail (`SceneResult.termination_details`). Version 1 logs still read, with empty new fields and unchanged score keys. A task with a `max_seconds` budget now ends an out-of-budget trial with the reason `max_seconds` instead of `max_steps`.
+- **Repo:** agent instructions now live in `AGENTS.md` (read by Codex and other agents; `CLAUDE.md` is a one-line `@AGENTS.md` import for Claude Code), with a new step-by-step "Cutting a release" section.
+
+### Deprecated
+
+- **Core:** ending a trial through `action.meta["request_stop"]` / `["stop_reason"]` is deprecated in favour of terminal actions (`ActionChunk.terminal`). It still ends the trial the same way and now also records `stop_detail` as the termination detail.
+
+### Removed
+
+- **Repo:** retired the Docusaurus documentation site (docs.inspectrobots.org) and its generated API reference. The guides now live in `docs/` as plain Markdown on GitHub, starting at `docs/README.md`, and link API symbols to their source modules. The `inspect-robots[docs]` extra is removed. ([#580](https://github.com/robocurve/inspect-robots/issues/580))
+- **Core (breaking):** the framework's types now use the paper's terms, with no aliases left behind: `Controller` is `ActionManager` (module `inspect_robots.action_manager`), `Approver` is `Guard` (module `inspect_robots.guard`; `ClampGuard`, `DeltaLimitGuard`, `GuardChain`, `PassThroughGuard`), `TrialRecord` is `Record`, `GuardrailContribution` is `GuardContribution`, `contribute_guardrails()` is `contribute_guards()`, and `eval()` takes `action_manager=` and `guard=`. The command line, observation text and log format are unchanged. See [Migrating to the paper release](docs/migrating-to-the-paper-release.md).
+- **Core and plugins:** dropped Python 3.10, which reaches end of life in October 2026; `inspect-robots` and the in-tree plugins now require Python 3.11 or later. On 3.10, pip and uv keep resolving to the last release that supports it. This also lets the lockfile move fully to the patched Pillow 13.
+
+### Fixed
+
+- **Core:** Reject duplicate scorer names in `Task` before rollout so colliding scorers cannot combine into a shared epoch reduction or overwrite per-epoch values, and allow optional custom `name` overrides for built-in scorers. ([#480](https://github.com/robocurve/inspect-robots/issues/480))
+- `eval()` now rejects a `pass_at_<k>` epoch reducer with fewer than `k` planned epochs before any rollout, instead of failing at scoring after the run. ([#490](https://github.com/robocurve/inspect-robots/issues/490))
+- Frames from distinct trial and camera identities no longer overwrite each other: new frames use a versioned, reversibly encoded filename, and frames written under the old naming remain readable. A new write whose encoded path exceeds the filesystem limit now fails with the filesystem error instead of colliding. `inspect-robots video` output names follow the new frame names (e.g. `~f1~scene-0-e0~left_cam.mp4`); quote them in shells, since a leading `~` triggers tilde expansion. ([#491](https://github.com/robocurve/inspect-robots/issues/491))
+- On native Windows, where neither `XDG_CONFIG_HOME` nor `HOME` is usually set, the config file now falls back to `%APPDATA%\inspect-robots\config.ini`, then `%USERPROFILE%\.config\inspect-robots\config.ini`, instead of setup failing with "cannot locate a config home". ([#495](https://github.com/robocurve/inspect-robots/issues/495))
+- **Core:** Isolate exceptions in `_Broadcast` sink fan-out so a failing `LogSink` warns instead of crashing evaluation or preventing other sinks from receiving lifecycle hooks. ([#511](https://github.com/robocurve/inspect-robots/issues/511))
+- **Agent plugin:** Anthropic tool translation no longer fails when a tool omits `parameters` or sets it to `null`; it sends an empty object schema instead.
+- **CLI:** Terminate the `ffmpeg` subprocess, close stdin, wait for exit, and unlink partial output if video encoding is interrupted by an escaping exception (e.g. `KeyboardInterrupt`, `MemoryError`) ([#508](https://github.com/robocurve/inspect-robots/issues/508)).
+- **CLI:** The headless live-view tip no longer prints an IPv6 `SSH_CONNECTION`
+  address that the suggested `view --serve --host 0.0.0.0` (IPv4-only) server
+  cannot answer; it falls back to the host name ([#501](https://github.com/robocurve/inspect-robots/issues/501)).
+- **Core:** A seconds-based task no longer gets an extra step from binary float
+  rounding: `max_seconds=1.1` at 50 Hz now resolves to 55 steps instead of 56, because
+  a product within a few ULPs of an integer counts as that integer before `ceil()`.
+- **Core:** Discard `OptionSlot` entries with non-boolean default values in `option_slots`, preventing setup interview type confusion and invalid configuration writes.
+- **Core:** Normalize NumPy integer and Boolean metadata scalars in JSON eval
+  logs to prevent `TypeError` serialization crashes on eval completion
+  ([#492](https://github.com/robocurve/inspect-robots/issues/492)).
+- **Core:** NumPy integer, Boolean and floating scalars in `Scene.metadata` are
+  kept in the saved log as plain numbers instead of being silently dropped;
+  temporal and complex scalars are still omitted.
+- **Core:** Safely fall back to an empty tuple when `samples` is omitted in `EvalLog.from_dict` rather than raising `KeyError`, preserving deserialization compatibility with sample-less logs.
+- **Core:** `DeltaLimitGuard` now raises `SafetyAbort` on `±inf` as well as
+  `NaN`; previously an infinite first absolute-mode target was stored as the
+  reference and disabled the limiter on that dimension for the rest of the
+  trial ([#376](https://github.com/robocurve/inspect-robots/pull/376)).
+- **Core:** a run in which no scene completed cleanly now warns instead of
+  passing silently (survivor bias,
+  [#440](https://github.com/robocurve/inspect-robots/issues/440)). Its status is
+  unchanged, since `fail_on_error` stays the caller's tolerance control, but
+  `eval()` emits a `UserWarning` and the run summary and `inspect` print how
+  many trials the metrics rest on.
+- **Core:** a scorer can abstain with `Score(value=None)`. The value used to
+  crash `value_to_float`, so the only workaround was `0.0`, which reads as a
+  failed trial. Abstained epochs are now recorded as `null`, left out by the
+  epoch reducers and the metric mean, and a scorer that abstained everywhere
+  reports a `null` metric. `EvalResults.abstentions` counts abstained trials
+  per scorer, and `inspect` and `view` show the count beside each metric
+  ([#436](https://github.com/robocurve/inspect-robots/issues/436)).
+- **Core:** the shared chat client behind `summarize`, `--auto-task` and the `vlm` grader validates the base URL before connecting, and reports read timeouts, dropped connections, malformed URLs and invalid API keys as guided configuration errors instead of raw exceptions. An invalid key is never echoed in the message.
+- **Core:** two regressions from the sink isolation in #520 are fixed. A failure to write the canonical eval log (`JsonLogSink`, now marked `critical`) is raised again after the other sinks finish, instead of becoming a warning that let a run with no saved log report success. A transcript sink whose `log_policy_messages` raises is skipped for the rest of the trial again (plan 0020), instead of being called every step.
+- **ROS plugin:** Accept rosbridge's failed `service_response`, whose `values`
+  is the error string rather than an object. A failed `reset_service` call now
+  raises `service_failed` with rosbridge's message instead of an `invalid_frame`
+  error that also stopped the receive thread.
+- **Setup wizard:** local macOS and Windows sessions no longer default to
+  `rerun = false` or print a headless warning just because X11/Wayland display
+  variables are absent. SSH sessions without a display still receive the
+  warning; forwarded displays and saved or explicitly entered viewer settings
+  remain supported. Empty display variables now count as unavailable
+  ([#437](https://github.com/robocurve/inspect-robots/pull/437)).
+- **Setup wizard:** the generated `config.ini` no longer annotates values you
+  typed yourself with comments written for the suggested ones. Accepting the
+  suggestions is unchanged; replacing a value now writes the bare `key = value`
+  instead of telling you that a core builtin such as `scripted` came from the
+  yam plugin, or that `max_steps = 80` is "120 s at 10 Hz".
+- Agent: chat replies stopped by a provider content filter end the trial with a forced give_up and the filter's reason instead of retrying. Chat replies keep provider reasoning fields (`reasoning`, `reasoning_details` and similar) for the next turn and report token, cache and cost usage. The Interactions wire waits up to 300 s, polls a generation the server has accepted instead of resubmitting it, records interaction ids in `interactions.jsonl`, and treats a completed turn without `steps` as empty. An explicit Google `base_url` drops the `google/` model prefix and requires a key. The move-note description is phrased as a caption for the operator, which models no longer read as a request for their hidden reasoning.
+- `inspect-robots doctor` no longer reports stream-URL camera slots (for example an MJPEG camera-hub URL) as missing device paths, and its `state_alignment` check now picks the absolute-control reference field the same way the agent tools do (the control mode's family wins when `joint_pos` and `eef_state` share a shape), so `doctor` accepts every setup a rollout accepts.
+
+### Security
+
+- **Repo:** bumped locked `pillow` to 13.0.0 and `certifi` to 2026.10.19 in `uv.lock` to clear Dependabot alerts.
+- **Repo:** bumped locked dependencies to clear open Dependabot alerts: `anyio` 4.15.1 and `virtualenv` 21.14.7 in `uv.lock`, plus patched transitive npm packages (`shell-quote`, `undici`, `fast-uri`, `joi`, `brace-expansion` and others) for the docs website and issue bot. Added a security-only `.github/dependabot.yml`.
+- **Repo:** bumped locked dependencies to clear open Dependabot alerts: `virtualenv` 21.15.1, `filelock` 4.2.4, `msgpack` 1.2.4 and `setuptools` 84.2.1 in `uv.lock`, plus `undici` 7.30.1 and `zod` 4.6.6 in the issue bot.
+
+
 ## [0.7.0 to 0.60.0]: consolidated log
 
 ### Added

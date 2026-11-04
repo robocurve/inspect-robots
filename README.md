@@ -13,7 +13,7 @@ auditable logs (grader scores, LLM transcript, full config) and first-class
 
 If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotics.
 
-![Status: alpha](https://img.shields.io/badge/status-alpha-blue)
+![Status: stable](https://img.shields.io/badge/status-stable-brightgreen)
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)

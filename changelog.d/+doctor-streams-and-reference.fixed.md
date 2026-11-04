@@ -1,1 +1,0 @@
-`inspect-robots doctor` no longer reports stream-URL camera slots (for example an MJPEG camera-hub URL) as missing device paths, and its `state_alignment` check now picks the absolute-control reference field the same way the agent tools do (the control mode's family wins when `joint_pos` and `eef_state` share a shape), so `doctor` accepts every setup a rollout accepts.
