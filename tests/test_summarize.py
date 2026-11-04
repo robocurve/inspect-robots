@@ -35,7 +35,7 @@ from inspect_robots.log import (
     read_eval_log,
 )
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Score
 from inspect_robots.task import Task
@@ -302,13 +302,13 @@ def test_digest_reports_partial_scoring_error_once(tmp_path: Path) -> None:
     class _GoodScorer:
         name = "good_score"
 
-        def __call__(self, record: TrialRecord, target: object) -> Score:
+        def __call__(self, record: Record, target: object) -> Score:
             return Score(value=1.0)
 
     class _BadScorer:
         name = "bad_score"
 
-        def __call__(self, record: TrialRecord, target: object) -> Score:
+        def __call__(self, record: Record, target: object) -> Score:
             raise RuntimeError("synthetic scorer exploded after rollout")
 
     task = Task(

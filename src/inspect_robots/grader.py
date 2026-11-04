@@ -3,7 +3,7 @@
 R6 splits judging in two. A grader captures the success judgement once per
 scored trial, after the rollout returns and before scorers run; it may be
 interactive (a human prompt) or expensive (a VLM call), and it mutates the
-[`TrialRecord`][inspect_robots.rollout.TrialRecord]. Scorers stay pure readers
+[`Record`][inspect_robots.rollout.Record]. Scorers stay pure readers
 of the record, so re-scoring a saved log remains deterministic.
 """
 
@@ -17,14 +17,16 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from inspect_robots._chatwire import HttpPost, _ChatHTTPError, chat_completion
 from inspect_robots.errors import ConfigError
+from inspect_robots.rubric import reads_judgements
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
-    from inspect_robots.rollout import StepRecord, TrialRecord
+    from inspect_robots.rollout import Record, StepRecord
     from inspect_robots.scene import Scene
     from inspect_robots.session import OperatorSession
+    from inspect_robots.types import Observation
 
 
 @runtime_checkable
@@ -40,6 +42,11 @@ class Grader(Protocol):
     ``operator`` scorer then abstains on the trial instead of scoring it as a
     failure, and the run ends with ``status == "error"`` naming the count.
 
+    What a grader captures is the run's judgement for each trial; the log
+    keeps it, and [`read_annotations`][inspect_robots.annotation.read_annotations]
+    returns it as an annotation with the grader as author. Later edits are
+    annotations beside the log, so a grader's own output is never rewritten.
+
     A grader may also define an optional ``preflight()`` method, duck-typed
     like ``config()``. It is called before any rollout (by the CLI before the
     robot is touched, and by ``eval()`` and ``eval_set()``) and should raise
@@ -51,7 +58,7 @@ class Grader(Protocol):
     name: str
     """Registry name identifying this grader in logs and CLI output."""
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Capture (or decline to capture) a judgement for one trial."""
         ...
 
@@ -68,7 +75,7 @@ class _OperatorGrader:
         """Adopt the run's session so prompts share the run's terminal seams."""
         self._session = session
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Delegate to ``OperatorSession.prompt_verdict`` (R6 capture).
 
         Without a connected session (e.g. ``eval(grader="operator")`` from the
@@ -86,7 +93,8 @@ class _OperatorGrader:
 def operator_grader(session: OperatorSession | None = None) -> _OperatorGrader:
     """The builtin human grader: prompt for a verdict and optional notes.
 
-    Adopts a console- or embodiment-definitive verdict without re-asking, and
+    Adopts a console verdict, or an embodiment-definitive one unless a safety
+    rubric needs judging, without re-asking, and
     never blocks a run whose stdin cannot answer (EOF degrades to no verdict).
     """
     return _OperatorGrader(session)
@@ -124,11 +132,15 @@ def _phase_frames(
     return [(camera, refs[camera].load()) for camera in sorted(refs)[:max_cameras]]
 
 
-def _parked_frames(
-    record: TrialRecord, max_cameras: int
-) -> list[tuple[str, npt.NDArray[np.uint8]]]:
+def _parked_frames(record: Record, max_cameras: int) -> list[tuple[str, npt.NDArray[np.uint8]]]:
     """Collect deterministic, capped frames from a fresh parked observation."""
-    observation = record.parked_observation
+    return _observation_frames(record.parked_observation, max_cameras)
+
+
+def _observation_frames(
+    observation: Observation | None, max_cameras: int
+) -> list[tuple[str, npt.NDArray[np.uint8]]]:
+    """An in-memory observation's frames, name-sorted and capped."""
     if observation is None or not observation.images:
         return []
     return [
@@ -172,7 +184,7 @@ class _VLMGrader:
         and any ``rubric_file`` read, and ``effort`` is the normalized value
         that rides the request (``None`` omits ``reasoning_effort`` so the
         provider default applies, ``"none"`` is sent verbatim). ``rubric``
-        is the run-level fallback only, since ``_rubric_for`` lets a scene's
+        is the run-level fallback only, since ``_judged_rubric`` lets a scene's
         own ``metadata["rubric"]`` win for that scene. The API key is
         deliberately absent: a log is not a place for a credential.
         """
@@ -252,17 +264,25 @@ class _VLMGrader:
             file=sys.stderr,
         )
 
-    def _rubric_for(self, scene: Scene) -> str:
-        """Prefer a generated per-scene rubric over the run-level one.
+    def _judged_rubric(self, scene: Scene) -> tuple[str, str | None]:
+        """Choose the rubric text this trial is judged against, and its name.
 
-        ``scene.metadata["rubric"]`` is the documented hand-off from task
-        generation (plan 0070); it wins over the constructed
-        ``rubric``/``rubric_file`` whenever it is a non-blank string.
+        In order: ``scene.metadata["rubric"]``, the hand-off from task
+        generation (plan 0070); then the first of the scene's effective rubrics
+        with text (``eval()`` passes the task's rubrics merged with the scene's),
+        preferring one scored from judgements so the verdict lands on a rubric
+        that reads it; then the constructed ``rubric``/``rubric_file``. A grader
+        makes one judgement per trial, so only one rubric text is judged; the
+        name is ``None`` unless it came from the scene's rubrics.
         """
         scene_rubric = scene.metadata.get("rubric")
         if isinstance(scene_rubric, str) and scene_rubric.strip():
-            return scene_rubric
-        return self._rubric
+            return scene_rubric, None
+        with_text = [rubric for rubric in scene.rubrics if rubric.text.strip()]
+        judged = [rubric for rubric in with_text if reads_judgements(rubric)]
+        for rubric in judged or with_text:
+            return rubric.text, rubric.name
+        return self._rubric, None
 
     def _messages(
         self,
@@ -289,24 +309,25 @@ class _VLMGrader:
                 parts.append({"type": "image_url", "image_url": {"url": png_data_url(image)}})
         return [{"role": "user", "content": parts}]
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Capture a model judgement, or degrade to an ungraded trial (R6).
 
         Adopts an existing console verdict or a definitive embodiment
-        termination without spending a model call. Any failure after the
+        termination without spending a model call, unless the scene has an
+        operator-scored safety rubric, which the outcome does not establish. Any failure after the
         rollout (frames, transport, parsing) prints one stderr note, leaves
         the judgement unset and records a one-line reason in
         ``record.metadata["grading_error"]``; grading never crashes a finished
         run. The ``operator`` scorer abstains on such a trial and the run ends
         with ``status == "error"`` naming how many trials went ungraded.
         """
-        from inspect_robots.session import _DEFINITIVE_REASONS
+        from inspect_robots.session import adopts_embodiment_verdict, safety_rubric_to_judge
         from inspect_robots.transcript import operator_event
 
         if record.operator_judgement is not None:
             return
-        if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
-            verdict = record.termination_reason
+        if adopts_embodiment_verdict(record, scene):
+            verdict = str(record.termination_reason)
             record.operator_judgement = verdict
             record.events.append(
                 operator_event(t=len(record.steps), verdict=verdict, source="embodiment")
@@ -314,10 +335,12 @@ class _VLMGrader:
             return
         try:
             parked = _parked_frames(record, self._max_cameras)
+            # A trial the policy ended before its first step (an immediate
+            # refusal) is judged from the observation it stopped on.
             final = parked or (
                 _phase_frames(record.steps[-1], final=True, max_cameras=self._max_cameras)
                 if record.steps
-                else []
+                else _observation_frames(record.unstepped_observation, self._max_cameras)
             )
             if not final:
                 raise ConfigError("no final frames recorded")
@@ -326,7 +349,13 @@ class _VLMGrader:
                 if record.steps
                 else []
             )
-            messages = self._messages(scene.instruction, self._rubric_for(scene), initial, final)
+            safety = safety_rubric_to_judge(record, scene)
+            rubric_text, rubric_name = (
+                (safety.text or safety.name, safety.name)
+                if safety is not None
+                else self._judged_rubric(scene)
+            )
+            messages = self._messages(scene.instruction, rubric_text, initial, final)
             reply = chat_completion(
                 self._base_url,
                 self._api_key,
@@ -355,6 +384,10 @@ class _VLMGrader:
             record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
         record.operator_note = note
+        if rubric_name is not None and any(
+            rubric.name == rubric_name and reads_judgements(rubric) for rubric in scene.rubrics
+        ):
+            record.metadata["judged_rubric"] = rubric_name
         record.events.append(
             operator_event(t=len(record.steps), verdict=judgement, source="vlm", note=note)
         )

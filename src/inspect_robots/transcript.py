@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
-EventKind = str  # Includes reset, inference, step, approval, operator_message, operator, error.
+# reset, inference, step, approval, replan, policy_terminal, operator_message, operator, error.
+EventKind = str
 
 
 @dataclass(frozen=True)
@@ -47,9 +48,30 @@ def step_event(t: int, terminated: bool, truncated: bool, reason: str | None) ->
     )
 
 
-def approval_event(t: int, modified: bool, detail: str | None = None) -> Event:
-    """Record whether the safety gate changed the proposed action at step ``t``."""
-    return Event(kind="approval", t=t, data={"modified": modified, "detail": detail})
+def approval_event(
+    t: int,
+    modified: bool,
+    detail: str | None = None,
+    guards: list[dict[str, Any]] | None = None,
+) -> Event:
+    """Record whether the safety gate changed the proposed action at step ``t``.
+
+    ``guards`` lists each guard that changed it, as ``{"guard", "before", "after"}``.
+    """
+    data: dict[str, Any] = {"modified": modified, "detail": detail}
+    if guards is not None:
+        data["guards"] = guards
+    return Event(kind="approval", t=t, data=data)
+
+
+def replan_event(t: int, trigger: str, reason: str) -> Event:
+    """Record that ``trigger`` cut a chunk short at step ``t`` so the policy could look again."""
+    return Event(kind="replan", t=t, data={"trigger": trigger, "reason": reason})
+
+
+def terminal_event(t: int, kind: str, reason: str) -> Event:
+    """Record the policy's terminal action (``done``, ``give_up``, ...) at step ``t``."""
+    return Event(kind="policy_terminal", t=t, data={"kind": kind, "reason": reason})
 
 
 def operator_message_event(t: int, text: str, source: str = "console") -> Event:
@@ -75,7 +97,7 @@ def operator_event(t: int, verdict: str, source: str = "prompt", note: str | Non
     )
 
 
-def judgement_source(record: TrialRecord) -> str | None:
+def judgement_source(record: Record) -> str | None:
     """Return which path produced the record's judgement.
 
     ``None`` when the record has no ``operator_judgement``, or when the

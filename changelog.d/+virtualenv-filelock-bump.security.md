@@ -1,0 +1,1 @@
+**Repo:** bumped locked dependencies to clear open Dependabot alerts: `virtualenv` 21.15.1, `filelock` 4.2.4, `msgpack` 1.2.4 and `setuptools` 84.2.1 in `uv.lock`, plus `undici` 7.30.1 and `zod` 4.6.6 in the issue bot.

@@ -1,0 +1,600 @@
+"""DeltaLimitGuard / GuardChain tests (plan 0008 §3a).
+
+The delta limiter is semantics-aware: absolute-target modes clamp around the
+last approved action; displacement/rate modes clamp the action magnitude
+itself. Construction never guesses — missing semantics, missing needed
+bounds, or unaverageable rotation reps refuse loudly.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pytest
+
+from inspect_robots.errors import SafetyAbort
+from inspect_robots.guard import (
+    ClampGuard,
+    DeltaLimitGuard,
+    GuardChain,
+    GuardContribution,
+    PassThroughGuard,
+)
+from inspect_robots.spaces import ActionSemantics, Box, RotationRepr
+from inspect_robots.types import Action
+
+
+def _abs_space() -> Box:
+    return Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=ActionSemantics("joint_pos"),
+    )
+
+
+def _delta_space() -> Box:
+    # Asymmetric second dim ([0, 1]) mirrors a normalized-gripper delta dim.
+    return Box(
+        shape=(2,),
+        low=np.array([-0.1, 0.0]),
+        high=np.array([0.1, 1.0]),
+        semantics=ActionSemantics("joint_delta"),
+    )
+
+
+# --- construction refusals: never guess -------------------------------------
+
+
+def test_refuses_missing_semantics() -> None:
+    with pytest.raises(ValueError, match="semantics"):
+        DeltaLimitGuard(Box(shape=(2,), low=np.zeros(2), high=np.ones(2)))
+
+
+def test_refuses_absolute_pose_mode_with_unaverageable_rotation() -> None:
+    # Absolute euler/quat orientations have wraparound + axis coupling, so
+    # per-dim clamping is unsound and refused.
+    space = Box(
+        shape=(7,),
+        low=np.full(7, -1.0),
+        high=np.full(7, 1.0),
+        semantics=ActionSemantics("eef_abs_pose", rotation_repr="quat_wxyz"),
+    )
+    with pytest.raises(ValueError, match="rotation_repr"):
+        DeltaLimitGuard(space)
+
+
+@pytest.mark.parametrize("rotation_repr", ["euler_xyz", "axis_angle"])
+def test_delta_pose_rotation_deltas_clamp_per_dim(rotation_repr: RotationRepr) -> None:
+    # eef_delta_pose carries small rotation *deltas*, not absolute orientations.
+    # euler_xyz/axis_angle deltas have a zero-vector no-op, so they clamp per
+    # dimension like a bounded displacement (#143). Quaternion and rot6d
+    # deltas are the exception — see
+    # test_refuses_displacement_pose_mode_with_off_origin_rotation.
+    # BridgeData V2 shape: 3 xyz + 3 euler deltas + 1 gripper.
+    space = Box(
+        shape=(7,),
+        low=np.full(7, -0.1),
+        high=np.full(7, 0.1),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
+    )
+    guard = DeltaLimitGuard(space, max_delta=0.05)
+    # A large rotation-delta dim (dpitch, index 4) clamps to the ±max_delta box.
+    out = guard.review(Action(data=np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0])), {})
+    assert np.isclose(out.data[4], 0.05)
+    assert out.meta.get("delta_clamped") is True
+
+
+@pytest.mark.parametrize(
+    ("rotation_repr", "rot_dim"),
+    [("quat_wxyz", 4), ("quat_xyzw", 4), ("rot6d", 6)],
+)
+def test_refuses_displacement_pose_mode_with_off_origin_rotation(
+    rotation_repr: RotationRepr, rot_dim: int
+) -> None:
+    # These reps' identity/no-op is not the zero vector (quaternion identity is
+    # (1, 0, 0, 0); rot6d identity is (1, 0, 0, 0, 1, 0)): clamping a delta per
+    # dimension toward a symmetric ±max_delta box drags it away from identity,
+    # and downstream re-normalization can amplify the rotation instead of
+    # limiting it — same failure class as clamping an absolute quat (#150).
+    # 3 xyz + rot_dim + 1 gripper.
+    dim = 3 + rot_dim + 1
+    space = Box(
+        shape=(dim,),
+        low=np.full(dim, -1.0),
+        high=np.full(dim, 1.0),
+        semantics=ActionSemantics("eef_delta_pose", rotation_repr=rotation_repr),
+    )
+    with pytest.raises(ValueError, match="rotation_repr"):
+        DeltaLimitGuard(space)
+
+
+def test_refuses_derived_default_without_bounds() -> None:
+    for mode in ("joint_pos", "joint_delta"):
+        unbounded = Box(shape=(2,), semantics=ActionSemantics(mode))
+        with pytest.raises(ValueError, match="bound"):
+            DeltaLimitGuard(unbounded)
+        # An explicit max_delta removes the bounds requirement.
+        DeltaLimitGuard(unbounded, max_delta=0.5)
+
+
+def test_refuses_nonpositive_or_nonfinite_max_delta() -> None:
+    with pytest.raises(ValueError, match="max_delta"):
+        DeltaLimitGuard(_abs_space(), max_delta=0.0)
+    with pytest.raises(ValueError, match="max_delta"):
+        DeltaLimitGuard(_abs_space(), max_delta=float("inf"))
+    with pytest.raises(ValueError, match="max_delta"):
+        DeltaLimitGuard(_abs_space(), max_delta=np.array([0.1, -0.1]))
+    with pytest.raises(ValueError, match="max_delta"):
+        DeltaLimitGuard(_abs_space(), max_delta=np.array([0.1, 0.1, 0.1]))
+
+
+# --- absolute-target modes ---------------------------------------------------
+
+
+def test_absolute_first_action_passes_then_limits() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    first = Action(data=np.array([0.9, 0.9]))
+    assert guard.review(first, store) is first  # no reference yet
+    # Second action is limited to ±0.1 around the last approved one.
+    out = guard.review(Action(data=np.array([0.0, 1.0])), store)
+    assert np.allclose(out.data, [0.8, 1.0])
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_absolute_identity_within_limit_and_reference_advances() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.5)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+    small = Action(data=np.array([0.3, 0.4]))
+    assert guard.review(small, store) is small  # identity when nothing clamps
+    # Reference advanced to [0.3, 0.4]: a jump back to 0.9 clamps to 0.8.
+    out = guard.review(Action(data=np.array([0.9, 0.4])), store)
+    assert np.allclose(out.data, [0.8, 0.4])
+
+
+def test_absolute_reference_is_the_approved_action_not_the_request() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+    guard.review(Action(data=np.array([1.0, 0.0])), store)  # approved as 0.1
+    out = guard.review(Action(data=np.array([1.0, 0.0])), store)
+    assert np.allclose(out.data, [0.2, 0.0])  # walks, one clamped step at a time
+
+
+def test_rewind_reference_changes_an_existing_reference() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+
+    DeltaLimitGuard.rewind_reference(store, np.array([0.5, 0.5]))
+    out = guard.review(Action(data=np.array([0.8, 0.8])), store)
+
+    assert np.allclose(out.data, [0.6, 0.6])
+
+
+def test_rewind_reference_is_a_noop_without_a_limiter_reference() -> None:
+    store: dict[str, object] = {"other": np.array([0.0, 0.0])}
+
+    DeltaLimitGuard.rewind_reference(store, np.array([0.5, 0.5]))
+
+    assert set(store) == {"other"}
+
+
+def test_rewind_reference_stores_a_copy() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+    held = np.array([0.4, 0.4])
+
+    DeltaLimitGuard.rewind_reference(store, held)
+    held[:] = 0.9
+    out = guard.review(Action(data=np.array([0.8, 0.8])), store)
+
+    assert np.allclose(out.data, [0.5, 0.5])
+
+
+def test_first_action_reference_is_a_copy_of_the_policy_buffer() -> None:
+    # A policy that writes each target into one preallocated array must not
+    # move the limiter's reference along with it.
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    buffer = np.array([0.0, 0.0])
+    approver.review(Action(data=buffer), store)
+
+    buffer[:] = [0.9, 0.9]
+    out = approver.review(Action(data=buffer), store)
+
+    assert np.allclose(out.data, [0.1, 0.1])
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_clamped_reference_is_not_shared_with_the_returned_action() -> None:
+    # A later approver or the controller mutating the clamped action in place
+    # must not move the limiter's reference with it.
+    approver = DeltaLimitApprover(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    approver.review(Action(data=np.array([0.0, 0.0])), store)
+
+    clamped = approver.review(Action(data=np.array([0.9, 0.9])), store)
+    assert np.allclose(clamped.data, [0.1, 0.1])
+    clamped.data[:] = [0.9, 0.9]
+
+    out = approver.review(Action(data=np.array([0.9, 0.9])), store)
+    assert np.allclose(out.data, [0.2, 0.2])
+
+
+def test_rewind_reference_uses_the_limiter_store_key() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+
+    assert set(store) == {"delta_limit:last"}
+    DeltaLimitGuard.rewind_reference(store, np.array([0.3, 0.4]))
+    reference = store["delta_limit:last"]
+    assert isinstance(reference, np.ndarray)
+    assert np.array_equal(reference, np.array([0.3, 0.4]))
+
+
+def test_rewind_reference_rejects_non_finite_pose() -> None:
+    store: dict[str, object] = {}
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitGuard.rewind_reference(store, np.array([float("nan"), 0.0]))
+    with pytest.raises(ValueError, match="non-finite"):
+        DeltaLimitGuard.rewind_reference(store, np.array([float("inf"), 0.0]))
+
+
+def test_substitution_rewinds_the_next_delta_reference() -> None:
+    held = Action(data=np.array([0.0, 0.0]))
+
+    class _HoldSecondTarget:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def review(self, action: Action, store: dict[str, Any]) -> Action:
+            self._calls += 1
+            if self._calls == 2:
+                DeltaLimitGuard.rewind_reference(store, np.asarray(held.data, dtype=np.float64))
+                return held
+            return action
+
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.1),
+        _HoldSecondTarget(),
+    )
+    store: dict[str, object] = {}
+    assert chain.review(held, store) is held
+    assert chain.review(Action(data=np.array([0.1, 0.0])), store) is held
+
+    out = chain.review(Action(data=np.array([0.2, 0.0])), store)
+
+    assert np.allclose(out.data, [0.1, 0.0])
+
+
+def test_a_later_tighter_limiter_binds_after_a_looser_one() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.1),
+        DeltaLimitGuard(_abs_space(), max_delta=0.01),
+    )
+    store: dict[str, object] = {}
+    chain.review(Action(data=np.array([0.0, 0.0])), store)
+
+    first = chain.review(Action(data=np.array([1.0, 1.0])), store)
+    second = chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    assert np.allclose(first.data, [0.01, 0.01])
+    assert np.allclose(second.data, [0.02, 0.02])
+
+
+def test_a_later_looser_limiter_keeps_the_tighter_reference() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.01),
+        DeltaLimitGuard(_abs_space(), max_delta=0.1),
+    )
+    store: dict[str, object] = {}
+    chain.review(Action(data=np.array([0.0, 0.0])), store)
+    chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    out = chain.review(Action(data=np.array([1.0, 1.0])), store)
+
+    assert np.allclose(out.data, [0.02, 0.02])
+
+
+def test_a_chain_records_its_final_output_as_the_reference() -> None:
+    chain = GuardChain(
+        DeltaLimitGuard(_abs_space(), max_delta=0.5),
+        ClampGuard(Box(shape=(2,), low=np.array([-0.2, 0.0]), high=np.array([0.2, 1.0]))),
+    )
+    store: dict[str, object] = {}
+    out = chain.review(Action(data=np.array([0.9, 0.0])), store)
+
+    assert np.allclose(out.data, [0.2, 0.0])
+    reference = store["delta_limit:last"]
+    assert isinstance(reference, np.ndarray)
+    assert np.allclose(reference, [0.2, 0.0])
+
+
+def test_a_chain_without_a_limiter_leaves_no_reference() -> None:
+    store: dict[str, object] = {}
+    GuardChain(PassThroughGuard()).review(Action(data=np.array([0.1, 0.1])), store)
+    assert "delta_limit:last" not in store
+
+
+def test_absolute_derived_default_is_five_percent_of_range() -> None:
+    guard = DeltaLimitGuard(_abs_space())  # ranges: 2.0 and 1.0
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.5])), store)
+    out = guard.review(Action(data=np.array([1.0, 0.0])), store)
+    assert np.allclose(out.data, [0.1, 0.45])  # 0.05 * (high - low) per dim
+
+
+def test_absolute_derived_default_keeps_the_box_shape_for_multi_d_boxes() -> None:
+    # The derived delta must broadcast against multi-dimensional actions; a
+    # flat (dim,) delta would raise in review() for a (2, 3) box.
+    space = Box(
+        shape=(2, 3),
+        low=np.zeros((2, 3)),
+        high=np.full((2, 3), 2.0),
+        semantics=ActionSemantics("joint_pos", max_step=(None, None, None, None, None, 0.5)),
+    )
+    guard = DeltaLimitGuard(space)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.zeros((2, 3))), store)
+    out = guard.review(Action(data=np.full((2, 3), 2.0)), store)
+    # Undeclared dims clamp to 5% of range (0.1); the flat declaration maps to
+    # the last element of the flattened box (0.5).
+    assert np.allclose(out.data, [[0.1, 0.1, 0.1], [0.1, 0.1, 0.5]])
+
+
+def test_absolute_derived_default_mixes_declared_and_native_range_limits() -> None:
+    low = np.array([-1.0, 0.0], dtype=np.float16)
+    high = np.array([1.0, 1.0], dtype=np.float16)
+    space = Box(
+        shape=(2,),
+        low=low,
+        high=high,
+        semantics=ActionSemantics("joint_pos", max_step=(None, 0.2)),
+    )
+    guard = DeltaLimitGuard(space)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0, 0.0])), store)
+    out = guard.review(Action(data=np.array([1.0, 1.0])), store)
+    native_default = np.asarray(0.05 * (high - low), dtype=np.float64)
+
+    assert np.array_equal(out.data, np.array([native_default[0], 0.2]))
+
+
+def test_all_declared_absolute_space_needs_no_finite_bounds() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([float("-inf"), float("nan")]),
+        high=np.array([float("inf"), float("nan")]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.1, 0.2)),
+    )
+    DeltaLimitGuard(space)
+
+
+def test_undeclared_absolute_dimension_still_needs_finite_bounds() -> None:
+    space = Box(
+        shape=(2,),
+        low=np.array([float("-inf"), 0.0]),
+        high=np.array([float("inf"), float("inf")]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.1, None)),
+    )
+    with pytest.raises(ValueError, match="finite low/high bounds"):
+        DeltaLimitGuard(space)
+
+
+def test_explicit_max_delta_overrides_declarations() -> None:
+    space = Box(
+        shape=(1,),
+        low=np.array([0.0]),
+        high=np.array([1.0]),
+        semantics=ActionSemantics("joint_pos", max_step=(0.01,)),
+    )
+    guard = DeltaLimitGuard(space, max_delta=0.5)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.0])), store)
+    within_override = Action(data=np.array([0.4]))
+
+    assert guard.review(within_override, store) is within_override
+
+
+def test_explicit_max_delta_broadcasts_to_a_multidimensional_box() -> None:
+    # A bimanual (2, 7) box: an explicit max_delta must reach review() shaped
+    # like the action, exactly as the derived default does (#287).
+    shape = (2, 7)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    guard = DeltaLimitGuard(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    guard.review(Action(data=np.zeros(shape)), store)
+    out = guard.review(Action(data=np.full(shape, 5.0)), store)
+
+    assert np.allclose(out.data, np.full(shape, 0.1))
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_stores_are_isolated_per_trial() -> None:
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    trial_a: dict[str, object] = {}
+    guard.review(Action(data=np.array([0.9, 0.9])), trial_a)
+    # A fresh store (new trial) has no reference: first action passes again.
+    trial_b: dict[str, object] = {}
+    big = Action(data=np.array([-0.9, 0.1]))
+    assert guard.review(big, trial_b) is big
+
+
+# --- displacement / rate modes ----------------------------------------------
+
+
+def test_displacement_explicit_limit_intersects_box() -> None:
+    guard = DeltaLimitGuard(_delta_space(), max_delta=0.05)
+    out = guard.review(Action(data=np.array([0.08, -0.5])), {})
+    # dim0: min(high=0.1, +0.05) → 0.05; dim1: max(low=0.0, -0.05) → 0.0.
+    assert np.allclose(out.data, [0.05, 0.0])
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_displacement_explicit_limit_broadcasts_to_a_multidimensional_box() -> None:
+    # The displacement branch intersects the limit with the box at construction
+    # time, so a flat delta fails there instead of in review() (#287).
+    shape = (2, 7)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    guard = DeltaLimitGuard(space, max_delta=0.1)
+    out = guard.review(Action(data=np.full(shape, 5.0)), {})
+
+    assert np.allclose(out.data, np.full(shape, 0.1))
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_displacement_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_delta"),
+    )
+    max_delta = np.array([[0.05, 0.1, 0.15], [0.2, 0.25, 0.3]])
+    guard = DeltaLimitGuard(space, max_delta=max_delta)
+    out = guard.review(Action(data=np.full(shape, 1.0)), {})
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_absolute_explicit_multidimensional_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -10.0),
+        high=np.full(shape, 10.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    max_delta = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+    guard = DeltaLimitGuard(space, max_delta=max_delta)
+    store: dict[str, Any] = {}
+    first = Action(data=np.zeros(shape))
+    assert guard.review(first, store) is first
+    second = Action(data=np.full(shape, 5.0))
+    out = guard.review(second, store)
+    assert np.allclose(out.data, max_delta)
+    assert out.meta.get("delta_clamped") is True
+
+
+def test_refuses_unbroadcastable_max_delta_array() -> None:
+    shape = (2, 3)
+    space = Box(
+        shape=shape,
+        low=np.full(shape, -1.0),
+        high=np.full(shape, 1.0),
+        semantics=ActionSemantics("joint_pos"),
+    )
+    with pytest.raises(ValueError, match="does not broadcast"):
+        DeltaLimitGuard(space, max_delta=np.ones((4, 4)))
+
+
+def test_displacement_derived_default_is_box_alone() -> None:
+    guard = DeltaLimitGuard(_delta_space())
+    inside = Action(data=np.array([0.1, 1.0]))  # at the box edge: untouched
+    assert guard.review(inside, {}) is inside
+    out = guard.review(Action(data=np.array([0.2, -0.2])), {})
+    assert np.allclose(out.data, [0.1, 0.0])
+
+
+def test_joint_vel_is_rate_limited_like_displacement() -> None:
+    space = Box(
+        shape=(1,),
+        low=np.array([-2.0]),
+        high=np.array([2.0]),
+        semantics=ActionSemantics("joint_vel"),
+    )
+    guard = DeltaLimitGuard(space, max_delta=1.0)
+    out = guard.review(Action(data=np.array([1.5])), {})
+    assert np.allclose(out.data, [1.0])
+
+
+# --- shared contracts ---------------------------------------------------------
+
+
+def test_nan_raises_safety_abort_in_both_branches() -> None:
+    for space in (_abs_space(), _delta_space()):
+        guard = DeltaLimitGuard(space, max_delta=0.1)
+        with pytest.raises(SafetyAbort, match="NaN"):
+            guard.review(Action(data=np.array([float("nan"), 0.0])), {})
+
+
+@pytest.mark.parametrize("space", [_abs_space(), _delta_space()])
+def test_inf_raises_safety_abort_in_both_branches(space: Box) -> None:
+    guard = DeltaLimitGuard(space, max_delta=0.1)
+    store: dict[str, object] = {}
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        guard.review(Action(data=np.array([float("inf"), 0.0])), store)
+
+    with pytest.raises(SafetyAbort, match="non-finite"):
+        guard.review(Action(data=np.array([0.0, float("-inf")])), store)
+
+
+@pytest.mark.parametrize("name", ["", "line\nbreak", "line\rbreak"])
+def test_guardrail_contribution_rejects_invalid_display_names(name: str) -> None:
+    with pytest.raises(ValueError, match="display names"):
+        GuardContribution(guards=((name, PassThroughGuard()),))
+
+
+def test_guardrail_contribution_requires_callable_review() -> None:
+    class _NotAnApprover:
+        review = 7
+
+    broken: Any = _NotAnApprover()
+    with pytest.raises(ValueError, match="callable review"):
+        GuardContribution(guards=(("broken", broken),))
+
+
+def test_guardrail_contribution_valid() -> None:
+    contrib = GuardContribution(guards=(("auto", PassThroughGuard()),))
+    assert len(contrib.guards) == 1
+    assert contrib.warnings == ()
+
+
+def test_chain_runs_approvers_in_order() -> None:
+    space = _delta_space()
+    chain = GuardChain(ClampGuard(space), DeltaLimitGuard(space, max_delta=0.05))
+    out = chain.review(Action(data=np.array([5.0, 5.0])), {})
+    # Clamp to box ([0.1, 1.0]) first, then delta-limit to 0.05.
+    assert np.allclose(out.data, [0.05, 0.05])
+    inside = Action(data=np.array([0.01, 0.01]))
+    assert chain.review(inside, {}) is inside  # identity survives the chain
+
+
+def test_chain_approver_requires_callable_review() -> None:
+    class _NotAnApprover:
+        review = "not callable"
+
+    broken: Any = _NotAnApprover()
+    with pytest.raises(ValueError, match="callable review"):
+        GuardChain(broken)
+
+    with pytest.raises(ValueError, match="callable review"):
+        GuardChain(None)  # type: ignore[arg-type]
+
+
+def test_guards_report_their_resolved_limits() -> None:
+    assert DeltaLimitGuard(_abs_space(), max_delta=0.1).config() == {
+        "mode": "absolute",
+        "max_delta": [0.1, 0.1],
+    }
+    assert DeltaLimitGuard(_delta_space(), max_delta=0.05).config()["mode"] == "displacement"
+    assert ClampGuard(_abs_space()).config() == {"low": [-1.0, 0.0], "high": [1.0, 1.0]}
+    unbounded = Box(shape=(2,), semantics=ActionSemantics("joint_pos"))
+    assert ClampGuard(unbounded).config() == {"low": None, "high": None}

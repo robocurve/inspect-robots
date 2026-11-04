@@ -24,7 +24,7 @@ from inspect_robots.types import ActionChunk, Observation
 
 if TYPE_CHECKING:
     from inspect_robots.embodiment import EmbodimentInfo
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.task import TaskEnvelope
 
 
@@ -52,6 +52,9 @@ class PolicyInfo:
     control_hz: float | None = None
     # Policy checkpoint hash, revision, or identifier.
     checkpoint: str | None = None
+    # Terminal actions the policy can emit (``ActionChunk.terminal.kind``): the
+    # part of its action space that ends a trial, such as "done" or "give_up".
+    terminal_actions: frozenset[str] = frozenset()
 
 
 @runtime_checkable
@@ -123,7 +126,7 @@ class PolicyBase(ABC):
         hook of the same name, which runs first with only scene id and epoch.
         """
 
-    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:  # noqa: B027
+    def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:  # noqa: B027
         """Optional: Hook called by eval() when a trial completes.
 
         Called for errored and cancelled trials too, except trials whose

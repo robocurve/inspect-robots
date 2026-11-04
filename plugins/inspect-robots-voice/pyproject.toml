@@ -7,7 +7,7 @@ name = "inspect-robots-voice"
 version = "0.5.1"
 description = "Local spoken operator feedback for attended Inspect Robots evaluations."
 dynamic = ["readme"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 keywords = ["robotics", "voice", "whisper", "operator", "inspect_robots", "evaluation"]

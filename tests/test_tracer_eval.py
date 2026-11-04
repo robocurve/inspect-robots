@@ -1,7 +1,7 @@
 """End-to-end tracer: one scene -> chunked rollout -> score -> EvalLog.
 
 This is the load-bearing integration test. It exercises the whole vertical
-through every architectural seam (Controller, Approver, LogSink) and must stay
+through every architectural seam (ActionManager, Guard, LogSink) and must stay
 green for the life of the project.
 """
 

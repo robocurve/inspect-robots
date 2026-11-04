@@ -15,18 +15,16 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), this is that for robotic
 
 ![Status: alpha](https://img.shields.io/badge/status-alpha-blue)
 [![CI](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml/badge.svg)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
-[![Docs](https://github.com/robocurve/inspect-robots/actions/workflows/docs.yml/badge.svg)](https://docs.inspectrobots.org/)
-[![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
+[![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)](https://github.com/robocurve/inspect-robots)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/typed-mypy%20strict-blue)](https://github.com/robocurve/inspect-robots)
 [![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 [![Docs coverage](https://img.shields.io/badge/public%20docstrings-100%25-brightgreen)](https://github.com/robocurve/inspect-robots/actions/workflows/ci.yml)
 
-[**Documentation**](https://docs.inspectrobots.org/) ·
-[Quickstart](https://docs.inspectrobots.org/guide/quickstart/) ·
-[Rig reference](https://docs.inspectrobots.org/guide/rig-reference/) ·
-[Concepts](https://docs.inspectrobots.org/guide/concepts/) ·
-[For LLMs](https://docs.inspectrobots.org/llms.txt)
+[**Documentation**](https://github.com/robocurve/inspect-robots/tree/main/docs) ·
+[Quickstart](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/quickstart.md) ·
+[Rig reference](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/rig-reference.md) ·
+[Concepts](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/concepts.md)
 
 </div>
 
@@ -74,7 +72,7 @@ toggles and numeric settings declared by the embodiment plugin, such as yam's
 `auto_start`, then writes `~/.config/inspect-robots/config.ini`. On a different
 rig, install its plugin instead and type its component names at the prompts; to
 write the config file by hand, see
-[the CLI guide](https://docs.inspectrobots.org/guide/cli/).
+[the CLI guide](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/cli.md).
 
 The `molmoact2` policy is only a client: nothing moves until the MolmoAct2
 server is listening, and the server does not start itself or survive a
@@ -106,7 +104,7 @@ beside the eval log. CLI flags override any default (`--no-rerun-save`,
 
 The policy slot is not limited to VLAs. With the
 [inspect-robots-agent](plugins/inspect-robots-agent/) plugin, a frontier LLM
-drives the same rig through tool calls, one approver-checked motion chunk
+drives the same rig through tool calls, one guard-checked motion chunk
 per call.
 
 Put a `.env` with your API key in the working directory (the CLI loads it
@@ -341,7 +339,7 @@ Trossen discontinued the WidowX 250S in July 2025. That adapter supports
 existing 250S rigs; the successor WidowX AI uses a different stack.
 
 New robot integrations are welcome. If your rig is not listed,
-[Authoring an embodiment adapter](https://docs.inspectrobots.org/guide/adapters/)
+[Authoring an embodiment adapter](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/adapters.md)
 walks through both halves of the pair, and opening an issue with the robot and
 its SDK is a good first step.
 
@@ -373,10 +371,25 @@ the compatibility check before anything moves, not mid-rollout.
 - **Auditable.** Every run yields an immutable, schema-versioned `EvalLog`
   with the resolved config, git revision, and package versions. It is re-readable
   across releases and re-scorable offline.
+- **Records you can review.** Each trial gets a record with a unique id, its
+  resolved configuration, and every action chunk the policy produced.
+  Reviewers correct verdicts and add notes as annotations beside the log,
+  results re-score from them, and analyzers summarize many logs
+  ([guide](docs/guide/editing-and-analysis.md)).
+- **Benchmarks with identity.** A benchmark is a named, versioned sequence of
+  tasks, and every log records which benchmark and version produced it
+  ([guide](docs/guide/writing-a-benchmark.md#benchmarks-a-versioned-set-of-tasks)).
 - **Light core.** Depends only on NumPy. Rerun and simulator/VLA backends are
   optional extras and separately installable plugins.
 - **Safe unattended.** An explicit error taxonomy separates "record and continue"
   from "halt and require a human", so a faulted robot never auto-advances overnight.
+  Embodiments can check their health before each trial and park after it, and
+  every guard that changes an action is named in the record
+  ([evaluation interface](docs/guide/policies-and-embodiments.md#the-evaluation-interface)).
+- **Language models as policies.** A policy adapter turns an embodiment's
+  declarations into control and termination tools, so any multimodal model
+  drives any embodiment the same way, and ends a trial with `done` or
+  `give_up` and a stated reason.
 - **Rerun visualization.** Stream camera images, 3D poses, joint/action
   time-series, and success markers to a `.rrd` recording. Logging is non-blocking:
   a slow viewer connection drops camera frames first (whole steps only under
@@ -413,7 +426,7 @@ shipped from this repo as separate packages:
 - **[inspect-robots-capx](plugins/inspect-robots-capx/)**: evaluate CaP-X-style
   code-as-policy agents against a joint-space embodiment. Model-generated
   Python calls separately served SAM3, Contact-GraspNet, and Pyroki helpers,
-  then queues approver-checked joint targets behind `--policy capx`.
+  then queues guard-checked joint targets behind `--policy capx`.
 - **[inspect-robots-voice](plugins/inspect-robots-voice/)**: transcribe local
   microphone speech into operator feedback during attended runs with
   `--voice`, or narrate streamed policy notes and terminal summaries with
@@ -470,9 +483,9 @@ If you know [Inspect AI](https://inspect.aisi.org.uk/), you already know Inspect
 | Inspect AI | Inspect Robots |
 |---|---|
 | `Model` | `Policy` (VLA) **+** `Embodiment` *(two inputs)* |
-| `Task = dataset + solver + scorer` | `Task = scenes + controller + scorer` |
+| `Task = dataset + solver + scorer` | `Task = scenes + action manager + scorer` |
 | `Sample` | `Scene` |
-| `Solver` chain | `Controller` middleware (chunking, ensembling, smoothing) |
+| `Solver` chain | `ActionManager` middleware (chunking, ensembling, smoothing) |
 | `eval()` → `EvalLog` | `eval()` → `EvalLog` |
 | `@task` / `@solver` / `@scorer` + registry | `@task` / `@policy` / `@embodiment` / `@scorer` + entry points |
 
@@ -482,10 +495,9 @@ and backend adapters live in separate plugin packages.
 
 ## Documentation
 
-Full guides and an auto-generated API reference live at
-**[docs.inspectrobots.org](https://docs.inspectrobots.org/)**.
-LLM-friendly versions: [`llms.txt`](https://docs.inspectrobots.org/llms.txt)
-and [`llms-full.txt`](https://docs.inspectrobots.org/llms-full.txt).
+Full guides live in **[`docs/`](https://github.com/robocurve/inspect-robots/tree/main/docs)** as plain Markdown, starting with
+the [Quickstart](https://github.com/robocurve/inspect-robots/blob/main/docs/guide/quickstart.md). The API reference is the
+source docstrings; each guide links symbols to the module that defines them.
 
 ## Development
 
@@ -500,14 +512,6 @@ uv venv && uv pip install -e ".[dev]"
 uv run pre-commit install          # ruff + mypy on commit, 100% coverage on push
 uv run pytest --cov                 # 100% coverage required
 uv run ruff check . && uv run mypy
-```
-
-To build the Docusaurus documentation site, generate its ignored API page and
-then build from `website/`:
-
-```bash
-uv run python scripts/gen_api_docs.py
-cd website && npm ci && npm run build
 ```
 
 Pre-commit hooks and a blocking CI coverage gate keep `main` green. See

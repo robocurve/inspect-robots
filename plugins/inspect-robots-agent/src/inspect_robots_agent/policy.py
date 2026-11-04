@@ -17,8 +17,8 @@ import json
 import math
 import os
 import sys
-from collections import Counter
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,13 +31,19 @@ import numpy.typing as npt
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import (
+    ToolAdapter,
+    observation_lines,
+    state_lines,
+)
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
 from inspect_robots.task import TaskEnvelope
-from inspect_robots.types import ActionChunk, Observation
+from inspect_robots.tools import PreCheck, ToolLibrary
+from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
 from inspect_robots_agent._gemini_live import GeminiLiveClient
@@ -47,15 +53,14 @@ from inspect_robots_agent._llm import (
     _OPENROUTER_BASE,
     ENV_MODEL,
     ChatClient,
+    ContentFilteredError,
     Provider,
-    ToolCall,
     _direct_claim,
     _has_openrouter_variant,
     resolve_provider,
 )
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
-from inspect_robots_agent._tools import PreCheck, Toolset, build_toolset
 
 from ._capture import WireCapture, _safe
 
@@ -100,8 +105,11 @@ _MESSAGES_CAPABLE_PREFIXES = frozenset(
     {"anthropic"}
     | {prefix for prefix, direct in _DIRECT_PROVIDERS.items() if direct.wire == "messages"}
 )
+# The terminal part of the agent's action space: its done and give_up tools.
+_TERMINAL_ACTIONS = frozenset({DONE, GIVE_UP})
 _SPEEDS = frozenset({"fast"})
 _SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
+_INTERACTIONS_SERVICE_TIERS = frozenset({"standard", "flex", "priority"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
@@ -114,13 +122,16 @@ _UNSET: Final = _Unset()
 
 # Duplicated in inspect_robots_capx/policy.py; keep both limits in sync.
 _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
+_EVAL_NOTES_TEXT_LIMIT = 8 * 1024
 
 # Native action units: 0.1 mm for eef_pos, 0.1 mrad for joints.
 _TARGET_REACHED_TOLERANCE = 1e-4
 
 _SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
-proprioceptive state and camera images. Work toward the user's goal in \
+proprioceptive state and camera images, and after your first move the \
+setpoint your commands hold next to that readback, with the dimensions where \
+the two differ. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
 Every move tool call must include a `note`: in one or two sentences, say what \
 you observe in the current observation and why you chose this motion. The user \
@@ -137,7 +148,9 @@ known from the start. You have a budget of \
 
 _ON_DEMAND_SYSTEM_TEMPLATE = """You are controlling a real robot embodiment named {name!r} \
 through tool calls. Each observation message gives you the current \
-proprioceptive state. Camera images are not attached automatically; call \
+proprioceptive state, and after your first move the setpoint your commands \
+hold next to that readback, with the dimensions where the two differ. Camera \
+images are not attached automatically; call \
 `take_pic` to see them. A camera already shown for the current observation \
 cannot be re-taken until the robot moves. Work toward the user's goal in \
 small, deliberate motions; re-check the observation after every motion. \
@@ -300,6 +313,20 @@ class AgentPolicyConfig(PolicyConfig):
     pre_check: str | None = None
     max_retries: int = 3
     backoff_s: float = 1.0
+    #: Per-request HTTP timeout in seconds; ``None`` keeps each wire's default.
+    timeout_s: float | None = None
+    #: Evaluation notes appended verbatim to every trial's system prompt
+    #: (scoring regime, budget use); ``None`` when not configured.
+    eval_notes: str | None = None
+
+
+@dataclass(frozen=True, eq=False)
+class _PendingMotion:
+    """A move whose playout and residual are narrated with the next observation."""
+
+    issued_step: object
+    chunk_len: int
+    target: npt.NDArray[np.float64] | None
 
 
 @dataclass(frozen=True, eq=False)
@@ -307,9 +334,32 @@ class _PendingCapture:
     """A capture request waiting for the observation produced after motion playout."""
 
     requested: tuple[str, ...] | None
-    issued_step: object
-    chunk_len: int
-    target: npt.NDArray[np.float64] | None
+
+
+@dataclass(frozen=True, eq=False)
+class _ThermalStatus:
+    """One observation's ``extra["motor_temps"]`` reduced to what a cool-down needs."""
+
+    limit: float
+    margin: float
+    #: Per tracked arm: the hottest motor's label and temperature.
+    hottest: dict[str, tuple[str, float]]
+
+    def text(self) -> str:
+        """The tracked hottest motors as ``left_j1 58 C`` fragments."""
+        return ", ".join(f"{label} {celsius:.0f} C" for label, celsius in self.hottest.values())
+
+
+@dataclass(frozen=True, eq=False)
+class _PendingSleep:
+    """A ``sleep`` whose outcome is narrated with the next observation."""
+
+    seconds: float
+    before: _ThermalStatus | None
+    #: The rollout step the sleep was issued at and its hold length, so a sleep a
+    #: replan cut short is reported as such.
+    issued_step: int | None = None
+    steps: int | None = None
 
 
 class LLMAgentPolicy(PolicyBase):
@@ -322,7 +372,10 @@ class LLMAgentPolicy(PolicyBase):
     Metric camera depth is rendered by default; pass ``depth="off"`` to omit
     it without resolving any depth entries.
     ``prior_learnings`` optionally loads a UTF-8 notes file once at construction
-    and appends its text to every trial's system prompt.
+    and appends its text to every trial's system prompt. ``eval_notes`` appends
+    a short benchmark-level brief (how trials are scored, how to spend the
+    budget) ahead of it, so an evaluation can override the generic prompt's
+    stopping advice without touching the task instruction.
     """
 
     #: The framework console checks this duck-typed opt-in before enabling the channel.
@@ -346,12 +399,15 @@ class LLMAgentPolicy(PolicyBase):
         depth: str = "render",
         image_horizon: int | _Unset | None = _UNSET,
         prior_learnings: str | None = None,
+        eval_notes: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
         env: dict[str, str] | None = None,
         pre_check: PreCheck | None = None,
         service_tier: str | None = None,
         max_retries: int = 3,
         backoff_s: float = 1.0,
+        timeout_s: float | None = None,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -406,6 +462,27 @@ class LLMAgentPolicy(PolicyBase):
                 prior_learnings_text.encode("utf-8")
             ).hexdigest()
 
+        eval_notes_text: str | None = None
+        if eval_notes is not None:
+            if not isinstance(eval_notes, str):
+                raise ConfigError(
+                    f"eval_notes must be a string, got {eval_notes!r}.\n"
+                    "fix: the -P parser coerces unquoted values; pass "
+                    "-P 'eval_notes=\"Scoring: ...\"'"
+                )
+            eval_notes_text = eval_notes.strip()
+            if not eval_notes_text:
+                raise ConfigError(
+                    "eval_notes is empty or whitespace-only.\n"
+                    "fix: pass the brief as text or omit -P eval_notes="
+                )
+            if len(eval_notes_text) > _EVAL_NOTES_TEXT_LIMIT:
+                raise ConfigError(
+                    f"eval_notes has {len(eval_notes_text)} characters; the limit is "
+                    f"{_EVAL_NOTES_TEXT_LIMIT}.\n"
+                    "fix: keep the brief short; longer material belongs in prior_learnings"
+                )
+
         pre_check_identity: str | None = None
         if pre_check is not None:
             if not callable(pre_check):
@@ -438,6 +515,21 @@ class LLMAgentPolicy(PolicyBase):
         ):
             raise ConfigError("backoff_s must be finite and >= 0")
         resolved_backoff_s = float(backoff_s)
+        if timeout_s is not None and (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            raise ConfigError(
+                f"timeout_s must be finite and > 0, or None, got {timeout_s!r}.\n"
+                "fix: pass -P timeout_s=300 (seconds per LLM request), or drop it"
+            )
+        resolved_timeout_s = None if timeout_s is None else float(timeout_s)
+        # Only an explicit timeout overrides; each wire's client keeps its own default.
+        timeout_kw: dict[str, float] = (
+            {} if resolved_timeout_s is None else {"timeout_s": resolved_timeout_s}
+        )
         environ = dict(os.environ) if env is None else env
         requested_model = model or environ.get(ENV_MODEL)
         direct_claim = (
@@ -480,15 +572,18 @@ class LLMAgentPolicy(PolicyBase):
         if speed is not None and speed not in _SPEEDS:
             raise ConfigError(f"speed must be one of {sorted(_SPEEDS)}, or None, got {speed!r}")
         if service_tier is not None:
-            if service_tier not in _SERVICE_TIERS:
+            allowed_tiers = (
+                _INTERACTIONS_SERVICE_TIERS if wire == "interactions" else _SERVICE_TIERS
+            )
+            if service_tier not in allowed_tiers:
                 raise ConfigError(
-                    f"service_tier must be one of {sorted(_SERVICE_TIERS)}, "
+                    f"service_tier must be one of {sorted(allowed_tiers)}, "
                     f"or None, got {service_tier!r}"
                 )
-            if wire != "responses":
+            if wire not in {"responses", "interactions"}:
                 raise ConfigError(
-                    f"service_tier is only supported on wire='responses', got wire={wire!r}.\n"
-                    "fix: pass -P wire=responses, or drop -P service_tier="
+                    f"service_tier requires wire=responses or interactions, got wire={wire!r}.\n"
+                    "fix: use a supported wire, or drop -P service_tier="
                 )
         if images not in _IMAGE_MODES:
             raise ConfigError(
@@ -730,6 +825,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "responses":
             self._client = ResponsesClient(
@@ -739,6 +835,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "gemini-live":
             self._client = GeminiLiveClient(
@@ -746,14 +843,17 @@ class LLMAgentPolicy(PolicyBase):
                 max_retries=max_retries,
                 backoff_s=resolved_backoff_s,
                 capture=self._capture,
+                **timeout_kw,
             )
         elif wire == "interactions":
             self._client = InteractionsClient(
                 provider,
+                service_tier=service_tier,
                 max_retries=max_retries,
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         else:
             self._client = ChatClient(
@@ -762,6 +862,7 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                **timeout_kw,
             )
         self._max_llm_calls = max_llm_calls
         self._temperature = temperature
@@ -770,10 +871,12 @@ class LLMAgentPolicy(PolicyBase):
         self._effort = resolved_effort
         self._max_speed_frac = max_speed_frac
         self._transcript_echo = transcript_echo
+        self._clock = clock
         self._images = images
         self._depth = depth
         self._image_horizon = resolved_image_horizon
         self._prior_learnings_text = prior_learnings_text
+        self._eval_notes = eval_notes_text
         self._pre_check = pre_check
         self._explicit_base_url = bool(base_url)
         self._wire = wire
@@ -790,6 +893,7 @@ class LLMAgentPolicy(PolicyBase):
             max_llm_calls=max_llm_calls,
             max_retries=max_retries,
             backoff_s=resolved_backoff_s,
+            timeout_s=resolved_timeout_s,
             effort=resolved_effort,
             max_speed_frac=max_speed_frac,
             transcript_echo=transcript_echo,
@@ -799,10 +903,13 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
+            eval_notes=eval_notes_text,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
-        self.info = PolicyInfo(name="agent", action_space=Box(shape=(1,)))
-        self._toolset: Toolset | None = None
+        self.info = PolicyInfo(
+            name="agent", action_space=Box(shape=(1,)), terminal_actions=_TERMINAL_ACTIONS
+        )
+        self._adapter: ToolAdapter | None = None
         self._embodiment_name = "(unbound)"
         self._embodiment_docs: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
@@ -810,8 +917,11 @@ class LLMAgentPolicy(PolicyBase):
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
         self._calls_used = 0
-        self._usage_totals: dict[str, int] = {}
+        self._usage_totals: dict[str, int | float] = {}
         self._pending: _PendingCapture | None = None
+        self._pending_motion: _PendingMotion | None = None
+        self._pending_sleep: _PendingSleep | None = None
+        self._trial_started: float | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
 
@@ -819,16 +929,14 @@ class LLMAgentPolicy(PolicyBase):
 
     def bind(self, embodiment_info: EmbodimentInfo) -> None:
         """Adopt the embodiment's spaces and build the tool surface from them."""
-        toolset = build_toolset(
-            embodiment_info.action_space,
-            embodiment_info.observation_space,
-            embodiment_info.control_hz,
-            self._max_speed_frac,
+        adapter = ToolAdapter(
+            max_speed_frac=self._max_speed_frac,
             images=self._images,
             pre_check=self._pre_check,
         )
-        self._toolset = toolset
-        self._state_labels = toolset.state_labels()
+        adapter.bind(embodiment_info)
+        self._adapter = adapter
+        self._state_labels = adapter.control.state_labels()
         self._embodiment_name = embodiment_info.name
         self._embodiment_docs = getattr(embodiment_info, "docs", None)
         self.info = PolicyInfo(
@@ -836,7 +944,14 @@ class LLMAgentPolicy(PolicyBase):
             action_space=embodiment_info.action_space,
             observation_space=embodiment_info.observation_space,
             control_hz=embodiment_info.control_hz,
+            terminal_actions=_TERMINAL_ACTIONS,
         )
+
+    def bind_tools(self, tools: ToolLibrary) -> None:
+        """Offer the embodiment's contributed tools to the model, after the built-in ones."""
+        if self._adapter is None:
+            raise RuntimeError("bind_tools() before bind(); eval() binds the embodiment first")
+        self._adapter.add_tools(tools)
 
     def bind_task(self, envelope: TaskEnvelope) -> None:
         """Learn the trial's rollout horizon from the task envelope."""
@@ -847,21 +962,14 @@ class LLMAgentPolicy(PolicyBase):
         if isinstance(self._client, ResponsesClient):
             self._client._reset_cache_tracking()
         self._hindsight = None
+        if self._adapter is not None:
+            self._adapter.start_trial()
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
             formatted += _PRE_CHECK_PROMPT_CLAUSE
-        docs = self._embodiment_docs
-        if docs is not None and docs.strip():
-            formatted = formatted + "\n\nEmbodiment notes:\n" + docs.strip()
-        if self._toolset is not None:
-            formatted += f"\n\nEmbodiment bounds:\n{self._toolset.bounds_text}"
-            pinned = self._toolset.pinned_labels
-            if pinned:
-                formatted += (
-                    "\nPinned dimensions: "
-                    f"{', '.join(pinned)} (fixed; do not attempt to move them)."
-                )
+        if self._adapter is not None:
+            formatted += "\n\n" + self._adapter.instructions()
         if self._max_steps is not None:
             formatted += (
                 f"\n\nEnvironment step budget:\nYou have {self._max_steps} environment steps "
@@ -869,6 +977,10 @@ class LLMAgentPolicy(PolicyBase):
                 "`executing move_to over N steps (X.Xs)`). Pace yourself against the "
                 "environment step budget, not only the call budget."
             )
+        if self._eval_notes is not None:
+            # After the budget lines, so "use the whole budget" sits next to
+            # the numbers, and before prior learnings, which are advisory.
+            formatted += "\n\nEvaluation notes:\n" + self._eval_notes
         if self._prior_learnings_text is not None:
             formatted = (
                 formatted
@@ -888,6 +1000,9 @@ class LLMAgentPolicy(PolicyBase):
         self._calls_used = 0
         self._usage_totals.clear()
         self._pending = None
+        self._pending_motion = None
+        self._pending_sleep = None
+        self._trial_started = self._clock()
         self._revealed.clear()
 
     def on_trial_start(self, scene_id: str, epoch: int, log_dir: str, run_id: str) -> None:
@@ -895,7 +1010,7 @@ class LLMAgentPolicy(PolicyBase):
         if self._capture is not None:
             self._capture.begin_trial(log_dir, run_id, f"{_safe(scene_id)}-e{epoch}")
 
-    def on_trial_end(self, record: TrialRecord, log_dir: str, run_id: str) -> None:
+    def on_trial_end(self, record: Record, log_dir: str, run_id: str) -> None:
         """Persist wire capture, hindsight, usage, and the transcript at trial end."""
         if isinstance(self._client, GeminiLiveClient):
             # Trial finalization must stay successful even if a half-dead Live
@@ -950,8 +1065,8 @@ class LLMAgentPolicy(PolicyBase):
 
     def act(self, observation: Observation) -> ActionChunk:
         """Run LLM turns until one validated tool call yields an action chunk."""
-        toolset = self._toolset
-        if toolset is None:
+        adapter = self._adapter
+        if adapter is None:
             raise RuntimeError(
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
@@ -960,6 +1075,16 @@ class LLMAgentPolicy(PolicyBase):
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
         narration: str | None = None
+        slept = self._pending_sleep
+        self._pending_sleep = None
+        if slept is not None:
+            narration = _sleep_narration(slept, _thermal_status(observation), observation)
+        motion = self._pending_motion
+        self._pending_motion = None
+        if motion is not None:
+            narration = self._motion_narration(
+                motion, observation, with_frames=self._pending is not None
+            )
         if self._images == "on_demand":
             reveal = ()
             pending = self._pending
@@ -973,7 +1098,13 @@ class LLMAgentPolicy(PolicyBase):
                 reveal = tuple(name for name in requested if name in observation.images)
                 missing = tuple(name for name in requested if name not in observation.images)
                 self._revealed.update(reveal)
-                narration = self._pending_narration(pending, observation, missing)
+                if missing:
+                    # A capture only ever rides behind a motion, so its
+                    # narration already exists.
+                    assert narration is not None
+                    narration += (
+                        f" Missing camera(s) in this observation: {_quoted_names(missing)}."
+                    )
         observation_content = _observation_content(
             observation,
             self._state_labels,
@@ -981,6 +1112,8 @@ class LLMAgentPolicy(PolicyBase):
             reveal=reveal,
             narration=narration,
             depth=depth,
+            setpoint_lines=adapter.control.setpoint_lines(observation),
+            wall_s=None if self._trial_started is None else self._clock() - self._trial_started,
         )
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
@@ -994,7 +1127,7 @@ class LLMAgentPolicy(PolicyBase):
         summary = f"{len(observation.images)} camera(s)"
         if self._images == "on_demand":
             summary += " available"
-        state_summary = " | ".join(_state_lines(observation, self._state_labels))
+        state_summary = " | ".join(state_lines(observation, self._state_labels))
         if state_summary:
             summary = f"{summary}, {state_summary}"
         step_label = _step_label(observation, self._max_steps)
@@ -1006,7 +1139,7 @@ class LLMAgentPolicy(PolicyBase):
         rejections = 0
         while True:
             if self._calls_used >= self._max_llm_calls:
-                return self._forced_give_up(toolset, observation, "LLM call budget exhausted")
+                return self._forced_give_up(adapter, observation, "LLM call budget exhausted")
             outgoing = self._messages
             if self._image_horizon is not None:
                 outgoing = _evicted_view(
@@ -1014,12 +1147,16 @@ class LLMAgentPolicy(PolicyBase):
                     self._image_horizon,
                     mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
                 )
-            message = self._client.complete(
-                outgoing,
-                toolset.schemas(),
-                temperature=self._temperature,
-                reasoning_effort=self._effort,
-            )
+            try:
+                message = self._client.complete(
+                    outgoing,
+                    adapter.tools.schemas(),
+                    temperature=self._temperature,
+                    reasoning_effort=self._effort,
+                )
+            except ContentFilteredError as exc:
+                self._calls_used += 1
+                return self._forced_give_up(adapter, observation, str(exc))
             self._calls_used += 1
             if message.usage is not None:
                 for key, value in message.usage.items():
@@ -1068,13 +1205,14 @@ class LLMAgentPolicy(PolicyBase):
             closed = False
             closed_after_failure = False
             stopped = False
+            sleep_request: float | None = None
             last_error: str | None = None
             for call in message.tool_calls:
                 result_text: str
                 echo_text: str | None = None
                 is_capture = self._images == "on_demand" and call.name == "take_pic"
                 if not closed:
-                    result = toolset.execute(call, observation)
+                    result = adapter.tools.execute(call.name, call.arguments, observation)
                     if is_capture:
                         closed = True
                         if result.error is not None:
@@ -1159,26 +1297,28 @@ class LLMAgentPolicy(PolicyBase):
                             if result.chunk is not None:
                                 chunk = result.chunk
                                 target = result.target
-                                stopped = bool(chunk.actions[0].meta.get("request_stop"))
+                                sleep_request = result.sleep
+                                stopped = chunk.terminal is not None
                                 if stopped:
-                                    self._hindsight = chunk.actions[0].meta.get("stop_hindsight")
+                                    # A terminal tool may stop without a hold action;
+                                    # only an action can carry hindsight.
+                                    self._hindsight = (
+                                        chunk.actions[0].meta.get("stop_hindsight")
+                                        if chunk.actions
+                                        else None
+                                    )
                                 closed = True
                 elif is_capture and chunk is not None and not stopped and self._pending is None:
                     # The closed-state exception validates only the capture
                     # that may ride behind a motion. A failed validation keeps
                     # the queue slot open for a later call in this same turn.
-                    result = toolset.execute(call, observation)
+                    result = adapter.tools.execute(call.name, call.arguments, observation)
                     if result.error is not None:
                         result_text = result.error
                     elif result.capture == ():
                         result_text = "no camera images are available in this observation"
                     else:
-                        self._pending = _PendingCapture(
-                            requested=result.capture,
-                            issued_step=observation.extra.get("env_step"),
-                            chunk_len=len(chunk),
-                            target=target,
-                        )
+                        self._pending = _PendingCapture(requested=result.capture)
                         result_text = (
                             "queued: frames arrive with the next observation, "
                             "after the motion plays"
@@ -1211,51 +1351,71 @@ class LLMAgentPolicy(PolicyBase):
                     }
                 )
             if chunk is not None:
+                if sleep_request is not None:
+                    issued = observation.extra.get("env_step")
+                    self._pending_sleep = _PendingSleep(
+                        seconds=sleep_request,
+                        before=_thermal_status(observation),
+                        issued_step=issued if isinstance(issued, int) else None,
+                        steps=len(chunk),
+                    )
+                elif not stopped:
+                    # Narrated with the next observation in every image mode:
+                    # how much played and how far the readback sits from the
+                    # target, so a short move never passes silently.
+                    self._pending_motion = _PendingMotion(
+                        issued_step=observation.extra.get("env_step"),
+                        chunk_len=len(chunk),
+                        target=target,
+                    )
                 return chunk
             if failures >= _MAX_CONSECUTIVE_FAILURES:
                 raise RuntimeError(
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
 
-    def _forced_give_up(self, toolset: Toolset, observation: Observation, why: str) -> ActionChunk:
+    def _forced_give_up(
+        self, adapter: ToolAdapter, observation: Observation, why: str
+    ) -> ActionChunk:
         # Echoed but never appended to _messages: the synthetic call is not
         # model output, so it stays out of the transcript.
         self._echo(f"[agent] -- {why}; forcing give_up")
-        synthetic = ToolCall(id="budget", name="give_up", arguments=json.dumps({"reason": why}))
-        result = toolset.execute(synthetic, observation)
+        result = adapter.tools.execute("give_up", json.dumps({"reason": why}), observation)
         if result.chunk is None:  # pragma: no cover - synthetic stop is structurally valid
             raise RuntimeError(f"forced give_up failed: {result.error}")
         return result.chunk
 
-    def _pending_narration(
+    def _motion_narration(
         self,
-        pending: _PendingCapture,
+        motion: _PendingMotion,
         observation: Observation,
-        missing: tuple[str, ...],
+        *,
+        with_frames: bool,
     ) -> str:
-        """Describe observed playout, residual, and any cameras missing at delivery."""
+        """Describe how much of the last move played and the readback's offset from its target."""
         arriving_step = observation.extra.get("env_step")
         if (
-            isinstance(pending.issued_step, int)
+            isinstance(motion.issued_step, int)
             and isinstance(arriving_step, int)
-            and (advanced := arriving_step - pending.issued_step) > 0
+            and (advanced := arriving_step - motion.issued_step) > 0
         ):
-            if advanced >= pending.chunk_len:
+            if advanced >= motion.chunk_len:
                 narration = (
-                    f"The motion finished playing ({pending.chunk_len} of "
-                    f"{pending.chunk_len} steps)."
+                    f"The motion finished playing ({motion.chunk_len} of {motion.chunk_len} steps)."
                 )
             else:
                 narration = (
-                    f"The motion played {advanced} of {pending.chunk_len} steps before "
+                    f"The motion played {advanced} of {motion.chunk_len} steps before "
                     "this observation; it did not run to the end."
                 )
-        else:
+        elif with_frames:
             narration = "These frames follow the motion."
+        else:
+            narration = "This observation follows the motion."
 
-        toolset = self._toolset
-        if pending.target is not None and toolset is not None:
-            residual = toolset.residual(pending.target, observation)
+        adapter = self._adapter
+        if motion.target is not None and adapter is not None:
+            residual = adapter.control.residual(motion.target, observation)
             if residual is not None:
                 label, magnitude = residual
                 if magnitude > _TARGET_REACHED_TOLERANCE:
@@ -1265,34 +1425,11 @@ class LLMAgentPolicy(PolicyBase):
                     )
                 else:
                     narration += " Target reached."
-        if missing:
-            narration += f" Missing camera(s) in this observation: {_quoted_names(missing)}."
-        return narration
+        return narration + _replan_note(observation)
 
     def _echo(self, text: str) -> None:
         if self._transcript_echo:
             print(text, file=sys.stderr, flush=True)
-
-
-def _state_lines(
-    observation: Observation,
-    state_labels: tuple[str, tuple[str, ...]] | None = None,
-) -> list[str]:
-    """One state[key] line per state entry, shared by prompt and echo so they never drift."""
-    lines: list[str] = []
-    for key, value in observation.state.items():
-        array = np.asarray(value, dtype=np.float64)
-        rounded = np.round(array, 4).tolist()
-        if state_labels is not None and key == state_labels[0]:
-            labels = state_labels[1]
-            if array.shape == (len(labels),):
-                labeled = " ".join(
-                    f"{label}={item}" for label, item in zip(labels, rounded, strict=True)
-                )
-                lines.append(f"state[{key}]: {labeled}")
-                continue
-        lines.append(f"state[{key}]: {rounded}")
-    return lines
 
 
 def _step_label(observation: Observation, max_steps: int | None = None) -> str:
@@ -1305,40 +1442,70 @@ def _step_label(observation: Observation, max_steps: int | None = None) -> str:
     return f"step {step}"
 
 
-def _approvals_line(observation: Observation) -> str | None:
-    approvals = observation.extra.get("approvals")
-    if not isinstance(approvals, list) or not approvals:
+def _thermal_status(observation: Observation) -> _ThermalStatus | None:
+    """Reduce ``extra["motor_temps"]`` to each arm's hottest reading, or ``None``.
+
+    A report without a numeric limit or arm map is treated as absent.
+    """
+    report = observation.extra.get("motor_temps")
+    if not isinstance(report, Mapping):
         return None
-    total = len(approvals)
-    details = [str(a.get("detail")) for a in approvals if isinstance(a, dict) and a.get("detail")]
-    if not details:
-        return f"approver: {total} step(s) modified."
-    counts = Counter(details)
-    formatted: list[str] = []
-    for flag, count in counts.items():
-        if count > 1:
-            formatted.append(f"{flag} \u00d7{count}")
-        else:
-            formatted.append(flag)
-    detail_str = f" ({', '.join(formatted)})"
-    return f"approver: {total} step(s) modified{detail_str}."
+    limit = report.get("limit")
+    margin = report.get("warn_margin", 0.0)
+    reported = report.get("arms")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or isinstance(margin, bool)
+        or not isinstance(margin, (int, float))
+        or not isinstance(reported, Mapping)
+    ):
+        return None
+    hottest: dict[str, tuple[str, float]] = {}
+    for name, entry in reported.items():
+        if not isinstance(entry, Mapping):
+            continue
+        label = entry.get("hottest")
+        celsius = entry.get("celsius")
+        if (
+            isinstance(label, str)
+            and not isinstance(celsius, bool)
+            and isinstance(celsius, (int, float))
+        ):
+            hottest[str(name)] = (label, float(celsius))
+    return _ThermalStatus(limit=float(limit), margin=float(margin), hottest=hottest)
 
 
-def _operator_lines(observation: Observation) -> list[str]:
-    """Render only well-formed feedback entries from the framework-reserved channel."""
-    messages = observation.extra.get("operator_messages")
-    if not isinstance(messages, list):
-        return []
-    lines: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        step = message.get("t")
-        text = message.get("text")
-        if not isinstance(step, int) or not isinstance(text, str):
-            continue
-        lines.append(f"operator feedback (step {step}): {text}")
-    return lines
+def _sleep_narration(
+    slept: _PendingSleep, after: _ThermalStatus | None, observation: Observation
+) -> str:
+    """Describe a sleep, how much of it played, and the hottest motors before and after."""
+    arriving = observation.extra.get("env_step")
+    played = (
+        arriving - slept.issued_step
+        if isinstance(arriving, int) and isinstance(slept.issued_step, int)
+        else None
+    )
+    if played is not None and slept.steps is not None and 0 < played < slept.steps:
+        narration = (
+            f"Slept {played} of {slept.steps} steps of the requested {slept.seconds:g} s "
+            "holding the setpoint; it did not run to the end."
+        )
+    else:
+        narration = f"Slept {slept.seconds:g} s holding the setpoint."
+    before = slept.before.text() if slept.before is not None else ""
+    now = after.text() if after is not None else ""
+    if before and now:
+        narration += f" Hottest motors: {before} before, {now} now."
+    return narration + _replan_note(observation)
+
+
+def _replan_note(observation: Observation) -> str:
+    """The sentence telling the model a replan trigger cut the last chunk short, or ""."""
+    replan = observation.extra.get("replan")
+    if isinstance(replan, Mapping) and isinstance(replan.get("reason"), str):
+        return f" The motion was cut short to look again: {replan['reason']}."
+    return ""
 
 
 def _observation_content(
@@ -1349,8 +1516,16 @@ def _observation_content(
     reveal: tuple[str, ...] | None = None,
     narration: str | None = None,
     depth: Mapping[str, Any] | None = None,
+    setpoint_lines: Sequence[str] = (),
+    wall_s: float | None = None,
 ) -> list[dict[str, Any]]:
-    """State as readable text plus camera frames as inline PNG data URLs."""
+    """State as readable text plus camera frames as inline PNG data URLs.
+
+    ``setpoint_lines`` (from ``ControlTools.setpoint_lines``) follow the state
+    lines so the readback and the setpoint it is compared against sit
+    together. ``wall_s`` is the wall-clock time since the trial began; it
+    follows the step budget so the model can pace motion against real time.
+    """
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
@@ -1358,11 +1533,9 @@ def _observation_content(
     if isinstance(step, int) and max_steps is not None:
         remaining = max_steps - step
         lines.append(f"Step budget: step {step}/{max_steps} ({remaining} env steps remaining).")
-    lines.extend(_state_lines(observation, state_labels))
-    app_line = _approvals_line(observation)
-    if app_line is not None:
-        lines.append(app_line)
-    lines.extend(_operator_lines(observation))
+    if wall_s is not None:
+        lines.append(f"Wall clock: {max(0.0, wall_s):.0f} s since the trial began.")
+    lines.extend(observation_lines(observation, state_labels, setpoint_lines))
     if narration is not None:
         lines.append(narration)
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]

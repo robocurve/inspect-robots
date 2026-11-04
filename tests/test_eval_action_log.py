@@ -13,13 +13,13 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval, eval_set
-from inspect_robots.approver import ClampApprover
 from inspect_robots.console import ConsolePoll, EndRequest
 from inspect_robots.eval import _write_action_log
 from inspect_robots.frames import _safe
+from inspect_robots.guard import ClampGuard
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import StepRecord, TrialRecord
+from inspect_robots.rollout import Record, StepRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
@@ -31,9 +31,9 @@ class _RecordingSink(NullSink):
     """Collect records after every trial lifecycle hook has run."""
 
     def __init__(self) -> None:
-        self.records: list[TrialRecord] = []
+        self.records: list[Record] = []
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         self.records.append(record)
 
 
@@ -116,7 +116,7 @@ def test_action_log_records_executed_clamped_action(tmp_path: Path) -> None:
         embodiment,
         log_dir=str(tmp_path),
         sinks=[sink],
-        approver=ClampApprover(embodiment.info.action_space),
+        guard=ClampGuard(embodiment.info.action_space),
     )
 
     (record,) = sink.records
@@ -344,7 +344,7 @@ def test_non_finite_policy_action_errors_with_header_only_log(tmp_path: Path) ->
 
 
 def test_write_action_log_rejects_nan_before_touching_disk(tmp_path: Path) -> None:
-    record = TrialRecord(
+    record = Record(
         scene_id="nan",
         epoch=0,
         seed=0,
