@@ -14,7 +14,7 @@ from inspect_robots.log import EvalLog, EvalResults, EvalSpec, EvalStats
 from inspect_robots.logging import LiveLogSink
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import StepRecord, TrialRecord
+from inspect_robots.rollout import Record, StepRecord
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
@@ -54,8 +54,8 @@ def _record(
     epoch: int = 0,
     status: str = "success",
     transcript: object = None,
-) -> TrialRecord:
-    return TrialRecord(
+) -> Record:
+    return Record(
         scene_id="scene-a",
         epoch=epoch,
         seed=7,
@@ -374,7 +374,7 @@ class _ProbeSink(NullSink):
         del t, messages
         self.message_logs.append(self._read())
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         del record
         self.trial_logs.append(self._read())
 
@@ -392,7 +392,7 @@ def test_live_snapshot_carries_the_same_grader_config_as_the_final_log(
     class _NamedGrader:
         name = "probe-grader"
 
-        def grade(self, record: TrialRecord, scene: Scene) -> None:
+        def grade(self, record: Record, scene: Scene) -> None:
             """Stamp a verdict so the trial is graded."""
             del scene
             record.operator_judgement = "success"
@@ -539,7 +539,7 @@ def test_eval_set_reused_live_sink_removes_unfinished_snapshot(tmp_path: Path) -
     ]
     grading_calls = 0
 
-    def fail_first_grading(record: TrialRecord, scene: Scene) -> None:
+    def fail_first_grading(record: Record, scene: Scene) -> None:
         nonlocal grading_calls
         del record, scene
         grading_calls += 1

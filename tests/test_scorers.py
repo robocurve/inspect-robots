@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from inspect_robots.rollout import StepRecord, TrialRecord
+from inspect_robots.rollout import Record, StepRecord
 from inspect_robots.scorer import (
     Score,
     VLMScorer,
@@ -23,7 +23,7 @@ from inspect_robots.scorer import (
 from inspect_robots.types import Action, Observation, StepResult
 
 
-def _record(distances: list[float], *, success: bool, operator: str | None = None) -> TrialRecord:
+def _record(distances: list[float], *, success: bool, operator: str | None = None) -> Record:
     steps = []
     for t, d in enumerate(distances):
         last = t == len(distances) - 1
@@ -40,7 +40,7 @@ def _record(distances: list[float], *, success: bool, operator: str | None = Non
                 ),
             )
         )
-    rec = TrialRecord(scene_id="s", epoch=0, seed=0, steps=steps)
+    rec = Record(scene_id="s", epoch=0, seed=0, steps=steps)
     rec.terminated = success
     rec.termination_reason = "success" if success else None
     rec.operator_judgement = operator

@@ -144,6 +144,43 @@ and SDK versions must match for live connections. For a replayable file without
 a live connection, use `--rerun-save`. Hosts driving two rigs give each config
 its own `rerun_port` so each run spawns its own viewer window.
 
+## Trial records
+
+Every trial gets a [`Record`](../../src/inspect_robots/rollout.py) with a unique
+`record_id`. Besides the executed steps, a record keeps every action chunk the
+policy produced (`Record.chunks`), before the action manager chose which actions
+to play and before any guard changed them. Chunks are captured where the policy
+returns them, so the record is complete with any action manager.
+
+By default `eval()` writes one directory per trial:
+
+```
+records/<run_id>/<sanitized_scene_id>-e<epoch>/
+  record.json    record id, configuration, termination, events
+  chunks.jsonl   a header row, then one row per produced chunk
+```
+
+`record.json` holds the resolved configuration the trial ran with: task,
+scene, rubrics, run and trial seeds, budget, policy name and config,
+embodiment, action manager and guard (each with its parameters), and grader.
+Values under credential-like keys (`api_key`, `token`, `password`, ...) are
+written as `"<redacted>"`; keys ending in `_env`, which name an environment
+variable, are kept. The same redaction applies to `eval.policy_config` in the
+log. Each `chunks.jsonl` row has the step `t` at which the policy was called,
+its `actions`, its `terminal` action (kind and stated reason) if any, the
+policy's reported `latency_s`, and `wall_s`, the time `act()` took. Non-finite
+values are written as strings such as `"nan"`, so a chunk that failed a trial
+is still recorded as produced.
+
+The log points at these directories: `SceneResult.record_ids` and
+`SceneResult.record_dirs` run parallel to `epochs`, and `stats.records_dir` is
+the run's directory. `SceneResult.events` keeps each trial's full event
+transcript (reset, inference, approval, step, operator messages and verdicts,
+errors, and the `policy_terminal` event with the step at which the policy ended
+the trial). Pass `store_records=False` to skip the directories; record ids and
+events stay in the log. A filesystem failure emits a warning and does not
+change the eval status.
+
 ## Action side-cars
 
 Every delivered trial writes its executed action sequence to an atomic JSONL
@@ -171,7 +208,7 @@ trial.
 
 Camera frames are large. With `store_frames=True`, the rollout streams frames to
 a per-run subdirectory of `<log_dir>/frames` through a
-[`FrameStore`](../../src/inspect_robots/frames.py) and the `TrialRecord` keeps lightweight
+[`FrameStore`](../../src/inspect_robots/frames.py) and the `Record` keeps lightweight
 [`FrameRef`](../../src/inspect_robots/frames.py) handles, so long, multi-camera episodes stay
 memory-safe and remain scorable from disk. Trial ids repeat across runs, so
 each eval gets its own directory; read the exact path from the log's

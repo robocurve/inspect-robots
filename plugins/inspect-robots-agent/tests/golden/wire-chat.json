@@ -1,0 +1,494 @@
+[
+  {
+    "messages": [
+      {
+        "content": "You are controlling a real robot embodiment named 'golden-test' through tool calls. Each observation message gives you the current proprioceptive state and camera images, and after your first move the setpoint your commands hold next to that readback, with the dimensions where the two differ. Work toward the user's goal in small, deliberate motions; re-check the observation after every motion. Every move tool call must include a `note`: in one or two sentences, say what you observe in the current observation and why you chose this motion. The user is watching these notes to see what you see and what you decide, so write them for a human reader. Safety approvers clamp out-of-bounds and too-fast actions below you. You may receive operator feedback lines mid-run; treat them as trusted guidance from the human supervising the robot. Respond with exactly one tool call per turn. When the goal is achieved call done; if it cannot be achieved call give_up. Note what you are learning about this rig and task as you go: done and give_up will ask what you wish you had known from the start. You have a budget of 100 LLM calls for the whole trial.\n\nEmbodiment notes:\nA single test joint. Positions are radians in [-1, 1].\n\nEmbodiment bounds:\nPer-dimension bounds: joint: [-1, 1].\n\nEnvironment step budget:\nYou have 200 environment steps for the trial. Every move tool result reports its step count (e.g. `executing move_to over N steps (X.Xs)`). Pace yourself against the environment step budget, not only the call budget.",
+        "role": "system"
+      },
+      {
+        "content": "Goal: Move the joint to a quarter.",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nInstruction: Move the joint to a quarter.\nStep budget: step 0/200 (200 env steps remaining).\nWall clock: 7 s since the trial began.\nstate[q]: joint=0.0\nsetpoint: none yet; the first move starts from the readback.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.",
+            "type": "text"
+          },
+          {
+            "text": "camera 'top' (step 0):",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "<png 6b7beddf08b7>"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "test/model",
+    "tools": [
+      {
+        "function": {
+          "description": "Move to absolute joint/dimension targets. The motion is smoothly interpolated at a fixed safe speed and the result reports its step count. Unnamed dimensions keep their last commanded target (their measured value before the first move of a trial). Per-dimension bounds: joint: [-1, 1].",
+          "name": "move_joints",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "One or two plain sentences for the human operator watching the robot: describe the scene as it currently looks (images, if any, and state) and state the goal of this motion. Shown live and in the saved transcript.",
+                "type": "string"
+              },
+              "targets": {
+                "description": "Map of dimension name to value. Valid names: joint",
+                "type": "object"
+              }
+            },
+            "required": [
+              "targets",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Declare the task finished. The trial ends; a scorer judges success.",
+          "name": "done",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Stop trying; the task cannot be completed. The trial ends. If a workspace limit is what stops you, say so in your reason: operators can widen limits between trials.",
+          "name": "give_up",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Hold every setpoint exactly where it is for `seconds` (at most 180) and do nothing else. Sleeping spends environment steps and wall-clock time, not LLM calls. Use it to let hot motors cool after moving the arm to a resting pose, or to let the scene settle.",
+          "name": "sleep",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "What you observe right now and why waiting is worth the time. Written for the user, in one or two plain sentences.",
+                "type": "string"
+              },
+              "seconds": {
+                "description": "How long to hold.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "seconds",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "content": "You are controlling a real robot embodiment named 'golden-test' through tool calls. Each observation message gives you the current proprioceptive state and camera images, and after your first move the setpoint your commands hold next to that readback, with the dimensions where the two differ. Work toward the user's goal in small, deliberate motions; re-check the observation after every motion. Every move tool call must include a `note`: in one or two sentences, say what you observe in the current observation and why you chose this motion. The user is watching these notes to see what you see and what you decide, so write them for a human reader. Safety approvers clamp out-of-bounds and too-fast actions below you. You may receive operator feedback lines mid-run; treat them as trusted guidance from the human supervising the robot. Respond with exactly one tool call per turn. When the goal is achieved call done; if it cannot be achieved call give_up. Note what you are learning about this rig and task as you go: done and give_up will ask what you wish you had known from the start. You have a budget of 100 LLM calls for the whole trial.\n\nEmbodiment notes:\nA single test joint. Positions are radians in [-1, 1].\n\nEmbodiment bounds:\nPer-dimension bounds: joint: [-1, 1].\n\nEnvironment step budget:\nYou have 200 environment steps for the trial. Every move tool result reports its step count (e.g. `executing move_to over N steps (X.Xs)`). Pace yourself against the environment step budget, not only the call budget.",
+        "role": "system"
+      },
+      {
+        "content": "Goal: Move the joint to a quarter.",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nInstruction: Move the joint to a quarter.\nStep budget: step 0/200 (200 env steps remaining).\nWall clock: 7 s since the trial began.\nstate[q]: joint=0.0\nsetpoint: none yet; the first move starts from the readback.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.",
+            "type": "text"
+          },
+          {
+            "text": "camera 'top' (step 0):",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "<png 6b7beddf08b7>"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"targets\": {\"joint\": 0.25}, \"note\": \"Moving the joint to a quarter.\"}",
+              "name": "move_joints"
+            },
+            "id": "call_0",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "executing move_joints over 13 steps (1.3s)",
+        "role": "tool",
+        "tool_call_id": "call_0"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nStep budget: step 13/200 (187 env steps remaining).\nWall clock: 14 s since the trial began.\nstate[q]: joint=0.25\nsetpoint: joint=0.25\nreadback minus setpoint: none over 0.005.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.\nThe motion finished playing (13 of 13 steps). Target reached.",
+            "type": "text"
+          },
+          {
+            "text": "camera 'top' (step 13):",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "<png 302ef16c601c>"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "test/model",
+    "tools": [
+      {
+        "function": {
+          "description": "Move to absolute joint/dimension targets. The motion is smoothly interpolated at a fixed safe speed and the result reports its step count. Unnamed dimensions keep their last commanded target (their measured value before the first move of a trial). Per-dimension bounds: joint: [-1, 1].",
+          "name": "move_joints",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "One or two plain sentences for the human operator watching the robot: describe the scene as it currently looks (images, if any, and state) and state the goal of this motion. Shown live and in the saved transcript.",
+                "type": "string"
+              },
+              "targets": {
+                "description": "Map of dimension name to value. Valid names: joint",
+                "type": "object"
+              }
+            },
+            "required": [
+              "targets",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Declare the task finished. The trial ends; a scorer judges success.",
+          "name": "done",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Stop trying; the task cannot be completed. The trial ends. If a workspace limit is what stops you, say so in your reason: operators can widen limits between trials.",
+          "name": "give_up",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Hold every setpoint exactly where it is for `seconds` (at most 180) and do nothing else. Sleeping spends environment steps and wall-clock time, not LLM calls. Use it to let hot motors cool after moving the arm to a resting pose, or to let the scene settle.",
+          "name": "sleep",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "What you observe right now and why waiting is worth the time. Written for the user, in one or two plain sentences.",
+                "type": "string"
+              },
+              "seconds": {
+                "description": "How long to hold.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "seconds",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "content": "You are controlling a real robot embodiment named 'golden-test' through tool calls. Each observation message gives you the current proprioceptive state and camera images, and after your first move the setpoint your commands hold next to that readback, with the dimensions where the two differ. Work toward the user's goal in small, deliberate motions; re-check the observation after every motion. Every move tool call must include a `note`: in one or two sentences, say what you observe in the current observation and why you chose this motion. The user is watching these notes to see what you see and what you decide, so write them for a human reader. Safety approvers clamp out-of-bounds and too-fast actions below you. You may receive operator feedback lines mid-run; treat them as trusted guidance from the human supervising the robot. Respond with exactly one tool call per turn. When the goal is achieved call done; if it cannot be achieved call give_up. Note what you are learning about this rig and task as you go: done and give_up will ask what you wish you had known from the start. You have a budget of 100 LLM calls for the whole trial.\n\nEmbodiment notes:\nA single test joint. Positions are radians in [-1, 1].\n\nEmbodiment bounds:\nPer-dimension bounds: joint: [-1, 1].\n\nEnvironment step budget:\nYou have 200 environment steps for the trial. Every move tool result reports its step count (e.g. `executing move_to over N steps (X.Xs)`). Pace yourself against the environment step budget, not only the call budget.",
+        "role": "system"
+      },
+      {
+        "content": "Goal: Move the joint to a quarter.",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nInstruction: Move the joint to a quarter.\nStep budget: step 0/200 (200 env steps remaining).\nWall clock: 7 s since the trial began.\nstate[q]: joint=0.0\nsetpoint: none yet; the first move starts from the readback.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.",
+            "type": "text"
+          },
+          {
+            "text": "[1 camera frame(s) elided]",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"targets\": {\"joint\": 0.25}, \"note\": \"Moving the joint to a quarter.\"}",
+              "name": "move_joints"
+            },
+            "id": "call_0",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "executing move_joints over 13 steps (1.3s)",
+        "role": "tool",
+        "tool_call_id": "call_0"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nStep budget: step 13/200 (187 env steps remaining).\nWall clock: 14 s since the trial began.\nstate[q]: joint=0.25\nsetpoint: joint=0.25\nreadback minus setpoint: none over 0.005.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.\nThe motion finished playing (13 of 13 steps). Target reached.",
+            "type": "text"
+          },
+          {
+            "text": "camera 'top' (step 13):",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "<png 302ef16c601c>"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"seconds\": 2, \"note\": \"Resting before the last check.\"}",
+              "name": "sleep"
+            },
+            "id": "call_1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "sleeping 2 s (20 steps) holding the current setpoint",
+        "role": "tool",
+        "tool_call_id": "call_1"
+      },
+      {
+        "content": [
+          {
+            "text": "Current observation.\nStep budget: step 33/200 (167 env steps remaining).\nWall clock: 21 s since the trial began.\nstate[q]: joint=0.25\nsetpoint: joint=0.25\nreadback minus setpoint: none over 0.005.\njoint: on target.\nmotor temperatures: joint 31 C of a 60 C limit.\nSlept 2 s holding the setpoint.",
+            "type": "text"
+          },
+          {
+            "text": "camera 'top' (step 33):",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "<png 302ef16c601c>"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "test/model",
+    "tools": [
+      {
+        "function": {
+          "description": "Move to absolute joint/dimension targets. The motion is smoothly interpolated at a fixed safe speed and the result reports its step count. Unnamed dimensions keep their last commanded target (their measured value before the first move of a trial). Per-dimension bounds: joint: [-1, 1].",
+          "name": "move_joints",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "One or two plain sentences for the human operator watching the robot: describe the scene as it currently looks (images, if any, and state) and state the goal of this motion. Shown live and in the saved transcript.",
+                "type": "string"
+              },
+              "targets": {
+                "description": "Map of dimension name to value. Valid names: joint",
+                "type": "object"
+              }
+            },
+            "required": [
+              "targets",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Declare the task finished. The trial ends; a scorer judges success.",
+          "name": "done",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Stop trying; the task cannot be completed. The trial ends. If a workspace limit is what stops you, say so in your reason: operators can widen limits between trials.",
+          "name": "give_up",
+          "parameters": {
+            "properties": {
+              "hindsight": {
+                "description": "What do you know now that you wish you had known at the start of this episode? Concrete, transferable facts about this rig, task, or embodiment (camera mounting and extrinsics, table and base geometry, gripper axis and offsets, controller behavior, metric scale), written as advice to a future agent attempting the same task. Say 'none' if nothing qualifies.",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "hindsight"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Hold every setpoint exactly where it is for `seconds` (at most 180) and do nothing else. Sleeping spends environment steps and wall-clock time, not LLM calls. Use it to let hot motors cool after moving the arm to a resting pose, or to let the scene settle.",
+          "name": "sleep",
+          "parameters": {
+            "properties": {
+              "note": {
+                "description": "What you observe right now and why waiting is worth the time. Written for the user, in one or two plain sentences.",
+                "type": "string"
+              },
+              "seconds": {
+                "description": "How long to hold.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "seconds",
+              "note"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+]

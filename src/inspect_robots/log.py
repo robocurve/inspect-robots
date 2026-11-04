@@ -11,7 +11,8 @@ dict-valued fields (``SceneResult.reduced``, the per-epoch score dicts,
 ``EvalResults.metrics``, ``EvalSpec.policy_config`` / ``embodiment_info`` /
 ``grader_config``, and ``SceneResult.scene_metadata``)
 remain plain mutable dicts, as do the dictionaries inside
-``SceneResult.operator_messages``. ``SceneResult.policy_transcripts`` entries
+``SceneResult.operator_messages`` and ``SceneResult.events``.
+``SceneResult.policy_transcripts`` entries
 are arbitrary mutable JSON values. Treat a log as read-only; nothing
 deep-freezes it.
 """
@@ -50,7 +51,17 @@ def _json_safe_scene_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     return safe
 
 
-SCHEMA_VERSION = 1
+# Version 2 (the paper release) adds rubrics (EvalSpec.rubrics, SceneResult.rubrics)
+# and the policy's stated termination detail (SceneResult.termination_details).
+# Version 3 gives every trial a record: SceneResult.record_ids and record_dirs name
+# each trial's record directory (EvalStats.records_dir), and SceneResult.events
+# keeps each trial's full event transcript, including the policy_terminal event.
+# EvalSpec.reducer records the epoch reducer so a log can be re-scored, and
+# EvalSpec.benchmark names the benchmark (and version) a task ran in.
+# Older logs still read: their new fields are empty and their result keys,
+# which were scorer names in version 1, are unchanged.
+SCHEMA_VERSION = 3
+READABLE_SCHEMA_VERSIONS = frozenset({1, 2, SCHEMA_VERSION})
 
 
 @dataclass(frozen=True)
@@ -102,6 +113,15 @@ class EvalSpec:
     # ``metadata["rubric"]`` overrides it for that scene, and that value is
     # already persisted in ``SceneResult.scene_metadata``.
     grader_config: dict[str, Any] = field(default_factory=dict)
+    # The task's rubrics (name, kind, text, scorer, metadata), in declared order;
+    # a scene's own additions and overrides are in its SceneResult.rubrics.
+    # Empty in schema-1 logs.
+    rubrics: list[dict[str, Any]] = field(default_factory=list)
+    # The epoch reducer that combined each scene's trial scores ("mean" by
+    # default), so a log can be re-scored after the fact. None before schema 3.
+    reducer: str | None = None
+    # The benchmark this task ran as part of, {"name", "version"}, or None.
+    benchmark: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +135,8 @@ class EvalStats:
     mean_inference_latency_s: float | None = None
     # Directory of streamed camera frame side-cars, if frame logging was enabled.
     frames_dir: str | None = None
+    # Directory of per-trial record directories, if record storage was enabled.
+    records_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,9 +174,25 @@ class SceneResult:
     # Strictly parallel to ``epochs``: why each recorded trial ended, or
     # ``None`` for errored trials. The default keeps older schema-v1 logs readable.
     termination_reasons: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: the policy's stated reason when its
+    # terminal action (done, give_up, ...) ended the trial, else ``None``.
+    termination_details: tuple[str | None, ...] = ()
+    # The scene's effective rubrics (name, kind, text, scorer, metadata), the
+    # task's merged with the scene's own; results are keyed by these names.
+    # Empty in schema-1 logs, whose result keys are scorer names.
+    rubrics: tuple[dict[str, Any], ...] = ()
     # Strictly parallel to ``epochs``: the policy's audit record per trial,
     # ``None`` when unavailable. The default keeps older schema-v1 logs readable.
     policy_transcripts: tuple[Any, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's ``Record.record_id``.
+    record_ids: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's record directory relative to
+    # the log directory (``record.json`` and ``chunks.jsonl``), or None when
+    # record storage was disabled or failed.
+    record_dirs: tuple[str | None, ...] = ()
+    # Strictly parallel to ``epochs``: each trial's event transcript, as
+    # ``{"kind", "t", "data"}`` dictionaries in the order they happened.
+    events: tuple[tuple[dict[str, Any], ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,10 +233,10 @@ class EvalLog:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalLog:
         """Reconstruct an immutable log, rejecting unsupported schema versions."""
-        if data.get("version") != SCHEMA_VERSION:
+        if data.get("version") not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported eval-log schema version {data.get('version')!r}; "
-                f"this Inspect Robots reads version {SCHEMA_VERSION}"
+                f"this Inspect Robots reads versions {sorted(READABLE_SCHEMA_VERSIONS)}"
             )
         samples = []
         for raw in data.get("samples", ()):
@@ -216,7 +254,12 @@ class EvalLog:
             )
             sample["trial_metadata"] = tuple(sample.get("trial_metadata", ()))
             sample["termination_reasons"] = tuple(sample.get("termination_reasons", ()))
+            sample["termination_details"] = tuple(sample.get("termination_details", ()))
+            sample["rubrics"] = tuple(sample.get("rubrics", ()))
             sample["policy_transcripts"] = tuple(sample.get("policy_transcripts", ()))
+            sample["record_ids"] = tuple(sample.get("record_ids", ()))
+            sample["record_dirs"] = tuple(sample.get("record_dirs", ()))
+            sample["events"] = tuple(tuple(trial) for trial in sample.get("events", ()))
             samples.append(SceneResult(**sample))
         return cls(
             version=data["version"],

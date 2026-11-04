@@ -98,8 +98,13 @@ endpoint support:
 Motion tool calls state where to go, not how long to move. For absolute modes,
 the move tool (`move_joints` for joint spaces, `move_to` for Cartesian pose
 modes) interpolates named partial targets from the observed state at a fixed
-safe speed. The default `max_speed_frac=0.1` allows a tenth of each
-dimension's range per second, subject to a 5%-of-range per-step ceiling that
+safe speed. Dimensions a call leaves unnamed keep the last target commanded in
+the trial (their measured value before the first move), so a gripper squeeze or
+a wrist rotation stays commanded without being repeated on every call, and the
+measured tracking sag never becomes the next command; `done` and `give_up`
+re-send that held target too. The default `max_speed_frac=0.1` allows a tenth
+of each dimension's range per second, subject to a 5%-of-range per-step
+ceiling that
 matches the core's default delta backstop. At that default a near-full-range
 move exceeds the 10 s per-call playout cap, so the agent receives a
 split-the-move error and issues it as two smaller motions; raise the fraction
@@ -136,7 +141,7 @@ A standalone `take_pic` shows the current frame and lets the model decide
 again before moving. A `take_pic` placed after one motion in the same assistant
 turn is queued with `queued: frames arrive with the next observation, after
 the motion plays`: the motion chunk is returned immediately, and the requested
-frames are attached to the next observation after the controller has played
+frames are attached to the next observation after the action manager has played
 the available part of the chunk. Two motions still cannot be chained.
 
 Queued-capture narration reports what the rollout actually observed. It says
@@ -144,16 +149,16 @@ whether all requested chunk steps played or only a prefix did, names camera
 frames missing on arrival, and, for absolute control modes with matching
 proprioception, reports the largest measured offset from the requested target.
 The residual is the arrival check: a full step count alone does not prove the
-arm reached its target when an approver rewrote actions or a smoothing
-controller blended them.
+arm reached its target when a guard rewrote actions or a smoothing
+action manager blended them.
 
-Controller choice affects that report. `DefaultController` buffers
+ActionManager choice affects that report. `DefaultActionManager` buffers
 `min(replan_interval, chunk_len)` actions, so a `replan_interval` shorter than
 the interpolation always reports partial playout; a chunk shorter than the
-interval reports finished. `EnsemblingController` re-queries every control
-step, so the observed advance is always one step. It also rebuilds actions
-from chunk metadata, which means `done` and `give_up` do not terminate under
-ensembling (an existing core limitation). A trial that terminates or reaches
+interval reports finished. `EnsemblingActionManager` re-queries every control
+step, so the observed advance is always one step. `done` and `give_up` still
+end the trial: the ensembler carries a chunk's terminal action onto the blended
+action it plays. A trial that terminates or reaches
 its step limit before the next policy call drops any queued capture.
 
 For displacement modes, `move_by` splits the requested total so every action
@@ -177,6 +182,25 @@ The embodiment then plays the chunk at its native rate. In this case the speed
 and playout caps are step-count constructs, not wall-clock guarantees, and the
 tool result does not report seconds.
 
+Every observation in an absolute mode also prints the setpoint, the target
+each dimension is holding from the agent's commands, under the state line,
+followed by `readback minus setpoint:` for the dimensions that differ by
+0.005 or more (before the first move of a trial it says the next move starts
+from the readback). Gravity sag, drift on an idle arm, measurement scatter,
+and a gripper squeezing an object all show up there as offsets the agent can
+read instead of estimate, and the system prompt tells it so.
+
+After every move, the next observation narrates how much of the motion
+played and the readback's largest remaining offset from the requested target
+(or `Target reached.`), in every image mode. When the embodiment publishes a
+`motion_report` in `observation.extra` (a mapping whose `lines` are
+plain-language strings written for the policy, such as the YAM plugin's
+per-arm IK diagnosis: whether the target could be posed at all, which joints
+sit on a limit, whether the move was still catching up, or how far the arm
+sits behind its command), those lines are rendered after the guard line.
+Malformed reports are ignored. Together these tell the model *why* a move
+fell short instead of leaving it to guess.
+
 When the embodiment publishes operating notes via `EmbodimentInfo.docs`
 (joint layout, sign conventions, gripper polarity), the policy appends them
 to the system prompt as an `Embodiment notes:` section. The system prompt
@@ -188,7 +212,7 @@ remaining environment steps in each observation. The per-step
 observation also labels the proprioceptive state vector with the action
 dimension names (`left_j0=0.01 ...`) whenever the mapping is unambiguous.
 
-Every action still passes the CLI's default safety approvers (bounds clamp plus
+Every action still passes the CLI's default safety guards (bounds clamp plus
 per-step delta limit); the plugin contains no safety-critical code path of its
 own. An explicit `--max-action-delta` tighter than 5% of range can truncate
 absolute interpolants. In displacement modes, a value tighter than the action
@@ -202,6 +226,34 @@ runs. Feedback typed during a trial is included in the next observation sent
 to the model, labeled with the environment step when it was received. The
 model treats these lines as trusted guidance from the human supervising the
 robot. The framework also saves the feedback in the eval log.
+
+## Motor temperatures, `sleep` and the wall clock
+
+An embodiment may put `extra["motor_temps"]` on its observations, in the
+same shape as `motion_report`: a mapping whose `lines` are plain-language
+strings for the policy. The agent renders those lines after the motion
+report, so a YAM rig with `motor_temp_limit` set shows the model the hottest
+motor on each arm against the limit, plus a warning line once a motor is
+inside the warning margin (inspect-robots-yam plan 0035). The embodiment's
+docs tell the model what to do about it: move that arm back to the start pose
+it saw at the first observation, the lowest-load pose, and sleep there.
+
+`sleep(seconds, note)` is that wait (plan 0087). It holds every setpoint
+exactly where it is for up to 180 s in one stationary chunk, spending
+environment steps and wall-clock time but no LLM call; a gripper squeeze
+stays squeezed. The next turn's observation reports the outcome:
+
+```
+Slept 30 s holding the setpoint. Hottest motors: left_j1 58 C, right_j2 31 C
+before, left_j1 47 C, right_j2 31 C now.
+```
+
+The harness adds no parking logic of its own: resting an arm is the model's
+own `move_to`, composed with `sleep`.
+
+Every observation also carries `Wall clock: N s since the trial began.` right
+after the step budget. The step budget measures robot motion; the wall clock
+is real time, so the model can pace its calls and its sleeps.
 
 ## Motion pre-check
 
@@ -249,10 +301,10 @@ cannot carry callables. Displacement control modes are refused at bind time
 when a pre-check is configured because their emitted vectors are per-step
 deltas, not absolute configurations.
 
-**Layering:** The pre-check supplies model feedback. The framework approver
+**Layering:** The pre-check supplies model feedback. The framework guard
 chain remains the enforcement backstop. Passing the pre-check does not imply
-that an approver will pass the motion. In particular, the YAM collision
-approver sweeps interpolated substeps finer than the emitted waypoint spacing
+that a guard will pass the motion. In particular, the YAM collision
+guard sweeps interpolated substeps finer than the emitted waypoint spacing
 at low control rates. An adapter that needs parity should interpolate and
 check between emitted waypoints itself.
 
@@ -280,10 +332,12 @@ be distinguishable, encode it in a named factory's qualname, for example
 Configuration knobs (all `-P key=value`): `model`, `base_url`, `api_key_env`,
 `wire`, `speed`, `service_tier`, `max_output_tokens`, `max_llm_calls` (default `100`),
 `max_retries` (default `3`, counting total attempts), `backoff_s` (default `1.0`),
+`timeout_s` (seconds per LLM request; default is the wire's own: 120 for most,
+300 for `interactions`),
 `temperature`, `effort`, `max_speed_frac`, `transcript_echo`, `images`
 (default `always`; use `on_demand` for model-requested frames; `inspect-robots setup` suggests `on_demand`),
 `image_horizon`, `depth` (default `render`; use `off` to omit depth
-renders), and `prior_learnings`.
+renders), `prior_learnings`, and `eval_notes`.
 `speed` and `max_output_tokens` apply to `-P wire=messages` only, and passing
 either on another wire is an error. `speed=fast` is meaningful only for Claude
 on Anthropic's API; Tinker accepts and silently ignores it.
@@ -356,6 +410,26 @@ when the policy is constructed, and its resolved path and content hash are
 recorded in the eval configuration. The `hindsight` answers that `done` and
 `give_up` collect into `trial_metadata` are the natural source material for
 this file: harvest them across runs, distill, and feed them back here.
+
+Set `-P eval_notes="..."` to append a short benchmark-level brief to the
+system prompt as an `Evaluation notes:` section. It lands after the budget
+lines and before any prior learnings, and the stripped text is recorded in the
+eval configuration. The generic prompt tells the agent to call `give_up` when
+the goal cannot be achieved, which is the wrong advice under a rubric that
+awards partial credit: it ends trials early that would still have scored.
+Pass the scoring regime here instead of editing task instructions, so run
+identities stay intact and benchmarks that want early stops (safety refusals)
+are unaffected. Keep it to a few sentences (the limit is 8 KiB); for example:
+
+```bash
+inspect-robots run --policy agent -P model=anthropic/claude-opus-5-5 \
+    -P eval_notes="Scoring: partial credit is awarded for each milestone \
+reached, so progress counts even if you cannot finish. give_up only ends the \
+trial early and never improves the score; use your whole call and step budget \
+before stopping." \
+    --instruction "stack the bowls on the table"
+```
+
 Set `-P transcript_echo=true` to print live `[agent]` conversation lines to
 stderr, including goals, observation summaries, assistant output, tool calls,
 and tool results.
