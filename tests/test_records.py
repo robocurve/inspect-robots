@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -388,3 +389,63 @@ def test_unencodable_rubric_metadata_still_writes_a_log(tmp_path: Path) -> None:
     reread = read_eval_log(str(log_file))
     assert reread.eval.rubrics[0]["metadata"] == {"n": 3}
     assert reread.samples[0].rubrics[0]["metadata"] == {"n": 3}
+
+
+class _TerminalPolicy:
+    """Stops with a configurable terminal and declaration."""
+
+    def __init__(self, terminal: Any, declared: Any = frozenset({DONE})) -> None:
+        self.info = PolicyInfo(
+            name="stopper",
+            action_space=CubePickEmbodiment().info.action_space,
+            terminal_actions=declared,
+        )
+        self.config = PolicyConfig()
+        self.terminal = terminal
+
+    def reset(self, scene: Scene) -> None:
+        pass
+
+    def act(self, observation: Observation) -> ActionChunk:
+        return ActionChunk(actions=[Action(data=np.zeros(2))], terminal=self.terminal)
+
+
+@pytest.mark.parametrize(
+    ("terminal", "declared", "message"),
+    [
+        ("done", frozenset({DONE}), "ActionChunk.terminal must be a Termination"),
+        (Termination(DONE, "x"), None, "does not declare"),
+        (Termination(DONE, "x"), 7, "does not declare"),
+    ],
+)
+def test_malformed_terminals_fail_the_trial_not_the_run(
+    tmp_path: Path, terminal: Any, declared: Any, message: str
+) -> None:
+    (log,) = ir_eval(
+        _task(), _TerminalPolicy(terminal, declared), CubePickEmbodiment(), log_dir=str(tmp_path)
+    )
+    assert log.status == "error"
+    assert list(tmp_path.glob("*.json"))
+    (sample,) = log.samples
+    assert sample.error is not None and message in sample.error
+
+
+def test_an_action_rejects_a_non_termination_terminal() -> None:
+    with pytest.raises(TypeError, match=r"Action\.terminal must be a Termination"):
+        Action(data=np.zeros(2), terminal="done")  # type: ignore[arg-type]
+
+
+def test_non_finite_metadata_keeps_the_record(tmp_path: Path) -> None:
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0, metadata={"tol": float("inf")})],
+        max_steps=2,
+        scorer=success_at_end(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    (record_dir,) = log.samples[0].record_dirs
+    assert record_dir is not None
+    document, _ = _record_files(tmp_path, record_dir)
+    assert "inf" in json.dumps(document["configuration"])

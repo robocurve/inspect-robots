@@ -88,6 +88,17 @@ class Action:
     meta: Mapping[str, Any] = field(default_factory=dict)
     terminal: Termination | None = None
 
+    def __post_init__(self) -> None:
+        _check_terminal(self.terminal, "Action")
+
+
+def _check_terminal(terminal: object, owner: str) -> None:
+    """Reject a ``terminal`` that is not a ``Termination``, where the policy builds it."""
+    if terminal is not None and not isinstance(terminal, Termination):
+        raise TypeError(
+            f"{owner}.terminal must be a Termination or None, got {type(terminal).__name__}"
+        )
+
 
 @dataclass(frozen=True, eq=False)
 class ActionChunk:
@@ -113,6 +124,7 @@ class ActionChunk:
     terminal: Termination | None = None
 
     def __post_init__(self) -> None:
+        _check_terminal(self.terminal, "ActionChunk")
         if len(self.actions) == 0 and self.terminal is None:
             raise ValueError("ActionChunk must contain at least one action unless it is terminal")
 

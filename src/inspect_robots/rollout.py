@@ -192,13 +192,20 @@ def _declared_terminal(
     policy: Policy, terminal: Termination, record: Record, t: int
 ) -> Termination:
     """Return ``terminal`` if the policy declared its kind; otherwise fail the trial."""
-    declared: frozenset[str] = getattr(policy.info, "terminal_actions", frozenset())
+    raw = getattr(policy.info, "terminal_actions", None)
+    # A malformed declaration (None, a non-iterable) declares nothing, so the
+    # trial fails as a PolicyError below instead of escaping the rollout.
+    try:
+        declared = frozenset(raw) if raw is not None and not isinstance(raw, str) else frozenset()
+    except TypeError:
+        declared = frozenset()
     if terminal.kind not in declared:
         raise _record_failure(
             record,
             PolicyError(
                 f"policy {policy.info.name!r} ended the trial with terminal action "
-                f"{terminal.kind!r}, which it does not declare; declared: {sorted(declared)}.\n"
+                f"{terminal.kind!r}, which it does not declare; "
+                f"declared: {sorted(map(str, declared))}.\n"
                 "fix: list it in PolicyInfo.terminal_actions; a policy that wraps another "
                 "must forward the inner policy's terminal_actions"
             ),

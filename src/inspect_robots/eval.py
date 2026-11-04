@@ -247,9 +247,25 @@ def _write_atomic(path: Path, payload: str) -> None:
     os.replace(tmp, path)
 
 
+def _finite(value: Any) -> Any:
+    """``value`` with non-finite floats as strings (``"nan"``, ``"inf"``), at any depth."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, Mapping):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(item) for item in value]
+    return value
+
+
 def _record_json(value: Any, indent: int | None = None) -> str:
-    """Strict JSON for record files; values json cannot encode are described, not raised."""
-    return json.dumps(value, indent=indent, allow_nan=False, default=_describe)
+    """Strict JSON for record files; values json cannot encode are described, not raised.
+
+    Non-finite floats anywhere (scene or rubric metadata, grader configuration)
+    are written as strings, as non-finite action values are, so one NaN never
+    costs the trial its record.
+    """
+    return json.dumps(_finite(value), indent=indent, allow_nan=False, default=_describe)
 
 
 def _write_record(
@@ -314,9 +330,12 @@ def _write_record(
             )
             for chunk in record.chunks
         )
+        record_json = _record_json(document, indent=2) + "\n"
+        # Both payloads are encoded before either file is written, so an
+        # encoding failure never leaves a partial record directory behind.
         _write_atomic(directory / "chunks.jsonl", "\n".join(lines) + "\n")
-        _write_atomic(directory / "record.json", _record_json(document, indent=2) + "\n")
-    except (OSError, ValueError, TypeError) as exc:
+        _write_atomic(directory / "record.json", record_json)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
         warnings.warn(
             f"Record storage disabled for this trial after {type(exc).__name__}: {exc}",
             RuntimeWarning,
