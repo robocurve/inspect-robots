@@ -199,3 +199,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - PR #599 lifetime cap raised to $30; head `7ad8142f4d39fc5e837a815d2bbe07b9b1c7f3c3` to $20. Other limits unchanged.
 - TypeScript clean; 100 offline tests pass, including a new month-scoped author exception test.
 - Reviewer version: `89a6b7a0-4888-49dd-81bc-efab94d9f549`.
+- 2026-11-04: after internal review fixes, PR #599 lifetime cap raised to $45, new head `4ca3781c7616228a173f9d2a49e463eac7d7c5c5` to $15, Chris Leet's 2026-11 author cap to $70. Reviewer version `cfa31ca7-5e42-4f73-83b1-6582b4bcaec8`.
