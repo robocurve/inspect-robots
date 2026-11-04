@@ -19,6 +19,7 @@ fine). The adapter authoring guide covers the human half.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import inspect
 import math
@@ -456,28 +457,32 @@ def assert_guardrail_contribution_conformant(embodiment: Embodiment, action_spac
 
 
 def _policy_interface(info: EmbodimentInfo) -> tuple[object, ...]:
-    """What a policy sees of an embodiment: the action contract and the observation layout."""
-    space = info.action_space
-    semantics = space.semantics
-    observation = info.observation_space
-    state = observation.state
-    return (
-        space.shape,
-        # Every semantic that changes how a policy must encode its actions:
-        # the same shape and labels under another rotation or gripper encoding
-        # is a different contract.
-        None
-        if semantics is None
-        else (
-            semantics.control_mode,
-            semantics.frame,
-            semantics.rotation_repr,
-            semantics.gripper,
-        ),
-        None if semantics is None else semantics.dim_labels,
-        tuple((camera.name, camera.height, camera.width) for camera in observation.cameras),
-        () if state is None else tuple((f.key, f.shape) for f in state.fields),
-    )
+    """What a policy sees of an embodiment: every declared field of both its spaces.
+
+    Built from the spaces' dataclass fields rather than a hand-picked list, so
+    any declared difference (bounds, rotation or gripper encoding, camera
+    channels, state units or dtypes, a field added later) makes two
+    interfaces distinct.
+    """
+    return (_frozen(info.action_space), _frozen(info.observation_space))
+
+
+def _frozen(value: object) -> object:
+    """A hashable, comparable rendering of a space description."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__name__,
+            tuple(
+                (spec.name, _frozen(getattr(value, spec.name)))
+                for spec in dataclasses.fields(value)
+            ),
+        )
+    if isinstance(value, np.ndarray):
+        # Bytes, not values: NaN bounds compare equal to themselves this way.
+        return ("ndarray", value.shape, str(value.dtype), value.tobytes())
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(item) for item in value)
+    return value
 
 
 def check_policy_interfaces(infos: Iterable[EmbodimentInfo]) -> ConformanceReport:

@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from inspect_robots import HealthCheck, HealthReport, Readiness
@@ -605,3 +606,44 @@ def test_an_unexpected_rollout_failure_still_parks_the_robot(tmp_path: Path, fai
             FrameStore.put = original  # type: ignore[method-assign]
     assert embodiment.calls[-1] == "park"
     assert embodiment.calls.count("park") == 1
+
+
+def test_camera_channels_state_units_and_bounds_are_distinct_interfaces() -> None:
+    from inspect_robots.spaces import CameraSpec, ObservationSpace, StateField, StateSpec
+
+    base = CubePickEmbodiment().info
+
+    def variant(name: str, **change: Any) -> Any:
+        cameras = (CameraSpec("top", 4, 4, channels=change.get("channels", 3)),)
+        state = StateSpec(
+            fields=(
+                StateField(
+                    "q", (2,), unit=change.get("unit", "rad"), dtype=change.get("dtype", "float64")
+                ),
+            )
+        )
+        space = Box(
+            shape=(2,),
+            low=np.array([-1.0, -1.0]),
+            high=np.array([change.get("high", 1.0), 1.0]),
+            semantics=ActionSemantics(control_mode="joint_pos"),
+        )
+        return replace(
+            base,
+            name=name,
+            morphology="arm",
+            action_space=space,
+            observation_space=ObservationSpace(cameras=cameras, state=state),
+        )
+
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("gray", {"channels": 1}),
+        ("degrees", {"unit": "deg"}),
+        ("float32", {"dtype": "float32"}),
+        ("wider", {"high": 2.0}),
+    ]
+    for name, change in cases:
+        assert check_policy_interfaces([variant("rgb"), variant(name, **change)]).ok, name
+    assert not check_policy_interfaces([variant("one"), variant("two")]).ok
+    nan_bounds = {"high": float("nan")}
+    assert not check_policy_interfaces([variant("a", **nan_bounds), variant("b", **nan_bounds)]).ok
