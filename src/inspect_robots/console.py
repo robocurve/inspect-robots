@@ -65,11 +65,78 @@ class OperatorInput(Protocol):
 
 
 def _stdin_readable() -> bool:
-    return bool(select.select([sys.stdin], [], [], 0)[0])  # pragma: no cover
+    if sys.platform == "win32":  # pragma: no cover
+        if not sys.stdin.isatty():
+            return False
+        import msvcrt
+
+        return msvcrt.kbhit()
+    try:  # pragma: no cover
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except OSError:  # pragma: no cover
+        return False
 
 
-def _stdin_read() -> str:
-    return os.read(sys.stdin.fileno(), 65536).decode("utf-8", errors="replace")  # pragma: no cover
+_pending_surrogate: str | None = None
+
+
+def _stdin_read() -> str | None:
+    global _pending_surrogate
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        chars: list[str] = []
+        has_keys = False
+        while msvcrt.kbhit():
+            has_keys = True
+            ch = msvcrt.getwch()
+            # On Windows, special keys emit two wide characters:
+            # either '\x00' or '\xe0' followed by the scan code.
+            # However, '\xe0' (U+00E0 'à') is also a legitimate character.
+            if ch == "\x00":
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if ch == "\xe0":
+                if msvcrt.kbhit():
+                    nxt = msvcrt.getwch()
+                    # Windows CRT scan codes for extended keys (arrows, navigation, F11/F12)
+                    if nxt in frozenset("HPKMGOIQRS\x85\x86"):
+                        continue
+                    chars.append(ch)
+                    ch = nxt
+                else:
+                    chars.append(ch)
+                    continue
+            if ch == "\r":
+                ch = "\n"
+            chars.append(ch)
+        if not chars:
+            return None if has_keys else ""
+        # Assemble UTF-16 surrogate pairs if any, retaining pending surrogate state across reads
+        assembled: list[str] = []
+        for ch in chars:
+            code = ord(ch)
+            if 0xD800 <= code <= 0xDBFF:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                _pending_surrogate = ch
+            elif 0xDC00 <= code <= 0xDFFF:
+                if _pending_surrogate is not None:
+                    assembled.append(
+                        chr(0x10000 + ((ord(_pending_surrogate) - 0xD800) << 10) + (code - 0xDC00))
+                    )
+                    _pending_surrogate = None
+                else:
+                    assembled.append(ch)
+            else:
+                if _pending_surrogate is not None:
+                    assembled.append(_pending_surrogate)
+                    _pending_surrogate = None
+                assembled.append(ch)
+        return "".join(assembled)
+    raw = os.read(sys.stdin.fileno(), 65536)  # pragma: no cover
+    return raw.decode("utf-8", errors="replace")  # pragma: no cover
 
 
 def _parse(line: str) -> tuple[str | None, EndRequest | None, bool]:
@@ -107,7 +174,7 @@ class OperatorConsole:
     def __init__(
         self,
         readable: Callable[[], bool] | None = None,
-        read: Callable[[], str] | None = None,
+        read: Callable[[], str | None] | None = None,
         output_fn: Callable[[str], None] = print,
         usage: str = USAGE,
     ) -> None:
@@ -128,20 +195,29 @@ class OperatorConsole:
         usage_requested = False
         while self._readable():
             chunk = self._read()
+            if chunk is None:
+                continue
             if chunk == "":
                 self._eof = True
                 self._buffer = ""
                 break
-            self._buffer += chunk
-            while "\n" in self._buffer:
-                line, self._buffer = self._buffer.split("\n", 1)
-                message, parsed_end, show_usage = _parse(f"{line}\n")
-                if message is not None:
-                    messages.append(message)
-                if parsed_end is not None and end is None:
-                    end = parsed_end
-                if show_usage:
-                    usage_requested = True
+            for ch in chunk:
+                if ch in ("\x08", "\x7f"):
+                    if self._buffer:
+                        self._buffer = self._buffer[:-1]
+                    continue
+                if ch == "\n":
+                    line = self._buffer
+                    self._buffer = ""
+                    message, parsed_end, show_usage = _parse(f"{line}\n")
+                    if message is not None:
+                        messages.append(message)
+                    if parsed_end is not None and end is None:
+                        end = parsed_end
+                    if show_usage:
+                        usage_requested = True
+                    continue
+                self._buffer += ch
         if usage_requested:
             # At most one reminder per poll: Enter autorepeat queues many empty
             # lines, and each print is a full footer repaint.
@@ -155,6 +231,9 @@ class OperatorConsole:
 
         self._buffer = ""
         while self._readable():
-            if self._read() == "":
+            chunk = self._read()
+            if chunk is None:
+                continue
+            if chunk == "":
                 self._eof = True
                 return
