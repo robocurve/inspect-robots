@@ -413,3 +413,21 @@ def test_gripper_slip_ignores_a_limiter_creeping_below_the_settle_tolerance() ->
         store[_EXECUTED_ACTION_KEY] = Action(data=np.array([0.0, executed]))
         # The gripper tracks the creeping command exactly: nothing slipped.
         assert trigger.should_replan(_gripper(executed), t, store) is None
+
+
+def test_gripper_slip_catches_a_slip_after_a_slow_limiter_stalls_on_an_object() -> None:
+    from inspect_robots.action_manager import _EXECUTED_ACTION_KEY
+
+    trigger = GripperSlip("joint_pos", 1, threshold=0.05, settle_steps=1)
+    store = _slip_store(command=0.0)
+    executed = 1.0
+    fired: list[tuple[int, str]] = []
+    for t in range(700):
+        executed = max(0.0, executed - 0.002)  # a limiter far below the settle tolerance
+        store[_EXECUTED_ACTION_KEY] = Action(data=np.array([0.0, executed]))
+        held = executed if t >= 550 else max(executed, 0.4)  # stalls on an object at 0.4
+        reason = trigger.should_replan(_gripper(held), t, store)
+        if reason is not None:
+            fired.append((t, reason))
+    assert fired and fired[0][0] == 550
+    assert "moved 0.4" in fired[0][1]

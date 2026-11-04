@@ -221,6 +221,12 @@ class GripperSlip:
         # limiter creeping below the settle tolerance) is commanded, not slip.
         commanded = abs(tracked["baseline_executed"] - command) - abs(executed - command)
         closer = abs(tracked["baseline"] - command) - abs(measured - command) - commanded
+        if closer < 0:
+            # The gripper lagged the command (it closed on something): measure
+            # later movement from here, so a stalled stretch never cancels a slip.
+            tracked["baseline"] = measured
+            tracked["baseline_executed"] = executed
+            return None
         if closer > self.threshold:
             tracked["baseline"] = measured
             tracked["baseline_executed"] = executed
