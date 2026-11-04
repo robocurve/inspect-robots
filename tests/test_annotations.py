@@ -348,6 +348,66 @@ def test_the_operator_scorer_scores_annotations_as_it_scores_records() -> None:
     assert scorer.score_annotations([], empty.record_id, "operator") == scorer(empty, None)  # type: ignore[attr-defined]
 
 
+def _two_judgement_rubric_log(tmp_path: Path) -> tuple[Path, EvalLog]:
+    verdicts = iter(["yes"])
+
+    def grade(record: Record, scene: Scene) -> None:
+        record.operator_judgement = next(verdicts)
+
+    task = Task(
+        name="two-judged",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=40,
+        rubrics=[
+            Rubric("reached", operator_scorer(), text="Reached."),
+            Rubric("safe", operator_scorer(), text="Nothing hit."),
+        ],
+    )
+    (log,) = ir_eval(
+        task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=grade
+    )
+    (path,) = tmp_path.glob("*.json")
+    return path, log
+
+
+def test_an_edit_without_rubric_corrects_the_rubric_the_run_judged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, log = _two_judgement_rubric_log(tmp_path)
+    assert log.samples[0].epochs[0] == {"reached": 1.0, "safe": None}
+    edit = ["edit", str(path), "--trial", "s0-e0", "--judgement", "no", "--author", "r"]
+    assert main(edit) == 0
+    assert "the run judged rubric 'reached'" in capsys.readouterr().out
+    (correction,) = [a for a in read_annotations(path) if a.source == "editor"]
+    assert correction.rubric == "reached"
+    assert correction.supersedes == f"{log.samples[0].record_ids[0]}:run:judgement"
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations).samples[0].epochs[0] == {
+        "reached": 0.0,
+        "safe": None,
+    }
+
+
+def test_a_grader_hint_for_a_single_judgement_rubric_is_not_kept(tmp_path: Path) -> None:
+    def grade(record: Record, scene: Scene) -> None:
+        record.operator_judgement = "yes"
+        record.metadata["judged_rubric"] = "goal"  # e.g. a grader that judged another rubric
+
+    task = Task(
+        name="one-judged",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=40,
+        rubrics=[Rubric("success", operator_scorer()), Rubric("goal", success_at_end(), text="G")],
+    )
+    (log,) = ir_eval(
+        task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=grade
+    )
+    assert "judged_rubric" not in log.samples[0].trial_metadata[0]
+    (path,) = tmp_path.glob("*.json")
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations) == item.log
+
+
 def test_a_rubric_edit_never_supersedes_the_runs_general_judgement(tmp_path: Path) -> None:
     path, _ = _judged_log(tmp_path)
     args = ["edit", str(path), "--trial", "s0-e1", "--judgement", "yes", "--author", "r"]

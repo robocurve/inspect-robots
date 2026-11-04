@@ -502,7 +502,12 @@ def build_parser() -> argparse.ArgumentParser:
     content.add_argument("--judgement", default=None, help="a verdict such as yes, no, partial")
     content.add_argument("--note", default=None, help="a free-text note")
     p_edit.add_argument(
-        "--rubric", default=None, help="the rubric a judgement is for (default: all of them)"
+        "--rubric",
+        default=None,
+        help=(
+            "the rubric a judgement is for (default: all of them, or the rubric the run's "
+            "verdict was scoped to when the trial has several judgement rubrics)"
+        ),
     )
     p_edit.add_argument("--author", required=True, help="who is making this edit")
     p_edit.add_argument("--reason", default=None, help="why, recorded with a judgement as its note")
@@ -3111,6 +3116,20 @@ def _resolve_trial(log: EvalLog, record: str | None, trial: str | None) -> str:
     return by_trial[str(trial)]
 
 
+def _judged_rubric_of(log: EvalLog, key: str) -> str | None:
+    """The rubric the run's verdict for trial ``key`` was scoped to, if any."""
+    from inspect_robots.annotation import trial_key
+
+    scoped = {
+        trial_key(sample, index): metadata.get("judged_rubric")
+        for sample in log.samples
+        for index, metadata in enumerate(sample.trial_metadata)
+        if isinstance(metadata, dict)
+    }
+    judged = scoped.get(key)
+    return judged if isinstance(judged, str) and judged else None
+
+
 def _cmd_edit(args: argparse.Namespace) -> int:
     """Append one annotation beside a saved log and print its id."""
     from inspect_robots.annotation import (
@@ -3126,8 +3145,20 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     log = read_eval_log(args.log)
     key = _resolve_trial(log, args.record, args.trial)
     kind = JUDGEMENT if args.judgement is not None else NOTE
-    previous = current(read_annotations(args.log, log), key, kind, args.rubric)
-    if previous is not None and previous.rubric != args.rubric:
+    rubric = args.rubric
+    if rubric is None and kind == JUDGEMENT:
+        judged = _judged_rubric_of(log, key)
+        if judged is not None:
+            # The run's verdict counted for this rubric only (the trial has
+            # several judgement rubrics), so a correction without --rubric
+            # corrects that verdict rather than scoring the others.
+            rubric = judged
+            print(
+                f"the run judged rubric {judged!r}; this edit corrects it "
+                "(pass --rubric for another)"
+            )
+    previous = current(read_annotations(args.log, log), key, kind, rubric)
+    if previous is not None and previous.rubric != rubric:
         # A rubric-specific edit overrides a general judgement for that rubric
         # only; superseding it would change every other rubric too.
         previous = None
@@ -3137,7 +3168,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         value=args.judgement if args.judgement is not None else args.note,
         author=args.author,
         source="editor",
-        rubric=args.rubric,
+        rubric=rubric,
         note=args.reason,
         supersedes=previous.annotation_id if previous is not None else None,
     )

@@ -1465,6 +1465,9 @@ def _judged_rubric(record: Record, scorers: Sequence[tuple[str, object]]) -> str
     """
     names = [name for name, scorer in scorers if _reads_judgement(scorer)]
     if len(names) < 2 or record.operator_judgement is None:
+        # The verdict applies unscoped; drop any grader hint so annotations
+        # lifted from the log scope it exactly as this eval scored it.
+        record.metadata.pop("judged_rubric", None)
         return None
     chosen = record.metadata.get("judged_rubric")
     judged = chosen if chosen in names else names[0]

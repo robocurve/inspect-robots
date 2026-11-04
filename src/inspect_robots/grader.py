@@ -367,7 +367,9 @@ class _VLMGrader:
             record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
         record.operator_note = note
-        if rubric_name is not None:
+        if rubric_name is not None and any(
+            rubric.name == rubric_name and _reads_judgements(rubric) for rubric in scene.rubrics
+        ):
             record.metadata["judged_rubric"] = rubric_name
         record.events.append(
             operator_event(t=len(record.steps), verdict=judgement, source="vlm", note=note)

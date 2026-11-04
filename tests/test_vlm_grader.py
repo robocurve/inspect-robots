@@ -287,7 +287,7 @@ def test_vlm_grader_records_the_rubric_it_judged_and_prefers_judgement_rubrics(
     )
     record = _framed_record()
     grader.grade(record, unregistered)
-    assert record.metadata["judged_rubric"] == "odd"
+    assert "judged_rubric" not in record.metadata  # "odd" does not read judgements
 
 
 def test_a_vlm_verdict_scores_only_the_rubric_it_judged(
