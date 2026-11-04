@@ -932,6 +932,15 @@ def _default_guardrails(
 
     missing = object()
     hook = getattr(embodiment, "contribute_guards", missing)
+    if hook is missing and getattr(embodiment, "contribute_guardrails", missing) is not missing:
+        # The pre-paper hook name: running would silently drop the embodiment's
+        # own safety guards, so refuse until the adapter is migrated.
+        assert embodiment is not None
+        raise SystemExit(
+            f"embodiment {embodiment.info.name!r} defines contribute_guardrails(), which "
+            "was renamed contribute_guards() and returns GuardContribution; update the "
+            "adapter (see docs/migrating-to-the-paper-release.md)"
+        )
     if hook is not missing:
         if not callable(hook):
             assert embodiment is not None

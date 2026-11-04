@@ -247,6 +247,11 @@ def _write_atomic(path: Path, payload: str) -> None:
     os.replace(tmp, path)
 
 
+def _record_json(value: Any, indent: int | None = None) -> str:
+    """Strict JSON for record files; values json cannot encode are described, not raised."""
+    return json.dumps(value, indent=indent, allow_nan=False, default=_describe)
+
+
 def _write_record(
     record: Record,
     records_dir: Path,
@@ -290,27 +295,28 @@ def _write_record(
         "action_dim": action_space.dim,
         "labels": semantics.dim_labels if semantics is not None else None,
     }
-    lines = [json.dumps(header)]
-    lines.extend(
-        json.dumps(
-            {
-                "t": chunk.t,
-                "actions": [_describe(action.tolist()) for action in chunk.actions],
-                "terminal": None
-                if chunk.terminal is None
-                else {"kind": chunk.terminal.kind, "reason": chunk.terminal.reason},
-                "latency_s": chunk.latency_s,
-                "wall_s": chunk.wall_s,
-            }
-        )
-        for chunk in record.chunks
-    )
     try:
-        _write_atomic(directory / "chunks.jsonl", "\n".join(lines) + "\n")
-        _write_atomic(
-            directory / "record.json", json.dumps(document, indent=2, allow_nan=False) + "\n"
+        # Values a policy, scorer or rubric supplies (numpy scalars, NaN latencies,
+        # arbitrary metadata) go through _describe, so storage degrades with a
+        # warning instead of escaping eval() and losing the run.
+        lines = [_record_json(header)]
+        lines.extend(
+            _record_json(
+                {
+                    "t": chunk.t,
+                    "actions": [_describe(action.tolist()) for action in chunk.actions],
+                    "terminal": None
+                    if chunk.terminal is None
+                    else {"kind": chunk.terminal.kind, "reason": chunk.terminal.reason},
+                    "latency_s": _describe(chunk.latency_s),
+                    "wall_s": _describe(chunk.wall_s),
+                }
+            )
+            for chunk in record.chunks
         )
-    except (OSError, ValueError) as exc:
+        _write_atomic(directory / "chunks.jsonl", "\n".join(lines) + "\n")
+        _write_atomic(directory / "record.json", _record_json(document, indent=2) + "\n")
+    except (OSError, ValueError, TypeError) as exc:
         warnings.warn(
             f"Record storage disabled for this trial after {type(exc).__name__}: {exc}",
             RuntimeWarning,

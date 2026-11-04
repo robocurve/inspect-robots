@@ -25,6 +25,9 @@ to rerun the policy on the latest observation. ``DefaultActionManager`` asks its
 the next buffered action; when one fires, the rest of the chunk is dropped, the
 policy is called on the current observation (which carries the trigger's
 ``extra["replan"]``), and the rollout records a ``replan`` event with the reason.
+A pending stop in the dropped actions is dropped with them on purpose: the
+policy chose to stop for a world the trigger says has changed, so it decides
+again from the new observation.
 Built in: [`UnreachableTarget`][inspect_robots.action_manager.UnreachableTarget]
 and [`GripperSlip`][inspect_robots.action_manager.GripperSlip]. Reaching the end
 of a chunk always replans and needs no trigger.

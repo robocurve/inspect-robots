@@ -7190,6 +7190,19 @@ def test_non_callable_guardrail_hook_is_a_hard_error() -> None:
         _build_guardrails(embodiment.info.action_space, None, embodiment)
 
 
+def test_the_pre_paper_guardrail_hook_is_a_hard_error() -> None:
+    from inspect_robots.cli import _build_guardrails
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _UnmigratedEmbodiment(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: object) -> object:
+            raise AssertionError("never called")
+
+    embodiment = _UnmigratedEmbodiment()
+    with pytest.raises(SystemExit, match=r"cubepick.*contribute_guardrails.*contribute_guards"):
+        _build_guardrails(embodiment.info.action_space, None, embodiment)
+
+
 def test_none_guardrail_hook_is_a_hard_error() -> None:
     from inspect_robots.cli import _build_guardrails
     from inspect_robots.mock import CubePickEmbodiment

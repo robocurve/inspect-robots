@@ -317,3 +317,52 @@ def test_chunks_copy_actions_from_a_reused_policy_buffer(tmp_path: Path) -> None
     assert record_dir is not None
     _, lines = _record_files(tmp_path, record_dir)
     assert [line["actions"] for line in lines[1:]] == [[[0.0, 0.0]], [[0.01, 0.01]]]
+
+
+class _NumpyTimer:
+    """Reports its inference latency as a numpy scalar (or NaN), as numpy-timed VLAs do."""
+
+    def __init__(self, latency: Any) -> None:
+        self.info = PolicyInfo(name="timer", action_space=CubePickEmbodiment().info.action_space)
+        self.config = PolicyConfig()
+        self.latency = latency
+
+    def reset(self, scene: Scene) -> None:
+        pass
+
+    def act(self, observation: Observation) -> ActionChunk:
+        return ActionChunk(actions=[Action(data=np.zeros(2))], inference_latency_s=self.latency)
+
+
+@pytest.mark.parametrize(
+    ("latency", "stored"),
+    [(np.float32(0.25), 0.25), (float("nan"), "nan")],
+)
+def test_numpy_and_nan_latencies_are_recorded_as_strict_json(
+    tmp_path: Path, latency: Any, stored: Any
+) -> None:
+    (log,) = ir_eval(
+        _task(max_steps=1), _NumpyTimer(latency), CubePickEmbodiment(), log_dir=str(tmp_path)
+    )
+    assert log.status == "success"
+    (record_dir,) = log.samples[0].record_dirs
+    assert record_dir is not None
+    _, lines = _record_files(tmp_path, record_dir)
+    assert lines[1]["latency_s"] == stored
+
+
+def test_numpy_rubric_metadata_does_not_escape_eval(tmp_path: Path) -> None:
+    from inspect_robots import Rubric
+
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        max_steps=2,
+        rubrics=[Rubric("reached", success_at_end(), metadata={"n": np.int64(3)})],
+    )
+    (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    (record_dir,) = log.samples[0].record_dirs
+    assert record_dir is not None
+    document, _ = _record_files(tmp_path, record_dir)
+    assert document["configuration"]["rubrics"][0]["metadata"] == {"n": 3}
