@@ -1205,6 +1205,9 @@ def _run_eval(
                 park_failure, park_halt = _park(embodiment)
                 if park_failure is not None and halted:
                     warnings.warn(park_failure, RuntimeWarning, stacklevel=2)
+                    # The trial's own halt ends only this task, but a faulted
+                    # park means the platform itself must not run another one.
+                    halt_exc = halt_exc or park_halt
                 elif park_failure is not None:
                     status = "error"
                     error = park_failure
@@ -1482,7 +1485,11 @@ def _park_before_escape(embodiment: Embodiment) -> None:
     would be; a park failure is warned about, never allowed to replace the
     exception that is escaping.
     """
-    failure, _ = _park(embodiment)
+    failure, halt = _park(embodiment)
+    if halt is not None:
+        # A faulted park outranks the escaping error: eval_set() must stop
+        # before another task touches the platform.
+        raise halt
     if failure is not None:
         warnings.warn(failure, RuntimeWarning, stacklevel=3)
 

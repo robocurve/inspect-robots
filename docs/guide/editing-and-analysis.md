@@ -52,14 +52,16 @@ inspect-robots score logs/run.json --out rescored.json
 ```
 
 [`rescore`](../../src/inspect_robots/analyzer.py) recomputes results from
-annotations. Scorers that offer `score_annotations(annotations, record_id,
-rubric)` score each trial from the judgement that counts; the built-in
-`operator` scorer does, and returns exactly what it returned during the run
-when nothing was edited. Scores from other scorers (for example
-`success_at_end`, which reads the trajectory) are kept as stored. Only values
+annotations. The built-in `operator` scorer scores each trial from the
+judgement that counts, through `score_annotations(annotations, record_id,
+rubric)`, and returns exactly what it returned during the run when nothing was
+edited. Scores from other scorers (for example `success_at_end`, which reads
+the trajectory, or a custom scorer whose configuration the log does not record)
+are kept as stored. Only values
 whose inputs changed are recomputed, using the log's recorded epoch reducer, so
 a log with no edits re-scores to exactly its stored results. `--out` writes a
-new file; the input log is never rewritten.
+new file in the input log's directory, with a copy of its annotations, so its
+records stay reachable; the input log is never rewritten.
 
 ## Analyzers
 

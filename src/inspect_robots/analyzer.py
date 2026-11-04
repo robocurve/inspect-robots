@@ -80,14 +80,17 @@ def _scorer_for(rubric: Mapping[str, Any] | None, name: str) -> object | None:
     """The registered scorer behind a rubric, or ``None`` when it cannot be resolved."""
     from inspect_robots.registry import resolve
 
-    rescored_by = rubric.get("rescored_by") if rubric is not None else None
-    scorer_name = (
-        rescored_by
-        if isinstance(rescored_by, str)
-        else (rubric.get("scorer") if rubric is not None else name)
-    )
-    if not isinstance(scorer_name, str):
-        return None
+    # A recorded rubric names only its scorer, not the scorer's configuration,
+    # so only the built-in operator scorer (configured by its name alone) can be
+    # rebuilt faithfully; other rubrics keep their stored scores. Logs written
+    # before rubrics were recorded resolve each result key by scorer name.
+    if rubric is not None:
+        rescored_by = rubric.get("rescored_by")
+        if not isinstance(rescored_by, str):
+            return None
+        scorer_name = rescored_by
+    else:
+        scorer_name = name
     try:
         scorer: object = resolve("scorer", scorer_name)
     except Exception:
@@ -141,9 +144,12 @@ def rescore(log: EvalLog, annotations: Sequence[Annotation]) -> EvalLog:
     """``log`` with its results recomputed from ``annotations``; the raw data is untouched.
 
     Each trial is re-scored by rubric scorers that offer
-    ``score_annotations(annotations, record_id, rubric)``; other scores stay
-    as stored. Scene reductions use the log's recorded reducer (``"mean"`` for
-    logs written before it was recorded), and a metric and its abstention
+    ``score_annotations(annotations, record_id, rubric)`` and can be rebuilt
+    faithfully from the log: the built-in ``operator`` scorer (recorded as
+    ``rescored_by``), or a scorer named by a result key in logs written before
+    rubrics were recorded. Other scores stay as stored. Scene reductions use
+    the log's recorded reducer (``"mean"`` for logs written before it was
+    recorded), and a metric and its abstention
     count are recomputed only when one of its trial scores changed, even if
     the scene reduction did not. Errored trials stay unscored.
     """

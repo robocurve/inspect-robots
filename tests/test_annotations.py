@@ -777,31 +777,40 @@ def test_cli_analyze_rejects_an_analyzer_that_returns_the_wrong_type(
         main(["analyze", "bad", str(path)])
 
 
-def test_a_registered_annotation_aware_scorer_rescores_by_its_own_name(tmp_path: Path) -> None:
+def test_a_configured_annotation_aware_scorer_keeps_its_stored_scores(tmp_path: Path) -> None:
     from inspect_robots.registry import _FACTORIES, scorer
 
-    class _PartialCredit:
-        name = "partial_credit"
+    class _Weighted:
+        name = "weighted"
+
+        def __init__(self, weight: float = 1.0) -> None:
+            self.weight = weight
 
         def __call__(self, record: Record, target: object) -> Score:
-            return Score(value=0.5)
+            return Score(value=self.weight)
 
         def score_annotations(self, annotations: object, record_id: str, rubric: str) -> Score:
-            return Score(value=0.5)
+            return Score(value=self.weight)
 
-    scorer("partial_credit")(_PartialCredit)
+    scorer("weighted")(_Weighted)
     try:
         task = Task(
-            name="partial",
+            name="weighted",
             scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
             max_steps=5,
-            rubrics=[Rubric("credit", "partial_credit")],
+            rubrics=[Rubric("credit", _Weighted(weight=0.5))],
         )
         (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
         assert "rescored_by" not in log.samples[0].rubrics[0]
         (path,) = tmp_path.glob("*.json")
         item = AnnotatedLog.load(path)
+        # Its configuration is not recorded, so re-scoring keeps what it stored
+        # rather than rebuilding it with defaults (weight 1.0).
         assert rescore(item.log, item.annotations) == item.log
-        assert item.log.samples[0].epochs[0] == {"credit": 0.5}
+        assert (
+            main(["edit", str(path), "--trial", "s0-e0", "--judgement", "no", "--author", "r"]) == 0
+        )
+        item = AnnotatedLog.load(path)
+        assert rescore(item.log, item.annotations).samples[0].epochs[0] == {"credit": 0.5}
     finally:
-        _FACTORIES["scorer"].pop("partial_credit", None)
+        _FACTORIES["scorer"].pop("weighted", None)

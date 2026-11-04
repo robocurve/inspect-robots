@@ -249,10 +249,19 @@ def test_a_halted_trial_still_parks_and_a_park_failure_only_warns(tmp_path: Path
     assert log.error == "EmbodimentFault: motor control loop stopped"
     assert embodiment.calls[-1] == "park"
 
-    embodiment = _Faulting(park=EmbodimentFault("driver gone"))
-    with pytest.warns(RuntimeWarning, match="embodiment.park\\(\\) failed: .*driver gone"):
-        (log,) = ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    # A park that fails with a plain error only warns; a park that faults
+    # halts the task set too, once the log is written.
+    embodiment = _Faulting(park=RuntimeError("no rest pose"))
+    with pytest.warns(RuntimeWarning, match="embodiment.park\\(\\) failed: .*no rest pose"):
+        (log,) = ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path / "plain"))
     assert log.error == "EmbodimentFault: motor control loop stopped"
+
+    driver_gone = EmbodimentFault("driver gone")
+    embodiment = _Faulting(park=driver_gone)
+    with pytest.warns(RuntimeWarning), pytest.raises(EmbodimentFault) as raised:
+        ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path / "fault"))
+    assert raised.value is driver_gone
+    assert getattr(raised.value, "log").error == "EmbodimentFault: motor control loop stopped"  # noqa: B009
 
 
 def test_a_cancelled_trial_is_not_parked(tmp_path: Path) -> None:
@@ -491,3 +500,28 @@ def test_a_hook_halt_survives_a_failed_final_log_write(tmp_path: Path) -> None:
         eval_set(tasks, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), sinks=[_FullDisk()])
     assert isinstance(raised.value.__cause__, OSError)
     assert embodiment.calls.count("health") == 1
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+@pytest.mark.parametrize("sequence", ["grading-then-park", "trial-halt-then-park"])
+def test_a_faulted_park_stops_the_task_set(tmp_path: Path, sequence: str) -> None:
+    from inspect_robots import eval_set
+
+    class _Faulting(_Lifecycle):
+        def step(self, action: Any) -> Any:
+            raise EmbodimentFault("motor control loop stopped")
+
+    def grade(record: Any, scene: Scene) -> None:
+        raise ValueError("grader bug")
+
+    park_fault = SafetyAbort("arm did not reach rest")
+    if sequence == "grading-then-park":
+        embodiment: _Lifecycle = _Lifecycle(park=park_fault)
+        hook: Any = grade
+    else:
+        embodiment = _Faulting(park=park_fault)
+        hook = None
+    tasks = [replace(_task(), name="first"), replace(_task(), name="second")]
+    with pytest.raises(SafetyAbort):
+        eval_set(tasks, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=hook)
+    assert embodiment.calls.count("reset") == 1  # the second task never started

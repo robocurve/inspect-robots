@@ -117,8 +117,9 @@ inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no \
 inspect-robots score logs/run.json --out rescored.json
 ```
 
-A scorer takes part in re-scoring by offering
+The built-in `operator` scorer takes part in re-scoring through
 `score_annotations(annotations, record_id, rubric)`, which scores a trial from
-the judgement that counts; the `operator` scorer does. Scorers without it, such
-as `success_at_end`, keep their stored scores. See
+the judgement that counts. A log records each rubric's scorer name but not its
+configuration, so other scorers keep their stored scores, including custom ones
+that offer `score_annotations` and scorers such as `success_at_end`. See
 [Re-scoring](editing-and-analysis.md#re-scoring).
