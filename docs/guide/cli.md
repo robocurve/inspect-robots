@@ -1,6 +1,6 @@
 # Command-line interface
 
-The `inspect_robots` CLI wraps the registry and [`eval`](/api/#inspect_robots.eval.eval).
+The `inspect_robots` CLI wraps the registry and [`eval`](../../src/inspect_robots/eval.py).
 The command is installed as `inspect-robots`, with `inspect-robot` as an alias
 for the common typo; both run the same CLI.
 
@@ -132,7 +132,10 @@ asks after each trial unless the embodiment already terminated the episode
 with a definitive `success` or `failure` verdict. In that case, it records the
 embodiment's verdict as the operator judgement instead of asking the operator
 a second time, and prints `operator verdict adopted from embodiment: success`
-(or `failure`) so the operator can catch a mistaken adoption live. A trial
+(or `failure`) so the operator can catch a mistaken adoption live. The outcome
+says whether the task was done, not whether it was done safely, so a scene with
+a `safety` rubric scored by the `operator` scorer is asked about that rubric
+instead; the verdict counts for it, and other judgement rubrics abstain. A trial
 that ended early for any other reason is announced first, for example
 `note: this trial ended early ('done')`.
 
@@ -229,7 +232,8 @@ the abstention count beside it. The run still finishes every trial, then ends
 with status `error` and a message such as
 `3 of 20 trial(s) ungraded: grader failed (grading request failed with HTTP 500: ...)`. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
-the console, is adopted without spending a model call. The log records which
+the console, is adopted without spending a model call, except that a scene
+with an operator-scored `safety` rubric is judged by the model on that rubric. The log records which
 path produced each verdict in `judgement_sources`.
 
 ### Live operator feedback
@@ -434,6 +438,44 @@ The exit code is `0` on a successful eval, `1` otherwise. When trials errored,
 the summary shows the count (`trials: 4 (2 errored)`) and lists each errored
 scene; a run in which every trial errored reports `run status: error` and exits `1`.
 
+### Guards: `--guard` and `[guards]`
+
+Every run checks actions with the default guardrails: a bounds clamp, a
+per-step delta limit, and any guards the embodiment contributes. Add more with
+`--guard NAME[:key=value,...]` (repeatable), or list them in a `[guards]`
+config section, one guard per line with its parameters as the value:
+
+```bash
+inspect-robots run ... --guard delta-limit:max_delta=0.02
+```
+
+```ini
+[guards]
+delta-limit = max_delta=0.02
+clamp =
+```
+
+Configured guards run after the defaults, config file first, in the order
+listed; the `guardrails:` banner names every active guard. With
+`--disable-guardrails`, only the configured guards run. `inspect-robots list
+guards` shows the registered guards; `clamp` and `delta-limit` are built in.
+Plugins register more through the `inspect_robots.guards` entry-point group,
+with a factory that takes the action space and keyword parameters:
+
+```python
+from inspect_robots.registry import guard
+
+
+@guard("workspace-box")
+def workspace_box(action_space, low: float = -0.5, high: float = 0.5):
+    return MyBoxGuard(action_space, low, high)
+```
+
+Programmatic runs take the same specs: `eval(..., guard=["clamp",
+"delta-limit:max_delta=0.02"])`. Each time a guard changes an action, the
+trial's `approval` event names the guard and records the action before and
+after it.
+
 ### Automatic task generation: `--auto-task`
 
 Use `--auto-task` in place of `--task` or `--instruction` to have a
@@ -483,7 +525,7 @@ evaluation use the same value so the initial peek matches epoch zero.
 
 Run several registered tasks against one resolved policy/embodiment pair in a
 single invocation — the CLI counterpart of
-[`eval_set`](/api/#inspect_robots.eval.eval_set). Task names are matched exactly, or
+[`eval_set`](../../src/inspect_robots/eval.py). Task names are matched exactly, or
 by shell-quoted `fnmatch` glob (entry-point discovery namespaces tasks as
 `<benchmark>/<key>`, so a benchmark name is a ready-made prefix):
 
@@ -533,8 +575,8 @@ up CPU-bound Python code, and separate policy instances may increase memory use.
 
 The Python API accepts `eval_set(task_names, "policy", "embodiment", max_workers=N)`.
 For parallel runs, tasks and components (including an optional grader) must be
-registered names. Live task/component objects, custom sinks, controllers,
-approvers, operator input and pre-scoring hooks are rejected to avoid sharing
+registered names. Live task/component objects, custom sinks, action managers,
+guards, operator input and pre-scoring hooks are rejected to avoid sharing
 mutable state between tasks. Custom configuration can be supplied by registered
 factories. Each task preflights its grader before opening its components, and a
 grading configuration error stops task admission. Log schemas and per-trial
@@ -581,7 +623,7 @@ inspect-robots doctor --embodiment my_arms
 
 ## `inspect-robots inspect`
 
-Print a summary of a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog):
+Print a summary of a saved [`EvalLog`](../../src/inspect_robots/log.py):
 
 ```bash
 inspect-robots inspect logs/cubepick-reach_xxxx.json
@@ -618,7 +660,7 @@ inspect-robots inspect logs/cubepick-reach_xxxx.json --transcript
 
 ## `inspect-robots summarize`
 
-Distill a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) into a markdown
+Distill a saved [`EvalLog`](../../src/inspect_robots/log.py) into a markdown
 learnings file:
 
 ```bash
@@ -672,7 +714,7 @@ details and limits live in the plugin READMEs linked above.
 
 ## `inspect-robots view`
 
-Render a saved [`EvalLog`](/api/#inspect_robots.log.EvalLog) as a self-contained HTML
+Render a saved [`EvalLog`](../../src/inspect_robots/log.py) as a self-contained HTML
 report:
 
 ```bash
@@ -747,6 +789,20 @@ overrides). The playback rate defaults to the log's `control_hz` and can be
 overridden with `--fps N`. A stream that fails to encode is reported on
 stderr and the remaining streams still encode; the exit code is 1 if any
 stream failed.
+
+## `inspect-robots edit`, `score` and `analyze`
+
+`edit` appends a judgement or note about one trial beside a saved log,
+`score` re-scores a log from its annotations and compares the result with the
+stored metrics, and `analyze NAME LOG...` runs a registered analyzer
+(`scores`, `terminations`, `digest`, `html`, or a plugin's). The log itself is
+never rewritten. See [Editing and analyzing records](editing-and-analysis.md).
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no --author reviewer
+inspect-robots score logs/run.json
+inspect-robots analyze terminations logs/*.json
+```
 
 ## `inspect-robots --version`
 

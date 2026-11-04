@@ -164,12 +164,6 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# Docusaurus documentation
-website/build
-website/node_modules
-website/.docusaurus
-docs/api/index.md
-
 # mypy
 .mypy_cache/
 .dmypy.json

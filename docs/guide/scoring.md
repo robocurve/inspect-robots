@@ -1,10 +1,14 @@
 # Scoring
 
-A [`Scorer`](/api/#inspect_robots.scorer.Scorer) maps a recorded
-[`TrialRecord`](/api/#inspect_robots.rollout.TrialRecord) (plus the scene's
-[`Target`](/api/#inspect_robots.scene.Target)) to a [`Score`](/api/#inspect_robots.scorer.Score). Scorers
+A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded
+[`Record`](../../src/inspect_robots/rollout.py) (plus the scene's
+[`Target`](../../src/inspect_robots/scene.py)) to a [`Score`](../../src/inspect_robots/scorer.py). Scorers
 read the *recorded* trajectory (never a live environment), so scoring is
 reproducible from a saved log.
+
+A task attaches scorers through [rubrics](writing-a-benchmark.md#rubrics): named
+criteria (capability or safety), each with its scorer. Results and metrics are
+keyed by rubric name.
 
 ## Builtin scorers
 
@@ -35,7 +39,7 @@ class SmoothMotion:
         return Score(value=-sum(deltas), explanation="negative total command magnitude")
 ```
 
-Register it with [`scorer`](/api/#inspect_robots.registry.scorer) to resolve it by name.
+Register it with [`scorer`](../../src/inspect_robots/registry.py) to resolve it by name.
 
 A scorer with no verdict for a trial can abstain by returning
 `Score(value=None)`. The log records the epoch as `null`, which is distinct
@@ -55,7 +59,7 @@ error (see "Automated grading" in the CLI guide).
 When a `Task` runs `epochs > 1`, an epoch reducer collapses the per-epoch
 scores of a scene before metrics aggregate across scenes. Reducers are namespaced
 separately from metrics and are selected by name on
-[`Epochs`](/api/#inspect_robots.task.Epochs):
+[`Epochs`](../../src/inspect_robots/task.py):
 
 | Reducer | Meaning |
 |---|---|
@@ -72,21 +76,21 @@ Task(..., epochs=Epochs(count=5, reducer="pass_at_2"))
 
 Real robots have no privileged success oracle. The dominant method is a human
 verdict, captured *once* per trial and read back by
-[`operator_scorer`](/api/#inspect_robots.scorer.operator_scorer), keeping scoring reproducible.
+[`operator_scorer`](../../src/inspect_robots/scorer.py), keeping scoring reproducible.
 Benchmarks that read `operator_judgement` directly, instead of delegating to
 `operator_scorer`, should call
-[`is_affirmative_verdict`](/api/#inspect_robots.scorer.is_affirmative_verdict)
+[`is_affirmative_verdict`](../../src/inspect_robots/scorer.py)
 rather than restate the vocabulary. It owns the recognized affirmative words
 together with the case-folding and whitespace handling around them, so a change
 reaches every consumer at once.
-Capture is the job of a [`Grader`](/api/#inspect_robots.grader.Grader): a registered
+Capture is the job of a [`Grader`](../../src/inspect_robots/grader.py): a registered
 component (`inspect_robots.graders` entry point, `grader` decorator) whose
 `grade(record, scene)` runs once per scored trial, after the rollout and
 before the scorers, and writes the judgement onto the record. The builtin
 `operator` grader prompts the terminal operator, and the builtin `vlm`
 grader is the autograder on the same seam: a vision model judges the trial's
 first and last frames against a rubric (the reserved
-[`VLMScorer`](/api/#inspect_robots.scorer.VLMScorer) interface predates it
+[`VLMScorer`](../../src/inspect_robots/scorer.py) interface predates it
 and stays a stub, because R6 requires scorers to be pure readers).
 
 Every attended CLI run is graded by default, registered tasks included, so
@@ -98,3 +102,24 @@ scores operator-graded trials as failures; pair attended operator-graded runs
 with a judgement-reading scorer instead. From the Python API, pass
 `eval(..., grader="operator")` (or any `Grader` object); unattended runs and
 `eval()` without a grader stay prompt-free.
+
+## Correcting a verdict after the run
+
+A verdict captured during the run can be corrected later without rewriting the
+log: `inspect-robots edit` appends a judgement
+[annotation](../../src/inspect_robots/annotation.py) beside the log, and
+`inspect-robots score` re-scores from it and compares the result with the
+stored metrics.
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no \
+  --author reviewer --reason "the top bowl slid off after release"
+inspect-robots score logs/run.json --out rescored.json
+```
+
+The built-in `operator` scorer takes part in re-scoring through
+`score_annotations(annotations, record_id, rubric)`, which scores a trial from
+the judgement that counts. A log records each rubric's scorer name but not its
+configuration, so other scorers keep their stored scores, including custom ones
+that offer `score_annotations` and scorers such as `success_at_end`. See
+[Re-scoring](editing-and-analysis.md#re-scoring).

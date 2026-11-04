@@ -15,7 +15,7 @@ from inspect_robots.grader import Grader, operator_grader
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyConfig, PolicyInfo
 from inspect_robots.registry import resolve
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Scorer, success_at_end
 from inspect_robots.session import OperatorSession
@@ -47,7 +47,7 @@ class _RecordingGrader:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int]] = []
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Record the trial identity and stamp a judgement."""
         del scene
         self.calls.append((record.scene_id, record.epoch))
@@ -80,7 +80,7 @@ def test_operator_grader_conforms_and_resolves_from_registry() -> None:
 def test_operator_grader_delegates_to_prompt_verdict() -> None:
     session, _output = _scripted_session(["partial", "slipped near the goal"])
     grader = operator_grader(session)
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     grader.grade(record, Scene(id="s0", instruction="reach"))
 
@@ -93,7 +93,7 @@ def test_connect_session_rebinds_the_prompt_seams() -> None:
     second, _ = _scripted_session(["n", ""])
     grader = operator_grader(first)
     grader.connect_session(second)
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     grader.grade(record, Scene(id="s0", instruction="reach"))
 
@@ -106,7 +106,7 @@ def test_operator_grader_builds_a_lazy_default_session(
     answers = iter(["y", ""])
     monkeypatch.setattr(builtins, "input", lambda _p: next(answers))
     grader = operator_grader()
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     grader.grade(record, Scene(id="s0", instruction="reach"))
 

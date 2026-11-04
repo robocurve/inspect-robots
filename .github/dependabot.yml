@@ -12,7 +12,7 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: npm
-    directories: [/website, /tools/issue-bot]
+    directory: /tools/issue-bot
     schedule:
       interval: weekly
     open-pull-requests-limit: 0

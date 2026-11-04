@@ -359,6 +359,28 @@ def test_started_log_with_synthetic_scene_metadata_renders_rubric() -> None:
     assert '<p class="rubric-text">The cube clears the table.</p></details>' in document
 
 
+def test_scene_rubrics_with_text_render_one_block_each() -> None:
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        rubrics=(
+            {"name": "stacked", "kind": "capability", "text": "Red <on> blue."},
+            {"name": "automatic", "kind": "capability", "text": ""},
+            {"name": "safe", "kind": "safety", "text": "Nothing falls."},
+            "not a rubric",  # a hand-edited log
+        ),  # type: ignore[arg-type]
+    )
+
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="rubrics")
+
+    assert (
+        '<details class="rubric"><summary>Rubric: stacked (capability)</summary>'
+        '<p class="rubric-text">Red &lt;on&gt; blue.</p></details>'
+    ) in document
+    assert "<summary>Rubric: safe (safety)</summary>" in document
+    assert "automatic" not in document
+
+
 def test_scene_where_no_trial_carried_a_note_renders_no_grader_notes_block() -> None:
     # The ordinary case: operator_notes is parallel to epochs, so an unannotated
     # run is a tuple of Nones, not the empty tuple the omission test above uses.
@@ -2291,3 +2313,41 @@ def test_wire_malformed_request_degrades_to_an_empty_call(tmp_path: Path) -> Non
     assert "Trial 0 Wire" in document
     assert "no new messages" in document
     assert "<dd>n/a</dd>" in document
+
+
+def test_the_policys_stated_reasons_are_shown_per_trial() -> None:
+    log = _log()
+    scene = dataclasses.replace(
+        log.samples[0],
+        termination_reasons=("give_up", "max_steps"),
+        termination_details=("the drawer is <glued> shut", None),
+    )
+    document = render_html(dataclasses.replace(log, samples=(scene,)), title="run")
+    assert "<h3>Policy's stated reasons</h3>" in document
+    assert ">trial 0</span>the drawer is &lt;glued&gt; shut</div>" in document
+    assert ">trial 1</span>" not in document.split("Policy")[1].split("<h3>")[0]
+
+    plain = render_html(
+        dataclasses.replace(
+            log, samples=(dataclasses.replace(scene, termination_details=(None, None)),)
+        ),
+        title="run",
+    )
+    assert "stated reasons" not in plain
+
+
+def test_the_html_analyzer_includes_the_wire_capture_view_shows(tmp_path: Path) -> None:
+    from inspect_robots.analyzer import AnnotatedLog, _HtmlAnalyzer
+
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/messages",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {"model": "claude-wire-only", "messages": []},
+    }
+    log, log_path, _ = _wire_log(tmp_path, [row])
+    item = AnnotatedLog(path=log_path, log=log, annotations=())
+    (document,) = _HtmlAnalyzer().analyze([item]).files.values()
+    assert "Trial 0 Wire" in document and "claude-wire-only" in document

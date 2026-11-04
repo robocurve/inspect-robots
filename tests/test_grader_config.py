@@ -17,7 +17,7 @@ from inspect_robots import eval_set as ir_eval_set
 from inspect_robots.grader import _DEFAULT_RUBRIC, _PREFLIGHT_PROMPT, Grader, vlm_grader
 from inspect_robots.log import read_eval_log
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.task import Task
@@ -51,7 +51,7 @@ class _PlainGrader:
 
     name = "plain"
 
-    def grade(self, record: TrialRecord, scene: Scene) -> None:
+    def grade(self, record: Record, scene: Scene) -> None:
         """Stamp a verdict without exposing any configuration."""
         del scene
         record.operator_judgement = "success"

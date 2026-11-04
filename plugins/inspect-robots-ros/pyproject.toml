@@ -7,7 +7,7 @@ name = "inspect-robots-ros"
 version = "0.1.0"
 description = "ROS embodiment adapter for Inspect Robots over the rosbridge websocket protocol."
 dynamic = ["readme"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Inspect Robots contributors" }]
 keywords = ["robotics", "ros", "rosbridge", "inspect_robots", "vla", "evaluation"]

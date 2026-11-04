@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "inspect-robots"
 dynamic = ["version", "readme"]
 description = "An evaluation framework for VLA (vision-language-action) models across real robots and simulators — the Inspect AI for robotics."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Inspect Robots contributors" }]
@@ -20,11 +20,10 @@ keywords = [
     "physical-ai",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -44,12 +43,10 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.5",
     "towncrier>=24.7",
-    "inspect-robots[docs]",
-    # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.10)
+    # numpy 2.5's type stubs use 3.12-only syntax that mypy (python_version 3.11)
     # rejects; pin the 2.4.x line for a deterministic dev/CI gate (runtime is free).
     "numpy<2.5",
 ]
-docs = ["griffe>=1.0"]
 all = ["inspect-robots[rerun]"]
 
 [project.scripts]
@@ -59,7 +56,7 @@ inspect-robot = "inspect_robots.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/robocurve/inspect-robots"
-Documentation = "https://docs.inspectrobots.org/"
+Documentation = "https://github.com/robocurve/inspect-robots/tree/main/docs"
 Repository = "https://github.com/robocurve/inspect-robots"
 Issues = "https://github.com/robocurve/inspect-robots/issues"
 
@@ -88,7 +85,7 @@ include = ["src/inspect_robots", "tests", "README.md", "LICENSE"]
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -103,11 +100,11 @@ ignore = ["B008", "D105", "D107"]
 known-first-party = ["inspect_robots"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 warn_unreachable = true
 disallow_untyped_defs = true
-files = ["src/inspect_robots", "tests", "scripts/gen_api_docs.py"]
+files = ["src/inspect_robots", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["rerun.*"]

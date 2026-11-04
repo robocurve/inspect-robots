@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
 from typing import TYPE_CHECKING, Any
@@ -27,7 +27,7 @@ from inspect_robots.logging.json_log import _sanitize, _slug
 from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scene import Scene
     from inspect_robots.types import Action, Observation, StepResult
 
@@ -201,7 +201,7 @@ class LiveLogSink:
         except Exception as exc:
             self._disable(exc)
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Replace the active slot with the completed record and force a snapshot."""
         if self._disabled:
             return
@@ -307,7 +307,7 @@ class LiveLogSink:
             return
         if self._spec is None or self.path is None:
             raise RuntimeError("live sink has not started an evaluation")
-        updated_at = datetime.now(timezone.utc).isoformat()
+        updated_at = datetime.now(UTC).isoformat()
         duration = max(0.0, now - self._started_clock)
         live_log = EvalLog(
             version=EvalLog.SCHEMA_VERSION,

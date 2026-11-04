@@ -14,9 +14,10 @@ import httpx
 import pytest
 
 import inspect_robots_agent._gemini_live as live_module
+import inspect_robots_agent._interactions as interactions_module
 from inspect_robots.errors import ConfigError
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots_agent import InteractionsClient, LLMAgentPolicy
 from inspect_robots_agent._capture import WireCapture
@@ -103,6 +104,8 @@ def _client(
     max_retries: int = 3,
     backoff_s: float = 0.0,
     capture: WireCapture | None = None,
+    service_tier: str | None = None,
+    timeout_s: float = 300.0,
 ) -> InteractionsClient:
     return InteractionsClient(
         Provider(
@@ -110,6 +113,8 @@ def _client(
             api_key=api_key,
             model="google/gemini-3.7-flash",
         ),
+        service_tier=service_tier,
+        timeout_s=timeout_s,
         max_retries=max_retries,
         backoff_s=backoff_s,
         transport=httpx.MockTransport(handler),
@@ -562,10 +567,16 @@ def test_failed_status_raises_and_incomplete_returns_partial_text() -> None:
     assert incomplete.content == "partial"
 
 
-def test_missing_steps_raise_and_unknown_step_types_are_skipped() -> None:
+def test_missing_steps_are_an_empty_turn_and_unknown_step_types_are_skipped() -> None:
     client = _client(lambda request: httpx.Response(200, json={"id": "i1", "status": "completed"}))
+    empty = client.complete(_messages(), [])
+    assert (empty.content, empty.tool_calls) == (None, ())
+
+    malformed = _client(
+        lambda request: httpx.Response(200, json={"id": "i1", "status": "completed", "steps": {}})
+    )
     with pytest.raises(RuntimeError, match="steps"):
-        client.complete(_messages(), [])
+        malformed.complete(_messages(), [])
 
     tolerant = _client(
         lambda request: httpx.Response(
@@ -774,7 +785,7 @@ def test_policy_act_chains_delta_and_capture_round_trips_blobs(tmp_path: Path) -
     next_observation = embodiment.step(first_chunk.actions[-1]).observation
     stop_chunk = policy.act(next_observation)
 
-    assert stop_chunk.actions[0].meta["request_stop"] is True
+    assert stop_chunk.terminal is not None
     second = raw_requests[1]
     assert second["previous_interaction_id"] == "i1"
     assert second["input"][0]["type"] == "function_result"
@@ -783,7 +794,7 @@ def test_policy_act_chains_delta_and_capture_round_trips_blobs(tmp_path: Path) -
     assert all(part.get("type") != "function_call" for part in second["input"])
     assert "The cube is ahead" not in json.dumps(second["input"])
 
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0, status="success")
+    record = Record(scene_id="s0", epoch=0, seed=0, status="success")
     policy.on_trial_end(record, str(tmp_path), "run-1")
     pointer = record.metadata["wire_capture"]
     assert isinstance(pointer, str)
@@ -836,7 +847,153 @@ def test_policy_text_turn_takes_existing_nudge_path_end_to_end() -> None:
 
     chunk = policy.act(embodiment.reset(scene, seed=0))
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert bodies[1]["previous_interaction_id"] == "i1"
     assert bodies[1]["input"] == [{"type": "text", "text": "Respond with exactly one tool call."}]
     assert "I should use a tool" not in json.dumps(bodies[1]["input"])
+
+
+def test_service_tier_is_sent_only_when_set() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(_body(request))
+        return httpx.Response(200, json=_response("i1", _text("ok")))
+
+    _client(handler).complete(_messages(), [])
+    _client(handler, service_tier="priority").complete(_messages(), [])
+    assert "service_tier" not in bodies[0]
+    assert bodies[1]["service_tier"] == "priority"
+
+
+def _interaction_rows(tmp_path: Path) -> list[dict[str, Any]]:
+    return _wire_rows(tmp_path / "wire/run-1/scene-e0/interactions.jsonl")
+
+
+def test_in_progress_interaction_is_polled_to_completion_and_checkpointed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(time_module, "sleep", lambda seconds: None)
+    polls = iter(
+        [
+            httpx.TransportError("blip"),
+            httpx.Response(503, text="busy"),
+        ]
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.raw_path.decode()}")
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "a/b", "status": "in_progress"})
+        nxt = next(polls, None)
+        if isinstance(nxt, Exception):
+            raise nxt
+        if nxt is not None:
+            return nxt
+        if seen.count("GET /v1beta/interactions/a%2Fb") < 4:
+            return httpx.Response(200, json={"id": "a/b", "status": "queued"})
+        return httpx.Response(200, json=_response("a/b", _text("done"), usage={"total_tokens": 3}))
+
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    message = _client(handler, capture=capture).complete(_messages(), [])
+
+    assert message.content == "done"
+    assert seen[0] == "POST /v1beta/interactions"
+    rows = _interaction_rows(tmp_path)
+    assert [row["event"] for row in rows] == ["submitted", "accepted", "finished"]
+    assert rows[1]["interaction_id"] == "a/b"
+    assert rows[2]["usage"] == {"total_tokens": 3}
+    assert len({row["request_id"] for row in rows}) == 1
+
+
+@pytest.mark.parametrize(
+    "poll",
+    [
+        httpx.Response(200, json={"id": "other", "status": "completed"}),
+        httpx.Response(200, text="not json"),
+    ],
+    ids=["wrong_id", "not_json"],
+)
+def test_invalid_poll_payload_stops_polling_without_resubmitting(
+    poll: httpx.Response, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(time_module, "sleep", lambda seconds: None)
+    posts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(1)
+            return httpx.Response(200, json={"id": "i1", "status": "in_progress"})
+        return poll
+
+    capture = WireCapture()
+    capture.begin_trial(str(tmp_path), "run-1", "scene-e0")
+    with pytest.raises(RuntimeError, match="not resubmitted") as excinfo:
+        _client(handler, capture=capture).complete(_messages(), [])
+
+    assert "invalid interaction response while polling" in str(excinfo.value)
+    assert posts == [1]
+    assert _interaction_rows(tmp_path)[-1]["event"] == "usage_pending"
+    calls = _wire_rows(tmp_path / "wire/run-1/scene-e0/calls.jsonl")
+    assert calls[-1]["error"].startswith("LLM request timed out or polling failed")
+
+
+def test_client_error_while_polling_stops_and_timeout_bounds_polling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time_module, "sleep", lambda seconds: None)
+
+    def rejected(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "i1", "status": "queued"})
+        return httpx.Response(404, text="gone")
+
+    with pytest.raises(RuntimeError, match="HTTP 404 while polling"):
+        _client(rejected).complete(_messages(), [])
+
+    def stuck(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "i1", "status": "in_progress"})
+
+    with pytest.raises(RuntimeError, match="generation still in progress"):
+        _client(stuck, timeout_s=0.0).complete(_messages(), [])
+
+
+def test_non_200_and_idless_submissions_skip_polling() -> None:
+    idless = _client(lambda request: httpx.Response(200, json={"status": "completed", "steps": []}))
+    with pytest.raises(RuntimeError):
+        idless.complete(_messages(), [])
+
+    responses = iter([httpx.Response(503, text="busy"), httpx.Response(200, json=_response("i1"))])
+    assert _client(lambda request: next(responses)).complete(_messages(), []).content is None
+
+
+time_module = interactions_module.time
+
+
+def test_transport_error_on_submit_is_retried() -> None:
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json=_response("i1", _text("ok")))
+
+    assert _client(handler).complete(_messages(), []).content == "ok"
+    assert len(attempts) == 2
+
+
+def test_checkpoint_write_failure_disables_capture_and_keeps_the_call(tmp_path: Path) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    capture = WireCapture()
+    capture.begin_trial(str(blocker), "run-1", "scene-e0")
+    client = _client(
+        lambda request: httpx.Response(200, json=_response("i1", _text("ok"))), capture=capture
+    )
+
+    assert client.complete(_messages(), []).content == "ok"
+    capture.record_interaction(attempt=0, event="after-disable")
+    assert not (blocker / "wire").exists()
