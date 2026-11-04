@@ -12,6 +12,9 @@ export function monthlyReviewLimit(pr: number, month: string): number {
   // Jay authorized $5 extra on 2026-09-30 (UTC), then transferred the unused
   // $3.93072 from PR 512 to release PR 513. Deployment PR caps total $5.
   if (month === '2026-09' && (pr === 512 || pr === 513)) return LIMITS.month + 15_000_000;
+  // Jay authorized up to $250 of review for PR 599 and its YAM companion on
+  // 2026-11-04; the YAM repo has no reviewer, and PR 599's own $199 cap still binds.
+  if (month === '2026-11' && pr === 599) return LIMITS.month + 50_000_000;
   // Jay authorized $10 extra on 2026-09-24 to finish PRs 475 and 476.
   // Both share one monthly total; this is not $10 per PR and expires in October.
   return LIMITS.month + (month === '2026-09' && (pr === 475 || pr === 476) ? 10_000_000 : 0);
