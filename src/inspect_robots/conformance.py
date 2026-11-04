@@ -463,7 +463,17 @@ def _policy_interface(info: EmbodimentInfo) -> tuple[object, ...]:
     state = observation.state
     return (
         space.shape,
-        None if semantics is None else (semantics.control_mode, semantics.frame),
+        # Every semantic that changes how a policy must encode its actions:
+        # the same shape and labels under another rotation or gripper encoding
+        # is a different contract.
+        None
+        if semantics is None
+        else (
+            semantics.control_mode,
+            semantics.frame,
+            semantics.rotation_repr,
+            semantics.gripper,
+        ),
         None if semantics is None else semantics.dim_labels,
         tuple((camera.name, camera.height, camera.width) for camera in observation.cameras),
         () if state is None else tuple((f.key, f.shape) for f in state.fields),

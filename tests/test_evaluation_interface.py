@@ -266,14 +266,14 @@ def test_a_cancelled_trial_is_not_parked(tmp_path: Path) -> None:
     assert "park" not in embodiment.calls
 
 
-def test_a_policy_that_fails_to_start_is_not_parked(tmp_path: Path) -> None:
+def test_a_policy_that_fails_to_start_is_parked_after_homing(tmp_path: Path) -> None:
     class _NoStart(ScriptedPolicy):
         def on_trial_start(self, *args: object) -> None:
             raise RuntimeError("no transcript dir")
 
     embodiment = _Lifecycle()
     ir_eval(_task(), _NoStart(), embodiment, log_dir=str(tmp_path))
-    assert embodiment.calls == ["health", "prepare_trial", "home"]
+    assert embodiment.calls == ["health", "prepare_trial", "home", "park"]
 
 
 def test_morphology_is_logged(tmp_path: Path) -> None:
@@ -324,6 +324,31 @@ def test_policy_interface_tells_missing_semantics_and_state_apart() -> None:
         observation_space=replace(bare.observation_space, state=None),
     )
     assert check_policy_interfaces([bare, _info("arm-delta", "arm")]).ok
+
+
+def test_rotation_and_gripper_encodings_are_distinct_interfaces() -> None:
+    def pose_info(name: str, rotation: Any, gripper: Any = "none") -> Any:
+        info = CubePickEmbodiment().info
+        space = Box(
+            shape=(7,),
+            semantics=ActionSemantics(
+                control_mode="eef_delta_pose", rotation_repr=rotation, gripper=gripper
+            ),
+        )
+        return replace(info, name=name, morphology="arm", action_space=space)
+
+    assert check_policy_interfaces(
+        [pose_info("axis-angle", "axis_angle"), pose_info("euler", "euler_xyz")]
+    ).ok
+    assert check_policy_interfaces(
+        [
+            pose_info("binary", "axis_angle", gripper="binary"),
+            pose_info("continuous", "axis_angle", gripper="continuous"),
+        ]
+    ).ok
+    assert not check_policy_interfaces(
+        [pose_info("one", "axis_angle"), pose_info("two", "axis_angle")]
+    ).ok
 
 
 def test_evaluation_interface_hooks_are_checked_without_being_called() -> None:

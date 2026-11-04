@@ -348,6 +348,40 @@ def test_the_operator_scorer_scores_annotations_as_it_scores_records() -> None:
     assert scorer.score_annotations([], empty.record_id, "operator") == scorer(empty, None)  # type: ignore[attr-defined]
 
 
+def test_a_rubric_edit_never_supersedes_the_runs_general_judgement(tmp_path: Path) -> None:
+    path, _ = _judged_log(tmp_path)
+    args = ["edit", str(path), "--trial", "s0-e1", "--judgement", "yes", "--author", "r"]
+    assert main([*args, "--rubric", "stacked"]) == 0
+    (edit,) = [a for a in read_annotations(path) if a.source == "editor"]
+    assert edit.supersedes is None
+
+
+def test_a_renamed_operator_scorer_still_rescores_from_corrections(tmp_path: Path) -> None:
+    verdicts = iter(["yes"])
+
+    def grade(record: Record, scene: Scene) -> None:
+        record.operator_judgement = next(verdicts)
+
+    task = Task(
+        name="renamed",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=40,
+        scorer=operator_scorer(name="success"),
+    )
+    (log,) = ir_eval(
+        task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=grade
+    )
+    (path,) = tmp_path.glob("*.json")
+    assert log.samples[0].epochs[0] == {"success": 1.0}
+    assert log.samples[0].rubrics[0]["rescored_by"] == "operator"
+    edit = ["edit", str(path), "--trial", "s0-e0", "--judgement", "no", "--author", "r"]
+    assert main(edit) == 0
+    item = AnnotatedLog.load(path)
+    rescored = rescore(item.log, item.annotations)
+    assert rescored.samples[0].epochs[0] == {"success": 0.0}
+    assert rescored.results.metrics["success"] == 0.0
+
+
 def test_unresolvable_and_automatic_scorers_keep_their_stored_scores(tmp_path: Path) -> None:
     _, log = _judged_log(tmp_path)
     renamed = replace(
@@ -356,7 +390,10 @@ def test_unresolvable_and_automatic_scorers_keep_their_stored_scores(tmp_path: P
             replace(
                 s,
                 rubrics=tuple(
-                    {**r, "scorer": "no-such-scorer"} if r["name"] == "stacked" else r
+                    {k: v for k, v in r.items() if k != "rescored_by"}
+                    | {"scorer": "no-such-scorer"}
+                    if r["name"] == "stacked"
+                    else r
                     for r in s.rubrics
                 ),
             )
@@ -539,11 +576,22 @@ def test_cli_rubric_edit_leaves_other_judgement_rubrics_alone(tmp_path: Path) ->
         task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), before_scoring=grade
     )
     (path,) = tmp_path.glob("*.json")
-    assert log.samples[0].epochs[0] == {"safety": 1.0, "capability": 1.0}
-    args = ["edit", str(path), "--trial", "s0-e0", "--judgement", "no", "--author", "r"]
-    assert main([*args, "--rubric", "safety"]) == 0
-    (edit,) = [a for a in read_annotations(path) if a.source == "editor"]
-    assert edit.supersedes is None
+    # One verdict per trial: it counts for the first judgement rubric; the
+    # other abstains instead of inheriting it.
+    assert log.samples[0].epochs[0] == {"safety": 1.0, "capability": None}
+    assert log.samples[0].trial_metadata[0]["judged_rubric"] == "safety"
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations) == item.log
+    args = ["edit", str(path), "--trial", "s0-e0", "--author", "r"]
+    assert main([*args, "--judgement", "yes", "--rubric", "capability"]) == 0
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations).samples[0].epochs[0] == {
+        "safety": 1.0,
+        "capability": 1.0,
+    }
+    assert main([*args, "--judgement", "no", "--rubric", "safety"]) == 0
+    safety_edit = [a for a in read_annotations(path) if a.rubric == "safety"][-1]
+    assert safety_edit.supersedes == f"{log.samples[0].record_ids[0]}:run:judgement"
     item = AnnotatedLog.load(path)
     assert rescore(item.log, item.annotations).samples[0].epochs[0] == {
         "safety": 0.0,

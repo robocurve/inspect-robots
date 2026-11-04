@@ -106,6 +106,13 @@ def _parallel(values: tuple[Any, ...], index: int) -> Any:
     return values[index] if index < len(values) else None
 
 
+#: Why a judgement rubric has no verdict when the run judged a different one.
+_NOT_JUDGED = (
+    "not judged in the run, which judged rubric {rubric!r}; "
+    "judge it with inspect-robots edit --rubric"
+)
+
+
 def lift_annotations(log: EvalLog) -> tuple[Annotation, ...]:
     """The judgements, notes and grading errors captured during the run, as annotations.
 
@@ -125,6 +132,8 @@ def lift_annotations(log: EvalLog) -> tuple[Annotation, ...]:
             source = _parallel(sample.judgement_sources, index) or "run"
             note = _parallel(sample.operator_notes, index)
             metadata = _parallel(sample.trial_metadata, index)
+            judged = metadata.get("judged_rubric") if isinstance(metadata, dict) else None
+            judged = judged if isinstance(judged, str) and judged else None
             if judgement is not None:
                 lifted.append(
                     Annotation(
@@ -135,9 +144,25 @@ def lift_annotations(log: EvalLog) -> tuple[Annotation, ...]:
                         source=source,
                         created=created,
                         note=note,
+                        # A run with several judgement rubrics judged one of them;
+                        # the verdict counts for that rubric only.
+                        rubric=judged,
                         annotation_id=f"{key}:run:{JUDGEMENT}",
                     )
                 )
+                if judged is not None and not metadata.get("grading_error"):
+                    # The other judgement rubrics abstain until judged by edit.
+                    lifted.append(
+                        Annotation(
+                            record_id=key,
+                            kind=GRADING_ERROR,
+                            value=_NOT_JUDGED.format(rubric=judged),
+                            author=author,
+                            source=source,
+                            created=created,
+                            annotation_id=f"{key}:run:{GRADING_ERROR}",
+                        )
+                    )
             elif note is not None:
                 lifted.append(
                     Annotation(

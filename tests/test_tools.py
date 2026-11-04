@@ -84,8 +84,8 @@ def _bimanual_obs_space() -> ObservationSpace:
 
 
 def _absolute_space(
-    low: np.ndarray | None = None,
-    high: np.ndarray | None = None,
+    low: npt.NDArray[np.float64] | None = None,
+    high: npt.NDArray[np.float64] | None = None,
     labels: tuple[str, ...] | None = ("joint",),
 ) -> Box:
     return Box(
@@ -126,8 +126,8 @@ def _camera_obs_space() -> ObservationSpace:
 
 
 def _delta_space(
-    low: np.ndarray | None = None,
-    high: np.ndarray | None = None,
+    low: npt.NDArray[np.float64] | None = None,
+    high: npt.NDArray[np.float64] | None = None,
 ) -> Box:
     return Box(
         shape=(2,),
@@ -143,7 +143,7 @@ def _call(name: str, **arguments: object) -> ToolCall:
     return ToolCall(id="call_1", name=name, arguments=json.dumps(arguments))
 
 
-def _obs(state: dict[str, np.ndarray] | None = None) -> Observation:
+def _obs(state: dict[str, npt.NDArray[np.float64]] | None = None) -> Observation:
     return Observation(state={"q": np.array([0.0])} if state is None else state)
 
 
@@ -346,7 +346,7 @@ def test_synthesized_action_labels_do_not_label_state() -> None:
     ],
 )
 def test_absolute_mode_requires_finite_bounds(
-    low: np.ndarray | None, high: np.ndarray | None
+    low: npt.NDArray[np.float64] | None, high: npt.NDArray[np.float64] | None
 ) -> None:
     space = Box(
         shape=(1,),
@@ -370,7 +370,7 @@ def test_absolute_mode_requires_finite_bounds(
     ],
 )
 def test_displacement_mode_requires_finite_zero_containing_bounds(
-    low: np.ndarray | None, high: np.ndarray | None, message: str
+    low: npt.NDArray[np.float64] | None, high: npt.NDArray[np.float64] | None, message: str
 ) -> None:
     space = Box(
         shape=(2,),

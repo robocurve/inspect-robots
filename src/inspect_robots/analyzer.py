@@ -80,7 +80,12 @@ def _scorer_for(rubric: Mapping[str, Any] | None, name: str) -> object | None:
     """The registered scorer behind a rubric, or ``None`` when it cannot be resolved."""
     from inspect_robots.registry import resolve
 
-    scorer_name = rubric.get("scorer") if rubric is not None else name
+    rescored_by = rubric.get("rescored_by") if rubric is not None else None
+    scorer_name = (
+        rescored_by
+        if isinstance(rescored_by, str)
+        else (rubric.get("scorer") if rubric is not None else name)
+    )
     if not isinstance(scorer_name, str):
         return None
     try:

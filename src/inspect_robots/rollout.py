@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import numpy.typing as npt
 
 from inspect_robots.action_manager import _APPROVALS_KEY, _INFER_KEY, _REPLAN_KEY, ActionManager
 from inspect_robots.embodiment import Embodiment
@@ -106,7 +107,7 @@ class ChunkRecord:
     """
 
     t: int
-    actions: tuple[np.ndarray, ...]
+    actions: tuple[npt.NDArray[Any], ...]
     terminal: Termination | None
     latency_s: float | None
     wall_s: float

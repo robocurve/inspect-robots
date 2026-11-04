@@ -1072,9 +1072,19 @@ def _run_eval(
                             if first_grading_error is None:
                                 first_grading_error = str(grading_error)
                     epoch_values: dict[str, float | None] = {}
+                    judged = _judged_rubric(record, scene_scorers[scene.id])
                     for rubric_name, scorer in scene_scorers[scene.id]:
                         try:
-                            score = scorer(record, scene.target)
+                            if (
+                                judged is not None
+                                and rubric_name != judged
+                                and _reads_judgement(scorer)
+                            ):
+                                # One verdict per trial: it counts for the rubric
+                                # it was given for; the others abstain until judged.
+                                score = Score(value=None, explanation="not judged in the run")
+                            else:
+                                score = scorer(record, scene.target)
                             value = value_to_float(score.value)
                         except (SafetyAbort, EmbodimentFault):
                             # Halt signals are not scoring errors: containing
@@ -1187,9 +1197,11 @@ def _run_eval(
                 policy_transcripts.append(record.policy_transcript)
                 bus.on_trial_end(record)
 
-            # Park after every trial that ran, so the scene can be reset by hand.
-            # A cancelled run is left to close(): the operator asked it to stop.
-            if not policy_start_failed and cancelled_exc is None:
+            # Park after every trial that ran, so the scene can be reset by hand,
+            # and after a policy that failed to start: home() already moved the
+            # platform. A cancelled run is left to close(): the operator asked
+            # it to stop.
+            if cancelled_exc is None:
                 park_failure, park_halt = _park(embodiment)
                 if park_failure is not None and halted:
                     warnings.warn(park_failure, RuntimeWarning, stacklevel=2)
@@ -1436,6 +1448,28 @@ def _before_trial_message(
             text = message if park_failure is None else f"{message}; {park_failure}"
             return text, _halt_of(exc) or park_halt
     return None
+
+
+def _reads_judgement(scorer: object) -> bool:
+    """Whether ``scorer`` scores from the trial's recorded judgement (the operator family)."""
+    return callable(getattr(scorer, "score_annotations", None))
+
+
+def _judged_rubric(record: Record, scorers: Sequence[tuple[str, object]]) -> str | None:
+    """Which judgement rubric the trial's single verdict belongs to, when there are several.
+
+    ``None`` with at most one judgement rubric or no verdict: the verdict then
+    applies as before. Otherwise the grader's ``metadata["judged_rubric"]``
+    when it names one of them, else the first; the choice is recorded there so
+    re-scoring from annotations scopes the verdict the same way.
+    """
+    names = [name for name, scorer in scorers if _reads_judgement(scorer)]
+    if len(names) < 2 or record.operator_judgement is None:
+        return None
+    chosen = record.metadata.get("judged_rubric")
+    judged = chosen if chosen in names else names[0]
+    record.metadata["judged_rubric"] = judged
+    return str(judged)
 
 
 def _park_before_escape(embodiment: Embodiment) -> None:

@@ -175,7 +175,7 @@ class _VLMGrader:
         and any ``rubric_file`` read, and ``effort`` is the normalized value
         that rides the request (``None`` omits ``reasoning_effort`` so the
         provider default applies, ``"none"`` is sent verbatim). ``rubric``
-        is the run-level fallback only, since ``_rubric_for`` lets a scene's
+        is the run-level fallback only, since ``_judged_rubric`` lets a scene's
         own ``metadata["rubric"]`` win for that scene. The API key is
         deliberately absent: a log is not a place for a credential.
         """
@@ -255,22 +255,25 @@ class _VLMGrader:
             file=sys.stderr,
         )
 
-    def _rubric_for(self, scene: Scene) -> str:
-        """Choose the rubric text this trial is judged against.
+    def _judged_rubric(self, scene: Scene) -> tuple[str, str | None]:
+        """Choose the rubric text this trial is judged against, and its name.
 
         In order: ``scene.metadata["rubric"]``, the hand-off from task
         generation (plan 0070); then the first of the scene's effective rubrics
-        with text (``eval()`` passes the task's rubrics merged with the scene's);
-        then the constructed ``rubric``/``rubric_file``. A grader makes one
-        judgement per trial, so only one rubric text is judged.
+        with text (``eval()`` passes the task's rubrics merged with the scene's),
+        preferring one scored from judgements so the verdict lands on a rubric
+        that reads it; then the constructed ``rubric``/``rubric_file``. A grader
+        makes one judgement per trial, so only one rubric text is judged; the
+        name is ``None`` unless it came from the scene's rubrics.
         """
         scene_rubric = scene.metadata.get("rubric")
         if isinstance(scene_rubric, str) and scene_rubric.strip():
-            return scene_rubric
-        for rubric in scene.rubrics:
-            if rubric.text.strip():
-                return rubric.text
-        return self._rubric
+            return scene_rubric, None
+        with_text = [rubric for rubric in scene.rubrics if rubric.text.strip()]
+        judged = [rubric for rubric in with_text if _reads_judgements(rubric)]
+        for rubric in judged or with_text:
+            return rubric.text, rubric.name
+        return self._rubric, None
 
     def _messages(
         self,
@@ -334,7 +337,8 @@ class _VLMGrader:
                 if record.steps
                 else []
             )
-            messages = self._messages(scene.instruction, self._rubric_for(scene), initial, final)
+            rubric_text, rubric_name = self._judged_rubric(scene)
+            messages = self._messages(scene.instruction, rubric_text, initial, final)
             reply = chat_completion(
                 self._base_url,
                 self._api_key,
@@ -363,9 +367,20 @@ class _VLMGrader:
             record.metadata["graded_frames"] = "parked"
         record.operator_judgement = judgement
         record.operator_note = note
+        if rubric_name is not None:
+            record.metadata["judged_rubric"] = rubric_name
         record.events.append(
             operator_event(t=len(record.steps), verdict=judgement, source="vlm", note=note)
         )
+
+
+def _reads_judgements(rubric: Any) -> bool:
+    """Whether ``rubric`` is scored from a recorded judgement (the ``operator`` scorer)."""
+    try:
+        scorer = rubric.resolve_scorer()
+    except Exception:
+        return False
+    return callable(getattr(scorer, "score_annotations", None))
 
 
 _PREFLIGHT_PROMPT = (

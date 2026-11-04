@@ -78,14 +78,20 @@ class Rubric:
         """
         from inspect_robots.log import _json_safe_scene_metadata
 
-        scorer = self.scorer if isinstance(self.scorer, str) else self.resolve_scorer().name
-        return {
+        resolved = self.resolve_scorer()
+        scorer = self.scorer if isinstance(self.scorer, str) else resolved.name
+        described: dict[str, Any] = {
             "name": self.name,
             "kind": self.kind,
             "text": self.text,
             "scorer": scorer,
             "metadata": _json_safe_scene_metadata(self.metadata),
         }
+        if callable(getattr(resolved, "score_annotations", None)):
+            # The scorer's display name can be anything (operator_scorer(name=...)),
+            # so record the registered scorer that re-scores it from annotations.
+            described["rescored_by"] = "operator"
+        return described
 
 
 def check_unique(rubrics: Sequence[Rubric], owner: str) -> None:

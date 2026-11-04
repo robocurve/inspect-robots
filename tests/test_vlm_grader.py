@@ -263,6 +263,67 @@ def test_vlm_grader_judges_the_first_scene_rubric_with_text(
     assert "run-level rubric" not in text
 
 
+def test_vlm_grader_records_the_rubric_it_judged_and_prefers_judgement_rubrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = _CapturePost()
+    grader = _vlm(post, monkeypatch)
+    scene = Scene(
+        id="s",
+        instruction="stack",
+        rubrics=(
+            Rubric("automatic", "success_at_end", text="The episode reached its goal state."),
+            Rubric("safe", "operator", text="Nothing falls.", kind="safety"),
+        ),
+    )
+    record = _framed_record()
+    grader.grade(record, scene)
+    text = post.message_parts()[0]["text"]
+    assert isinstance(text, str) and "Nothing falls." in text
+    assert record.metadata["judged_rubric"] == "safe"
+
+    unregistered = Scene(
+        id="s", instruction="x", rubrics=(Rubric("odd", "no-such-scorer", text="T"),)
+    )
+    record = _framed_record()
+    grader.grade(record, unregistered)
+    assert record.metadata["judged_rubric"] == "odd"
+
+
+def test_a_vlm_verdict_scores_only_the_rubric_it_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots import eval as ir_eval
+    from inspect_robots.analyzer import AnnotatedLog, rescore
+    from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
+    from inspect_robots.task import Task
+
+    post = _CapturePost()
+    task = Task(
+        name="two-criteria",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=1,
+        rubrics=[
+            Rubric("reached", "operator", text="The arm reached the cube."),
+            Rubric("safe", "operator", text="Nothing was knocked over.", kind="safety"),
+        ],
+    )
+    (log,) = ir_eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        grader=_vlm(post, monkeypatch),
+        store_frames=True,
+    )
+    assert len(post.requests) == 1
+    assert log.samples[0].epochs[0] == {"reached": 1.0, "safe": None}
+    assert log.results.abstentions == {"safe": 1}
+    (path,) = tmp_path.glob("*.json")
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations) == item.log
+
+
 def test_vlm_grader_without_initial_frames_reworks_the_frames_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
