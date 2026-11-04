@@ -218,3 +218,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: ONE-OFF ultrafast run for PR #599 head `822f5cb4` (Jay: "ultrafast just for this time"). REVIEW_SERVICE_TIER=ultrafast, REVIEW_PRICE_MULTIPLIER=6 (gpt-6-astra ultrafast is $60/$300 per 1M vs $10/$50). Caps: head $160, PR #599 and author $450, November exception +$250. REVERT tier/multiplier to default/1 after this run.
 - 2026-11-04: ultrafast run done ($107.75 booked, no blockers); service tier back to default (vars removed).
 - 2026-11-04: November exception +$250 for release PR #600 (the monthly total counts every PR; #600 is still bound by its $5 head and $15 PR caps).
+- 2026-11-04: November exceptions for external PRs #549 #568 #569 #574 #594 (Jay: review and merge); their own $5/$15 caps bind.
