@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import Record, StepRecord
     from inspect_robots.scene import Scene
     from inspect_robots.session import OperatorSession
+    from inspect_robots.types import Observation
 
 
 @runtime_checkable
@@ -131,7 +132,13 @@ def _phase_frames(
 
 def _parked_frames(record: Record, max_cameras: int) -> list[tuple[str, npt.NDArray[np.uint8]]]:
     """Collect deterministic, capped frames from a fresh parked observation."""
-    observation = record.parked_observation
+    return _observation_frames(record.parked_observation, max_cameras)
+
+
+def _observation_frames(
+    observation: Observation | None, max_cameras: int
+) -> list[tuple[str, npt.NDArray[np.uint8]]]:
+    """An in-memory observation's frames, name-sorted and capped."""
     if observation is None or not observation.images:
         return []
     return [
@@ -325,10 +332,12 @@ class _VLMGrader:
             return
         try:
             parked = _parked_frames(record, self._max_cameras)
+            # A trial the policy ended before its first step (an immediate
+            # refusal) is judged from the observation it stopped on.
             final = parked or (
                 _phase_frames(record.steps[-1], final=True, max_cameras=self._max_cameras)
                 if record.steps
-                else []
+                else _observation_frames(record.unstepped_observation, self._max_cameras)
             )
             if not final:
                 raise ConfigError("no final frames recorded")

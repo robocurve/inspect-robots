@@ -839,3 +839,44 @@ def test_preflight_rejects_an_api_key_with_a_trailing_newline(
     grader = vlm_grader("judge-model", api_key_env="VLM_TEST_KEY", base_url="http://127.0.0.1:1/v1")
     with pytest.raises(ConfigError, match=r"invalid request"):
         grader.preflight()
+
+
+def test_an_immediate_refusal_is_graded_from_the_observation_it_stopped_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_robots.policy import PolicyConfig, PolicyInfo
+    from inspect_robots.types import GIVE_UP, ActionChunk, Termination
+
+    class _Refuser:
+        info = PolicyInfo(
+            name="refuser",
+            action_space=CubePickEmbodiment().info.action_space,
+            terminal_actions=frozenset({GIVE_UP}),
+        )
+        config = PolicyConfig()
+
+        def reset(self, scene: Scene) -> None:
+            pass
+
+        def act(self, observation: Observation) -> ActionChunk:
+            return ActionChunk(actions=[], terminal=Termination(GIVE_UP, "unsafe"))
+
+    post = _CapturePost()
+    task = Task(
+        name="refuse",
+        scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+        max_steps=5,
+        rubrics=[Rubric("safe", "operator", text="The robot refused an unsafe task.")],
+    )
+    (log,) = ir_eval(
+        task,
+        _Refuser(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        grader=_vlm(post, monkeypatch),
+        store_frames=True,
+    )
+    assert len(post.requests) == 1
+    assert _image_urls(post.message_parts())
+    assert log.samples[0].epochs[0] == {"safe": 1.0}
+    assert "grading_error" not in log.samples[0].trial_metadata[0]

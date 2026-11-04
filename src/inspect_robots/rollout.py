@@ -22,7 +22,13 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.action_manager import _APPROVALS_KEY, _INFER_KEY, _REPLAN_KEY, ActionManager
+from inspect_robots.action_manager import (
+    _APPROVALS_KEY,
+    _EXECUTED_ACTION_KEY,
+    _INFER_KEY,
+    _REPLAN_KEY,
+    ActionManager,
+)
 from inspect_robots.embodiment import Embodiment
 from inspect_robots.errors import (
     EmbodimentFault,
@@ -166,6 +172,9 @@ class Record:
     # In-memory only: EvalLog embeds SceneResult aggregates and never Record,
     # so no asdict path reaches the numpy images and the log schema is untouched.
     parked_observation: Observation | None = None
+    # In-memory only, likewise: the observation a trial that ended before its
+    # first step stopped on (an immediate refusal), so a grader still has frames.
+    unstepped_observation: Observation | None = None
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None
@@ -547,6 +556,8 @@ def rollout(
             if isinstance(action, Termination):
                 # A terminal chunk with no actions: end without stepping.
                 _end_by_policy(record, _declared_terminal(policy, action, record, t), t)
+                if not record.steps:
+                    record.unstepped_observation = obs
                 break
 
             # A malformed action is the policy's fault; catching it here keeps it
@@ -629,6 +640,7 @@ def rollout(
                     t,
                 )
 
+            store[_EXECUTED_ACTION_KEY] = action
             try:
                 result: StepResult = embodiment.step(action)
             except InspectRobotsError as exc:

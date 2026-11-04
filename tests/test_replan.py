@@ -212,3 +212,70 @@ def test_gripper_slip_triggers_are_built_from_gripper_labels() -> None:
 def test_gripper_slip_validates_its_settings(kwargs: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         GripperSlip("joint_pos", 1, **kwargs)
+
+
+def test_gripper_slip_follows_the_executed_command_not_the_requested_one() -> None:
+    from inspect_robots.guard import DeltaLimitGuard
+    from inspect_robots.logging import NullSink
+    from inspect_robots.rollout import rollout
+
+    space = Box(
+        shape=(2,),
+        low=np.array([-1.0, 0.0]),
+        high=np.array([1.0, 1.0]),
+        semantics=ActionSemantics("joint_pos", dim_labels=("joint", "gripper")),
+    )
+
+    class _Tracker(CubePickEmbodiment):
+        """Follows every executed command exactly: a gripper that never slips."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.info = self.info.__class__(
+                **{**self.info.__dict__, "action_space": space, "name": "tracker"}
+            )
+            self.q = np.array([0.0, 1.0])
+
+        def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+            self.q = np.array([0.0, 1.0])
+            return Observation(state={"joint_pos": self.q.copy()})
+
+        def step(self, action: Action) -> Any:
+            from inspect_robots.types import StepResult
+
+            self.q = np.asarray(action.data, dtype=np.float64).copy()
+            return StepResult(observation=Observation(state={"joint_pos": self.q.copy()}))
+
+    class _Closer:
+        """Holds the gripper open once (the limiter's reference), then commands it shut."""
+
+        info = PolicyInfo(name="closer", action_space=space)
+        config = PolicyConfig()
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reset(self, scene: Scene) -> None:
+            self.calls = 0
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.calls += 1
+            if self.calls == 1:
+                return ActionChunk(actions=[Action(data=np.array([0.0, 1.0]))])
+            return ActionChunk(actions=[Action(data=np.array([0.0, 0.0]))] * 8)
+
+    trigger = GripperSlip("joint_pos", 1)
+    record = rollout(
+        _Closer(),
+        _Tracker(),
+        Scene(id="s", instruction="close"),
+        max_steps=30,
+        seed=0,
+        epoch=0,
+        action_manager=DefaultActionManager(triggers=[trigger]),
+        guard=DeltaLimitGuard(space, max_delta=0.04),
+        sink=NullSink(),
+    )
+    # The guard walks the gripper shut 0.04 per step; tracking that is not a slip.
+    assert [event for event in record.events if event.kind == "replan"] == []
+    assert record.steps[-1].action.data[1] == pytest.approx(0.0)

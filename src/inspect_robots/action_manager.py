@@ -58,6 +58,9 @@ _APPROVALS_KEY = "_rollout_approvals"
 _REPLAN_KEY = "_controller_replans"
 # The action most recently returned for execution, and the step its chunk began.
 _LAST_ACTION_KEY = "_controller_last_action"
+# The action the rollout actually sent to the embodiment, after smoothing and
+# guard review; set by the rollout just before each step.
+_EXECUTED_ACTION_KEY = "_rollout_executed_action"
 _CHUNK_START_KEY = "_controller_chunk_start"
 
 
@@ -171,8 +174,13 @@ class GripperSlip:
         ]
 
     def should_replan(self, observation: Observation, t: int, store: dict[str, Any]) -> str | None:
-        """Compare the gripper with its reading once the unchanged command has settled."""
-        last = store.get(_LAST_ACTION_KEY)
+        """Compare the gripper with its reading once the unchanged command has settled.
+
+        The command is the one the embodiment executed (after smoothing and any
+        guard), so a delta limiter walking the gripper toward its target restarts
+        the settle count instead of reading as a slip.
+        """
+        last = store.get(_EXECUTED_ACTION_KEY, store.get(_LAST_ACTION_KEY))
         state = observation.state.get(self.state_key)
         if last is None or state is None:
             return None
