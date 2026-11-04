@@ -1015,6 +1015,12 @@ def _run_eval(
                         status="error",
                         error=scene_error,
                     )
+                except Exception:
+                    # Anything else rollout() passes through (a frame store or
+                    # critical sink failing mid-trial, a configuration error from
+                    # the policy) still leaves a moved platform: park it first.
+                    _park_before_escape(embodiment)
+                    raise
 
             if record is not None:
                 total_trials += 1

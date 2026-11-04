@@ -563,3 +563,45 @@ def test_a_critical_sink_failure_after_a_cancel_does_not_park(tmp_path: Path) ->
     with pytest.raises((OSError, KeyboardInterrupt)):
         ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path), sinks=[_Critical()])
     assert "park" not in embodiment.calls
+
+
+@pytest.mark.parametrize("failure", ["frame_store", "policy_reset", "critical_log_step"])
+def test_an_unexpected_rollout_failure_still_parks_the_robot(tmp_path: Path, failure: str) -> None:
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.logging import NullSink
+
+    class _Critical(NullSink):
+        critical = True
+
+        def log_step(self, *args: Any, **kwargs: Any) -> None:
+            raise OSError("disk full")
+
+    class _BadReset(ScriptedPolicy):
+        def reset(self, scene: Scene) -> None:
+            raise ConfigError("bad policy configuration")
+
+    embodiment = _Lifecycle()
+    kwargs: dict[str, Any] = {"log_dir": str(tmp_path)}
+    policy: Any = ScriptedPolicy()
+    expected: type[Exception] = OSError
+    if failure == "frame_store":
+        from inspect_robots.frames import FrameStore
+
+        def fail(*args: Any, **kw: Any) -> Any:
+            raise OSError("No space left on device")
+
+        kwargs["store_frames"] = True
+        original = FrameStore.put
+        FrameStore.put = fail  # type: ignore[method-assign]
+    elif failure == "policy_reset":
+        policy, expected = _BadReset(), ConfigError
+    else:
+        kwargs["sinks"] = [_Critical()]
+    try:
+        with pytest.raises(expected):
+            ir_eval(_task(), policy, embodiment, **kwargs)
+    finally:
+        if failure == "frame_store":
+            FrameStore.put = original  # type: ignore[method-assign]
+    assert embodiment.calls[-1] == "park"
+    assert embodiment.calls.count("park") == 1
