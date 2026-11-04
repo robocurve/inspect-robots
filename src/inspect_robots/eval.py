@@ -944,7 +944,13 @@ def _run_eval(
                 scene_error = not_ready
                 stopped = True
                 break
-            bus.on_trial_start(scene.id, epoch)
+            try:
+                bus.on_trial_start(scene.id, epoch)
+            except Exception:
+                # A critical sink failing after home() moved the platform:
+                # park it before the failure leaves eval().
+                _park_before_escape(embodiment)
+                raise
             record: Record | None = None
             policy_start_failed = False
             on_trial_start = getattr(policy, "on_trial_start", None)
@@ -1195,7 +1201,12 @@ def _run_eval(
                     )
                 )
                 policy_transcripts.append(record.policy_transcript)
-                bus.on_trial_end(record)
+                try:
+                    bus.on_trial_end(record)
+                except Exception:
+                    if cancelled_exc is None:
+                        _park_before_escape(embodiment)
+                    raise
 
             # Park after every trial that ran, so the scene can be reset by hand,
             # and after a policy that failed to start: home() already moved the

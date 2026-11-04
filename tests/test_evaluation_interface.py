@@ -525,3 +525,41 @@ def test_a_faulted_park_stops_the_task_set(tmp_path: Path, sequence: str) -> Non
     with pytest.raises(SafetyAbort):
         eval_set(tasks, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=hook)
     assert embodiment.calls.count("reset") == 1  # the second task never started
+
+
+@pytest.mark.parametrize("hook", ["on_trial_start", "on_trial_end"])
+def test_a_critical_sink_failure_still_parks_the_robot(tmp_path: Path, hook: str) -> None:
+    from inspect_robots.logging import NullSink
+
+    class _Critical(NullSink):
+        critical = True
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    sink = _Critical()
+    setattr(sink, hook, fail)
+    embodiment = _Lifecycle()
+    with pytest.raises(OSError, match="disk full"):
+        ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path), sinks=[sink])
+    assert embodiment.calls[-1] == "park"
+    assert embodiment.calls.count("park") == 1
+
+
+def test_a_critical_sink_failure_after_a_cancel_does_not_park(tmp_path: Path) -> None:
+    from inspect_robots.logging import NullSink
+
+    class _Critical(NullSink):
+        critical = True
+
+        def on_trial_end(self, record: Any) -> None:
+            raise OSError("disk full")
+
+    class _Interrupted(_Lifecycle):
+        def step(self, action: Any) -> Any:
+            raise KeyboardInterrupt
+
+    embodiment = _Interrupted()
+    with pytest.raises((OSError, KeyboardInterrupt)):
+        ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path), sinks=[_Critical()])
+    assert "park" not in embodiment.calls
