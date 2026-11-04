@@ -229,6 +229,9 @@ class ControlTools:
         #: The clipped target of the trial's last successful absolute move;
         #: ``None`` before the first one and after ``start_trial()``.
         self._held_target: npt.NDArray[np.float64] | None = None
+        #: The last absolute move's waypoints and the ``env_step`` it was issued
+        #: at, until the next observation shows how much of it played.
+        self._in_flight: tuple[tuple[npt.NDArray[np.float64], ...], int | None] | None = None
         if absolute:
             self._positive_limits = np.zeros_like(high)
             self._negative_limits = np.zeros_like(low)
@@ -252,6 +255,7 @@ class ControlTools:
         """
         if not self._absolute:
             return []
+        self._settle(observation)
         held = self._held_target
         if held is None:
             return ["setpoint: none yet; the first move starts from the readback."]
@@ -285,6 +289,37 @@ class ControlTools:
         nothing about where a freshly reset embodiment is.
         """
         self._held_target = None
+        self._in_flight = None
+
+    def _settle(self, observation: Observation) -> None:
+        """Pull the held target back to what played when the last move was cut short.
+
+        A move stores its final target as the setpoint when it is built, but
+        an action manager may replan before the chunk finishes (a trigger or a
+        short ``replan_interval``). The rollout's ``env_step`` says how many
+        waypoints actually played: the last of those is the setpoint. Without
+        a usable step count, a ``replan`` note means progress is unknown, so
+        the next motion starts from the readback instead of a target the arm
+        never reached.
+        """
+        in_flight = self._in_flight
+        if in_flight is None:
+            return
+        self._in_flight = None
+        waypoints, issued = in_flight
+        arriving = observation.extra.get("env_step")
+        if isinstance(issued, int) and isinstance(arriving, int) and not isinstance(arriving, bool):
+            played = arriving - issued
+            if played >= len(waypoints):
+                return
+            if played >= 1:
+                self._held_target = waypoints[played - 1].copy()
+            else:
+                # Still the observation the move was issued from: nothing played yet.
+                self._in_flight = in_flight
+            return
+        if "replan" in observation.extra:
+            self._held_target = None
 
     @property
     def resolved_hz(self) -> float:
@@ -343,6 +378,7 @@ class ControlTools:
 
     def hold_target(self, observation: Observation) -> npt.NDArray[np.float64]:
         """The setpoint the controller is tracking: the last absolute target, else the readback."""
+        self._settle(observation)
         held = self._held_target
         return self._current_state(observation) if held is None else held.copy()
 
@@ -563,6 +599,7 @@ class ControlTools:
             return ToolResult(error="seconds must be a positive number")
         seconds = min(float(seconds), _SLEEP_MAX_S)
         if self._absolute:
+            self._settle(observation)
             held = self._held_target
             if held is None:
                 current = self._current_state(observation)
@@ -624,7 +661,7 @@ class ControlTools:
 
         if self._absolute:
             assert current is not None
-            return self._move_absolute(values, vector, named_indices, current)
+            return self._move_absolute(values, vector, named_indices, current, observation)
         return self._move_displacement(vector, named_indices)
 
     def _move_absolute(
@@ -633,7 +670,9 @@ class ControlTools:
         vector: npt.NDArray[np.float64],
         named_indices: list[int],
         current: npt.NDArray[np.float64],
+        observation: Observation,
     ) -> ToolResult:
+        self._settle(observation)
         held = self._held_target
         target = (current if held is None else held).copy()
         for label, index in zip(values, named_indices, strict=True):
@@ -688,6 +727,11 @@ class ControlTools:
             if message := self._pre_check(waypoints):
                 return ToolResult(error="pre-check rejected this motion: " + message)
         self._held_target = clipped_target.copy()
+        issued = observation.extra.get("env_step")
+        self._in_flight = (
+            tuple(np.asarray(action.data, dtype=np.float64).copy() for action in actions),
+            issued if isinstance(issued, int) and not isinstance(issued, bool) else None,
+        )
         return self._success(actions, steps, target=clipped_target)
 
     def _move_displacement(

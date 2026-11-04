@@ -1569,6 +1569,57 @@ def test_stop_actions_resend_the_held_target_rather_than_the_measured_state(name
     assert after.chunk.terminal is not None
 
 
+def _stepped(q: list[float], step: int, **extra: Any) -> Observation:
+    return Observation(state={"q": np.array(q)}, extra={"env_step": step, **extra})
+
+
+def _cut_short_toolset() -> tuple[Any, npt.NDArray[np.float64]]:
+    """A move of a from 0.0 to 0.9 issued at step 10, then cut short."""
+    toolset = _two_dim_toolset()
+    first = toolset.execute(_call("move_joints", targets={"a": 0.9}), _stepped([0.0, 0.2], 10))
+    assert first.chunk is not None and len(first.chunk.actions) > 3
+    waypoints = np.stack([action.data for action in first.chunk.actions])
+    return toolset, waypoints
+
+
+def test_a_move_cut_short_holds_the_last_waypoint_that_played() -> None:
+    toolset, waypoints = _cut_short_toolset()
+    second = toolset.execute(_call("move_joints", targets={"b": 0.3}), _stepped([0.05, 0.2], 12))
+    assert second.chunk is not None
+    # a stays where the two played steps left it; it never jumps to 0.9.
+    assert all(action.data[0] == waypoints[1, 0] for action in second.chunk.actions)
+
+
+@pytest.mark.parametrize("name", ["sleep", "done", "give_up"])
+def test_holds_after_a_cut_short_move_resend_what_played(name: str) -> None:
+    toolset, waypoints = _cut_short_toolset()
+    arguments: dict[str, Any] = (
+        {"seconds": 1.0, "note": "waiting"} if name == "sleep" else {"summary": "x", "reason": "x"}
+    )
+    held = toolset.execute(_call(name, **arguments), _stepped([0.05, 0.2], 13))
+    assert held.chunk is not None
+    assert np.array_equal(held.chunk.actions[0].data, waypoints[2])
+
+
+def test_a_move_that_finished_keeps_its_target_and_same_step_calls_wait() -> None:
+    toolset, waypoints = _cut_short_toolset()
+    # Rendering the setpoint on the issuing observation does not settle the move.
+    assert toolset.setpoint_lines(_stepped([0.0, 0.2], 10))[0] == "setpoint: a=0.9 b=0.2"
+    later = _stepped([0.9, 0.2], 10 + len(waypoints))
+    assert toolset.setpoint_lines(later)[0] == "setpoint: a=0.9 b=0.2"
+
+
+def test_a_replan_without_a_step_count_restarts_from_the_readback() -> None:
+    toolset = _two_dim_toolset()
+    toolset.execute(_call("move_joints", targets={"a": 0.9}), _obs({"q": np.array([0.0, 0.2])}))
+    replanned = Observation(
+        state={"q": np.array([0.04, 0.2])}, extra={"replan": {"trigger": "t", "reason": "r"}}
+    )
+    assert toolset.setpoint_lines(replanned) == [
+        "setpoint: none yet; the first move starts from the readback."
+    ]
+
+
 # --- setpoint lines ------------------------------------------------------------
 
 
