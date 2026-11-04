@@ -50,19 +50,17 @@ def read_jsonl_prefix(target: Path) -> list[dict[str, Any]] | None:
     """
     rows: list[dict[str, Any]] = []
     try:
-        with target.open(encoding="utf-8") as handle:
+        # TextIOWrapper decodes ahead: bad UTF-8 in a later line can make
+        # readline() fail before it returns earlier, intact JSON objects.
+        # Decode one binary line at a time so only the bad line is rejected.
+        with target.open("rb") as handle:
             while True:
-                try:
-                    line = handle.readline()
-                except UnicodeError:
-                    # A torn multi-byte tail is still a torn tail: keep the
-                    # prefix rather than voiding the crashed trial's capture.
-                    break
+                line = handle.readline()
                 if not line:
                     break
                 try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
+                    row = json.loads(line.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError):
                     break
                 if not isinstance(row, dict):
                     break

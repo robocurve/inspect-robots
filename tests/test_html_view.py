@@ -2098,10 +2098,11 @@ def test_wire_section_is_absent_for_unavailable_sidecars(tmp_path: Path, mode: s
     assert "Trial 0 Wire" not in document
 
 
-def test_wire_section_survives_torn_tail_line(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tail", [b'{"call": 1, "request": {"model": "trunc', b'{"bad": "\xff"}\n'])
+def test_wire_section_survives_torn_tail_line(tmp_path: Path, tail: bytes) -> None:
     log, log_path, calls_path = _wire_log(tmp_path, [{"call": 0, "request": {}}])
-    with calls_path.open("a", encoding="utf-8") as handle:
-        handle.write('{"call": 1, "request": {"model": "trunc')
+    with calls_path.open("ab") as handle:
+        handle.write(tail)
 
     document = render_html(log, title="torn", log_path=log_path)
 
