@@ -203,3 +203,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `4ca3781c` held with `context_too_large` after 26 calls: Codex compacts at 200k tokens but the gateway refused anything over 200k, so the compaction request itself was refused. A one-off probe confirmed gpt-6-astra accepts 266k input tokens. Gateway ceiling raised to 260k (`CONTEXT_TOKEN_LIMIT`); runner unchanged. 101 tests pass. Reviewer version `42f4c1fa-a32d-420d-b3db-ff5274deda6e`.
 - 2026-11-04: head `4ca3781c` cap $30, PR #599 $60, author 2026-11 $85 (each run here books ~$6-10).
 - 2026-11-04: PR #599 head `a84303e3` $30, PR lifetime $120, author 2026-11 $150 (Jay authorized up to $250 total reviewer spend across #599 and the YAM PR).
+- 2026-11-04: PR #599 head `9423d407` $30.
