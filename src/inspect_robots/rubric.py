@@ -97,6 +97,15 @@ class Rubric:
         return described
 
 
+def reads_judgements(rubric: Rubric) -> bool:
+    """Whether ``rubric`` is scored from a recorded judgement (the ``operator`` scorer)."""
+    try:
+        scorer = rubric.resolve_scorer()
+    except Exception:
+        return False
+    return callable(getattr(scorer, "score_annotations", None))
+
+
 def check_unique(rubrics: Sequence[Rubric], owner: str) -> None:
     """Fail with a guided error when two rubrics in one list share a name."""
     seen: set[str] = set()

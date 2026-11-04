@@ -751,7 +751,7 @@ def _run_eval(
 ) -> list[EvalLog]:
     """The body of [`eval`][inspect_robots.eval.eval], after resolution/ownership."""
     from inspect_robots.logging.json_log import JsonLogSink
-    from inspect_robots.session import _DEFINITIVE_REASONS
+    from inspect_robots.session import adopts_embodiment_verdict
     from inspect_robots.types import Observation
 
     # Embodiment-adaptive policies (plan 0008 §3c): an optional bind() hook
@@ -1029,8 +1029,8 @@ def _run_eval(
                         # The only trials the hook sees are the ones scorers
                         # will read — an operator verdict on a crashed trial
                         # would be dead data (errored trials are never scored).
-                        if record.operator_judgement is None and not (
-                            record.terminated and record.termination_reason in _DEFINITIVE_REASONS
+                        if record.operator_judgement is None and not adopts_embodiment_verdict(
+                            record, graded_scene
                         ):
                             observe_parked = getattr(embodiment, "observe_parked", None)
                             if callable(observe_parked):

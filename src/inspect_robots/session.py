@@ -27,6 +27,7 @@ from inspect_robots.console import (
     _stdin_readable,
 )
 from inspect_robots.errors import EmbodimentFault
+from inspect_robots.rubric import SAFETY, reads_judgements
 from inspect_robots.types import HORIZON_REASONS
 
 if TYPE_CHECKING:
@@ -40,6 +41,20 @@ _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 _NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
+
+
+def adopts_embodiment_verdict(record: Record, scene: Scene) -> bool:
+    """Whether a grader may adopt the embodiment's definitive outcome as the verdict.
+
+    A ``success``/``failure`` termination establishes whether the task was
+    done, nothing more. A scene with a judgement-scored safety rubric must be
+    judged on that criterion instead, so the outcome is not adopted there.
+    """
+    if not (record.terminated and record.termination_reason in _DEFINITIVE_REASONS):
+        return False
+    return not any(rubric.kind == SAFETY and reads_judgements(rubric) for rubric in scene.rubrics)
+
+
 _NO_TERMIOS_STATE = object()
 _END_HINT = "Esc ends the episode"
 _END_HINT_PHRASE = "ends the episode"
@@ -686,9 +701,10 @@ class OperatorSession:
         A verdict already captured by the console is announced and preserved.
         A terminated episode with a definitive embodiment verdict adopts and announces
         that verdict instead of asking the operator to confirm the same outcome a second
-        time. When prompting, a non-blank string at ``scene.metadata["rubric"]``
-        is displayed first. Prompted verdicts are followed by one optional,
-        stripped, case-preserved grader note.
+        time, unless the scene has an operator-scored safety rubric (see
+        ``adopts_embodiment_verdict``). When prompting, a non-blank string at
+        ``scene.metadata["rubric"]`` is displayed first. Prompted verdicts are
+        followed by one optional, stripped, case-preserved grader note.
         """
         self.status(None)
         from inspect_robots.transcript import operator_event
@@ -696,7 +712,7 @@ class OperatorSession:
         if record.operator_judgement is not None:
             self.write_line(f"operator verdict adopted from console: {record.operator_judgement}")
             return
-        if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
+        if adopts_embodiment_verdict(record, scene):
             verdict = "y" if record.termination_reason == "success" else "n"
             record.operator_judgement = verdict
             record.events.append(

@@ -132,7 +132,9 @@ asks after each trial unless the embodiment already terminated the episode
 with a definitive `success` or `failure` verdict. In that case, it records the
 embodiment's verdict as the operator judgement instead of asking the operator
 a second time, and prints `operator verdict adopted from embodiment: success`
-(or `failure`) so the operator can catch a mistaken adoption live. A trial
+(or `failure`) so the operator can catch a mistaken adoption live. The outcome
+says whether the task was done, not whether it was done safely, so a scene with
+a `safety` rubric scored by the `operator` scorer is always asked. A trial
 that ended early for any other reason is announced first, for example
 `note: this trial ended early ('done')`.
 
@@ -229,7 +231,8 @@ the abstention count beside it. The run still finishes every trial, then ends
 with status `error` and a message such as
 `3 of 20 trial(s) ungraded: grader failed (grading request failed with HTTP 500: ...)`. A trial the embodiment already terminated with a
 definitive `success` or `failure`, or one the operator already judged from
-the console, is adopted without spending a model call. The log records which
+the console, is adopted without spending a model call, except that a scene
+with an operator-scored `safety` rubric is always judged by the model. The log records which
 path produced each verdict in `judgement_sources`.
 
 ### Live operator feedback

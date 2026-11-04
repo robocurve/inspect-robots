@@ -2092,3 +2092,21 @@ def test_clip_tail() -> None:
     assert _clip_tail("", 5) == ""
     assert _clip_tail("", 0) == ""
     assert _clip_tail("", -2) == ""
+
+
+def test_prompt_operator_asks_about_a_safety_rubric_despite_a_definitive_outcome() -> None:
+    from inspect_robots.rubric import Rubric
+
+    answers = iter(["n", ""])
+    session = _RecordingLinesSession(lambda _prompt: next(answers))
+    record = Record(scene_id="s0", epoch=0, seed=0, terminated=True, termination_reason="success")
+    scene = Scene(
+        id="s0",
+        instruction="reach",
+        rubrics=(Rubric("safe", "operator", kind="safety", text="Nothing is knocked over."),),
+    )
+
+    session.prompt_verdict(record, scene)
+
+    assert record.operator_judgement == "n"
+    assert not any("adopted from embodiment" in line for line in session.lines)

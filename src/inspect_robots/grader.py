@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from inspect_robots._chatwire import HttpPost, _ChatHTTPError, chat_completion
 from inspect_robots.errors import ConfigError
+from inspect_robots.rubric import reads_judgements
 
 if TYPE_CHECKING:
     import numpy as np
@@ -92,7 +93,8 @@ class _OperatorGrader:
 def operator_grader(session: OperatorSession | None = None) -> _OperatorGrader:
     """The builtin human grader: prompt for a verdict and optional notes.
 
-    Adopts a console- or embodiment-definitive verdict without re-asking, and
+    Adopts a console verdict, or an embodiment-definitive one unless a safety
+    rubric needs judging, without re-asking, and
     never blocks a run whose stdin cannot answer (EOF degrades to no verdict).
     """
     return _OperatorGrader(session)
@@ -277,7 +279,7 @@ class _VLMGrader:
         if isinstance(scene_rubric, str) and scene_rubric.strip():
             return scene_rubric, None
         with_text = [rubric for rubric in scene.rubrics if rubric.text.strip()]
-        judged = [rubric for rubric in with_text if _reads_judgements(rubric)]
+        judged = [rubric for rubric in with_text if reads_judgements(rubric)]
         for rubric in judged or with_text:
             return rubric.text, rubric.name
         return self._rubric, None
@@ -311,20 +313,21 @@ class _VLMGrader:
         """Capture a model judgement, or degrade to an ungraded trial (R6).
 
         Adopts an existing console verdict or a definitive embodiment
-        termination without spending a model call. Any failure after the
+        termination without spending a model call, unless the scene has an
+        operator-scored safety rubric, which the outcome does not establish. Any failure after the
         rollout (frames, transport, parsing) prints one stderr note, leaves
         the judgement unset and records a one-line reason in
         ``record.metadata["grading_error"]``; grading never crashes a finished
         run. The ``operator`` scorer abstains on such a trial and the run ends
         with ``status == "error"`` naming how many trials went ungraded.
         """
-        from inspect_robots.session import _DEFINITIVE_REASONS
+        from inspect_robots.session import adopts_embodiment_verdict
         from inspect_robots.transcript import operator_event
 
         if record.operator_judgement is not None:
             return
-        if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
-            verdict = record.termination_reason
+        if adopts_embodiment_verdict(record, scene):
+            verdict = str(record.termination_reason)
             record.operator_judgement = verdict
             record.events.append(
                 operator_event(t=len(record.steps), verdict=verdict, source="embodiment")
@@ -377,21 +380,12 @@ class _VLMGrader:
         record.operator_judgement = judgement
         record.operator_note = note
         if rubric_name is not None and any(
-            rubric.name == rubric_name and _reads_judgements(rubric) for rubric in scene.rubrics
+            rubric.name == rubric_name and reads_judgements(rubric) for rubric in scene.rubrics
         ):
             record.metadata["judged_rubric"] = rubric_name
         record.events.append(
             operator_event(t=len(record.steps), verdict=judgement, source="vlm", note=note)
         )
-
-
-def _reads_judgements(rubric: Any) -> bool:
-    """Whether ``rubric`` is scored from a recorded judgement (the ``operator`` scorer)."""
-    try:
-        scorer = rubric.resolve_scorer()
-    except Exception:
-        return False
-    return callable(getattr(scorer, "score_annotations", None))
 
 
 _PREFLIGHT_PROMPT = (
