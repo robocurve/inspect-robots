@@ -199,6 +199,47 @@ def test_parse_value_scalars() -> None:
     assert parse_value("-infinity") == "-infinity"
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["035622060973", "007", "-012", "+00", "0123.5", "00.5", "012e3", " 035622060973", "007\t"],
+)
+def test_parse_value_keeps_zero_padded_numbers_as_strings(text: str) -> None:
+    assert parse_value(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "value"), [("0", 0), ("-0", 0), ("0.5", 0.5), ("0e3", 0.0), (" 0.5", 0.5)]
+)
+def test_parse_value_still_parses_numbers_starting_with_zero(text: str, value: float) -> None:
+    parsed = parse_value(text)
+    assert parsed == value and type(parsed) is type(value)
+
+
+def test_config_args_keep_zero_padded_serial(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        "[defaults]\nembodiment = rig\n[embodiment.args]\ntop_depth_serial = 035622060973\n",
+    )
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    assert d.embodiment_args == {"top_depth_serial": "035622060973"}
+
+
+def test_config_padded_numeric_defaults_still_parse_as_integers(tmp_path: Path) -> None:
+    _write_config(tmp_path, "[defaults]\nmax_steps = 0300\nrerun_port = 09090\n")
+    d = load_defaults({"XDG_CONFIG_HOME": str(tmp_path)})
+    assert d.max_steps == 300
+    assert d.rerun_port == 9090
+
+
+def test_set_default_accepts_padded_numeric_defaults(tmp_path: Path) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path)}
+    set_default(env, "max_steps", "0300")
+    set_default(env, "rerun_port", "09090")
+    d = load_defaults(env)
+    assert d.max_steps == 300
+    assert d.rerun_port == 9090
+
+
 _SIM_CONFIG = """
 [defaults]
 embodiment = yam-bimanual
