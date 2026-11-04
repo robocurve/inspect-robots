@@ -17,15 +17,15 @@ export async function runReview(env: ReviewEnvironment, job: Job, step: Pick<Wor
   try {
     if (raw === null) {
       if (await ledger().isSandboxCleaned(job.id)) throw new Error('codex_review_incomplete');
-      if (Date.now() - execution.started >= 22 * 60_000) { timedOut = true; throw new Error('model_timeout'); }
+      if (Date.now() - execution.started >= 32 * 60_000) { timedOut = true; throw new Error('model_timeout'); }
       await step.do('launch Codex process', retryRead, async () => {
         if (await ledger().runOutput(job.id) !== null) return;
         await env.RUNNER.start(job.head, execution.mergeBase, JSON.stringify(context), policy, JSON.stringify(zodTextFormat(ReviewSchema, 'review').schema), execution.token, execution.sandbox, execution.checkpointToken);
       });
-      for (let poll = 0; poll < 100; poll++) {
+      for (let poll = 0; poll < 140; poll++) {
         const state = await step.do(`inspect reviewer process ${poll}`, retryRead, async () => {
           if (await ledger().runOutput(job.id) !== null) return 'complete';
-          if (Date.now() - execution.started >= 22 * 60_000) return 'timeout';
+          if (Date.now() - execution.started >= 32 * 60_000) return 'timeout';
           return await env.RUNNER.poll(execution.sandbox, execution.token) ? 'complete' : 'running';
         });
         if (state === 'complete') break;

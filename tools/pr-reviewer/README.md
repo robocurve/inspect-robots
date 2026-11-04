@@ -111,7 +111,7 @@ copy of the source and synthetic version 0.0.0. Installation is offline, without
 dependencies or build isolation, as the build user; each package has
 a 45-second limit and setup has a 2-minute total limit. Codex receives setup.json
 and can repair routine setup failures. Network installs and hardware checks remain
-unavailable. Setup and Codex together have a 20-minute deadline, with an independent container shutdown at 22 minutes.
+unavailable. Setup and Codex together have a 30-minute deadline, with an independent container shutdown at 32 minutes.
 Only one basic container can run at once. Provider credentials and GitHub publishing
 remain outside this environment even though Codex can execute arbitrary review code.
 

@@ -144,7 +144,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<ReviewerEnv, { id: string
       // Never log external response bodies, prompts, code, headers or credentials.
       console.error(JSON.stringify({ job: job.id, status: 'held', error: error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : 'review_failed' }));
       const execution = await ledger().execution(job.id);
-      if (execution && await ledger().runOutput(job.id) === null && Date.now() - execution.started < 22 * 60_000) {
+      if (execution && await ledger().runOutput(job.id) === null && Date.now() - execution.started < 32 * 60_000) {
         // Leave the independent process/callback alive. The reconciler resumes
         // polling this exact execution; prepareExecution never charges it twice.
         await step.do('record recovery pending', () => ledger().finish(job.id, 'recovering'));
@@ -171,7 +171,7 @@ async function scheduled(env: ReviewerEnv) {
     try {
       const job = await ledger().job(owner);
       const execution = await ledger().execution(owner);
-      if (execution && (await ledger().runOutput(owner) !== null || Date.now() - execution.started >= 22 * 60_000)) {
+      if (execution && (await ledger().runOutput(owner) !== null || Date.now() - execution.started >= 32 * 60_000)) {
         await ledger().closeSession(execution.token);
         await env.RUNNER.cleanup(execution.sandbox);
         await ledger().sandboxCleaned(owner);

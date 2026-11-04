@@ -105,7 +105,7 @@ installs are allowed: python -m pip install --no-deps --no-build-isolation --tar
 src. Source archives lack Git history; a synthetic SETUPTOOLS_SCM_PRETEND_VERSION
 may be necessary for a local build. Disclose setup adjustments relevant to results.
 Pytest plugin autoload is disabled: use -p pytest_cov or -o addopts='' as needed.
-The session has 20 minutes. The gateway reports the actual remaining allowance;
+The session has 30 minutes. The gateway reports the actual remaining allowance;
 the default $5 per-head cap is shared across runs and may have an authorized
 exception. Investigate efficiently and write your verdict before exhausting
 the available allowance. Scope uncertainty does not justify leaving code unread.

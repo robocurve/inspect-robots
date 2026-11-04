@@ -241,7 +241,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
       const checkpointToken = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
       const execution = { token, checkpointToken, sandbox: crypto.randomUUID(), started: Date.now(), mergeBase };
       this.ctx.storage.sql.exec('INSERT INTO executions(job,token,sandbox,started,mergeBase,checkpointToken) VALUES(?,?,?,?,?,?)', id, token, execution.sandbox, execution.started, mergeBase, checkpointToken);
-      this.ctx.storage.sql.exec('INSERT INTO settings(key,value) VALUES(?,?)', `session-${token}`, JSON.stringify({ jobId: id, expires: execution.started + 25 * 60_000 }));
+      this.ctx.storage.sql.exec('INSERT INTO settings(key,value) VALUES(?,?)', `session-${token}`, JSON.stringify({ jobId: id, expires: execution.started + 35 * 60_000 }));
       return execution;
     });
     if (!prepared) throw new Error('stale_revision');
@@ -289,7 +289,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
   async openSession(jobId: string): Promise<string> {
     if (!await this.job(jobId)) throw new Error('unknown_job');
     const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
-    this.ctx.storage.sql.exec('INSERT INTO settings(key,value) VALUES(?,?)', `session-${token}`, JSON.stringify({ jobId, expires: Date.now() + 25 * 60_000 }));
+    this.ctx.storage.sql.exec('INSERT INTO settings(key,value) VALUES(?,?)', `session-${token}`, JSON.stringify({ jobId, expires: Date.now() + 35 * 60_000 }));
     return token;
   }
   async session(token: string): Promise<Job | null> {

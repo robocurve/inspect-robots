@@ -27,10 +27,10 @@ export class ReviewSandbox extends Sandbox<RunnerEnv> {
     const protectedFile = await this.exec('chmod 600 /tmp/request.json');
     if (!protectedFile.success) throw new Error('sandbox_execution_failed');
     await this.ctx.storage.put('launch-claimed', true);
-    await this.startProcess('/opt/review-env/bin/python /opt/codex-review.py > /tmp/review-output.json', { processId: 'codex-review', autoCleanup: false, timeout: 21 * 60_000 });
+    await this.startProcess('/opt/review-env/bin/python /opt/codex-review.py > /tmp/review-output.json', { processId: 'codex-review', autoCleanup: false, timeout: 31 * 60_000 });
   }
   async armDeadline(): Promise<void> {
-    await this.schedule(22 * 60, 'expireReview');
+    await this.schedule(32 * 60, 'expireReview');
   }
   async expireReview(): Promise<void> { await this.destroy(); }
 }

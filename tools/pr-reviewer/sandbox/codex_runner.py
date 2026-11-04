@@ -323,7 +323,7 @@ def codex_args(workspace, environment, policy, prompt):
 
 def main():
     """Launch a fresh CLI session and return only validated-shape diagnostics."""
-    deadline = time.monotonic() + 1200
+    deadline = time.monotonic() + 1800
     request = json.loads(Path("/tmp/request.json").read_text())
     workspace = Path("/workspace/review")
     unpack("/tmp/head.tar.gz", workspace / "head")
