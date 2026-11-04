@@ -214,3 +214,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `5d64ca61` $30.
 - 2026-11-04: November monthly ceiling +$50 for PR #599 only (Jay's $250 authorization); PR cap $199 still binds.
 - 2026-11-04: PR #599 head `5d77fff4` $30.
+- 2026-11-04: run 4503fcb8 on `5d77fff4` hit model_timeout after $21. For the final run Jay said "increase any cap comfortably": November exception +$100 for PR #599, PR/author caps $280 (validation now allows a PR cap up to its monthly limit and an author cap up to $100 over the shared ceiling), head `5d77fff4` $60.

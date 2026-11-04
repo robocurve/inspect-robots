@@ -1,12 +1,16 @@
 import { DurableObject } from 'cloudflare:workers';
 import { JAY_ID, LIMITS, monthlyReviewLimit, RunOutput, SHA, type Execution, type Job } from './common';
 
+// An author's monthly cap may exceed the shared ceiling only by this much, and
+// only where a PR's own monthly exception (monthlyReviewLimit) lets it be spent.
+const MAX_AUTHOR_EXCEPTION = 100_000_000;
+
 export class ReviewLedger extends DurableObject<ReviewerEnv> {
   private prLimit(pr: number): number {
     const overrides = JSON.parse(this.env.REVIEW_PR_LIMITS_JSON ?? '{}');
     if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') throw new Error('invalid_budget_config');
     for (const [key, value] of Object.entries(overrides)) {
-      if (!/^[1-9][0-9]*$/.test(key) || !Number.isSafeInteger(Number(key)) || !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > LIMITS.month) throw new Error('invalid_budget_config');
+      if (!/^[1-9][0-9]*$/.test(key) || !Number.isSafeInteger(Number(key)) || !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > monthlyReviewLimit(Number(key), new Date().toISOString().slice(0, 7))) throw new Error('invalid_budget_config');
     }
     return overrides[String(pr)] ?? LIMITS.pr;
   }
@@ -49,7 +53,7 @@ export class ReviewLedger extends DurableObject<ReviewerEnv> {
     const overrides = JSON.parse(this.env.REVIEW_AUTHOR_LIMITS_JSON ?? '{}');
     if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') throw new Error('invalid_budget_config');
     for (const [key, value] of Object.entries(overrides)) {
-      if (!/^[1-9][0-9]*-[0-9]{4}-(0[1-9]|1[0-2])$/.test(key) || !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > LIMITS.month) throw new Error('invalid_budget_config');
+      if (!/^[1-9][0-9]*-[0-9]{4}-(0[1-9]|1[0-2])$/.test(key) || !Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > LIMITS.month + MAX_AUTHOR_EXCEPTION) throw new Error('invalid_budget_config');
     }
     return overrides[`${author}-${month}`] ?? LIMITS.author;
   }
