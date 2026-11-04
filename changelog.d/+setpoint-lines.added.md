@@ -1,1 +1,0 @@
-**Agent plugin (0.30.0):** observations in absolute modes now print the setpoint each dimension holds from the agent's commands under the state line, plus `readback minus setpoint:` for the dimensions that differ by 0.005 or more, so sag, drift, scatter, and a squeezed gripper are read off the observation rather than estimated. The system prompt announces the lines.

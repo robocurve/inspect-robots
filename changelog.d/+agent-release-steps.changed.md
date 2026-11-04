@@ -1,1 +1,0 @@
-**Repo:** agent instructions now live in `AGENTS.md` (read by Codex and other agents; `CLAUDE.md` is a one-line `@AGENTS.md` import for Claude Code), with a new step-by-step "Cutting a release" section.
