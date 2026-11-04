@@ -1772,3 +1772,90 @@ def test_hold_chunk_resends_the_target_and_closes_the_motion_window() -> None:
     assert all(np.array_equal(action.data, target) for action in chunk.actions)
     assert chunk.actions[-1].meta == {"chunk_final": True}
     assert chunk.actions[0].meta == {}
+
+
+class _JointWorld:
+    """A two-joint absolute embodiment that tracks every command exactly."""
+
+    def __init__(self, space: Box, obs_space: ObservationSpace) -> None:
+        from inspect_robots.embodiment import EmbodimentInfo
+
+        self.info = EmbodimentInfo(
+            name="joints", action_space=space, observation_space=obs_space, control_hz=10.0
+        )
+        self.q = np.array([0.0, 0.2])
+        self.played: list[npt.NDArray[np.float64]] = []
+
+    def reset(self, scene: Any, *, seed: int | None = None) -> Observation:
+        self.q = np.array([0.0, 0.2])
+        return Observation(state={"q": self.q.copy()})
+
+    def step(self, action: Action) -> Any:
+        from inspect_robots.types import StepResult
+
+        self.q = np.asarray(action.data, dtype=np.float64).copy()
+        self.played.append(self.q.copy())
+        return StepResult(observation=Observation(state={"q": self.q.copy()}))
+
+    def close(self) -> None:
+        pass
+
+
+class _Alternator:
+    """Moves one joint at a time between far targets, so every replan cuts a move short."""
+
+    def __init__(self, space: Box, obs_space: ObservationSpace) -> None:
+        from inspect_robots.policy import PolicyConfig, PolicyInfo
+
+        self.info = PolicyInfo(name="alternator", action_space=space)
+        self.config = PolicyConfig()
+        self.control = control_tools(space, obs_space, control_hz=10.0)
+        self.calls = 0
+
+    def reset(self, scene: Any) -> None:
+        self.control.start_trial()
+        self.calls = 0
+
+    def act(self, observation: Observation) -> Any:
+        self.calls += 1
+        if self.calls % 2:
+            targets = {"a": 0.9 if self.calls % 4 == 1 else 0.1}
+        else:
+            targets = {"b": 0.8 if self.calls % 4 == 2 else 0.2}
+        result = self.control.library.execute(
+            "move_joints", json.dumps({"targets": targets, "note": "x"}), observation
+        )
+        assert result.error is None and result.chunk is not None
+        return result.chunk
+
+
+@pytest.mark.parametrize("replan_interval", [1, 2, 3, 7])
+def test_replanning_mid_move_never_jumps_past_the_tool_speed_cap(replan_interval: int) -> None:
+    from inspect_robots.action_manager import DefaultActionManager
+    from inspect_robots.guard import PassThroughGuard
+    from inspect_robots.logging import NullSink
+    from inspect_robots.rollout import rollout
+    from inspect_robots.scene import Scene
+
+    space = Box(
+        shape=(2,),
+        low=np.zeros(2),
+        high=np.ones(2),
+        semantics=ActionSemantics("joint_pos", dim_labels=("a", "b")),
+    )
+    obs_space = _absolute_obs_space(dim=2)
+    world = _JointWorld(space, obs_space)
+    rollout(
+        _Alternator(space, obs_space),
+        world,
+        Scene(id="s", instruction="x"),
+        max_steps=120,
+        seed=0,
+        epoch=0,
+        action_manager=DefaultActionManager(replan_interval=replan_interval),
+        guard=PassThroughGuard(),
+        sink=NullSink(),
+    )
+    path = np.vstack([[0.0, 0.2], *world.played])
+    # The tool paces at about 1% of range per step; a stale setpoint jumped ~0.8.
+    assert float(np.abs(np.diff(path, axis=0)).max()) <= 0.0101
