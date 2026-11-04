@@ -213,3 +213,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `aee89479` $30.
 - 2026-11-04: PR #599 head `5d64ca61` $30.
 - 2026-11-04: November monthly ceiling +$50 for PR #599 only (Jay's $250 authorization); PR cap $199 still binds.
+- 2026-11-04: PR #599 head `5d77fff4` $30.
