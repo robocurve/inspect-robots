@@ -61,6 +61,9 @@ _LAST_ACTION_KEY = "_controller_last_action"
 # The action the rollout actually sent to the embodiment, after smoothing and
 # guard review; set by the rollout just before each step.
 _EXECUTED_ACTION_KEY = "_rollout_executed_action"
+# How close (as a share of GripperSlip.threshold) the executed gripper command
+# must be to the requested one before the grasp counts as held.
+_EXECUTED_TOLERANCE = 0.1
 _CHUNK_START_KEY = "_controller_chunk_start"
 
 
@@ -176,19 +179,29 @@ class GripperSlip:
     def should_replan(self, observation: Observation, t: int, store: dict[str, Any]) -> str | None:
         """Compare the gripper with its reading once the unchanged command has settled.
 
-        The command is the one the embodiment executed (after smoothing and any
-        guard), so a delta limiter walking the gripper toward its target restarts
-        the settle count instead of reading as a slip.
+        The command is the policy's requested gripper target. Settling counts
+        only while the command the embodiment actually executed (after smoothing
+        and any guard) is within a small tolerance of it, so a delta limiter or
+        a smoother still walking the gripper toward the target is never read as
+        a slip, and an exponentially smoothed command that only approaches its
+        target still lets the check run.
         """
-        last = store.get(_EXECUTED_ACTION_KEY, store.get(_LAST_ACTION_KEY))
+        last = store.get(_LAST_ACTION_KEY)
         state = observation.state.get(self.state_key)
         if last is None or state is None:
             return None
         command = float(np.asarray(last.data, dtype=np.float64).ravel()[self.index])
+        executed_action = store.get(_EXECUTED_ACTION_KEY, last)
+        executed = float(np.asarray(executed_action.data, dtype=np.float64).ravel()[self.index])
         measured = float(np.asarray(state, dtype=np.float64).ravel()[self.index])
         tracked = store.get(self._key)
         if tracked is None or tracked["command"] != command:
             store[self._key] = {"command": command, "steady": 0, "baseline": None}
+            return None
+        if abs(executed - command) > self.threshold * _EXECUTED_TOLERANCE:
+            # Still converging on the command: not yet a held grasp.
+            tracked["steady"] = 0
+            tracked["baseline"] = None
             return None
         tracked["steady"] += 1
         if tracked["steady"] < self.settle_steps:
