@@ -2,7 +2,7 @@
 
 Model output is executed in-process with the evaluator's privileges. This is
 the policy under evaluation, not a security boundary. Robot actions still pass
-through the rollout's approver chain, but untrusted models must run inside an
+through the rollout's guard chain, but untrusted models must run inside an
 external container or equivalent isolation.
 """
 
@@ -26,9 +26,10 @@ import numpy as np
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
+from inspect_robots.policy_adapter import embodiment_notes, state_lines
 from inspect_robots.scene import Scene
 from inspect_robots.spaces import Box
-from inspect_robots.types import ActionChunk, Observation
+from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation, Termination
 from inspect_robots_agent import (
     ENV_MODEL,
     AssistantMessage,
@@ -61,6 +62,9 @@ _PRIOR_LEARNINGS_TEXT_LIMIT = 32 * 1024
 
 _FENCED_CODE = re.compile(r"^```(?:python)?[ \t]*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCED_ANYWHERE = re.compile(r"```(?:python)?[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+# The model ends a program with a control word; each maps to a standard terminal kind.
+_TERMINAL_KINDS = {"FINISH": DONE, "GIVE_UP": GIVE_UP}
+_TERMINAL_ACTIONS = frozenset(_TERMINAL_KINDS.values())
 _CONTROL_WORD = re.compile(r"(FINISH|GIVE_UP)[.!]?", re.IGNORECASE)
 
 _HELPER_DOCS = """Helpers available in the persistent namespace:
@@ -297,13 +301,15 @@ class CapxPolicy(PolicyBase):
             prior_learnings=prior_learnings_path,
             prior_learnings_sha256=prior_learnings_sha256,
         )
-        self.info = PolicyInfo(name="capx", action_space=Box(shape=(1,)))
+        self.info = PolicyInfo(
+            name="capx", action_space=Box(shape=(1,)), terminal_actions=_TERMINAL_ACTIONS
+        )
         self._motion: MotionQueue | None = None
         self._sandbox: CodeSandbox | None = None
         self._state_key: str | None = None
         self._state_labels: tuple[str, tuple[str, ...]] | None = None
         self._embodiment_name = "(unbound)"
-        self._embodiment_docs: str | None = None
+        self._embodiment_notes: str | None = None
         self._action_summary = "unbound; call bind() before act()"
         self._messages: list[dict[str, Any]] = []
         self._delta_cursor = 0
@@ -387,7 +393,7 @@ class CapxPolicy(PolicyBase):
         self._state_key = state_key
         self._state_labels = (state_key, labels) if labels is not None else None
         self._embodiment_name = embodiment_info.name
-        self._embodiment_docs = getattr(embodiment_info, "docs", None)
+        self._embodiment_notes = embodiment_notes(embodiment_info)
         arm_labels = [
             labels[index] if labels is not None else str(index)
             for index in range(space.dim)
@@ -405,6 +411,7 @@ class CapxPolicy(PolicyBase):
             action_space=space,
             observation_space=embodiment_info.observation_space,
             control_hz=embodiment_info.control_hz,
+            terminal_actions=_TERMINAL_ACTIONS,
         )
 
     def reset(self, scene: Scene) -> None:
@@ -419,8 +426,8 @@ class CapxPolicy(PolicyBase):
                 extrinsics_key=self._extrinsics_key,
             ),
         )
-        if self._embodiment_docs is not None and self._embodiment_docs.strip():
-            system += "\n\nEmbodiment notes:\n" + self._embodiment_docs.strip()
+        if self._embodiment_notes is not None:
+            system += "\n\n" + self._embodiment_notes
         if self._prior_learnings_text is not None:
             system = (
                 system
@@ -474,7 +481,7 @@ class CapxPolicy(PolicyBase):
                 self._echo("[capx] -- LLM call budget exhausted; forcing GIVE_UP")
                 return motion.hold_chunk(
                     state,
-                    stop_reason="GIVE_UP",
+                    terminal=Termination(GIVE_UP, "LLM call budget exhausted"),
                     inference_latency_s=llm_latency,
                 )
             started = time.monotonic()
@@ -494,7 +501,7 @@ class CapxPolicy(PolicyBase):
             if control is not None:
                 return motion.hold_chunk(
                     state,
-                    stop_reason=control.group(1).upper(),
+                    terminal=Termination(_TERMINAL_KINDS[control.group(1).upper()]),
                     inference_latency_s=llm_latency,
                 )
 
@@ -573,27 +580,6 @@ def _execution_report(code: str, result: ExecutionResult) -> str:
     return _REPORT_TRUNCATION_MARKER + report[-tail_size:]
 
 
-def _state_lines(
-    observation: Observation,
-    state_labels: tuple[str, tuple[str, ...]] | None,
-) -> list[str]:
-    """Render observation state with action labels when the bound vector aligns."""
-    lines: list[str] = []
-    for key, value in observation.state.items():
-        array = np.asarray(value, dtype=np.float64)
-        rounded = np.round(array, 4).tolist()
-        if state_labels is not None and key == state_labels[0]:
-            labels = state_labels[1]
-            if array.shape == (len(labels),):
-                labeled = " ".join(
-                    f"{label}={item}" for label, item in zip(labels, rounded, strict=True)
-                )
-                lines.append(f"state[{key}]: {labeled}")
-                continue
-        lines.append(f"state[{key}]: {rounded}")
-    return lines
-
-
 def _observation_content(
     observation: Observation,
     state_labels: tuple[str, tuple[str, ...]] | None,
@@ -602,7 +588,7 @@ def _observation_content(
     lines = ["Current observation."]
     if observation.instruction:
         lines.append(f"Instruction: {observation.instruction}")
-    lines.extend(_state_lines(observation, state_labels))
+    lines.extend(state_lines(observation, state_labels))
     parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(lines)}]
     for name, image in observation.images.items():
         parts.append({"type": "text", "text": f"camera {name!r}:"})

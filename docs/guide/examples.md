@@ -2,7 +2,8 @@
 
 Copy-paste recipes for the run shapes people ask about most: picking a model,
 scaling reasoning effort, driving VLA policies, switching control interfaces,
-and varying the instruction. Swap in your own tasks, embodiments, and hosts.
+varying the instruction, adding guards, running benchmarks, and reviewing
+results after the run. Swap in your own tasks, embodiments, and hosts.
 Values chosen during `inspect-robots setup` act as defaults, so the flags shown
 here override your config; the [CLI guide](cli.md) documents every flag.
 
@@ -78,12 +79,11 @@ inspect-robots run --task kitchenbench/clear-table --policy agent \
     --embodiment yam_arms
 ```
 
-:::note
-The interactions wire accepts only `minimal`, `low`, `medium`, and `high`. On
-Anthropic's own endpoint keep effort at `high` or below; `xhigh` and `max`
-need a larger token cap plus streaming, which the messages wire does not
-implement yet.
-:::
+> [!NOTE]
+> The interactions wire accepts only `minimal`, `low`, `medium`, and `high`. On
+> Anthropic's own endpoint keep effort at `high` or below; `xhigh` and `max`
+> need a larger token cap plus streaming, which the messages wire does not
+> implement yet.
 
 Effort is a per-owner arg, so task generation and grading scale
 independently of the policy: `-A effort=` for `--auto-task` and `-G effort=`
@@ -231,3 +231,47 @@ inspect-robots eval-set cubepick-reach my-other-task \
 A halt raised inside a trial ends that task with an error log and the set
 continues with the next task; see the [CLI guide](cli.md) for the full
 `eval-set` contract.
+
+## Adding guards
+
+The default guardrails (a bounds clamp and a per-step delta limit) always run
+unless disabled. Add a tighter speed limit, or any registered guard, after
+them:
+
+```bash
+inspect-robots "stack the bowls" --guard delta-limit:max_delta=0.02
+inspect-robots list guards
+```
+
+The `guardrails:` banner at the start of the run names every active guard. See
+[Guards](cli.md#guards---guard-and-guards) for the `[guards]` config section.
+
+## Running a benchmark
+
+A registered benchmark runs all its tasks in order, and each log records the
+benchmark's name and version:
+
+```bash
+inspect-robots list benchmarks
+inspect-robots run --benchmark my-benchmark --policy agent --embodiment yam_arms
+inspect-robots analyze benchmarks logs/*.json
+```
+
+See [Benchmarks](writing-a-benchmark.md#benchmarks-a-versioned-set-of-tasks) to
+write one.
+
+## Reviewing results after the run
+
+Correct a verdict, add a note, re-score, and summarize, without rewriting the
+log:
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement yes \
+    --author reviewer --reason "the stack held after release"
+inspect-robots edit logs/run.json --trial scene-1-e0 --note "bowl chipped" --author reviewer
+inspect-robots score logs/run.json
+inspect-robots analyze terminations logs/*.json
+inspect-robots analyze html logs/run.json --out pages/
+```
+
+See [Editing and analyzing records](editing-and-analysis.md).

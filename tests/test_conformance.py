@@ -29,6 +29,7 @@ from inspect_robots.spaces import (
     ObservationSpace,
     StateField,
     StateSpec,
+    reference_state_fields,
 )
 
 
@@ -74,7 +75,7 @@ def test_device_slots_valid_tuple_round_trips_in_order() -> None:
     slots = (
         DeviceSlot("left_channel", "can", "left arm CAN channel", "arms"),
         DeviceSlot("camera", "v4l2", "camera"),
-        DeviceSlot("tty", "serial", "controller serial port"),
+        DeviceSlot("tty", "serial", "action_manager serial port"),
     )
 
     class _Factory:
@@ -647,3 +648,48 @@ def test_report_summary_is_readable() -> None:
     report = check_embodiment(_info(space=Box(shape=(2,))))
     text = report.summary()
     assert "error" in text and "semantics" in text
+
+
+def test_absolute_mode_prefers_the_control_family_like_the_tool_layer() -> None:
+    # A bimanual arm exposes joint_pos and eef_state with the same shape; eef control
+    # takes eef_state and joint control takes joint_pos, as the agent tools do.
+    obs = ObservationSpace(
+        state=StateSpec(
+            fields=(
+                StateField(key="joint_pos", shape=(2,)),
+                StateField(key="eef_state", shape=(2,)),
+            )
+        )
+    )
+    for mode in ("eef_abs_pose", "joint_pos"):
+        space = Box(
+            shape=(2,),
+            low=np.zeros(2),
+            high=np.ones(2),
+            semantics=ActionSemantics(mode, dim_labels=("a", "b")),
+        )
+        assert "state_alignment" not in _codes(_info(space=space, obs=obs))
+    assert reference_state_fields(obs.state, 2, "eef_abs_pose") == ["eef_state"]
+    assert reference_state_fields(obs.state, 2, "joint_pos") == ["joint_pos"]
+    assert reference_state_fields(None, 2, "joint_pos") == []
+    two_eef = StateSpec(
+        fields=(StateField(key="eef_a", shape=(2,)), StateField(key="eef_b", shape=(2,)))
+    )
+    assert reference_state_fields(two_eef, 2, "eef_abs_pose") == ["eef_a", "eef_b"]
+
+
+def test_device_slots_skip_stream_urls_but_check_paths(tmp_path: Path) -> None:
+    class _Factory:
+        DEVICE_SLOTS: ClassVar[tuple[DeviceSlot, ...]] = (
+            DeviceSlot(arg="top", kind="v4l2", label="top camera"),
+            DeviceSlot(arg="left", kind="v4l2", label="left camera"),
+            DeviceSlot(arg="right", kind="v4l2", label="right camera"),
+        )
+
+    configured = {
+        "top": "http://camera-hub.example/stream.mjpeg?src=top",
+        "left": "rtsp://cam.local/left",
+        "right": str(tmp_path / "missing-video0"),
+    }
+    issues = check_device_slots(_Factory, configured, sysfs_net=tmp_path)
+    assert [i.message.split(" (")[0] for i in issues] == ["right camera"]

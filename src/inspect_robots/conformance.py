@@ -19,17 +19,23 @@ fine). The adapter authoring guide covers the human half.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
+import inspect
 import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from inspect_robots.approver import GuardrailContribution
 from inspect_robots.embodiment import Embodiment, EmbodimentInfo
-from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box
+from inspect_robots.guard import GuardContribution
+from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box, reference_state_fields
+
+# A slot value with a URL scheme (http://, rtsp://, ...) names a stream, not a device node.
+_STREAM_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 DEVICE_KINDS = ("v4l2", "can", "serial")
 
@@ -246,7 +252,9 @@ def check_device_slots(
 
     For each ``DEVICE_SLOTS`` slot with a string value in ``configured``, return an
     error finding when a camera or serial path does not exist or cannot be checked, or a CAN
-    interface is not present.
+    interface is not present. A non-CAN value with a URL scheme (a camera stream such as
+    ``http://host/api/stream.mjpeg?src=cam``) is skipped: there is no path to check, and the
+    embodiment's own health check probes the stream live.
 
     ``configured`` is the resolved ``[embodiment.args]``. A non-string or absent value is skipped by
     this check. CAN validation checks presence only.
@@ -274,6 +282,11 @@ def check_device_slots(
                         f"present: {present}",
                     )
                 )
+        elif _STREAM_URL.match(value):
+            # A camera slot may name a stream (e.g. an MJPEG URL from a camera
+            # hub) instead of a device node; it has no path to stat, and the
+            # embodiment's live health check is what probes it.
+            continue
         else:
             try:
                 exists = Path(value).exists()
@@ -347,8 +360,9 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
             error("dim_labels", "dim_labels contains duplicates")
 
         if semantics.control_mode in ABSOLUTE_CONTROL_MODES:
-            spec = info.observation_space.state
-            matching = [f.key for f in spec.fields if f.shape == (space.dim,)] if spec else []
+            matching = reference_state_fields(
+                info.observation_space.state, space.dim, semantics.control_mode
+            )
             if len(matching) != 1:
                 error(
                     "state_alignment",
@@ -358,10 +372,10 @@ def check_embodiment(info: EmbodimentInfo) -> ConformanceReport:
                 )
 
         if low is not None and high is not None:
-            from inspect_robots.approver import DeltaLimitApprover
+            from inspect_robots.guard import DeltaLimitGuard
 
             try:
-                DeltaLimitApprover(space)
+                DeltaLimitGuard(space)
             except ValueError as exc:
                 # Same refusal the CLI degradation path reports; here it is an
                 # error because a conformant adapter must be limitable.
@@ -383,32 +397,53 @@ def assert_embodiment_conformant(info: EmbodimentInfo) -> None:
         raise AssertionError(report.summary())
 
 
+def _unmigrated_guard_hook(embodiment: object) -> bool:
+    """True when only the pre-paper ``contribute_guardrails`` hook supplies safety guards.
+
+    That is the old hook with no ``contribute_guards``, or with only the no-op
+    ``EmbodimentBase.contribute_guards`` inherited rather than overridden.
+    """
+    from inspect_robots.embodiment import EmbodimentBase
+
+    if not hasattr(embodiment, "contribute_guardrails"):
+        return False
+    method = getattr(type(embodiment), "contribute_guards", None)
+    return method is None or method is EmbodimentBase.contribute_guards
+
+
 def check_guardrail_contribution(embodiment: Embodiment, action_space: Box) -> ConformanceReport:
     """Validate an optional contribution hook by executing plugin code.
 
     An absent attribute passes. A present attribute must be callable and must
-    return ``GuardrailContribution``. Exceptions raised by the hook propagate
+    return ``GuardContribution``. Exceptions raised by the hook propagate
     as plugin bugs. Unlike ``check_embodiment``, callers must opt in knowing
     this check can run arbitrary adapter code.
     """
+    if _unmigrated_guard_hook(embodiment):
+        issue = ConformanceIssue(
+            "error",
+            "guardrail_contribution",
+            "defines contribute_guardrails(), which was renamed contribute_guards() and "
+            "returns GuardContribution; the run command refuses this adapter until it is migrated",
+        )
+        return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     missing = object()
-    hook = getattr(embodiment, "contribute_guardrails", missing)
+    hook = getattr(embodiment, "contribute_guards", missing)
     if hook is missing:
         return ConformanceReport(embodiment=embodiment.info.name)
     if not callable(hook):
         issue = ConformanceIssue(
             "error",
             "guardrail_contribution",
-            f"contribute_guardrails is not callable (got {type(hook).__name__})",
+            f"contribute_guards is not callable (got {type(hook).__name__})",
         )
         return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     contribution = hook(action_space)
-    if not isinstance(contribution, GuardrailContribution):
+    if not isinstance(contribution, GuardContribution):
         issue = ConformanceIssue(
             "error",
             "guardrail_contribution",
-            f"contribute_guardrails returned {type(contribution).__name__}, "
-            "expected GuardrailContribution",
+            f"contribute_guards returned {type(contribution).__name__}, expected GuardContribution",
         )
         return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     return ConformanceReport(embodiment=embodiment.info.name)
@@ -419,3 +454,119 @@ def assert_guardrail_contribution_conformant(embodiment: Embodiment, action_spac
     report = check_guardrail_contribution(embodiment, action_space)
     if not report.ok:
         raise AssertionError(report.summary())
+
+
+def _policy_interface(info: EmbodimentInfo) -> tuple[object, ...]:
+    """What a policy sees of an embodiment: every declared field of both its spaces.
+
+    Built from the spaces' dataclass fields rather than a hand-picked list, so
+    any declared difference (bounds, rotation or gripper encoding, camera
+    channels, state units or dtypes, a field added later) makes two
+    interfaces distinct.
+    """
+    return (_frozen(info.action_space), _frozen(info.observation_space))
+
+
+def _frozen(value: object) -> object:
+    """A hashable, comparable rendering of a space description."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return (
+            type(value).__name__,
+            tuple(
+                (spec.name, _frozen(getattr(value, spec.name)))
+                for spec in dataclasses.fields(value)
+            ),
+        )
+    if isinstance(value, np.ndarray):
+        # Bytes, not values: NaN bounds compare equal to themselves this way.
+        return ("ndarray", value.shape, str(value.dtype), value.tobytes())
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
+def check_policy_interfaces(infos: Iterable[EmbodimentInfo]) -> ConformanceReport:
+    """Check that embodiments sharing a morphology offer distinct policy interfaces.
+
+    The paper's unit is one (morphology, policy interface) pair: two
+    embodiments on the same platform that a policy cannot tell apart are one
+    embodiment registered twice, and their results would be pooled under two
+    names. Embodiments without a ``morphology`` are not compared. Errors name
+    each clashing pair. Purely declarative.
+    """
+    issues: list[ConformanceIssue] = []
+    seen: dict[tuple[str, tuple[object, ...]], str] = {}
+    names: list[str] = []
+    for info in infos:
+        names.append(info.name)
+        if info.morphology is None:
+            continue
+        key = (info.morphology, _policy_interface(info))
+        earlier = seen.setdefault(key, info.name)
+        if earlier != info.name:
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "policy_interface",
+                    f"{earlier!r} and {info.name!r} share morphology {info.morphology!r} "
+                    "and the same policy interface; give them different action or "
+                    "observation spaces, or register one embodiment",
+                )
+            )
+    return ConformanceReport(embodiment=", ".join(names), issues=tuple(issues))
+
+
+_EVALUATION_HOOK_ARITY = {"health": 0, "prepare_trial": 1, "home": 0, "park": 0}
+
+
+def check_evaluation_interface(embodiment: Embodiment) -> ConformanceReport:
+    """Check the optional evaluation-interface hooks without calling them.
+
+    Absent hooks pass. A present ``health``, ``home`` or ``park`` must be
+    callable with no arguments, and ``prepare_trial`` with one (the scene).
+    Signatures that cannot be inspected pass. A warning notes ``park``
+    without ``health``: an embodiment that can move itself to rest can
+    usually also say whether it is fit to run.
+    """
+    issues: list[ConformanceIssue] = []
+    missing = object()
+    offered: set[str] = set()
+    for name, arity in _EVALUATION_HOOK_ARITY.items():
+        hook = getattr(embodiment, name, missing)
+        if hook is missing:
+            continue
+        if not callable(hook):
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "evaluation_interface",
+                    f"{name} is not callable (got {type(hook).__name__})",
+                )
+            )
+            continue
+        offered.add(name)
+        try:
+            signature = inspect.signature(hook)
+        except (TypeError, ValueError):
+            continue
+        try:
+            signature.bind(*([None] * arity))
+        except TypeError:
+            expected = "the scene" if arity else "no arguments"
+            issues.append(
+                ConformanceIssue(
+                    "error",
+                    "evaluation_interface",
+                    f"{name}({', '.join(signature.parameters)}) cannot be called with {expected}",
+                )
+            )
+    if "park" in offered and "health" not in offered:
+        issues.append(
+            ConformanceIssue(
+                "warning",
+                "evaluation_interface",
+                "park() is offered without health(); eval() cannot refuse to start "
+                "a trial on an unhealthy platform",
+            )
+        )
+    return ConformanceReport(embodiment=embodiment.info.name, issues=tuple(issues))

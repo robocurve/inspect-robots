@@ -29,7 +29,9 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from typing import Any, TypeVar
 
-Kind = str  # "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
+# "task" | "policy" | "embodiment" | "scorer" | "grader" | "sink" | "operator_input"
+# | "analyzer" | "guard" | "benchmark"
+Kind = str
 KINDS: tuple[Kind, ...] = (
     "task",
     "policy",
@@ -38,6 +40,9 @@ KINDS: tuple[Kind, ...] = (
     "grader",
     "sink",
     "operator_input",
+    "analyzer",
+    "guard",
+    "benchmark",
 )
 
 # Any non-empty value opts out of entry-point plugin autoloading (see module
@@ -52,6 +57,9 @@ _GROUPS: dict[Kind, str] = {
     "grader": "inspect_robots.graders",
     "sink": "inspect_robots.sinks",
     "operator_input": "inspect_robots.operator_inputs",
+    "analyzer": "inspect_robots.analyzers",
+    "guard": "inspect_robots.guards",
+    "benchmark": "inspect_robots.benchmarks",
 }
 
 _FACTORIES: dict[Kind, dict[str, Callable[..., Any]]] = {k: {} for k in KINDS}
@@ -104,6 +112,21 @@ def grader(name: str | None = None) -> Callable[[F], F]:
 def sink(name: str | None = None) -> Callable[[F], F]:
     """Decorator: register a log-sink factory under ``name``."""
     return register("sink", name)
+
+
+def benchmark(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register a benchmark factory (returns a ``Benchmark``) under ``name``."""
+    return register("benchmark", name)
+
+
+def guard(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register a guard factory, called as ``factory(action_space=..., **params)``."""
+    return register("guard", name)
+
+
+def analyzer(name: str | None = None) -> Callable[[F], F]:
+    """Decorator: register an analyzer factory under ``name``."""
+    return register("analyzer", name)
 
 
 def operator_input(name: str | None = None) -> Callable[[F], F]:

@@ -1130,10 +1130,10 @@ def test_policy_rejects_invalid_service_tier(service_tier: Any) -> None:
         )
 
 
-@pytest.mark.parametrize("wire", ["chat", "messages", "anthropic", "gemini-live", "interactions"])
+@pytest.mark.parametrize("wire", ["chat", "messages", "anthropic", "gemini-live"])
 @pytest.mark.parametrize("service_tier", ["fast", "ultrafast"])
 def test_policy_rejects_service_tier_on_other_wires(wire: str, service_tier: str) -> None:
-    with pytest.raises(ConfigError, match="service_tier is only supported on wire='responses'"):
+    with pytest.raises(ConfigError, match="service_tier requires wire=responses or interactions"):
         LLMAgentPolicy(
             model="test/model",
             base_url="http://llm.test/v1",
@@ -1282,4 +1282,15 @@ def test_policy_rejects_invalid_retry_configuration(kwargs: dict[str, Any]) -> N
             wire_capture=False,
             env={},
             **kwargs,
+        )
+
+
+@pytest.mark.parametrize("service_tier", ["fast", "ultrafast", "default"])
+def test_policy_rejects_responses_tiers_on_the_interactions_wire(service_tier: str) -> None:
+    with pytest.raises(ConfigError, match=r"\['flex', 'priority', 'standard'\]"):
+        LLMAgentPolicy(
+            model="google/test-model",
+            wire="interactions",
+            service_tier=service_tier,
+            env={"GEMINI_API_KEY": "k"},
         )

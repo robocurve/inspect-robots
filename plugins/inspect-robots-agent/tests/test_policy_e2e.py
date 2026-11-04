@@ -25,13 +25,13 @@ import pytest
 
 import inspect_robots_agent.policy as agent_policy_module
 from inspect_robots import eval as ir_eval
-from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
-from inspect_robots.controller import DefaultController
+from inspect_robots.action_manager import DefaultActionManager
 from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.errors import ConfigError
+from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardChain
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import success_at_end
 from inspect_robots.spaces import (
@@ -43,20 +43,23 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.task import Task
+from inspect_robots.tools import ToolResult
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
 from inspect_robots_agent._llm import ChatClient, resolve_provider
 from inspect_robots_agent._png import encode_png
-from inspect_robots_agent._tools import ToolResult
 from inspect_robots_agent.policy import (
+    _EVAL_NOTES_TEXT_LIMIT,
     _ON_DEMAND_SYSTEM_TEMPLATE,
     _PRIOR_LEARNINGS_TEXT_LIMIT,
     _SYSTEM_TEMPLATE,
     AgentPolicyConfig,
     _image_parts,
     _observation_content,
-    _operator_lines,
-    _PendingCapture,
+    _PendingMotion,
+    _PendingSleep,
+    _sleep_narration,
+    _thermal_status,
 )
 
 # --- scripted-conversation harness ---------------------------------------------
@@ -257,6 +260,9 @@ class _FlushRecordingStream(io.StringIO):
 
 
 def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
+    # A frozen clock keeps the wall-clock line deterministic ("0 s") unless a
+    # test injects its own.
+    kwargs.setdefault("clock", lambda: 100.0)
     return LLMAgentPolicy(
         model="test/model",
         base_url="http://llm.test/v1",
@@ -277,9 +283,9 @@ def _task(max_steps: int = 40) -> Task:
 
 class _RecordingSink(NullSink):
     def __init__(self) -> None:
-        self.records: list[TrialRecord] = []
+        self.records: list[Record] = []
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         self.records.append(record)
 
 
@@ -422,6 +428,37 @@ def test_done_hindsight_lands_in_trial_metadata(tmp_path: Path) -> None:
     )
 
     assert logs[0].samples[0].trial_metadata[0]["hindsight"] == hindsight
+
+
+def test_a_contributed_terminal_tool_may_stop_without_an_action(tmp_path: Path) -> None:
+    from inspect_robots.tools import TERMINATION, Tool, ToolLibrary
+    from inspect_robots.types import GIVE_UP, Termination
+
+    def abort(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        stop = Termination(GIVE_UP, "operator e-stop pressed")
+        return ToolResult(chunk=ActionChunk(actions=[], terminal=stop), note="aborted")
+
+    class _AbortingCube(CubePickEmbodiment):
+        def contribute_tools(self, action_space: Box) -> ToolLibrary:
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": "abort",
+                    "description": "Stop now without moving.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            return ToolLibrary([Tool("abort", schema, abort, TERMINATION)])
+
+    script = _Script([_tool_response("abort", {})])
+    sink = _RecordingSink()
+    logs = ir_eval(_task(), _policy(script), _AbortingCube(), log_dir=str(tmp_path), sinks=[sink])
+
+    assert logs[0].status == "success"
+    (record,) = sink.records
+    assert record.termination_reason == GIVE_UP
+    assert record.steps == []
+    assert "hindsight" not in logs[0].samples[0].trial_metadata[0]
 
 
 def test_forced_give_up_omits_hindsight_from_trial_metadata(tmp_path: Path) -> None:
@@ -620,8 +657,8 @@ def test_version_skew_warning_fires_once_across_trial_ends(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     policy = _policy(_Script([_text_response("unused")]))
-    first = TrialRecord(scene_id="s0", epoch=0, seed=0, status="success")
-    second = TrialRecord(scene_id="s0", epoch=1, seed=1, status="success")
+    first = Record(scene_id="s0", epoch=0, seed=0, status="success")
+    second = Record(scene_id="s0", epoch=1, seed=1, status="success")
 
     policy.on_trial_end(first, str(tmp_path), "run-1")
     policy.on_trial_end(second, str(tmp_path), "run-1")
@@ -645,23 +682,23 @@ def test_success_without_action_chunk_retries_the_model(
     policy = _policy(script)
     policy.bind(CubePickEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="stop"))
-    toolset = policy._toolset
-    assert toolset is not None
-    execute = toolset.execute
+    assert policy._adapter is not None
+    library = policy._adapter.tools
+    execute = library.execute
     calls = 0
 
-    def no_chunk_once(call: Any, observation: Observation) -> ToolResult:
+    def no_chunk_once(name: str, arguments: str, observation: Observation) -> ToolResult:
         nonlocal calls
         calls += 1
         if calls == 1:
             return ToolResult(note="accepted without an action")
-        return execute(call, observation)
+        return execute(name, arguments, observation)
 
-    monkeypatch.setattr(toolset, "execute", no_chunk_once)
+    monkeypatch.setattr(library, "execute", no_chunk_once)
 
     chunk = policy.act(Observation())
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert len(script.requests) == 2
 
 
@@ -671,19 +708,15 @@ def test_pending_narration_handles_absent_target_and_residual(
     policy = _policy(_Script([_text_response("unused")]))
     policy.bind(_VisionAbsoluteEmbodiment().info)
     observation = _vision_observation(env_step=2)
-    without_target = _PendingCapture(
-        requested=("top",),
-        issued_step=1,
-        chunk_len=1,
-        target=None,
+    without_target = _PendingMotion(issued_step=1, chunk_len=1, target=None)
+    assert "finished playing" in policy._motion_narration(
+        without_target, observation, with_frames=True
     )
-    assert "finished playing" in policy._pending_narration(without_target, observation, ())
 
-    toolset = policy._toolset
-    assert toolset is not None
-    monkeypatch.setattr(toolset, "residual", lambda target, current: None)
+    assert policy._adapter is not None
+    monkeypatch.setattr(policy._adapter.control, "residual", lambda target, current: None)
     with_target = replace(without_target, target=np.array([0.1]))
-    narration = policy._pending_narration(with_target, observation, ())
+    narration = policy._motion_narration(with_target, observation, with_frames=True)
     assert "remaining offset" not in narration
 
 
@@ -746,27 +779,6 @@ def test_observation_content_renders_operator_messages(
 
     assert [line for line in lines if line.startswith("operator feedback")] == expected
     assert lines.index(expected[-1]) < lines.index("motion finished")
-
-
-def test_operator_lines_skip_malformed_values_and_entries() -> None:
-    malformed: list[object] = [
-        None,
-        "feedback",
-        {"t": "2", "text": "wrong step type"},
-        {"t": 2, "text": 3},
-        {"t": 2},
-        {"text": "missing step"},
-        {"t": 5, "text": "valid feedback"},
-    ]
-
-    assert _operator_lines(Observation(extra={"operator_messages": malformed})) == [
-        "operator feedback (step 5): valid feedback"
-    ]
-    assert _operator_lines(Observation(extra={"operator_messages": {"t": 1}})) == []
-
-
-def test_operator_lines_are_empty_when_observation_has_no_reserved_key() -> None:
-    assert _operator_lines(Observation()) == []
 
 
 def test_agent_opts_in_to_framework_operator_messages() -> None:
@@ -1136,7 +1148,13 @@ def test_depth_off_preserves_pre_depth_observation_message() -> None:
         observation,
         extra={**observation.extra, "top_depth": depth_thunk},
     )
-    expected = _observation_content(observation, policy._state_labels)
+    assert policy._adapter is not None
+    expected = _observation_content(
+        observation,
+        policy._state_labels,
+        setpoint_lines=policy._adapter.control.setpoint_lines(observation),
+        wall_s=0.0,
+    )
 
     policy.act(observation)
 
@@ -1150,7 +1168,13 @@ def test_missing_depth_key_preserves_pre_depth_observation_message() -> None:
     policy.bind(_VisionAbsoluteEmbodiment().info)
     policy.reset(Scene(id="s0", instruction="inspect rgb"))
     observation = _vision_observation(env_step=5)
-    expected = _observation_content(observation, policy._state_labels)
+    assert policy._adapter is not None
+    expected = _observation_content(
+        observation,
+        policy._state_labels,
+        setpoint_lines=policy._adapter.control.setpoint_lines(observation),
+        wall_s=0.0,
+    )
 
     policy.act(observation)
 
@@ -1494,7 +1518,12 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
     ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))
     first = script.requests[0]
     assert first["model"] == "test/model"
-    assert [t["function"]["name"] for t in first["tools"]] == ["move_by", "done", "give_up"]
+    assert [t["function"]["name"] for t in first["tools"]] == [
+        "move_by",
+        "done",
+        "give_up",
+        "sleep",
+    ]
     system, goal, observation = first["messages"]
     assert "cubepick" in system["content"]
     assert "Embodiment notes:\n" in system["content"]
@@ -1508,7 +1537,7 @@ def test_outbound_messages_carry_state_images_and_tools(tmp_path: Path) -> None:
 
 
 def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> None:
-    def run(approver: Any) -> TrialRecord:
+    def run(guard: Any) -> Record:
         script = _Script(
             [
                 _tool_response("move_by", {"deltas": {"dx": 0.08}}),
@@ -1522,18 +1551,18 @@ def test_wild_swing_is_clamped_by_guardrails_but_not_without(tmp_path: Path) -> 
             CubePickEmbodiment(),
             log_dir=str(tmp_path),
             sinks=[sink],
-            approver=approver,
+            guard=guard,
         )
         return sink.records[0]
 
     space = CubePickEmbodiment().info.action_space
-    guarded = run(ChainApprover(ClampApprover(space), DeltaLimitApprover(space, max_delta=0.02)))
+    guarded = run(GuardChain(ClampGuard(space), DeltaLimitGuard(space, max_delta=0.02)))
     approvals = [e for e in guarded.events if e.kind == "approval"]
     assert approvals
     assert any(e.data.get("detail") == "delta_clamped" for e in approvals)
     assert float(np.asarray(guarded.steps[0].action.data)[0]) == 0.02
 
-    unguarded = run(None)  # eval()'s Python-API default is the permissive AutoApprover
+    unguarded = run(None)  # eval()'s Python-API default is the permissive PassThroughGuard
     assert not [e for e in unguarded.events if e.kind == "approval"]
     assert float(np.asarray(unguarded.steps[0].action.data)[0]) == 0.08
 
@@ -1722,8 +1751,8 @@ def test_stop_and_forced_give_up_never_call_pre_check() -> None:
     first = policy.act(Observation(state={"q": np.array([0.0])}))
     forced = policy.act(Observation(state={"q": np.array([0.0])}))
 
-    assert first.actions[0].meta["stop_reason"] == "done"
-    assert forced.actions[0].meta["stop_reason"] == "give_up"
+    assert getattr(first.terminal, "kind", None) == "done"
+    assert getattr(forced.terminal, "kind", None) == "give_up"
     assert calls == 0
 
 
@@ -1851,6 +1880,7 @@ def test_on_demand_observation_names_available_cameras_without_sending_frames() 
         "move_joints",
         "done",
         "give_up",
+        "sleep",
         "take_pic",
     ]
 
@@ -1871,7 +1901,7 @@ def test_immediate_capture_appends_results_then_frames_and_redecides() -> None:
 
     chunk = policy.act(_vision_observation(env_step=7))
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert len(script.requests) == 2
     history = script.requests[1]["messages"]
     assistant_index = next(
@@ -1959,7 +1989,7 @@ def test_imageless_capture_is_rejected_without_ending_the_trial() -> None:
 
     chunk = policy.act(_vision_observation(cameras=()))
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     assert len(script.requests) == 2
     results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
     assert results[:2] == [
@@ -1987,7 +2017,7 @@ def test_a_dropout_rejection_does_not_count_toward_the_three_strike_guard() -> N
 
     chunk = policy.act(_vision_observation(cameras=()))
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     results = [message["content"] for message in policy._messages if message.get("role") == "tool"]
     assert results[1] == "no camera images are available in this observation"
     assert results[0] == results[2]
@@ -2035,7 +2065,7 @@ def test_take_pic_before_move_short_circuits_with_contiguous_results() -> None:
 
     chunk = policy.act(_vision_observation())
 
-    assert chunk.actions[0].meta["stop_reason"] == "done"
+    assert getattr(chunk.terminal, "kind", None) == "done"
     history = script.requests[1]["messages"]
     results = [message for message in history if message.get("role") == "tool"]
     assert results == [
@@ -2166,7 +2196,9 @@ def test_unknown_tool_error_names_take_pic_in_on_demand_mode() -> None:
     policy.act(_vision_observation())
 
     errors = [message["content"] for message in policy._messages if message.get("role") == "tool"]
-    assert errors[0] == ("unknown tool 'look'; available: move_joints, done, give_up, take_pic")
+    assert errors[0] == (
+        "unknown tool 'look'; available: move_joints, done, give_up, sleep, take_pic"
+    )
 
 
 def test_valid_capture_after_an_earlier_error_is_ignored_with_failure_reason() -> None:
@@ -2329,7 +2361,7 @@ def test_chained_capture_reports_default_controller_partial_playout(tmp_path: Pa
         _policy(script, images="on_demand"),
         _VisionAbsoluteEmbodiment(),
         log_dir=str(tmp_path),
-        controller=DefaultController(replan_interval=1),
+        action_manager=DefaultActionManager(replan_interval=1),
     )
 
     arrived = script.requests[1]["messages"][-1]["content"][0]["text"]
@@ -2443,7 +2475,7 @@ def test_take_pic_after_done_is_ignored_because_the_trial_ends() -> None:
 
     chunk = policy.act(_vision_observation())
 
-    assert chunk.actions[0].meta["request_stop"] is True
+    assert chunk.terminal is not None
     assert [message["content"] for message in policy._messages[-2:]] == [
         "done: finished",
         "ignored: the trial ends with this call",
@@ -2776,7 +2808,7 @@ def test_reset_clears_usage_accumulated_by_the_previous_trial(tmp_path: Path) ->
     policy.act(Observation())
 
     policy.reset(Scene(id="fresh", instruction="wait"))
-    record = TrialRecord(scene_id="fresh", epoch=0, seed=0)
+    record = Record(scene_id="fresh", epoch=0, seed=0)
     policy.on_trial_end(record, str(tmp_path), "run")
 
     assert "llm_usage" not in record.metadata
@@ -2785,7 +2817,7 @@ def test_reset_clears_usage_accumulated_by_the_previous_trial(tmp_path: Path) ->
 def test_trial_with_zero_llm_calls_omits_usage_metadata(tmp_path: Path) -> None:
     policy = _policy(_Script([_text_response("unused")]))
     policy.reset(Scene(id="s0", instruction="wait"))
-    record = TrialRecord(scene_id="s0", epoch=0, seed=0)
+    record = Record(scene_id="s0", epoch=0, seed=0)
 
     policy.on_trial_end(record, str(tmp_path), "run")
 
@@ -2953,7 +2985,7 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
     policy.on_trial_start(unsafe_id, 0, str(tmp_path), "run-1")
     policy.act(Observation())
 
-    record = TrialRecord(scene_id=unsafe_id, epoch=0, seed=0)
+    record = Record(scene_id=unsafe_id, epoch=0, seed=0)
     policy.on_trial_end(record, str(tmp_path), "run-1")
 
     # Assert wire_capture metadata and file exists at sanitized path
@@ -2972,3 +3004,515 @@ def test_scene_id_sanitization_prevents_directory_traversal(tmp_path: Path) -> N
 
     # Assert wire directory stem and transcript stem agree
     assert Path(wire_ptr).parts[2] == Path(transcript_ptr).stem
+
+
+def test_reset_forgets_the_held_move_target_between_trials() -> None:
+    info = EmbodimentInfo(
+        name="two-dim",
+        action_space=Box(
+            shape=(2,),
+            low=np.zeros(2),
+            high=np.ones(2),
+            semantics=ActionSemantics("joint_pos", dim_labels=("a", "b")),
+        ),
+        observation_space=ObservationSpace(
+            state=StateSpec(fields=(StateField(key="q", shape=(2,)),))
+        ),
+        control_hz=10.0,
+        is_simulated=True,
+    )
+    policy = _policy(
+        _Script(
+            [
+                _tool_response("move_joints", {"targets": {"b": 0.6}}),
+                _tool_response("move_joints", {"targets": {"a": 0.5}}),
+            ]
+        )
+    )
+    policy.bind(info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+    policy.act(Observation(state={"q": np.array([0.2, 0.2])}))
+    held = policy.act(Observation(state={"q": np.array([0.25, 0.55])}))
+    assert np.array_equal(held.actions[-1].data, np.array([0.5, 0.6]))
+
+    policy.reset(Scene(id="s1", instruction="reach again"))
+    fresh = policy.act(Observation(state={"q": np.array([0.25, 0.55])}))
+    assert np.array_equal(fresh.actions[-1].data, np.array([0.5, 0.55]))
+
+
+def test_eval_notes_follow_the_budget_and_precede_prior_learnings(tmp_path: Path) -> None:
+    docs = "Use the wrist camera before closing the gripper."
+    learnings = "Approach from the object's left side.\n"
+    path = tmp_path / "learnings.md"
+    path.write_text(learnings, encoding="utf-8")
+    notes = "  Scoring: partial credit per milestone; use the whole budget.\n"
+    from inspect_robots.task import TaskEnvelope
+
+    info = replace(CubePickEmbodiment().info, docs=docs)
+    policy = _policy(
+        _Script([_text_response("unused")]),
+        prior_learnings=str(path),
+        eval_notes=notes,
+    )
+    policy.bind(info)
+    policy.bind_task(TaskEnvelope(name="test_task", max_steps=200))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    prompt = transcript[0]["content"]
+    budget_at = prompt.index("Environment step budget:")
+    notes_at = prompt.index("\n\nEvaluation notes:\n" + notes.strip())
+    learnings_at = prompt.index(_PRIOR_LEARNINGS_FRAME)
+    assert budget_at < notes_at < learnings_at
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.eval_notes == notes.strip()
+
+
+def test_eval_notes_default_off_leaves_prompt_and_config_unchanged() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    transcript = policy.transcript()
+
+    assert transcript is not None
+    assert "Evaluation notes:" not in transcript[0]["content"]
+    assert isinstance(policy.config, AgentPolicyConfig)
+    assert policy.config.eval_notes is None
+
+
+@pytest.mark.parametrize(
+    ("eval_notes", "message"),
+    [
+        (42, "eval_notes must be a string, got 42"),
+        ("   \n ", "eval_notes is empty or whitespace-only"),
+        ("x" * (_EVAL_NOTES_TEXT_LIMIT + 1), "the limit is"),
+    ],
+)
+def test_eval_notes_rejects_non_strings_blanks_and_oversize(
+    eval_notes: object, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _policy(_Script([_text_response("unused")]), eval_notes=eval_notes)
+
+
+def test_default_image_mode_narrates_playout_and_residual_after_every_move() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    chunk = policy.act(Observation(state={"q": np.array([0.0])}, extra={"env_step": 4}))
+    policy.act(Observation(state={"q": np.array([0.496])}, extra={"env_step": 4 + len(chunk)}))
+    policy.act(Observation(state={"q": np.array([0.5])}))
+
+    second = script.requests[1]["messages"][-1]["content"][0]["text"]
+    third = script.requests[2]["messages"][-1]["content"][0]["text"]
+    assert (
+        f"The motion finished playing ({len(chunk)} of {len(chunk)} steps). "
+        "Largest remaining offset from the requested target is 0.004 on joint." in second
+    )
+    assert "This observation follows the motion. Target reached." in third
+    assert "These frames follow the motion." not in third
+
+
+def test_stop_calls_and_resets_leave_no_pending_motion() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("done", {"summary": "finished"}),
+            _tool_response("move_joints", {"targets": {"joint": 0.1}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+    policy.act(Observation(state={"q": np.array([0.0])}))
+    assert policy._pending_motion is not None
+
+    policy.reset(Scene(id="s1", instruction="reach"))
+    assert policy._pending_motion is None
+    policy.act(Observation(state={"q": np.array([0.0])}))  # done
+    assert policy._pending_motion is None
+
+    fresh = script.requests[-1]["messages"][-1]["content"][0]["text"]
+    assert "follows the motion" not in fresh and "finished playing" not in fresh
+
+
+def test_motion_report_lines_render_after_the_approver_line_and_ignore_malformed_data() -> None:
+    observation = Observation(
+        state={"joint_pos": np.array([0.1])},
+        extra={
+            "approvals": [{"t": 3, "detail": "delta_clamped"}],
+            "motion_report": {
+                "lines": [
+                    "motion report (left arm): on target.",
+                    "  ",
+                    42,
+                    " motion report (right arm): the arm sits 3.0 cm behind its command. ",
+                ],
+                "arms": {},
+            },
+        },
+    )
+
+    text = _observation_content(observation)[0]["text"]
+
+    assert text.splitlines()[-3:] == [
+        "approver: 1 step(s) modified (delta_clamped).",
+        "motion report (left arm): on target.",
+        "motion report (right arm): the arm sits 3.0 cm behind its command.",
+    ]
+    for malformed in ({"motion_report": "nope"}, {"motion_report": {"lines": "nope"}}, {}):
+        assert "motion report" not in _observation_content(Observation(extra=malformed))[0]["text"]
+
+
+def test_observations_carry_setpoint_lines_after_the_state_lines() -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+            _tool_response("move_joints", {"targets": {"joint": 0.5}}),
+        ]
+    )
+    policy = _policy(script)
+    policy.bind(_AbsoluteEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach"))
+
+    policy.act(Observation(state={"q": np.array([0.0])}))
+    policy.act(Observation(state={"q": np.array([0.48])}))
+
+    first = script.requests[0]["messages"][-1]["content"][0]["text"].splitlines()
+    second = script.requests[1]["messages"][-1]["content"][0]["text"].splitlines()
+    assert first[1] == "Wall clock: 0 s since the trial began."
+    assert first[2:4] == [
+        "state[q]: joint=0.0",
+        "setpoint: none yet; the first move starts from the readback.",
+    ]
+    assert second[2:5] == [
+        "state[q]: joint=0.48",
+        "setpoint: joint=0.5",
+        "readback minus setpoint: joint=-0.0200",
+    ]
+    assert _observation_content(Observation(), setpoint_lines=["setpoint: x=1"])[0]["text"] == (
+        "Current observation.\nsetpoint: x=1"
+    )
+
+
+# --- sleep and wall clock (plan 0087) --------------------------------------
+
+
+class _ThermalEmbodiment:
+    """Two arms; the left shoulder cools 1 C per 5 steps while left_x sits at 0."""
+
+    def __init__(self, *, celsius: float = 58.0) -> None:
+        self._q = np.zeros(4)
+        self._rested = 0
+        self._celsius = celsius
+        self.info = EmbodimentInfo(
+            name="thermal-test",
+            action_space=Box(
+                shape=(4,),
+                low=np.array([-1.0, 0.0, -1.0, 0.0]),
+                high=np.array([1.0, 1.0, 1.0, 1.0]),
+                semantics=ActionSemantics(
+                    "joint_pos", dim_labels=("left_x", "left_gripper", "right_x", "right_gripper")
+                ),
+            ),
+            observation_space=ObservationSpace(
+                state=StateSpec(fields=(StateField(key="q", shape=(4,)),))
+            ),
+            control_hz=10.0,
+            is_simulated=True,
+        )
+
+    def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
+        self._q = np.array([0.0, 1.0, 0.0, 1.0])
+        return self._observe(scene.instruction)
+
+    def step(self, action: Action) -> StepResult:
+        self._q = np.asarray(action.data, dtype=np.float64).copy()
+        if abs(self._q[0]) < 1e-9:
+            self._rested += 1
+            if self._rested % 5 == 0:
+                self._celsius -= 1.0
+        return StepResult(observation=self._observe(None))
+
+    def close(self) -> None:
+        return None
+
+    def _observe(self, instruction: str | None) -> Observation:
+        return Observation(
+            state={"q": self._q.copy()},
+            instruction=instruction,
+            extra={
+                "motor_temps": {
+                    "limit": 60.0,
+                    "warn_margin": 10.0,
+                    "arms": {
+                        "left": {"hottest": "left_j1", "celsius": self._celsius},
+                        "right": {"hottest": "right_j2", "celsius": 31.0},
+                    },
+                    "lines": [
+                        f"motor temperatures: left arm hottest left_j1 {self._celsius:.0f} C"
+                    ],
+                }
+            },
+        )
+
+
+def _last_user_text(request: dict[str, Any]) -> str:
+    users = [m for m in request["messages"] if m.get("role") == "user"]
+    content = users[-1]["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(part["text"] for part in content if part.get("type") == "text")
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_sleep_holds_without_llm_calls_and_narrates_the_temperatures(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("move_joints", {"targets": {"left_x": 0.5}}),
+            _tool_response("move_joints", {"targets": {"left_x": 0.0}}),
+            _tool_response("sleep", {"seconds": 5, "note": "resting the left arm at home"}),
+            _tool_response("done", {"summary": "cooled", "hindsight": "none"}),
+        ]
+    )
+    sink = _RecordingSink()
+    policy = _policy(script, max_speed_frac=0.5)
+    logs = ir_eval(
+        _task(max_steps=400), policy, _ThermalEmbodiment(), log_dir=str(tmp_path), sinks=[sink]
+    )
+
+    assert logs[0].status == "success"
+    assert len(script.requests) == 4  # the 50-step sleep cost no LLM call
+    (record,) = sink.records
+    notes = [m["content"] for m in policy._messages if m.get("role") == "tool"]
+    assert "sleeping 5 s (50 steps) holding the current setpoint" in notes
+    moves = [int(m.group(1)) for n in notes if (m := re.search(r"over (\d+) steps", n))]
+    assert len(record.steps) == sum(moves) + 50 + 1
+    held = record.steps[sum(moves) : sum(moves) + 50]
+    assert all(step.action.data[0] == 0.0 for step in held)
+    assert held[-1].action.meta == {"chunk_final": True}
+    text = _last_user_text(script.requests[3])
+    assert (
+        "Slept 5 s holding the setpoint. Hottest motors: left_j1 58 C, right_j2 31 C before, "
+        "left_j1 48 C, right_j2 31 C now." in text
+    )
+    assert "motor temperatures: left arm hottest left_j1 48 C" in text
+
+
+def test_sleep_narration_without_temperatures_is_just_the_duration(tmp_path: Path) -> None:
+    script = _Script(
+        [
+            _tool_response("sleep", {"seconds": 0.3, "note": "let it settle"}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    sink = _RecordingSink()
+    policy = _policy(script)
+    ir_eval(_task(), policy, _AbsoluteEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+
+    (record,) = sink.records
+    assert len(record.steps) == 3 + 1
+    assert _last_user_text(script.requests[1]).count("Slept 0.3 s holding the setpoint.") == 1
+    assert "Hottest motors" not in _last_user_text(script.requests[1])
+
+
+def test_sleep_narration_pairs_before_and_after_only_when_both_exist() -> None:
+    before = _thermal_status(
+        Observation(
+            state={},
+            extra={
+                "motor_temps": {
+                    "limit": 60,
+                    "arms": {"left": {"hottest": "left_j1", "celsius": 50}},
+                }
+            },
+        )
+    )
+    assert before is not None
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), None, Observation()) == (
+        "Slept 3 s holding the setpoint."
+    )
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=None), before, Observation()) == (
+        "Slept 3 s holding the setpoint."
+    )
+    assert _sleep_narration(_PendingSleep(seconds=3.0, before=before), before, Observation()) == (
+        "Slept 3 s holding the setpoint. Hottest motors: left_j1 50 C before, left_j1 50 C now."
+    )
+
+
+def test_wall_clock_line_counts_from_reset(tmp_path: Path) -> None:
+    clock = _FakeClock()
+    script = _Script(
+        [
+            _tool_response("move_by", {"deltas": {"dx": 0.1}}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    policy = _policy(script, clock=clock)
+    policy.bind(CubePickEmbodiment().info)
+    policy.reset(Scene(id="s0", instruction="reach", init_seed=0))
+    clock.now = 107.4
+    policy.act(Observation(state={"ee_pos": np.zeros(3)}, extra={"env_step": 0}))
+    assert "Wall clock: 7 s since the trial began." in _last_user_text(script.requests[0])
+    clock.now = 190.0
+    policy.act(Observation(state={"ee_pos": np.zeros(3)}, extra={"env_step": 2}))
+    assert "Wall clock: 90 s since the trial began." in _last_user_text(script.requests[1])
+
+
+def test_observation_content_omits_the_wall_clock_without_a_trial() -> None:
+    (text,) = _observation_content(Observation(state={}))
+    assert "Wall clock" not in text["text"]
+    (text,) = _observation_content(Observation(state={}), wall_s=-0.5)
+    assert "Wall clock: 0 s since the trial began." in text["text"]
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        None,
+        "hot",
+        {"limit": "60", "arms": {}},
+        {"limit": True, "arms": {}},
+        {"limit": 60.0, "warn_margin": "ten", "arms": {}},
+        {"limit": 60.0, "arms": ["left"]},
+    ],
+)
+def test_thermal_status_treats_malformed_reports_as_absent(report: Any) -> None:
+    extra = {} if report is None else {"motor_temps": report}
+    assert _thermal_status(Observation(state={}, extra=extra)) is None
+
+
+def test_thermal_status_skips_malformed_arm_entries() -> None:
+    observation = Observation(
+        state={},
+        extra={
+            "motor_temps": {
+                "limit": 60,
+                "arms": {
+                    "left": {"hottest": "left_j1", "celsius": 55},
+                    "right": "broken",
+                    "base": {"hottest": None, "celsius": None},
+                    "lift": {"hottest": "lift_j0", "celsius": True},
+                },
+            }
+        },
+    )
+    status = _thermal_status(observation)
+    assert status is not None
+    assert status.hottest == {"left": ("left_j1", 55.0)}
+    assert status.margin == 0.0 and status.limit == 60.0
+    assert status.text() == "left_j1 55 C"
+
+
+def test_observation_content_renders_motor_temperature_lines() -> None:
+    observation = Observation(
+        state={},
+        extra={"motor_temps": {"lines": ["motor temperatures: left arm hottest left_j1 41 C", 7]}},
+    )
+    (text,) = _observation_content(observation)
+    assert text["text"].endswith("motor temperatures: left arm hottest left_j1 41 C")
+
+
+def _filtered_response() -> dict[str, Any]:
+    return {"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]}
+
+
+def test_content_filter_forces_give_up_and_counts_the_call(tmp_path: Path) -> None:
+    script = _Script([_filtered_response()])
+    log = ir_eval(_task(), _policy(script), CubePickEmbodiment(), log_dir=str(tmp_path))[0]
+
+    assert len(script.requests) == 1
+    assert log.samples[0].termination_reasons == ("give_up",)
+    assert log.samples[0].trial_metadata[0]["llm_usage"]["llm_calls"] == 1
+
+
+@pytest.mark.parametrize(("timeout_s", "expected"), [(None, 120.0), (300, 300.0)])
+def test_timeout_s_overrides_the_wire_default(timeout_s: float | None, expected: float) -> None:
+    policy = LLMAgentPolicy(
+        model="test/model", base_url="http://llm.test/v1", env={}, timeout_s=timeout_s
+    )
+    client = policy._client
+    assert isinstance(client, ChatClient)
+    assert client._http.timeout.read == expected
+    assert policy.config.timeout_s == (None if timeout_s is None else expected)
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1, float("nan"), float("inf"), True, "300"])
+def test_invalid_timeout_s_is_a_guided_error(timeout_s: Any) -> None:
+    with pytest.raises(ConfigError, match="timeout_s must be finite and > 0"):
+        LLMAgentPolicy(
+            model="test/model", base_url="http://llm.test/v1", env={}, timeout_s=timeout_s
+        )
+
+
+def test_motion_narration_says_why_a_motion_was_cut_short() -> None:
+    policy = _policy(_Script([_text_response("unused")]))
+    policy.bind(_VisionAbsoluteEmbodiment().info)
+    observation = replace(
+        _vision_observation(env_step=2),
+        extra={"env_step": 2, "replan": {"trigger": "gripper_slip", "reason": "the grasp slipped"}},
+    )
+    motion = _PendingMotion(issued_step=1, chunk_len=5, target=None)
+    narration = policy._motion_narration(motion, observation, with_frames=True)
+    assert narration.endswith("The motion was cut short to look again: the grasp slipped.")
+    malformed = replace(observation, extra={"env_step": 2, "replan": {"reason": 3}})
+    assert "cut short" not in policy._motion_narration(motion, malformed, with_frames=True)
+
+
+def test_sleep_narration_reports_a_sleep_a_replan_cut_short() -> None:
+    slept = _PendingSleep(seconds=3.0, before=None, issued_step=10, steps=30)
+    cut = Observation(
+        state={},
+        extra={"env_step": 12, "replan": {"trigger": "gripper_slip", "reason": "grasp slipped"}},
+    )
+    assert _sleep_narration(slept, None, cut) == (
+        "Slept 2 of 30 steps of the requested 3 s holding the setpoint; it did not run to "
+        "the end. The motion was cut short to look again: grasp slipped."
+    )
+    finished = Observation(state={}, extra={"env_step": 40})
+    assert _sleep_narration(slept, None, finished) == "Slept 3 s holding the setpoint."
+
+
+def test_a_triggered_replan_during_sleep_reaches_the_model(tmp_path: Path) -> None:
+    class _FiresOnce:
+        name = "test_trigger"
+
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def should_replan(self, observation: Observation, t: int, store: Any) -> str | None:
+            self.checks += 1
+            return "the grasp may have slipped" if self.checks == 2 else None
+
+    script = _Script(
+        [
+            _tool_response("sleep", {"seconds": 3, "note": "let it settle"}),
+            _tool_response("done", {"summary": "ok", "hindsight": "none"}),
+        ]
+    )
+    ir_eval(
+        _task(),
+        _policy(script),
+        _AbsoluteEmbodiment(),
+        log_dir=str(tmp_path),
+        action_manager=DefaultActionManager(triggers=[_FiresOnce()]),
+    )
+    prompt = _last_user_text(script.requests[1])
+    assert "it did not run to the end" in prompt
+    assert "cut short to look again: the grasp may have slipped" in prompt
