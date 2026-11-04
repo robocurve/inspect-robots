@@ -7369,6 +7369,20 @@ def test_guardrail_contribution_conformance_passes_absent_and_valid_hooks() -> N
     assert_guardrail_contribution_conformant(valid, valid.info.action_space)
 
 
+def test_guardrail_contribution_conformance_flags_the_pre_paper_hook() -> None:
+    from inspect_robots.conformance import check_guardrail_contribution
+    from inspect_robots.mock import CubePickEmbodiment
+
+    class _Unmigrated(CubePickEmbodiment):
+        def contribute_guardrails(self, action_space: object) -> object:
+            raise AssertionError("never called")
+
+    unmigrated = _Unmigrated()
+    report = check_guardrail_contribution(unmigrated, unmigrated.info.action_space)
+    assert not report.ok
+    assert "contribute_guardrails" in report.summary()
+
+
 def test_guardrail_contribution_conformance_reports_bad_hooks() -> None:
     from inspect_robots.conformance import (
         assert_guardrail_contribution_conformant,

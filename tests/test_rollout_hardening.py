@@ -214,6 +214,20 @@ def test_policy_request_stop_default_reason() -> None:
     assert record.termination_reason == "policy_stop"
 
 
+@pytest.mark.parametrize("reason", ["", "  ", None, 7])
+def test_policy_request_stop_with_a_blank_or_odd_reason_uses_the_default(reason: object) -> None:
+    record = _run(_StopPolicy({"request_stop": True, "stop_reason": reason}), CubePickEmbodiment())
+    assert record.truncated is True
+    assert record.termination_reason == "policy_stop"
+
+
+def test_policy_request_stop_reason_is_trimmed() -> None:
+    record = _run(
+        _StopPolicy({"request_stop": True, "stop_reason": " done "}), CubePickEmbodiment()
+    )
+    assert record.termination_reason == "done"
+
+
 def test_request_stop_survives_approver_rewrite() -> None:
     class _MetaStrippingApprover:
         def review(self, action: Action, store: dict[str, object]) -> Action:

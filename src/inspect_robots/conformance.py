@@ -396,6 +396,20 @@ def assert_embodiment_conformant(info: EmbodimentInfo) -> None:
         raise AssertionError(report.summary())
 
 
+def _unmigrated_guard_hook(embodiment: object) -> bool:
+    """True when only the pre-paper ``contribute_guardrails`` hook supplies safety guards.
+
+    That is the old hook with no ``contribute_guards``, or with only the no-op
+    ``EmbodimentBase.contribute_guards`` inherited rather than overridden.
+    """
+    from inspect_robots.embodiment import EmbodimentBase
+
+    if not hasattr(embodiment, "contribute_guardrails"):
+        return False
+    method = getattr(type(embodiment), "contribute_guards", None)
+    return method is None or method is EmbodimentBase.contribute_guards
+
+
 def check_guardrail_contribution(embodiment: Embodiment, action_space: Box) -> ConformanceReport:
     """Validate an optional contribution hook by executing plugin code.
 
@@ -404,6 +418,14 @@ def check_guardrail_contribution(embodiment: Embodiment, action_space: Box) -> C
     as plugin bugs. Unlike ``check_embodiment``, callers must opt in knowing
     this check can run arbitrary adapter code.
     """
+    if _unmigrated_guard_hook(embodiment):
+        issue = ConformanceIssue(
+            "error",
+            "guardrail_contribution",
+            "defines contribute_guardrails(), which was renamed contribute_guards() and "
+            "returns GuardContribution; the run command refuses this adapter until it is migrated",
+        )
+        return ConformanceReport(embodiment=embodiment.info.name, issues=(issue,))
     missing = object()
     hook = getattr(embodiment, "contribute_guards", missing)
     if hook is missing:

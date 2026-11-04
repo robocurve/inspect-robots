@@ -162,11 +162,21 @@ def test_a_failed_pre_trial_hook_stops_the_run_before_the_trial(
     assert log.status == "error"
     assert log.error == error
     assert "reset" not in embodiment.calls
-    assert "park" not in embodiment.calls
+    # Only a failed home() may have moved the platform, so only it is parked.
+    assert embodiment.calls.count("park") == (1 if "home" in overrides else 0)
     assert log.results.total_trials == 0
     (sample,) = log.samples
     assert sample.error == error
     assert sample.epochs == ()
+
+
+def test_a_failed_home_reports_a_failed_park_too(tmp_path: Path) -> None:
+    embodiment = _Lifecycle(home=EmbodimentFault("joint 3 stalled"), park=RuntimeError("brake"))
+    (log,) = ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path))
+    assert log.error == (
+        "embodiment.home() failed before scene 's0' epoch 0: EmbodimentFault: joint 3 stalled; "
+        "embodiment.park() failed: RuntimeError: brake"
+    )
 
 
 def test_a_later_unhealthy_check_keeps_the_trials_already_run(tmp_path: Path) -> None:

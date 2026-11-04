@@ -212,8 +212,11 @@ def _legacy_stop(action: Action) -> Termination | None:
     if not action.meta.get("request_stop"):
         return None
     detail = action.meta.get("stop_detail")
+    # Termination needs a non-blank kind; the legacy channel never validated
+    # stop_reason, so anything blank or non-string falls back to the default.
+    reason = action.meta.get("stop_reason")
     return Termination(
-        kind=str(action.meta.get("stop_reason") or "policy_stop"),
+        kind=reason.strip() if isinstance(reason, str) and reason.strip() else "policy_stop",
         reason=detail if isinstance(detail, str) else "",
     )
 

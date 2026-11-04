@@ -918,6 +918,7 @@ def _default_guardrails(
     warnings: list[str],
 ) -> None:
     """Append the bounds clamp, the delta limit and the embodiment's contributed guards."""
+    from inspect_robots.conformance import _unmigrated_guard_hook
     from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardContribution
 
     if space.low is None and space.high is None:
@@ -935,9 +936,7 @@ def _default_guardrails(
 
     missing = object()
     hook = getattr(embodiment, "contribute_guards", missing)
-    if getattr(embodiment, "contribute_guardrails", missing) is not missing and (
-        hook is missing or _inherits_default_guard_hook(embodiment)
-    ):
+    if _unmigrated_guard_hook(embodiment):
         # The pre-paper hook name: running would silently drop the embodiment's
         # own safety guards, so refuse until the adapter is migrated.
         assert embodiment is not None
@@ -964,14 +963,6 @@ def _default_guardrails(
             parts.append(guard)
             active.append(name)
         warnings.extend(contribution.warnings)
-
-
-def _inherits_default_guard_hook(embodiment: object) -> bool:
-    """True when ``contribute_guards`` is ``EmbodimentBase``'s no-op, not an override."""
-    from inspect_robots.embodiment import EmbodimentBase
-
-    method = getattr(type(embodiment), "contribute_guards", None)
-    return method is EmbodimentBase.contribute_guards
 
 
 def _attended(args: argparse.Namespace) -> bool:

@@ -366,3 +366,25 @@ def test_numpy_rubric_metadata_does_not_escape_eval(tmp_path: Path) -> None:
     assert record_dir is not None
     document, _ = _record_files(tmp_path, record_dir)
     assert document["configuration"]["rubrics"][0]["metadata"] == {"n": 3}
+
+
+def test_unencodable_rubric_metadata_still_writes_a_log(tmp_path: Path) -> None:
+    from inspect_robots import Rubric
+
+    rubric = Rubric(
+        "reached",
+        success_at_end(),
+        metadata={"weights": np.array([1.0, 2.0]), "source": Path("a.md"), "n": np.int64(3)},
+    )
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        max_steps=2,
+        rubrics=[rubric],
+    )
+    (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    assert log.status == "success"
+    (log_file,) = tmp_path.glob("*.json")
+    reread = read_eval_log(str(log_file))
+    assert reread.eval.rubrics[0]["metadata"] == {"n": 3}
+    assert reread.samples[0].rubrics[0]["metadata"] == {"n": 3}

@@ -896,7 +896,8 @@ def _run_eval(
         for epoch in range(epoch_spec.count):
             trial_seed = derive_seed(seed, scene.init_seed, epoch)
             # The evaluation interface runs before the trial exists: a failed
-            # check stops the run with nothing moved and no trial recorded.
+            # check stops the run with no trial recorded (a failed home() is
+            # parked first, since it may have moved the platform).
             not_ready = _before_trial(embodiment, scene, epoch)
             if not_ready is not None:
                 status = "error"
@@ -1344,7 +1345,11 @@ def _before_trial(embodiment: Embodiment, scene: Scene, epoch: int) -> str | Non
         try:
             home()
         except Exception as exc:
-            return f"embodiment.home() failed before {trial}: {type(exc).__name__}: {exc}"
+            message = f"embodiment.home() failed before {trial}: {type(exc).__name__}: {exc}"
+            # home() may have moved the platform before failing, so it is parked
+            # like any trial that ran; park is documented as safe after a fault.
+            park_failure = _park(embodiment)
+            return message if park_failure is None else f"{message}; {park_failure}"
     return None
 
 

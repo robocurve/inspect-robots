@@ -70,14 +70,21 @@ class Rubric:
         return self.scorer
 
     def describe(self) -> dict[str, Any]:
-        """The JSON-safe description recorded in logs: everything but the scorer object."""
+        """The JSON-safe description recorded in logs: everything but the scorer object.
+
+        Metadata is free-form, so it is made JSON-safe the way scene metadata is:
+        NumPy numbers become Python ones and values JSON cannot encode (arrays,
+        paths, objects) are omitted, so a log can always be written.
+        """
+        from inspect_robots.log import _json_safe_scene_metadata
+
         scorer = self.scorer if isinstance(self.scorer, str) else self.resolve_scorer().name
         return {
             "name": self.name,
             "kind": self.kind,
             "text": self.text,
             "scorer": scorer,
-            "metadata": dict(self.metadata),
+            "metadata": _json_safe_scene_metadata(self.metadata),
         }
 
 

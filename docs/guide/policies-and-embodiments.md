@@ -245,7 +245,8 @@ class MyArm:
 [`HealthReport`](../../src/inspect_robots/embodiment.py) and
 [`Readiness`](../../src/inspect_robots/embodiment.py) are exported from
 `inspect_robots`. Any exception from `health()`, `prepare_trial()` or `home()`
-also stops the run before the trial starts. `park()` runs after every trial
+also stops the run before the trial starts; after a failed `home()`, which may
+already have moved the platform, `park()` is called first. `park()` runs after every trial
 whatever its outcome, except a run cancelled with Ctrl-C, so it must be safe to
 call after a fault; it may decline by returning without moving. A failed park
 after a clean trial stops the run. The log lists the methods an embodiment
