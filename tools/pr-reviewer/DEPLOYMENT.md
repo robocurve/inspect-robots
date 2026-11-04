@@ -205,3 +205,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `a84303e3` $30, PR lifetime $120, author 2026-11 $150 (Jay authorized up to $250 total reviewer spend across #599 and the YAM PR).
 - 2026-11-04: PR #599 head `9423d407` $30.
 - 2026-11-04: PR #599 head `30aa26c9` $30.
+- 2026-11-04: PR #599 head `7d306398` $30.
