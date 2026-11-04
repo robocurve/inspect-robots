@@ -437,6 +437,7 @@ def test_rerun_sink_writes_recording(tmp_path: Path) -> None:
         CubePickEmbodiment(),
         sinks=[sink],
         store_actions=False,
+        log_dir=str(tmp_path),
     )
     assert rrd.exists()
 
@@ -1051,6 +1052,7 @@ def test_reused_sink_resends_blueprint_for_same_trial_prefix(
 
 def test_eval_drives_the_blueprint_through_bind_spaces(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """End-to-end: eval() wires bind_spaces into RerunSink and a layout is sent."""
     recorder = _BlueprintRecorder()
@@ -1061,6 +1063,7 @@ def test_eval_drives_the_blueprint_through_bind_spaces(
         CubePickEmbodiment(),
         sinks=[RerunSink()],
         store_actions=False,
+        log_dir=str(tmp_path),
     )
     assert len(recorder.sent) >= 1
     reachable = _sent_tree(recorder.sent[0])

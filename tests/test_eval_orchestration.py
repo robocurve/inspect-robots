@@ -372,7 +372,7 @@ def test_cancelled_first_scene_halts_before_second_scene(tmp_path: Path) -> None
     assert tuple(scene.scene_id for scene in log.samples) == ("s0",)
 
 
-def test_cancelled_trial_is_never_scored() -> None:
+def test_cancelled_trial_is_never_scored(tmp_path: Path) -> None:
     scorer = _CountingScorer()
 
     with pytest.raises(KeyboardInterrupt):
@@ -382,6 +382,7 @@ def test_cancelled_trial_is_never_scored() -> None:
             CubePickEmbodiment(),
             sinks=[NullSink()],
             store_actions=False,
+            log_dir=str(tmp_path),
         )
 
     assert scorer.calls == 0
@@ -762,7 +763,7 @@ def test_halt_error_message_is_not_overwritten_by_all_errored(tmp_path: Path) ->
 # --------------------------------------------------------------------------- #
 # 3. Partial records reach the sinks (forensics survive errors).
 # --------------------------------------------------------------------------- #
-def test_policy_error_partial_record_reaches_sinks() -> None:
+def test_policy_error_partial_record_reaches_sinks(tmp_path: Path) -> None:
     class _BoomLaterPolicy(_BoomPolicy):
         def __init__(self) -> None:
             super().__init__()
@@ -781,6 +782,7 @@ def test_policy_error_partial_record_reaches_sinks() -> None:
         CubePickEmbodiment(),
         sinks=[sink],
         store_actions=False,
+        log_dir=str(tmp_path),
     )
     assert log.status == "error"  # its only trial errored (issue #73)
     (record,) = sink.records
@@ -807,7 +809,7 @@ def test_halt_without_attached_record_still_produces_error_log(
     assert log.results.total_trials == 0  # nothing to count or deliver
 
 
-def test_halt_delivers_partial_record_and_counts_trial() -> None:
+def test_halt_delivers_partial_record_and_counts_trial(tmp_path: Path) -> None:
     sink = _RecordingSink()
     (log,) = eval(
         _task(),
@@ -815,6 +817,7 @@ def test_halt_delivers_partial_record_and_counts_trial() -> None:
         _FaultAfterEpochsEmbodiment(good_epochs=0),
         sinks=[sink],
         store_actions=False,
+        log_dir=str(tmp_path),
     )
     assert log.status == "error"
     assert log.results.total_trials == 1  # the aborted trial is counted...

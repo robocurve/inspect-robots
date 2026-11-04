@@ -537,7 +537,7 @@ def test_rerun_sink_logs_with_fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_
     RerunSink().on_eval_start(None)  # type: ignore[arg-type]
 
 
-def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import sys
 
     calls: list[str] = []
@@ -553,6 +553,7 @@ def test_rerun_sink_supports_new_sdk_api(monkeypatch: pytest.MonkeyPatch) -> Non
         CubePickEmbodiment(),
         sinks=[sink],
         store_actions=False,
+        log_dir=str(tmp_path),
     )
     assert log.status == "success"
     assert "time" in calls  # rr.set_time (>=0.23) was used
