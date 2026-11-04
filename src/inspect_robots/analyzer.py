@@ -18,6 +18,7 @@ recomputed, so a log with no edits re-scores to exactly its stored results.
 
 from __future__ import annotations
 
+import warnings
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -115,7 +116,19 @@ def _rescore_sample(
     reduced = dict(sample.reduced)
     for name in changed_rubrics:
         scores = [Score(value=epoch[name]) for epoch in epochs if name in epoch]
-        reduced[name] = value_to_float(reduce_scores(reducer, scores).value)
+        try:
+            reduced[name] = value_to_float(reduce_scores(reducer, scores).value)
+        except Exception as exc:
+            # eval() records a reducer that cannot reduce (e.g. pass_at_k with
+            # too few voting epochs) and still writes the log; re-scoring
+            # degrades the same way, dropping the reduction and warning.
+            reduced.pop(name, None)
+            warnings.warn(
+                f"rescore: reducer {reducer!r} failed for {name!r} in scene "
+                f"{sample.scene_id!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return replace(sample, epochs=tuple(epochs), reduced=reduced), changed_rubrics
 
 

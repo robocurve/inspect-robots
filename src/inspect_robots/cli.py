@@ -1767,7 +1767,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "--benchmark runs its own tasks: drop --task, --instruction and --auto-task"
             )
-        # A benchmark is a set of tasks, so it runs through eval-set's path.
+        # A benchmark is a set of tasks, so it runs through eval-set's path,
+        # which has no horizon, scorer, task-args, speaker or Rerun options:
+        # refuse them rather than run something other than what was asked.
+        run_only = {
+            "--max-steps": args.max_steps is not None,
+            "--scorer": args.scorer is not None,
+            "-T": bool(args.task_args),
+            "-A": bool(args.auto_task_args),
+            "--speak": bool(args.speak),
+            "-S": bool(args.speak_args),
+            "--rerun/--no-rerun": args.rerun is not None,
+            "--rerun-save/--no-rerun-save": args.rerun_save is not None,
+            "--rerun-connect": args.rerun_connect is not None,
+            "--rerun-port": args.rerun_port is not None,
+        }
+        passed = [flag for flag, given in run_only.items() if given]
+        if passed:
+            raise SystemExit(
+                f"--benchmark runs through eval-set, which does not take {', '.join(passed)}; "
+                "a benchmark's tasks own their horizons and scorers"
+            )
         args.tasks = []
         args.max_workers = 1
         args.retry_attempts = 0

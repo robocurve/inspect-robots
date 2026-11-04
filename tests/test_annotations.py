@@ -250,6 +250,26 @@ def test_a_judged_abstention_clears_even_when_the_mean_is_unchanged(tmp_path: Pa
     assert fixed.results.abstentions == {}
 
 
+def test_a_reducer_that_cannot_reduce_drops_the_scene_and_warns(tmp_path: Path) -> None:
+    _, log = _judged_log(tmp_path, reducer="pass_at_2")
+    sample = log.samples[0]
+    # The second trial abstained, so pass_at_2 has one voting epoch for this scene.
+    abstaining = replace(
+        sample,
+        epochs=(sample.epochs[0], {"stacked": None, "reached": sample.epochs[1]["reached"]}),
+        operator_judgements=(sample.operator_judgements[0], None),
+        trial_metadata=(sample.trial_metadata[0], {"grading_error": "judge down"}),
+    )
+    stored = replace(log, samples=(abstaining, log.samples[1]))
+    edit = Annotation(
+        record_id=trial_key(sample, 0), kind=JUDGEMENT, value="no", author="r", source="editor"
+    )
+    with pytest.warns(RuntimeWarning, match="pass_at_2.*'stacked'.*'s0'"):
+        rescored = rescore(stored, [*lift_annotations(stored), edit])
+    assert "stacked" not in rescored.samples[0].reduced
+    assert rescored.results.metrics["stacked"] == log.samples[1].reduced["stacked"]
+
+
 def test_a_rubric_specific_edit_leaves_other_rubrics_alone(tmp_path: Path) -> None:
     path, log = _judged_log(tmp_path)
     key = trial_key(log.samples[1], 0)

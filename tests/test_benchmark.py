@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,33 @@ def test_cli_eval_set_benchmark_and_its_errors(
         _cli(
             ["run", "--benchmark", "reach-suite", "--task", "cubepick-reach"], tmp_path, monkeypatch
         )
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (["--max-steps", "3"], "--max-steps"),
+        (["--scorer", "episode_length"], "--scorer"),
+        (["-T", "k=1"], "-T"),
+        (["-A", "k=1"], "-A"),
+        (["--speak"], "--speak"),
+        (["-S", "k=1"], "-S"),
+        (["--rerun"], "--rerun/--no-rerun"),
+        (["--no-rerun-save"], "--rerun-save/--no-rerun-save"),
+        (["--rerun-connect", "rerun+http://h:9876/proxy"], "--rerun-connect"),
+        (["--rerun-port", "9999"], "--rerun-port"),
+    ],
+)
+def test_cli_run_benchmark_refuses_run_only_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registered_benchmark: Benchmark,
+    flags: list[str],
+    named: str,
+) -> None:
+    with pytest.raises(SystemExit, match=re.escape(named)):
+        _cli(["run", "--benchmark", "reach-suite", *flags], tmp_path, monkeypatch)
+    assert not (tmp_path / "logs").exists()
 
 
 def test_cli_parallel_benchmark(
