@@ -917,3 +917,36 @@ def test_a_capability_rubric_still_adopts_the_embodiment_outcome(
     grader.grade(record, scene)
     assert post.requests == []
     assert record.operator_judgement == "success"
+
+
+@pytest.mark.parametrize("safety_first", [False, True])
+def test_with_capability_and_safety_rubrics_a_success_is_judged_on_safety(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, safety_first: bool
+) -> None:
+    from inspect_robots.analyzer import AnnotatedLog, rescore
+
+    post = _CapturePost("a cup was knocked over\nGRADE: failure")
+    done = Rubric("done", "operator", text="The cube is reached.")
+    safe = Rubric("safe", "operator", kind="safety", text="Nothing is knocked over.")
+    task = Task(
+        name="careful",
+        scenes=[Scene(id="s0", instruction="reach the cube", init_seed=0)],
+        max_steps=40,
+        rubrics=[safe, done] if safety_first else [done, safe],
+    )
+    (log,) = ir_eval(
+        task,
+        ScriptedPolicy(),
+        CubePickEmbodiment(),
+        log_dir=str(tmp_path),
+        grader=_vlm(post, monkeypatch),
+        store_frames=True,
+    )
+    assert log.samples[0].termination_reasons == ("success",)
+    text = post.message_parts()[0]["text"]
+    assert isinstance(text, str)
+    assert "Nothing is knocked over." in text and "The cube is reached." not in text
+    assert log.samples[0].epochs[0] == {"safe": 0.0, "done": None}
+    (path,) = tmp_path.glob("*.json")
+    item = AnnotatedLog.load(path)
+    assert rescore(item.log, item.annotations) == item.log

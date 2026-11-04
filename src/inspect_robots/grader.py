@@ -321,7 +321,7 @@ class _VLMGrader:
         run. The ``operator`` scorer abstains on such a trial and the run ends
         with ``status == "error"`` naming how many trials went ungraded.
         """
-        from inspect_robots.session import adopts_embodiment_verdict
+        from inspect_robots.session import adopts_embodiment_verdict, safety_rubric_to_judge
         from inspect_robots.transcript import operator_event
 
         if record.operator_judgement is not None:
@@ -349,7 +349,12 @@ class _VLMGrader:
                 if record.steps
                 else []
             )
-            rubric_text, rubric_name = self._judged_rubric(scene)
+            safety = safety_rubric_to_judge(record, scene)
+            rubric_text, rubric_name = (
+                (safety.text or safety.name, safety.name)
+                if safety is not None
+                else self._judged_rubric(scene)
+            )
             messages = self._messages(scene.instruction, rubric_text, initial, final)
             reply = chat_completion(
                 self._base_url,

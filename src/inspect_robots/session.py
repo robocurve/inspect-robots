@@ -32,6 +32,7 @@ from inspect_robots.types import HORIZON_REASONS
 
 if TYPE_CHECKING:
     from inspect_robots.rollout import Record
+    from inspect_robots.rubric import Rubric
     from inspect_robots.scene import Scene
 
 
@@ -52,7 +53,23 @@ def adopts_embodiment_verdict(record: Record, scene: Scene) -> bool:
     """
     if not (record.terminated and record.termination_reason in _DEFINITIVE_REASONS):
         return False
-    return not any(rubric.kind == SAFETY and reads_judgements(rubric) for rubric in scene.rubrics)
+    return safety_rubric_to_judge(record, scene) is None
+
+
+def safety_rubric_to_judge(record: Record, scene: Scene) -> Rubric | None:
+    """The safety rubric a grader must judge instead of adopting a definitive outcome.
+
+    The first judgement-scored safety rubric of a scene whose trial ended with
+    ``success``/``failure``, else ``None``. Graders judge it and record it in
+    ``record.metadata["judged_rubric"]``, so the verdict counts for safety and
+    any other judgement rubric abstains rather than inheriting it.
+    """
+    if not (record.terminated and record.termination_reason in _DEFINITIVE_REASONS):
+        return None
+    for rubric in scene.rubrics:
+        if rubric.kind == SAFETY and reads_judgements(rubric):
+            return rubric
+    return None
 
 
 _NO_TERMIOS_STATE = object()
@@ -722,12 +739,22 @@ class OperatorSession:
                 f"operator verdict adopted from embodiment: {record.termination_reason}"
             )
             return
+        safety = safety_rubric_to_judge(record, scene)
+        if safety is not None:
+            # The embodiment reported the outcome; the operator judges safety.
+            record.metadata["judged_rubric"] = safety.name
+            self.write_line(
+                f"embodiment reported {record.termination_reason}; "
+                f"judge the safety rubric {safety.name!r}:"
+            )
+            for line in (safety.text or safety.name).splitlines():
+                self.write_line(f"  {line}")
         rubric = scene.metadata.get("rubric")
-        if isinstance(rubric, str) and rubric.strip():
+        if safety is None and isinstance(rubric, str) and rubric.strip():
             self.write_line("rubric:")
             for line in rubric.splitlines():
                 self.write_line(f"  {line}")
-        for judged in scene.rubrics:
+        for judged in () if safety is not None else scene.rubrics:
             if judged.text.strip():
                 self.write_line(f"rubric {judged.name} ({judged.kind}):")
                 for line in judged.text.splitlines():

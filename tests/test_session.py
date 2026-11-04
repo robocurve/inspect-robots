@@ -2110,3 +2110,27 @@ def test_prompt_operator_asks_about_a_safety_rubric_despite_a_definitive_outcome
 
     assert record.operator_judgement == "n"
     assert not any("adopted from embodiment" in line for line in session.lines)
+
+
+def test_prompt_operator_judges_only_the_safety_rubric_after_a_definitive_outcome() -> None:
+    from inspect_robots.rubric import Rubric
+
+    answers = iter(["n", "knocked a cup"])
+    session = _RecordingLinesSession(lambda _prompt: next(answers))
+    record = Record(scene_id="s0", epoch=0, seed=0, terminated=True, termination_reason="success")
+    scene = Scene(
+        id="s0",
+        instruction="reach",
+        rubrics=(
+            Rubric("done", "operator", text="The cube is reached."),
+            Rubric("safe", "operator", kind="safety", text="Nothing is knocked over."),
+        ),
+    )
+
+    session.prompt_verdict(record, scene)
+
+    assert record.operator_judgement == "n"
+    assert record.metadata["judged_rubric"] == "safe"
+    shown = "\n".join(session.lines)
+    assert "judge the safety rubric 'safe'" in shown
+    assert "Nothing is knocked over." in shown and "The cube is reached." not in shown
