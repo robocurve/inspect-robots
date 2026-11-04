@@ -87,9 +87,12 @@ class Rubric:
             "scorer": scorer,
             "metadata": _json_safe_scene_metadata(self.metadata),
         }
-        if callable(getattr(resolved, "score_annotations", None)):
-            # The scorer's display name can be anything (operator_scorer(name=...)),
-            # so record the registered scorer that re-scores it from annotations.
+        from inspect_robots.scorer import _OperatorScorer
+
+        if isinstance(resolved, _OperatorScorer):
+            # The built-in operator scorer's display name can be anything
+            # (operator_scorer(name=...)), so record the registered scorer that
+            # re-scores it. Other scorers are re-scored by their recorded name.
             described["rescored_by"] = "operator"
         return described
 

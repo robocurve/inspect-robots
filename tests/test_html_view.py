@@ -2334,3 +2334,20 @@ def test_the_policys_stated_reasons_are_shown_per_trial() -> None:
         title="run",
     )
     assert "stated reasons" not in plain
+
+
+def test_the_html_analyzer_includes_the_wire_capture_view_shows(tmp_path: Path) -> None:
+    from inspect_robots.analyzer import AnnotatedLog, _HtmlAnalyzer
+
+    row = {
+        "call": 0,
+        "attempt": 0,
+        "endpoint": "/messages",
+        "duration_s": 0.1,
+        "status": 200,
+        "request": {"model": "claude-wire-only", "messages": []},
+    }
+    log, log_path, _ = _wire_log(tmp_path, [row])
+    item = AnnotatedLog(path=log_path, log=log, annotations=())
+    (document,) = _HtmlAnalyzer().analyze([item]).files.values()
+    assert "Trial 0 Wire" in document and "claude-wire-only" in document

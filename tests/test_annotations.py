@@ -588,7 +588,7 @@ def test_cli_edit_then_score_shows_the_change(
     assert edit.supersedes == f"{log.samples[0].record_ids[1]}:run:judgement"
     assert edit.note == "stack held after release"
 
-    out_path = tmp_path / "rescored" / "log.json"
+    out_path = tmp_path / "rescored.json"
     assert main(["score", str(path), "--out", str(out_path)]) == 0
     out = capsys.readouterr().out
     assert "stacked: 0.500 -> 0.750  (changed)" in out
@@ -680,7 +680,7 @@ def test_cli_score_export_carries_its_corrections_so_rescoring_reproduces_it(
     path, _ = _judged_log(tmp_path)
     edit = ["edit", str(path), "--trial", "s0-e1", "--judgement", "yes", "--author", "r"]
     assert main(edit) == 0
-    out_path = tmp_path / "exported" / "log.json"
+    out_path = tmp_path / "exported.json"
     assert main(["score", str(path), "--out", str(out_path)]) == 0
     assert f"wrote {annotations_path(out_path)}" in capsys.readouterr().out
 
@@ -691,10 +691,17 @@ def test_cli_score_export_carries_its_corrections_so_rescoring_reproduces_it(
     assert again.samples == exported.log.samples
 
 
+def test_cli_score_refuses_an_export_outside_the_logs_directory(tmp_path: Path) -> None:
+    path, _ = _judged_log(tmp_path)
+    elsewhere = tmp_path / "elsewhere" / "log.json"
+    with pytest.raises(SystemExit, match="must be in the input log's directory"):
+        main(["score", str(path), "--out", str(elsewhere)])
+    assert not elsewhere.exists()
+
+
 def test_cli_score_export_without_edits_clears_a_stale_sidecar(tmp_path: Path) -> None:
     path, _ = _judged_log(tmp_path)
-    out_path = tmp_path / "exported" / "log.json"
-    out_path.parent.mkdir()
+    out_path = tmp_path / "exported.json"
     annotations_path(out_path).write_text("stale\n", encoding="utf-8")
     assert main(["score", str(path), "--out", str(out_path)]) == 0
     assert not annotations_path(out_path).exists()
@@ -768,3 +775,33 @@ def test_cli_analyze_rejects_an_analyzer_that_returns_the_wrong_type(
     monkeypatch.setitem(registry._FACTORIES["analyzer"], "bad", _Bad)
     with pytest.raises(SystemExit, match="returned str; expected Analysis"):
         main(["analyze", "bad", str(path)])
+
+
+def test_a_registered_annotation_aware_scorer_rescores_by_its_own_name(tmp_path: Path) -> None:
+    from inspect_robots.registry import _FACTORIES, scorer
+
+    class _PartialCredit:
+        name = "partial_credit"
+
+        def __call__(self, record: Record, target: object) -> Score:
+            return Score(value=0.5)
+
+        def score_annotations(self, annotations: object, record_id: str, rubric: str) -> Score:
+            return Score(value=0.5)
+
+    scorer("partial_credit")(_PartialCredit)
+    try:
+        task = Task(
+            name="partial",
+            scenes=[Scene(id="s0", instruction="reach", init_seed=0)],
+            max_steps=5,
+            rubrics=[Rubric("credit", "partial_credit")],
+        )
+        (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+        assert "rescored_by" not in log.samples[0].rubrics[0]
+        (path,) = tmp_path.glob("*.json")
+        item = AnnotatedLog.load(path)
+        assert rescore(item.log, item.annotations) == item.log
+        assert item.log.samples[0].epochs[0] == {"credit": 0.5}
+    finally:
+        _FACTORIES["scorer"].pop("partial_credit", None)

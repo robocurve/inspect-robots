@@ -521,7 +521,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "write the re-scored log here, with a copy of its annotations file beside it "
-            "(a new file; the input log is never rewritten)"
+            "(a new file in the input log's directory, so its records stay reachable; "
+            "the input log is never rewritten)"
         ),
     )
 
@@ -3194,6 +3195,13 @@ def _cmd_score(args: argparse.Namespace) -> int:
         out = Path(args.out)
         if out.resolve() == Path(args.log).resolve():
             raise SystemExit(f"--out {out} would overwrite the input log; pass a different path")
+        if out.resolve().parent != Path(args.log).resolve().parent:
+            # The log names its records, action and wire side-cars by paths
+            # relative to its own directory; elsewhere they would not resolve.
+            raise SystemExit(
+                f"--out {out} must be in the input log's directory "
+                f"({Path(args.log).resolve().parent}) so its records stay reachable"
+            )
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(rescored.to_dict(), indent=2) + "\n", encoding="utf-8")
         print(f"wrote {out}")

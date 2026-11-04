@@ -302,9 +302,20 @@ class _HtmlAnalyzer:
 
     def analyze(self, logs: Sequence[AnnotatedLog]) -> Analysis:
         from inspect_robots._html import render_html
+        from inspect_robots._video import resolve_frames_dir
 
+        # Resolved from each log's own path, as `inspect-robots view` does, so the
+        # page carries the same wire-capture and stored-frame evidence.
         files = {
-            f"{item.path.stem}.html": render_html(item.log, title=item.path.name) for item in logs
+            f"{item.path.stem}.html": render_html(
+                item.log,
+                title=item.path.name,
+                log_path=Path(item.path),
+                frames_dir=None
+                if item.log.stats.frames_dir is None
+                else resolve_frames_dir(item.log.stats.frames_dir, Path(item.path)),
+            )
+            for item in logs
         }
         return Analysis(
             name=self.name,
