@@ -206,3 +206,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - 2026-11-04: PR #599 head `9423d407` $30.
 - 2026-11-04: PR #599 head `30aa26c9` $30.
 - 2026-11-04: PR #599 head `7d306398` $30.
+- 2026-11-04: PR #599 head `06f74c33` $30.
