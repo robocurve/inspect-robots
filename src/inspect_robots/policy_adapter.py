@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import Protocol, runtime_checkable
+from dataclasses import replace
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -30,6 +31,8 @@ from inspect_robots.tools import (
     ControlTools,
     PreCheck,
     ToolLibrary,
+    ToolResult,
+    ToolRun,
     control_tools,
     termination_tools,
 )
@@ -218,8 +221,15 @@ class ToolAdapter:
         return self._control
 
     def add_tools(self, tools: ToolLibrary) -> None:
-        """Add the embodiment's tools after the built-in ones; a name clash raises ``ToolError``."""
-        combined = self._contributed + tools
+        """Add the embodiment's tools after the built-in ones; a name clash raises ``ToolError``.
+
+        A contributed tool's motion becomes the held setpoint (see
+        ``ControlTools.track``), so built-in moves, ``sleep`` and stops keep
+        what it commanded instead of snapping back to an earlier target.
+        """
+        control = self.control
+        tracked = ToolLibrary(replace(tool, run=_tracking(tool.run, control)) for tool in tools)
+        combined = self._contributed + tracked
         _ = self.control.library + termination_tools(self.control) + combined
         self._contributed = combined
         self._tools = None
@@ -258,3 +268,15 @@ class ToolAdapter:
     def start_trial(self) -> None:
         """Forget the held setpoint so the next move starts from the measured state."""
         self.control.start_trial()
+
+
+def _tracking(run: ToolRun, control: ControlTools) -> ToolRun:
+    """Wrap a contributed tool so the chunk it returns updates the held setpoint."""
+
+    def tracked(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        result = run(arguments, observation)
+        if result.chunk is not None:
+            control.track(result.chunk, observation)
+        return result
+
+    return tracked

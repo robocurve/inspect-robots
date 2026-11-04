@@ -239,3 +239,120 @@ def test_a_move_without_a_declared_rate_reports_steps_only() -> None:
     )
     assert result.note.startswith("executing move_joints over ")
     assert result.note.endswith(" steps")
+
+
+def _open_elbow(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+    """The docs' open_gripper example: set the last dimension from the readback."""
+    target = np.asarray(observation.state["joint_pos"], dtype=np.float64).copy()
+    target[-1] = 1.0
+    return ToolResult(chunk=ActionChunk(actions=[Action(data=target)]), note="opening")
+
+
+_OPEN = Tool(
+    "open_elbow",
+    {
+        "type": "function",
+        "function": {"name": "open_elbow", "description": "Open.", "parameters": {}},
+    },
+    _open_elbow,
+)
+
+
+def _arm_obs(shoulder: float, elbow: float, step: int | None = None) -> Observation:
+    extra = {} if step is None else {"env_step": step}
+    return Observation(state={"joint_pos": np.array([shoulder, elbow])}, extra=extra)
+
+
+@pytest.mark.parametrize("follow", ["move_joints", "sleep", "done", "give_up"])
+def test_a_contributed_motion_becomes_the_held_setpoint(follow: str) -> None:
+    adapter = ToolAdapter()
+    adapter.bind(_info())
+    adapter.add_tools(ToolLibrary([_OPEN]))
+    tools = adapter.tools
+    close = '{"targets": {"elbow": -1.0}, "note": "close"}'
+    assert tools.execute("move_joints", close, _arm_obs(0.0, 0.0)).error is None
+    assert tools.execute("open_elbow", "{}", _arm_obs(0.0, -1.0)).chunk is not None
+
+    arguments = {
+        "move_joints": '{"targets": {"shoulder": 0.5}, "note": "reach"}',
+        "sleep": '{"seconds": 1, "note": "wait"}',
+        "done": '{"summary": "ok"}',
+        "give_up": '{"reason": "stuck"}',
+    }[follow]
+    result = tools.execute(follow, arguments, _arm_obs(0.0, 1.0))
+    assert result.error is None and result.chunk is not None
+    # The elbow stays where the contributed tool opened it; it never snaps shut.
+    assert all(action.data[1] == 1.0 for action in result.chunk.actions)
+    assert adapter.control.setpoint_lines(_arm_obs(0.0, 1.0))[0].endswith("elbow=1.0")
+
+
+def test_a_contributed_chunk_settles_like_a_built_in_move() -> None:
+    adapter = ToolAdapter()
+    adapter.bind(_info())
+
+    def slide(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        waypoints = [Action(data=np.array([0.1 * i, 0.0])) for i in range(1, 6)]
+        return ToolResult(chunk=ActionChunk(actions=waypoints))
+
+    adapter.add_tools(ToolLibrary([replace(_WAVE, name="slide", run=slide)]))
+    adapter.tools.execute("slide", "{}", _arm_obs(0.0, 0.0, step=10))
+    # Cut short after two steps: the setpoint is the second waypoint.
+    lines = adapter.control.setpoint_lines(_arm_obs(0.2, 0.0, step=12))
+    assert lines[0] == "setpoint: shoulder=0.2 elbow=0.0"
+
+
+@pytest.mark.parametrize(
+    "data", [np.array([0.1, np.nan]), np.zeros(3), np.array(["a", "b"], dtype=object)]
+)
+def test_an_unreadable_contributed_chunk_clears_the_setpoint(data: Any) -> None:
+    adapter = ToolAdapter()
+    adapter.bind(_info())
+
+    def odd(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        return ToolResult(chunk=ActionChunk(actions=[Action(data=data)]))
+
+    adapter.add_tools(ToolLibrary([replace(_WAVE, name="odd", run=odd)]))
+    adapter.tools.execute(
+        "move_joints", '{"targets": {"elbow": -1.0}, "note": "x"}', _arm_obs(0, 0)
+    )
+    adapter.tools.execute("odd", "{}", _arm_obs(0.0, -1.0))
+    assert adapter.control.setpoint_lines(_arm_obs(0.0, -1.0)) == [
+        "setpoint: none yet; the first move starts from the readback."
+    ]
+
+
+def test_contributed_results_without_motion_leave_the_setpoint() -> None:
+    adapter = ToolAdapter()
+    adapter.bind(_info())
+
+    def look(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        return ToolResult(note="looked")
+
+    def halt(arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        from inspect_robots.types import GIVE_UP, Termination
+
+        return ToolResult(chunk=ActionChunk(actions=[], terminal=Termination(GIVE_UP, "e-stop")))
+
+    adapter.add_tools(
+        ToolLibrary([replace(_WAVE, name="look", run=look), replace(_WAVE, name="halt", run=halt)])
+    )
+    adapter.tools.execute(
+        "move_joints", '{"targets": {"elbow": -1.0}, "note": "x"}', _arm_obs(0, 0)
+    )
+    adapter.tools.execute("look", "{}", _arm_obs(0.0, -1.0))
+    adapter.tools.execute("halt", "{}", _arm_obs(0.0, -1.0))
+    assert adapter.control.setpoint_lines(_arm_obs(0.0, -1.0))[0].endswith("elbow=-1.0")
+
+
+def test_displacement_surfaces_ignore_contributed_chunks() -> None:
+    from inspect_robots.tools import control_tools
+
+    space = Box(
+        shape=(2,),
+        low=np.array([-0.1, -0.1]),
+        high=np.array([0.1, 0.1]),
+        semantics=ActionSemantics("eef_delta_pos", frame="world"),
+    )
+    control = control_tools(space, ObservationSpace(), control_hz=10.0)
+    control.track(ActionChunk(actions=[Action(data=np.array([0.1, 0.1]))]), Observation())
+    assert control.setpoint_lines(Observation()) == []

@@ -144,6 +144,12 @@ class MyArm:
         return ToolLibrary([Tool("open_gripper", schema, open_gripper)])
 ```
 
+On an absolute surface, the last action of a contributed tool's chunk becomes
+the held setpoint, so a later `move_joints` that doesn't name the gripper, or a
+`sleep`, `done` or `give_up`, keeps it open. A chunk the adapter can't read as
+finite targets of the action space's shape clears the setpoint, and the next
+motion starts from the readback.
+
 ## An embodiment (robot or sim)
 
 An [`Embodiment`](../../src/inspect_robots/embodiment.py) produces observations and executes

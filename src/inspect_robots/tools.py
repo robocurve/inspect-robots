@@ -321,6 +321,37 @@ class ControlTools:
         if "replan" in observation.extra:
             self._held_target = None
 
+    def track(self, chunk: ActionChunk, observation: Observation) -> None:
+        """Adopt a chunk built outside these tools (a contributed tool) as the motion in flight.
+
+        Absolute modes only. Its last action becomes the held setpoint and its
+        actions the waypoints a cut-short replan settles against, so the next
+        built-in move, ``sleep`` or stop holds where that chunk left the robot,
+        not a target from before it. A chunk whose actions cannot be read as
+        finite vectors of this space's shape clears the setpoint instead, so the
+        next motion starts from the readback.
+        """
+        if not self._absolute or not chunk.actions:
+            return
+        shape = self._low.shape
+        waypoints: list[npt.NDArray[np.float64]] = []
+        for action in chunk.actions:
+            try:
+                data = np.asarray(action.data, dtype=np.float64)
+            except (TypeError, ValueError):
+                data = np.full(shape, np.nan)
+            if data.shape != shape or not bool(np.all(np.isfinite(data))):
+                self._held_target = None
+                self._in_flight = None
+                return
+            waypoints.append(np.clip(data, self._low, self._high))
+        self._held_target = waypoints[-1].copy()
+        issued = observation.extra.get("env_step")
+        self._in_flight = (
+            tuple(waypoints),
+            issued if isinstance(issued, int) and not isinstance(issued, bool) else None,
+        )
+
     @property
     def resolved_hz(self) -> float:
         """The control rate motions are timed at (the fallback when the embodiment names none)."""
