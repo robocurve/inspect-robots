@@ -1,4 +1,4 @@
-# 0086: `doctor` preflights configured components before embodiment construction
+# 0089: `doctor` preflights configured components before embodiment construction
 
 Addresses the registry-resolution and aggregate-reporting parts of
 item 1, the policy runtime-requirement part of item 2, and the
