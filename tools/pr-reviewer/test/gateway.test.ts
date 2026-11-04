@@ -34,6 +34,21 @@ describe('Codex private budget gateway', () => {
     expect((await s.gateway.respond(s.token, request)).status).toBe(409);
     expect(creates).toBe(1);
   });
+  it('lets a compaction request above 200k through and stops above the context ceiling', async () => {
+    for (const [tokens, allowed] of [[230_000, true], [260_001, false]] as const) {
+      const s = await setup(); let creates = 0;
+      vi.stubGlobal('fetch', vi.fn(async (url: string | Request, init?: RequestInit) => {
+        const r = new Request(url, init);
+        if (r.url.endsWith('/input_tokens')) return Response.json({ input_tokens: tokens });
+        creates++;
+        return new Response(`data: {"type":"response.completed","response":{"usage":{"input_tokens":${tokens},"output_tokens":10}}}\n\n`);
+      }));
+      const response = await s.gateway.respond(s.token, request);
+      await response.text();
+      expect(response.status === 413).toBe(!allowed);
+      expect(creates).toBe(allowed ? 1 : 0);
+    }
+  });
   it('denies expired capabilities and paid provider tools before inference', async () => {
     const s = await setup(); const send = vi.fn(); vi.stubGlobal('fetch', send);
     expect((await s.gateway.respond(s.token, JSON.stringify({ input: [], tools: [{ type: 'web_search' }] }))).status).toBe(400);

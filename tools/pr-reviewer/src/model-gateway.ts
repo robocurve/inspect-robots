@@ -8,6 +8,7 @@ function localTools(tools: any[]): boolean {
 }
 
 // Private binding. Codex receives a short-lived budget capability, never an API key.
+export const CONTEXT_TOKEN_LIMIT = 260_000;
 export type GatewayEnvironment = Pick<ReviewerEnv, 'OPENAI_API_KEY'> & { LEDGER: Pick<ReviewerEnv['LEDGER'], 'getByName'> };
 export class ModelGateway extends WorkerEntrypoint<GatewayEnvironment> {
   async deliverCheckpoint(receipt: string, body: string): Promise<void> {
@@ -51,7 +52,10 @@ export class ModelGateway extends WorkerEntrypoint<GatewayEnvironment> {
       console.error(JSON.stringify({ event: 'model_stopped', job: job.id, reason: 'token_count_failed', status: error instanceof OpenAI.APIError ? error.status : null }));
       return new Response('Review token counting failed', { status: 502 });
     }
-    if (count.input_tokens > 200_000) return stop('context_too_large', 'Review context limit reached', 413);
+    // Codex compacts its history once it passes 200k tokens (codex_runner.py), and
+    // the compaction request itself carries that history. The ceiling leaves room
+    // for it; gpt-6-astra accepted a 266k-token request on 2026-11-04.
+    if (count.input_tokens > CONTEXT_TOKEN_LIMIT) return stop('context_too_large', 'Review context limit reached', 413);
     const inputReservation = (count.input_tokens + 128) * 13;
     const maxOutput = Math.min(16000, Math.floor((allowance - inputReservation) / 50));
     console.log(JSON.stringify({ event: 'model_allowance', job: job.id, inputTokens: count.input_tokens, remainingMicros: allowance, maxOutput }));

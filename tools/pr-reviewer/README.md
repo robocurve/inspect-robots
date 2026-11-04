@@ -183,7 +183,8 @@ PRs #475 and #476 retain their $210 ceiling, and all other PRs retain $200.
 Existing charges remain intact, and the monthly exception expires in October.
 
 Reservations are atomic across the deployment and recorded before submission.
-Input is counted using OpenAI's token-count endpoint, limited to 200,000 tokens,
+Input is counted using OpenAI's token-count endpoint, limited to 260,000 tokens
+(Codex compacts at 200,000, and the compaction request needs the headroom),
 and reserved at $13/M plus a small token margin. This conservatively covers the
 published $10/M ordinary input and $12.50/M cache-write pricing. Output, including
 reasoning, is reserved at $50/M. Each call allows at most 16,000 output tokens;
