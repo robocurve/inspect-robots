@@ -201,3 +201,4 @@ rollout decision. Implementation is tracked in PR #455; deployment is already li
 - Reviewer version: `89a6b7a0-4888-49dd-81bc-efab94d9f549`.
 - 2026-11-04: after internal review fixes, PR #599 lifetime cap raised to $45, new head `4ca3781c7616228a173f9d2a49e463eac7d7c5c5` to $15, Chris Leet's 2026-11 author cap to $70. Reviewer version `cfa31ca7-5e42-4f73-83b1-6582b4bcaec8`.
 - 2026-11-04: PR #599 head `4ca3781c` held with `context_too_large` after 26 calls: Codex compacts at 200k tokens but the gateway refused anything over 200k, so the compaction request itself was refused. A one-off probe confirmed gpt-6-astra accepts 266k input tokens. Gateway ceiling raised to 260k (`CONTEXT_TOKEN_LIMIT`); runner unchanged. 101 tests pass. Reviewer version `42f4c1fa-a32d-420d-b3db-ff5274deda6e`.
+- 2026-11-04: head `4ca3781c` cap $30, PR #599 $60, author 2026-11 $85 (each run here books ~$6-10).
