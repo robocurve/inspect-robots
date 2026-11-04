@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -61,3 +62,17 @@ def test_read_jsonl_prefix_keeps_prefix_before_torn_multibyte_tail(tmp_path: Pat
     path = tmp_path / "calls.jsonl"
     path.write_bytes(b'{"call": 0}\n{"note": "\xe2\x82')
     assert read_jsonl_prefix(path) == [{"call": 0}]
+
+
+@pytest.mark.parametrize("count", [2, 1000])
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+@pytest.mark.parametrize("bad_line", [b'{"note": "\xff"}', b'{"note": "\xe2'])
+def test_read_jsonl_prefix_preserves_rows_before_invalid_utf8(
+    tmp_path: Path, count: int, newline: bytes, bad_line: bytes
+) -> None:
+    rows = [{"call": i, "note": "café"} for i in range(count)]
+    prefix = b"".join(json.dumps(row, ensure_ascii=False).encode("utf-8") + newline for row in rows)
+    path = tmp_path / "calls.jsonl"
+    path.write_bytes(prefix + bad_line + newline + b'{"call": "after corruption"}\n')
+
+    assert read_jsonl_prefix(path) == rows

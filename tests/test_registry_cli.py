@@ -4138,14 +4138,15 @@ def test_inspect_wire_hostile_pointer_is_treated_as_missing(
     assert "no wire capture recorded" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("tail", [b'{"call": 1, "attempt": 0, "sta', b'{"bad": "\xff"}\n'])
 def test_inspect_wire_keeps_rows_before_a_torn_tail_line(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tail: bytes
 ) -> None:
     row = {"call": 0, "attempt": 0, "endpoint": "/chat/completions", "status": 200}
     path, _ = _write_wire_log(tmp_path, ([row],))
     calls_path = tmp_path / "wire/run/s0-e0/calls.jsonl"
-    with calls_path.open("a", encoding="utf-8") as handle:
-        handle.write('{"call": 1, "attempt": 0, "sta')
+    with calls_path.open("ab") as handle:
+        handle.write(tail)
 
     assert main(["inspect", str(path), "--wire"]) == 0
     out = capsys.readouterr().out
