@@ -438,3 +438,31 @@ def test_observe_parked_halts_park_before_escaping(tmp_path: Path) -> None:
             unfinished, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=grade
         )
     assert embodiment.calls[-1] == "park"
+
+
+def test_a_ctrl_c_while_grading_is_not_parked(tmp_path: Path) -> None:
+    def grade(record: Any, scene: Scene) -> None:
+        raise KeyboardInterrupt
+
+    embodiment = _Lifecycle()
+    with pytest.raises(KeyboardInterrupt):
+        ir_eval(_task(), ScriptedPolicy(), embodiment, log_dir=str(tmp_path), before_scoring=grade)
+    assert "park" not in embodiment.calls
+
+
+def test_a_hook_halt_survives_a_failed_final_log_write(tmp_path: Path) -> None:
+    from inspect_robots import eval_set
+    from inspect_robots.logging import NullSink
+
+    class _FullDisk(NullSink):
+        critical = True
+
+        def on_eval_end(self, log: Any) -> None:
+            raise OSError("disk full")
+
+    embodiment = _Lifecycle(health=SafetyAbort("e-stop"))
+    tasks = [replace(_task(), name="first"), replace(_task(), name="second")]
+    with pytest.raises(SafetyAbort) as raised:
+        eval_set(tasks, ScriptedPolicy(), embodiment, log_dir=str(tmp_path), sinks=[_FullDisk()])
+    assert isinstance(raised.value.__cause__, OSError)
+    assert embodiment.calls.count("health") == 1

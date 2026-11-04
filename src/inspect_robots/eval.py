@@ -1060,7 +1060,9 @@ def _run_eval(
                                         )
                         try:
                             before_scoring(record, graded_scene)
-                        except BaseException:
+                        except Exception:
+                            # Not BaseException: a Ctrl-C at the judgement prompt
+                            # is a cancel, and a cancelled run is never parked.
                             _park_before_escape(embodiment)
                             raise
                         graded_attempts += 1
@@ -1312,10 +1314,13 @@ def _run_eval(
     try:
         bus.on_eval_end(log)
     except Exception as exc:
-        # A failed final write must not swallow the user's Ctrl-C: eval_set
-        # would otherwise treat the OSError as a task error and continue.
+        # A failed final write must not swallow the user's Ctrl-C or a hook
+        # halt: eval_set would otherwise treat the OSError as a task error and
+        # continue on a platform that asked to stop.
         if cancelled_exc is not None:
             raise cancelled_exc from exc
+        if halt_exc is not None:
+            raise halt_exc from exc
         raise
     survivor_warning = _survivor_warning(log)
     if survivor_warning is not None:
