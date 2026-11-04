@@ -1,27 +1,35 @@
-"""The Approver — a safety gate between policy output and the embodiment.
+"""The Guard — a safety gate between policy output and the embodiment.
 
-Every action passes through ``Approver.review`` before ``embodiment.step``. This
+Every action passes through ``Guard.review`` before ``embodiment.step``. This
 is the robotics analog of Inspect AI's ``ApprovalPolicy`` and is more
-safety-critical: an approver may pass, clamp, or veto an action (a veto raises
-[`SafetyAbort`][inspect_robots.errors.SafetyAbort]). In the tracer slice the default approver
-passes everything through; clamping/operator approval land in rollout hardening.
+safety-critical: a guard may pass, clamp, or veto an action (a veto raises
+[`SafetyAbort`][inspect_robots.errors.SafetyAbort]).
+
+Guards are also configuration. ``guard`` is a registry kind whose factories
+take the action space plus keyword parameters (``clamp`` and ``delta-limit``
+are built in), and a guard spec ``NAME`` or ``NAME:key=value,key=value``
+names one. [`build_guard`][inspect_robots.guard.build_guard] turns specs into a
+[`GuardChain`][inspect_robots.guard.GuardChain], which records which guard
+changed an action and the action before and after, so the record shows every
+intervention.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, get_args, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.errors import SafetyAbort
+from inspect_robots.errors import ConfigError, SafetyAbort
 from inspect_robots.spaces import ABSOLUTE_CONTROL_MODES, Box, RotationRepr
 from inspect_robots.types import Action
 
 
 @runtime_checkable
-class Approver(Protocol):
+class Guard(Protocol):
     """Reviews an action before it reaches the embodiment.
 
     May return the action unchanged, return a modified (e.g. clamped) action, or
@@ -34,45 +42,49 @@ class Approver(Protocol):
 
 
 @dataclass(frozen=True)
-class GuardrailContribution:
-    """Approvers an embodiment adds to the CLI's default guardrail chain.
+class GuardContribution:
+    """Guards an embodiment adds to the CLI's default guardrail chain.
 
-    ``approvers`` pairs a short display name (shown in the ``guardrails:``
-    banner) with each approver to append. ``warnings`` names contributions
+    ``guards`` pairs a short display name (shown in the ``guardrails:``
+    banner) with each guard to append. ``warnings`` names contributions
     the embodiment declined to make or made in a degraded state, and why, so
-    neither condition is invisible. Warnings may accompany active approvers.
+    neither condition is invisible. Warnings may accompany active guards.
 
-    A contributed approver must preserve the incoming ``Action`` object's
+    A contributed guard must preserve the incoming ``Action`` object's
     identity when approving it unmodified. If it substitutes another target,
     such as holding an earlier pose, it must call
-    ``DeltaLimitApprover.rewind_reference`` with that executed pose so later
+    ``DeltaLimitGuard.rewind_reference`` with that executed pose so later
     deltas are measured from reality. It vetoes by raising ``SafetyAbort``;
     other exceptions are bugs and propagate. The rollout enforces finiteness
-    before review and again on the returned action, so contributed approvers
+    before review and again on the returned action, so contributed guards
     need not duplicate that validation.
     """
 
-    approvers: tuple[tuple[str, Approver], ...] = ()
+    guards: tuple[tuple[str, Guard], ...] = ()
     warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name, approver in self.approvers:
+        for name, guard in self.guards:
             if not name or "\n" in name or "\r" in name:
                 raise ValueError("guardrail display names must be non-empty and newline-free")
-            if not callable(getattr(approver, "review", None)):
-                raise ValueError(f"guardrail approver {name!r} must have a callable review")
+            if not callable(getattr(guard, "review", None)):
+                raise ValueError(f"guardrail guard {name!r} must have a callable review")
 
 
-class AutoApprover:
+class PassThroughGuard:
     """Approve every action unchanged (the permissive default)."""
+
+    name = "pass_through"
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Pass the action through without modifying its identity."""
         return action
 
 
-class ClampApprover:
+class ClampGuard:
     """Clamp actions to a box's ``low``/``high`` bounds before they reach hardware.
+
+    Registered as the ``clamp`` guard.
 
     One-sided boxes are honored: a ``low``-only box clamps from below, a
     ``high``-only box from above. A modified action is flagged via
@@ -89,14 +101,24 @@ class ClampApprover:
     out-of-range value (and passes through if that side is unbounded).
     """
 
+    name = "clamp"
+
     def __init__(self, action_space: Box):
         self._space = action_space
+
+    def config(self) -> dict[str, Any]:
+        """The bounds this guard clamps to, as recorded in a trial's record."""
+        low, high = self._space.low, self._space.high
+        return {
+            "low": None if low is None else low.tolist(),
+            "high": None if high is None else high.tolist(),
+        }
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
         """Reject NaNs and clamp bounded dimensions, preserving identity when unchanged."""
         data = np.asarray(action.data, dtype=np.float64)
         if bool(np.isnan(data).any()):
-            raise SafetyAbort("ClampApprover: action contains NaN; refusing to pass it on")
+            raise SafetyAbort("ClampGuard: action contains NaN; refusing to pass it on")
         low, high = self._space.low, self._space.high
         if low is None and high is None:
             return action
@@ -116,7 +138,7 @@ _POSE_MODES = frozenset({"eef_abs_pose", "eef_delta_pose"})
 _ABSOLUTE_POSE_MODES = ABSOLUTE_CONTROL_MODES & _POSE_MODES
 _DISPLACEMENT_POSE_MODES = _POSE_MODES - _ABSOLUTE_POSE_MODES
 # Rotation reps that survive independent per-dimension clamping of an absolute
-# orientation (same set the EnsemblingController accepts for per-dimension
+# orientation (same set the EnsemblingActionManager accepts for per-dimension
 # averaging).
 _LIMITABLE_ROT = frozenset({"none", "rot6d"})
 # Displacement pose modes carry rotation *deltas*, whose no-op is not the zero
@@ -138,7 +160,7 @@ _DISPLACEMENT_SAFE_ROT = frozenset(get_args(RotationRepr)) - _DISPLACEMENT_POSE_
 _LAST_APPROVED_KEY = "delta_limit:last"
 
 
-class DeltaLimitApprover:
+class DeltaLimitGuard:
     """The "no wild swings" gate — semantics-aware per-step change limiting.
 
     Absolute-target modes (``joint_pos``, ``eef_abs_pose``) clamp each
@@ -153,7 +175,7 @@ class DeltaLimitApprover:
     dimension clamps to the intersection of the box and
     ``[-max_delta, +max_delta]``. The derived default is the box alone —
     core cannot assume displacement bounds are per-step-sized, so without an
-    explicit ``max_delta`` the limiter adds nothing beyond ``ClampApprover``.
+    explicit ``max_delta`` the limiter adds nothing beyond ``ClampGuard``.
 
     Construction never guesses: missing semantics, a needed missing/non-finite
     bound without an explicit ``max_delta``, an absolute pose mode whose
@@ -161,7 +183,7 @@ class DeltaLimitApprover:
     pose mode carrying a quaternion or rot6d delta (whose identity is not the
     zero vector, so per-dimension clamping distorts it) all raise ``ValueError``.
     Non-finite values (``NaN`` or ``±inf``) anywhere in a reviewed action raise
-    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampApprover``
+    [`SafetyAbort`][inspect_robots.errors.SafetyAbort]. Unlike ``ClampGuard``
     (which clamps ``±inf`` to finite box bounds), a delta limiter cannot clamp
     ``±inf`` into anything meaningful because it has no trustworthy finite bound
     on the first absolute step. A modified action is
@@ -170,16 +192,18 @@ class DeltaLimitApprover:
     lives in the rollout ``store`` (fresh per trial) under a namespaced key.
     """
 
+    name = "delta-limit"
+
     def __init__(self, action_space: Box, max_delta: float | Any | None = None):
         sem = action_space.semantics
         if sem is None:
             raise ValueError(
-                "DeltaLimitApprover: action space declares no semantics; the "
+                "DeltaLimitGuard: action space declares no semantics; the "
                 "limiter cannot tell absolute targets from displacements"
             )
         if sem.control_mode in _ABSOLUTE_POSE_MODES and sem.rotation_repr not in _LIMITABLE_ROT:
             raise ValueError(
-                f"DeltaLimitApprover: cannot clamp absolute rotation_repr "
+                f"DeltaLimitGuard: cannot clamp absolute rotation_repr "
                 f"{sem.rotation_repr!r} per dimension; only {sorted(_LIMITABLE_ROT)} "
                 f"are safe"
             )
@@ -188,7 +212,7 @@ class DeltaLimitApprover:
             and sem.rotation_repr in _DISPLACEMENT_POSE_UNSAFE_ROT
         ):
             raise ValueError(
-                f"DeltaLimitApprover: cannot clamp displacement rotation_repr "
+                f"DeltaLimitGuard: cannot clamp displacement rotation_repr "
                 f"{sem.rotation_repr!r} per dimension; its identity is not at the "
                 f"origin, so per-dimension clamping distorts it instead of "
                 f"limiting it; only {sorted(_DISPLACEMENT_SAFE_ROT)} are safe here"
@@ -212,7 +236,7 @@ class DeltaLimitApprover:
                 )
                 if bool(np.any(undeclared)) and (low is None or high is None):
                     raise ValueError(
-                        "DeltaLimitApprover: deriving a default needs finite low/high "
+                        "DeltaLimitGuard: deriving a default needs finite low/high "
                         "bounds; pass max_delta explicitly"
                     )
                 self._delta = np.empty(dim, dtype=np.float64)
@@ -228,7 +252,7 @@ class DeltaLimitApprover:
                         and np.all(np.isfinite(native_default))
                     ):
                         raise ValueError(
-                            "DeltaLimitApprover: deriving a default needs finite low/high "
+                            "DeltaLimitGuard: deriving a default needs finite low/high "
                             "bounds; pass max_delta explicitly"
                         )
                     self._delta[undeclared] = native_default
@@ -241,24 +265,39 @@ class DeltaLimitApprover:
         else:
             if explicit is None and (low is None or high is None):
                 raise ValueError(
-                    "DeltaLimitApprover: a displacement-mode space without both "
+                    "DeltaLimitGuard: a displacement-mode space without both "
                     "bounds needs an explicit max_delta"
                 )
             self._low = low if explicit is None else _intersect(low, -explicit, np.maximum)
             self._high = high if explicit is None else _intersect(high, explicit, np.minimum)
 
+    def config(self) -> dict[str, Any]:
+        """The resolved limits, as recorded in a trial's record.
+
+        Absolute modes report the per-dimension ``max_delta`` around the last
+        approved action; displacement modes report the clamp box after
+        intersecting the space with ``max_delta``.
+        """
+        if self._absolute:
+            return {"mode": "absolute", "max_delta": self._delta.tolist()}
+        return {
+            "mode": "displacement",
+            "low": None if self._low is None else np.asarray(self._low).tolist(),
+            "high": None if self._high is None else np.asarray(self._high).tolist(),
+        }
+
     @staticmethod
     def rewind_reference(store: dict[str, Any], pose: npt.NDArray[np.float64]) -> None:
         """Reset an existing limiter reference to a copy of an executed pose.
 
-        A downstream approver that substitutes a target, such as holding an
+        A downstream guard that substitutes a target, such as holding an
         earlier safe pose, must use this before the next action is reviewed so
         the limiter measures subsequent deltas from the pose that actually ran.
         If the limiter has not established a reference, this is a no-op.
         """
         if not bool(np.all(np.isfinite(pose))):
             raise ValueError(
-                "DeltaLimitApprover: rewind_reference received a non-finite pose; "
+                "DeltaLimitGuard: rewind_reference received a non-finite pose; "
                 "refusing to corrupt reference state"
             )
         if _LAST_APPROVED_KEY in store:
@@ -269,7 +308,7 @@ class DeltaLimitApprover:
         data = np.asarray(action.data, dtype=np.float64)
         if not bool(np.all(np.isfinite(data))):
             raise SafetyAbort(
-                "DeltaLimitApprover: action contains a non-finite value (NaN or ±inf); "
+                "DeltaLimitGuard: action contains a non-finite value (NaN or ±inf); "
                 "refusing to pass it on"
             )
         if self._absolute:
@@ -298,10 +337,10 @@ def _validate_max_delta(
             arr = np.broadcast_to(raw, (dim,)).reshape(shape)
         except ValueError as exc:
             raise ValueError(
-                f"DeltaLimitApprover: max_delta does not broadcast to {shape} (or {dim} dimensions)"
+                f"DeltaLimitGuard: max_delta does not broadcast to {shape} (or {dim} dimensions)"
             ) from exc
     if not bool(np.all(np.isfinite(arr))) or bool(np.any(arr <= 0)):
-        raise ValueError("DeltaLimitApprover: max_delta must be finite and > 0")
+        raise ValueError("DeltaLimitGuard: max_delta must be finite and > 0")
     # Shaped like the box for the same reason the derived default is: review()
     # clips against the action's own shape, and the displacement branch
     # intersects with bounds of that shape, so a flat delta fails to broadcast
@@ -319,25 +358,123 @@ def _intersect(
     return result
 
 
-class ChainApprover:
-    """Run approvers in sequence, feeding each the previous one's result.
+# Where a GuardChain lists the guards that changed the action under review, as
+# {"guard", "before", "after"}; the rollout moves them into the approval event.
+_GUARD_TRACE_KEY = "_guard_trace"
+
+
+def guard_name(guard: object) -> str:
+    """A guard's ``name`` attribute, or its class name when it has none."""
+    name = getattr(guard, "name", None)
+    return name if isinstance(name, str) and name else type(guard).__name__
+
+
+def _values(action: Action) -> list[float]:
+    return [float(value) for value in np.asarray(action.data, dtype=np.float64).ravel()]
+
+
+class GuardChain:
+    """Run guards in sequence, feeding each the previous one's result.
 
     Gives "guardrails" one composable name, e.g.
-    ``ChainApprover(ClampApprover(space), DeltaLimitApprover(space))``.
-    Identity is preserved end to end: if no approver modifies the action, the
+    ``GuardChain(ClampGuard(space), DeltaLimitGuard(space))``.
+    Identity is preserved end to end: if no guard modifies the action, the
     original object comes back, so the rollout's modification check still works.
+    ``names`` labels the guards in the record (default: each guard's
+    [`guard_name`][inspect_robots.guard.guard_name]). Each guard that changes the
+    action is noted with the action before and after it.
     """
 
-    def __init__(self, *approvers: Approver):
-        for approver in approvers:
-            if not callable(getattr(approver, "review", None)):
-                raise ValueError(
-                    f"ChainApprover element must have a callable review, got {approver!r}"
-                )
-        self._approvers = approvers
+    name = "chain"
+
+    def __init__(self, *guards: Guard, names: Sequence[str] | None = None):
+        for guard in guards:
+            if not callable(getattr(guard, "review", None)):
+                raise ValueError(f"GuardChain element must have a callable review, got {guard!r}")
+        if names is not None and len(names) != len(guards):
+            raise ValueError(f"GuardChain got {len(names)} names for {len(guards)} guards")
+        self.guards = guards
+        self.names = tuple(names) if names is not None else tuple(guard_name(g) for g in guards)
 
     def review(self, action: Action, store: dict[str, Any]) -> Action:
-        """Apply each configured gate in order to the preceding gate's output."""
-        for approver in self._approvers:
-            action = approver.review(action, store)
+        """Apply each configured gate in order to the preceding gate's output.
+
+        Every member that limits absolute deltas measures against the same
+        reference: the action the previous chain review approved. Without this,
+        an earlier limiter would advance the shared reference to its own output
+        before a later, tighter limiter read it, so the tighter limit could never
+        bind. After the chain, the reference is the chain's final output.
+        """
+        trace: list[dict[str, Any]] = store.setdefault(_GUARD_TRACE_KEY, [])
+        had_reference = _LAST_APPROVED_KEY in store
+        reference = store.get(_LAST_APPROVED_KEY)
+        limited = had_reference
+        for name, guard in zip(self.names, self.guards, strict=True):
+            if had_reference:
+                store[_LAST_APPROVED_KEY] = reference
+            else:
+                store.pop(_LAST_APPROVED_KEY, None)
+            reviewed = guard.review(action, store)
+            limited = limited or _LAST_APPROVED_KEY in store
+            if reviewed is not action:
+                trace.append({"guard": name, "before": _values(action), "after": _values(reviewed)})
+            action = reviewed
+        if limited:
+            # The chain's output is what executes, including a substituted hold
+            # target, so it is the next review's reference.
+            store[_LAST_APPROVED_KEY] = np.asarray(action.data, dtype=np.float64).copy()
         return action
+
+
+def parse_guard_spec(spec: str) -> tuple[str, dict[str, Any]]:
+    """Split ``NAME`` or ``NAME:key=value,key=value`` into a name and parsed parameters.
+
+    Values are parsed like CLI ``-P k=v`` values (booleans, numbers, ``none``,
+    quoted strings).
+    """
+    from inspect_robots.defaults import _parse_value
+
+    name, _, rest = spec.partition(":")
+    name = name.strip()
+    if not name:
+        raise ConfigError(f"guard spec {spec!r} has no name.\nfix: write NAME or NAME:k=v,k=v")
+    params: dict[str, Any] = {}
+    for item in filter(None, (part.strip() for part in rest.split(","))):
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise ConfigError(
+                f"guard spec {spec!r}: {item!r} is not key=value.\nfix: write NAME:k=v,k=v"
+            )
+        params[key.strip()] = _parse_value(value.strip())
+    return name, params
+
+
+def build_guard(specs: Sequence[str | Guard], action_space: Box) -> Guard:
+    """One guard from specs or guard objects, applied in order.
+
+    A string is a registered guard spec (``NAME`` or ``NAME:k=v,...``); its
+    factory is called with ``action_space`` and the parameters. An unknown
+    name or a factory that rejects its parameters raises ``ConfigError``.
+    """
+    from inspect_robots.registry import registered, resolve
+
+    guards: list[Guard] = []
+    names: list[str] = []
+    for spec in specs:
+        if not isinstance(spec, str):
+            guards.append(spec)
+            names.append(guard_name(spec))
+            continue
+        name, params = parse_guard_spec(spec)
+        if name not in registered("guard"):
+            known = ", ".join(sorted(registered("guard"))) or "(none)"
+            raise ConfigError(f"unknown guard {name!r}; registered guards: {known}")
+        try:
+            guard = resolve("guard", name, action_space=action_space, **params)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"guard {spec!r}: {exc}") from exc
+        if not callable(getattr(guard, "review", None)):
+            raise ConfigError(f"guard {name!r} factory returned {guard!r}, which has no review")
+        guards.append(guard)
+        names.append(name)
+    return GuardChain(*guards, names=names)

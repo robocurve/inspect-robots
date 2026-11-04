@@ -15,6 +15,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from inspect_robots.rubric import Rubric, check_unique
+
 
 @dataclass(frozen=True)
 class Target:
@@ -31,7 +33,11 @@ class Target:
 
 @dataclass(frozen=True)
 class Scene:
-    """One initial condition of a benchmark."""
+    """One initial condition of a benchmark.
+
+    ``rubrics`` are this scene's own rubrics: each replaces the task's rubric of
+    the same name, or adds a new one (see [`Rubric`][inspect_robots.rubric.Rubric]).
+    """
 
     id: str
     instruction: str
@@ -39,6 +45,10 @@ class Scene:
     init_seed: int | None = None
     setup: str | None = None  # registered setup-hook name (serializable)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    rubrics: Sequence[Rubric] = ()
+
+    def __post_init__(self) -> None:
+        check_unique(self.rubrics, f"Scene {self.id!r}")
 
 
 class ListSceneDataset:

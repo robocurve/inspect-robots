@@ -1,0 +1,1 @@
+Agent plugin: observations' `extra["motor_temps"]["lines"]` are rendered for the model like the motion report, every observation carries the wall-clock time since the trial began, and a `sleep` tool holds the current setpoint for up to 180 s without spending an LLM call (plan 0087).

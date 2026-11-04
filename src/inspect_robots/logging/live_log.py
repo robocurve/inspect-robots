@@ -27,7 +27,7 @@ from inspect_robots.logging.json_log import _sanitize, _slug
 from inspect_robots.transcript import judgement_source
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.scene import Scene
     from inspect_robots.types import Action, Observation, StepResult
 
@@ -201,7 +201,7 @@ class LiveLogSink:
         except Exception as exc:
             self._disable(exc)
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Replace the active slot with the completed record and force a snapshot."""
         if self._disabled:
             return

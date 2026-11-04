@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-robots-agent"
-version = "0.29.0"
+version = "0.30.0"
 description = "LLM agent policy for Inspect Robots: frontier LLMs (Claude, GPT, anything OpenAI-compatible) drive any registered embodiment through tool calls."
 dynamic = ["readme"]
 requires-python = ">=3.11"
@@ -25,7 +25,7 @@ classifiers = [
 # their compatibility endpoints do not expose. This keeps the same "speak the
 # protocol, don't import the package" doctrine as the xpolicylab plugin.
 dependencies = [
-    "inspect-robots>=0.30",
+    "inspect-robots>=0.61",
     "numpy>=1.24",
     "httpx>=0.27",
     "websockets>=12",

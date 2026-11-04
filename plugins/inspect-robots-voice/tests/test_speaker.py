@@ -14,7 +14,7 @@ import pytest
 
 import inspect_robots_voice._speaker as speaker_module
 from inspect_robots.log import EvalLog
-from inspect_robots.rollout import TrialRecord
+from inspect_robots.rollout import Record
 from inspect_robots.types import OPERATOR_END
 from inspect_robots_voice._speaker import SpeakerSink, extract_speech
 
@@ -158,8 +158,8 @@ def _log(status: str) -> EvalLog:
     return cast(EvalLog, SimpleNamespace(status=status))
 
 
-def _record(termination_reason: str | None = None) -> TrialRecord:
-    return TrialRecord(
+def _record(termination_reason: str | None = None) -> Record:
+    return Record(
         scene_id="scene",
         epoch=0,
         seed=0,

@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from inspect_robots.approver import AutoApprover
-from inspect_robots.controller import DefaultController
+from inspect_robots.action_manager import DefaultActionManager
 from inspect_robots.eval import _Broadcast
+from inspect_robots.guard import PassThroughGuard
 from inspect_robots.logging.sink import LogSink, NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
-from inspect_robots.rollout import TrialRecord, rollout
+from inspect_robots.rollout import Record, rollout
 from inspect_robots.scene import Scene
 from inspect_robots.types import Action, Observation, StepResult
 
@@ -70,7 +70,7 @@ class _RecordingSink(NullSink):
         self.order.append(("step", t))
 
 
-def _run(policy: ScriptedPolicy, sink: LogSink, *, max_steps: int = 3) -> TrialRecord:
+def _run(policy: ScriptedPolicy, sink: LogSink, *, max_steps: int = 3) -> Record:
     return rollout(
         policy,
         CubePickEmbodiment(),
@@ -78,8 +78,8 @@ def _run(policy: ScriptedPolicy, sink: LogSink, *, max_steps: int = 3) -> TrialR
         max_steps=max_steps,
         seed=0,
         epoch=0,
-        controller=DefaultController(),
-        approver=AutoApprover(),
+        action_manager=DefaultActionManager(),
+        guard=PassThroughGuard(),
         sink=sink,
     )
 

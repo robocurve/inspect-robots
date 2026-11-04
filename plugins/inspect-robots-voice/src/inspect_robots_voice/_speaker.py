@@ -23,7 +23,7 @@ from inspect_robots_voice._tts import KokoroEngine, TtsEngine, resolve_model_fil
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
 
 PlaybackDevice = str | int | None
 EngineFactory = Callable[[], TtsEngine]
@@ -242,7 +242,7 @@ class SpeakerSink(NullSink):
             suffix = "" if dropped == 1 else "s"
             print(f"speaker: dropped {dropped} stale note{suffix}", file=sys.stderr)
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Silence operator-ended narration in every mode while natural endings play out."""
         if record.termination_reason != OPERATOR_END:
             return

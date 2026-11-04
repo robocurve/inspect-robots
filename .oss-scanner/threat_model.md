@@ -28,7 +28,7 @@ Treat all of these as attacker-controlled:
   must isolate the whole evaluator in a container or VM. Do not report imports,
   file, network, or process access from generated code as vulnerabilities. In
   scope: robot motion that generated code can produce without passing through
-  the approver chain, and bugs in how model output is parsed before execution.
+  the guard chain, and bugs in how model output is parsed before execution.
 - **Robot middleware:** `plugins/inspect-robots-ros` speaks rosbridge JSON over
   websockets. A malicious or compromised rosbridge server is in scope.
 - **Eval logs and frame directories:** `inspect-robots view`, `inspect`,
@@ -45,10 +45,10 @@ Treat all of these as attacker-controlled:
 
 ## Components that matter most
 
-1. The safety gate: `approver.py` (`ClampApprover`, `DeltaLimitApprover`,
-   `ChainApprover`) and the non-finite-action check in `rollout.py`. Any input
+1. The safety gate: `guard.py` (`ClampGuard`, `DeltaLimitGuard`,
+   `GuardChain`) and the non-finite-action check in `rollout.py`. Any input
    that makes an action reach `Embodiment.step()` outside the configured bounds,
-   bypasses the approver chain, or turns a halting error (`SafetyAbort`,
+   bypasses the guard chain, or turns a halting error (`SafetyAbort`,
    `EmbodimentFault`) into a continuing one is the most important class of bug.
 2. Deserialisation of network responses in the plugins listed above.
 3. HTML report rendering (`_html.py`) and the `--serve` HTTP server.

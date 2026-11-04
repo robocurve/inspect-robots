@@ -25,6 +25,13 @@ Subcommands:
 - ``inspect-robots video LOG.json`` — render a ``--store-frames`` run's stored
   camera frames to one MP4 per (trial, camera) stream via the ffmpeg binary.
 - ``inspect-robots setup`` — interactively configure defaults and camera devices.
+- ``inspect-robots edit LOG.json --trial SCENE-eEPOCH --judgement V --author NAME``
+  — append an annotation (a judgement or note, with provenance) beside a saved
+  log, which itself is never rewritten.
+- ``inspect-robots score LOG.json [--out PATH]`` — re-score a saved log from its
+  annotations and compare with the stored results.
+- ``inspect-robots analyze NAME LOG.json ...`` — run a registered analyzer
+  (``scores``, ``terminations``, ``digest``, ``html`` or a plugin's) over saved logs.
 
 Zero-config form (plan 0005): ``inspect-robots "place the spoon on the plate"``
 is sugar for ``run --instruction "..."`` — a single ad-hoc scene on the user's
@@ -88,13 +95,14 @@ from inspect_robots.defaults import (
 )
 from inspect_robots.registry import registered
 from inspect_robots.session import ECHO_INTERVAL_S, OperatorSession
-from inspect_robots.types import OPERATOR_END
+from inspect_robots.types import HORIZON_REASONS, OPERATOR_END
 
 if TYPE_CHECKING:
-    from inspect_robots.approver import Approver
+    from inspect_robots.benchmark import Benchmark
     from inspect_robots.console import OperatorInput
     from inspect_robots.embodiment import Embodiment
     from inspect_robots.grader import Grader
+    from inspect_robots.guard import Guard
     from inspect_robots.log import EvalLog
     from inspect_robots.logging.sink import LogSink
     from inspect_robots.spaces import Box
@@ -129,6 +137,7 @@ _OUTCOME_PHRASES = {
     "success": "succeeded",
     "failure": "failed",
     "max_steps": "hit step limit",
+    "max_seconds": "hit time limit",
     OPERATOR_END: "ended by operator",
     "give_up": "gave up",
     "done": "reported done",
@@ -145,6 +154,9 @@ _KIND_BY_PLURAL = {
     "graders": "grader",
     "sinks": "sink",
     "operator_inputs": "operator_input",
+    "analyzers": "analyzer",
+    "guards": "guard",
+    "benchmarks": "benchmark",
 }
 
 _PLURAL_BY_KIND = {kind: plural for plural, kind in _KIND_BY_PLURAL.items()}
@@ -160,6 +172,9 @@ _SUBCOMMANDS = (
     "config",
     "setup",
     "doctor",
+    "edit",
+    "score",
+    "analyze",
 )
 
 _ENV_BY_KIND = {"policy": _ENV_POLICY, "embodiment": _ENV_EMBODIMENT}
@@ -257,8 +272,17 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--disable-guardrails",
         action="store_true",
-        help="turn off the default safety approvers (bounds clamp + per-step "
+        help="turn off the default safety guards (bounds clamp + per-step "
         "delta limit); actions reach the embodiment unchecked",
+    )
+    parser.add_argument(
+        "--guard",
+        action="append",
+        default=None,
+        metavar="NAME[:k=v,...]",
+        help="add a registered guard after the default guardrails (repeatable; "
+        "see `inspect-robots list guards`), e.g. --guard delta-limit:max_delta=0.02; "
+        "a [guards] config section adds guards the same way",
     )
     parser.add_argument(
         "--max-action-delta",
@@ -324,6 +348,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="run an evaluation")
     p_run.add_argument("--task", help="registered task name")
+    p_run.add_argument(
+        "--benchmark",
+        default=None,
+        metavar="NAME",
+        help="run every task of a registered benchmark (see `inspect-robots list benchmarks`)",
+    )
     p_run.add_argument(
         "--instruction",
         help="run a single ad-hoc scene with this language instruction "
@@ -409,9 +439,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval_set = sub.add_parser("eval-set", help="run a set of registered tasks in one invocation")
     p_eval_set.add_argument(
         "tasks",
-        nargs="+",
+        nargs="*",
         metavar="TASK",
         help="registered task name(s); shell-quoted globs match by prefix, e.g. 'kitchenbench/*'",
+    )
+    p_eval_set.add_argument(
+        "--benchmark",
+        default=None,
+        metavar="NAME",
+        help="run every task of a registered benchmark instead of named tasks",
     )
     _add_shared_eval_args(p_eval_set)
     _add_config_arg(p_eval_set)
@@ -450,6 +486,52 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SCENE-eEPOCH",
         help="select a captured trial for --wire CALL",
+    )
+
+    p_edit = sub.add_parser(
+        "edit",
+        help="append a judgement or note about one trial beside a saved log",
+    )
+    p_edit.add_argument("log", help="path to an EvalLog JSON file")
+    target = p_edit.add_mutually_exclusive_group(required=True)
+    target.add_argument("--record", default=None, help="the trial's record id")
+    target.add_argument(
+        "--trial", default=None, metavar="SCENE-eEPOCH", help="the trial by scene and epoch"
+    )
+    content = p_edit.add_mutually_exclusive_group(required=True)
+    content.add_argument("--judgement", default=None, help="a verdict such as yes, no, partial")
+    content.add_argument("--note", default=None, help="a free-text note")
+    p_edit.add_argument(
+        "--rubric",
+        default=None,
+        help=(
+            "the rubric a judgement is for (default: all of them, or the rubric the run's "
+            "verdict was scoped to when the trial has several judgement rubrics)"
+        ),
+    )
+    p_edit.add_argument("--author", required=True, help="who is making this edit")
+    p_edit.add_argument("--reason", default=None, help="why, recorded with a judgement as its note")
+
+    p_score = sub.add_parser(
+        "score", help="re-score a saved log from its annotations and compare with its results"
+    )
+    p_score.add_argument("log", help="path to an EvalLog JSON file")
+    p_score.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "write the re-scored log here, with a copy of its annotations file beside it "
+            "(a new file in the input log's directory, so its records stay reachable; "
+            "the input log is never rewritten)"
+        ),
+    )
+
+    p_analyze = sub.add_parser("analyze", help="run a registered analyzer over saved logs")
+    p_analyze.add_argument("analyzer", help="analyzer name (see `inspect-robots list analyzers`)")
+    p_analyze.add_argument("logs", nargs="+", help="EvalLog JSON files")
+    p_analyze.add_argument("--json", action="store_true", help="print the analysis data as JSON")
+    p_analyze.add_argument(
+        "--out", default=None, help="directory for the files an analyzer produces"
     )
 
     p_summarize = sub.add_parser(
@@ -793,67 +875,100 @@ def _build_guardrails(
     space: Box,
     max_action_delta: float | None,
     embodiment: Embodiment | None = None,
-) -> tuple[Approver, list[str], list[str]]:
+    extra: Sequence[str] = (),
+    *,
+    defaults: bool = True,
+) -> tuple[Guard, list[str], list[str]]:
     """The default CLI safety chain for an action space (plan 0008 §3e).
 
-    Returns ``(approver, active, warnings)``. Degrades per component instead
+    Returns ``(guard, active, warnings)``. Degrades per component instead
     of blocking: a component that cannot apply to this space is skipped with
     a warning naming the actual refusal reason (the constructor's message),
     so the CLI is never *less* protective than running without guardrails —
     and never silently unprotected either.
     """
-    from inspect_robots.approver import (
-        AutoApprover,
-        ChainApprover,
-        ClampApprover,
-        DeltaLimitApprover,
-        GuardrailContribution,
-    )
+    from inspect_robots.guard import GuardChain, PassThroughGuard
 
-    parts: list[Approver] = []
+    parts: list[Guard] = []
     active: list[str] = []
     warnings: list[str] = []
-    if space.low is None and space.high is None:
-        warnings.append("bounds clamp skipped: the action space declares no low/high bounds")
-    else:
-        parts.append(ClampApprover(space))
-        active.append("clamp")
-    try:
-        # Catch the constructor's refusal generically — whatever the §3a
-        # reason — rather than pre-checking an enumerated list.
-        parts.append(DeltaLimitApprover(space, max_delta=max_action_delta))
-        active.append("delta-limit")
-    except ValueError as exc:
-        warnings.append(f"delta limit skipped: {exc}")
+    if defaults:
+        _default_guardrails(space, max_action_delta, embodiment, parts, active, warnings)
+    if extra:
+        from inspect_robots.errors import ConfigError
+        from inspect_robots.guard import build_guard
 
-    missing = object()
-    hook = getattr(embodiment, "contribute_guardrails", missing)
-    if hook is not missing:
-        if not callable(hook):
-            assert embodiment is not None
-            raise SystemExit(
-                f"embodiment {embodiment.info.name!r} contribute_guardrails is "
-                f"not callable (got {type(hook).__name__})"
-            )
-        contribution = hook(space)
-        if not isinstance(contribution, GuardrailContribution):
-            assert embodiment is not None
-            raise SystemExit(
-                f"embodiment {embodiment.info.name!r} contribute_guardrails returned "
-                f"{type(contribution).__name__}, expected GuardrailContribution"
-            )
-        for name, approver in contribution.approvers:
-            parts.append(approver)
-            active.append(name)
-        warnings.extend(contribution.warnings)
+        try:
+            configured = build_guard(list(extra), space)
+        except ConfigError as exc:
+            raise SystemExit(str(exc)) from exc
+        assert isinstance(configured, GuardChain)
+        parts.extend(configured.guards)
+        active.extend(configured.names)
 
     if not parts:
         warnings.append(
             "no guardrails are active for this action space; declare bounds/semantics "
             "on the embodiment or pass --max-action-delta"
         )
-        return AutoApprover(), active, warnings
-    return ChainApprover(*parts), active, warnings
+        return PassThroughGuard(), active, warnings
+    return GuardChain(*parts, names=active), active, warnings
+
+
+def _default_guardrails(
+    space: Box,
+    max_action_delta: float | None,
+    embodiment: Embodiment | None,
+    parts: list[Guard],
+    active: list[str],
+    warnings: list[str],
+) -> None:
+    """Append the bounds clamp, the delta limit and the embodiment's contributed guards."""
+    from inspect_robots.conformance import _unmigrated_guard_hook
+    from inspect_robots.guard import ClampGuard, DeltaLimitGuard, GuardContribution
+
+    if space.low is None and space.high is None:
+        warnings.append("bounds clamp skipped: the action space declares no low/high bounds")
+    else:
+        parts.append(ClampGuard(space))
+        active.append("clamp")
+    try:
+        # Catch the constructor's refusal generically — whatever the §3a
+        # reason — rather than pre-checking an enumerated list.
+        parts.append(DeltaLimitGuard(space, max_delta=max_action_delta))
+        active.append("delta-limit")
+    except ValueError as exc:
+        warnings.append(f"delta limit skipped: {exc}")
+
+    missing = object()
+    hook = getattr(embodiment, "contribute_guards", missing)
+    if _unmigrated_guard_hook(embodiment):
+        # The pre-paper hook name: running would silently drop the embodiment's
+        # own safety guards, so refuse until the adapter is migrated.
+        assert embodiment is not None
+        raise SystemExit(
+            f"embodiment {embodiment.info.name!r} defines contribute_guardrails(), which "
+            "was renamed contribute_guards() and returns GuardContribution; update the "
+            "adapter (see docs/migrating-to-the-paper-release.md)"
+        )
+    if hook is not missing:
+        if not callable(hook):
+            assert embodiment is not None
+            raise SystemExit(
+                f"embodiment {embodiment.info.name!r} contribute_guards is "
+                f"not callable (got {type(hook).__name__})"
+            )
+        contribution = hook(space)
+        if not isinstance(contribution, GuardContribution):
+            assert embodiment is not None
+            raise SystemExit(
+                f"embodiment {embodiment.info.name!r} contribute_guards returned "
+                f"{type(contribution).__name__}, expected GuardContribution"
+            )
+        for name, guard in contribution.guards:
+            parts.append(guard)
+            active.append(name)
+        warnings.extend(contribution.warnings)
 
 
 def _attended(args: argparse.Namespace) -> bool:
@@ -1072,7 +1187,9 @@ def _connect_grader_session(grader: Grader | None, session: OperatorSession | No
 def _step_limit_count(log: EvalLog) -> int:
     """Count recorded trials whose termination reason is the step horizon."""
     return sum(
-        reason == "max_steps" for scene in log.samples for reason in scene.termination_reasons
+        isinstance(reason, str) and reason in HORIZON_REASONS
+        for scene in log.samples
+        for reason in scene.termination_reasons
     )
 
 
@@ -1572,29 +1689,40 @@ def _announce_components(resolved: _ResolvedComponents) -> None:
 
 def _build_and_announce_guardrails(
     args: argparse.Namespace, action_space: Box, embodiment: Embodiment
-) -> Approver | None:
+) -> Guard | None:
     """Build the default guardrail chain for a run, announcing what is active.
 
-    Guardrails are on by default (plan 0008 §3e): the approver chain sits below
+    Guardrails are on by default (plan 0008 §3e): the guard chain sits below
     the policy in rollout, so nothing the policy emits — a wild VLA action or a
     misbehaving LLM — reaches hardware unchecked. Returns ``None`` (the eval's
     own default) only when ``--disable-guardrails`` is given.
     """
+    extra = [*load_defaults(os.environ).guards, *(getattr(args, "guard", None) or [])]
     if args.disable_guardrails:
+        if not extra:
+            print(
+                "WARNING: guardrails disabled (--disable-guardrails); actions "
+                "reach the embodiment unchecked.",
+                file=sys.stderr,
+            )
+            print("guardrails: disabled (--disable-guardrails)")
+            return None
         print(
-            "WARNING: guardrails disabled (--disable-guardrails); actions "
-            "reach the embodiment unchecked.",
+            "WARNING: default guardrails disabled (--disable-guardrails); only the "
+            "configured guards below check actions.",
             file=sys.stderr,
         )
-        print("guardrails: disabled (--disable-guardrails)")
-        return None
-    approver, active, guard_warnings = _build_guardrails(
-        action_space, args.max_action_delta, embodiment
+    guard, active, guard_warnings = _build_guardrails(
+        action_space,
+        args.max_action_delta,
+        embodiment,
+        extra,
+        defaults=not args.disable_guardrails,
     )
     for warning in guard_warnings:
         print(f"guardrails warning: {warning}", file=sys.stderr)
     print(f"guardrails: {' + '.join(active) if active else 'none active'}")
-    return approver
+    return guard
 
 
 def _headless_session(env: Mapping[str, str], platform: str = sys.platform) -> bool:
@@ -1640,6 +1768,36 @@ def _announce_live_view(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.benchmark is not None:
+        if args.task is not None or args.instruction is not None or args.auto_task:
+            raise SystemExit(
+                "--benchmark runs its own tasks: drop --task, --instruction and --auto-task"
+            )
+        # A benchmark is a set of tasks, so it runs through eval-set's path,
+        # which has no horizon, scorer, task-args, speaker or Rerun options:
+        # refuse them rather than run something other than what was asked.
+        run_only = {
+            "--max-steps": args.max_steps is not None,
+            "--scorer": args.scorer is not None,
+            "-T": bool(args.task_args),
+            "-A": bool(args.auto_task_args),
+            "--speak": bool(args.speak),
+            "-S": bool(args.speak_args),
+            "--rerun/--no-rerun": args.rerun is not None,
+            "--rerun-save/--no-rerun-save": args.rerun_save is not None,
+            "--rerun-connect": args.rerun_connect is not None,
+            "--rerun-port": args.rerun_port is not None,
+        }
+        passed = [flag for flag, given in run_only.items() if given]
+        if passed:
+            raise SystemExit(
+                f"--benchmark runs through eval-set, which does not take {', '.join(passed)}; "
+                "a benchmark's tasks own their horizons and scorers"
+            )
+        args.tasks = []
+        args.max_workers = 1
+        args.retry_attempts = 0
+        return _cmd_eval_set(args)
     if args.rerun_port is not None and args.rerun_connect is not None:
         raise SystemExit(
             "--rerun-port spawns a local viewer and --rerun-connect streams "
@@ -1766,7 +1924,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             task = _apply_epochs_or_exit(task, args.epochs)
 
         _announce_components(resolved)
-        approver = _build_and_announce_guardrails(
+        guard = _build_and_announce_guardrails(
             args, embodiment.info.action_space, resolved.embodiment
         )
         _announce_live_view(args, resolved)
@@ -1847,7 +2005,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 seed=args.seed,
                 sinks=sinks,
                 fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-                approver=approver,
+                guard=guard,
                 store_frames=(
                     args.store_frames if args.store_frames is not None else defaults.store_frames
                 ),
@@ -1954,17 +2112,35 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
     if args.max_workers > 1 and (not args.no_prompt or args.voice):
         raise SystemExit("--max-workers > 1 requires --no-prompt and does not support --voice")
-    task_names = _match_tasks(args.tasks)
+    benchmark = None
+    entries: Sequence[Task | str]
+    if args.benchmark is not None:
+        from inspect_robots.benchmark import resolve_benchmark
+
+        if args.tasks:
+            raise SystemExit("pass task names or --benchmark, not both")
+        try:
+            benchmark = resolve_benchmark(args.benchmark)
+        except ConfigError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"benchmark: {benchmark.name} v{benchmark.version}")
+        entries = list(benchmark.tasks)
+    elif not args.tasks:
+        raise SystemExit("eval-set needs task names or --benchmark NAME")
+    else:
+        entries = _match_tasks(args.tasks)
     defaults = load_defaults(os.environ)
     try:
         if args.max_workers == 1:
-            success, logs = _run_cli_eval_set(args, defaults, task_names)
+            success, logs = _run_cli_eval_set(args, defaults, entries, benchmark=benchmark)
         else:
 
-            def run_task(name: str) -> tuple[bool, list[EvalLog]]:
-                return _run_cli_eval_set(args, defaults, [name], parallel=True)
+            def run_task(entry: Task | str) -> tuple[bool, list[EvalLog]]:
+                return _run_cli_eval_set(
+                    args, defaults, [entry], parallel=True, benchmark=benchmark
+                )
 
-            results = run_parallel(task_names, run_task, args.max_workers)
+            results = run_parallel(entries, run_task, args.max_workers)
             success = all(result[0] for result in results)
             logs = [log for _, task_logs in results for log in task_logs]
     except KeyboardInterrupt:
@@ -1984,16 +2160,21 @@ def _cmd_eval_set(args: argparse.Namespace) -> int:
 def _run_cli_eval_set(
     args: argparse.Namespace,
     defaults: Defaults,
-    task_names: Sequence[str],
+    entries: Sequence[Task | str],
     *,
     parallel: bool = False,
+    benchmark: Benchmark | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Own components and sinks for one sequential set, or one parallel task."""
     from inspect_robots import eval_set
     from inspect_robots._parallel import HaltPreservingExitStack
     from inspect_robots.logging import JsonLogSink, LiveLogSink
+    from inspect_robots.task import Task
 
-    tasks = [_resolve_or_exit("task", name) for name in task_names]
+    tasks = [
+        entry if isinstance(entry, Task) else _resolve_or_exit("task", entry) for entry in entries
+    ]
+    task_names = [task.name for task in tasks]
     if args.epochs is not None:
         tasks = [_apply_epochs_or_exit(t, args.epochs, attribute_task=True) for t in tasks]
 
@@ -2017,7 +2198,7 @@ def _run_cli_eval_set(
         with _EVAL_SET_OUTPUT_LOCK:
             _announce_components(resolved)
             print(f"tasks: {', '.join(task_names)}")
-            approver = _build_and_announce_guardrails(
+            guard = _build_and_announce_guardrails(
                 args, embodiment.info.action_space, resolved.embodiment
             )
             _announce_live_view(args, resolved)
@@ -2054,11 +2235,12 @@ def _run_cli_eval_set(
             tasks,
             resolved.policy,
             embodiment,
+            benchmark=benchmark,
             log_dir=args.log_dir,
             sinks=sinks,
             seed=args.seed,
             fail_on_error=args.fail_on_error if args.fail_on_error is not None else False,
-            approver=approver,
+            guard=guard,
             store_frames=(
                 args.store_frames if args.store_frames is not None else defaults.store_frames
             ),
@@ -2134,10 +2316,14 @@ def _cmd_inspect(
     print("scenes:")
     for scene in log.samples:
         reduced = "  ".join(f"{k}={_format_metric(v)}" for k, v in sorted(scene.reduced.items()))
-        step_limit_count = sum(reason == "max_steps" for reason in scene.termination_reasons)
+        step_limit_count = sum(
+            isinstance(reason, str) and reason in HORIZON_REASONS
+            for reason in scene.termination_reasons
+        )
         details = [reduced] if reduced else []
         if step_limit_count:
-            details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit max_steps)")
+            budget = "max_seconds" if log.eval.max_seconds is not None else "max_steps"
+            details.append(f"({step_limit_count}/{len(scene.epochs)} trials hit {budget})")
         print(f"  [{scene.status}] {scene.scene_id}: {'  '.join(details)}")
         if not shared and scene.instruction:
             _print_degraded(f"      instruction: {scene.instruction}")
@@ -2911,6 +3097,159 @@ def _apply_instruction_sugar(argv: list[str]) -> list[str]:
     return ["run", "--instruction", argv[0], *argv[1:]]
 
 
+def _resolve_trial(log: EvalLog, record: str | None, trial: str | None) -> str:
+    """The annotation key for ``--record`` or ``--trial SCENE-eEPOCH``, checked against the log."""
+    from inspect_robots.annotation import trial_key
+
+    keys = {
+        trial_key(sample, index): f"{sample.scene_id}-e{index}"
+        for sample in log.samples
+        for index in range(len(sample.epochs))
+    }
+    if record is not None:
+        if record not in keys:
+            raise SystemExit(f"--record {record!r} is not a trial in this log")
+        return record
+    by_trial = {name: key for key, name in keys.items()}
+    if trial not in by_trial:
+        choices = ", ".join(sorted(by_trial)) or "(none)"
+        raise SystemExit(f"--trial {trial!r} is not a trial in this log; trials: {choices}")
+    return by_trial[str(trial)]
+
+
+def _judged_rubric_of(log: EvalLog, key: str) -> str | None:
+    """The rubric the run's verdict for trial ``key`` was scoped to, if any."""
+    from inspect_robots.annotation import trial_key
+
+    scoped = {
+        trial_key(sample, index): metadata.get("judged_rubric")
+        for sample in log.samples
+        for index, metadata in enumerate(sample.trial_metadata)
+        if isinstance(metadata, dict)
+    }
+    judged = scoped.get(key)
+    return judged if isinstance(judged, str) and judged else None
+
+
+def _cmd_edit(args: argparse.Namespace) -> int:
+    """Append one annotation beside a saved log and print its id."""
+    from inspect_robots.annotation import (
+        JUDGEMENT,
+        NOTE,
+        Annotation,
+        append_annotations,
+        current,
+        read_annotations,
+    )
+    from inspect_robots.log import read_eval_log
+
+    log = read_eval_log(args.log)
+    key = _resolve_trial(log, args.record, args.trial)
+    kind = JUDGEMENT if args.judgement is not None else NOTE
+    rubric = args.rubric
+    if rubric is None and kind == JUDGEMENT:
+        judged = _judged_rubric_of(log, key)
+        if judged is not None:
+            # The run's verdict counted for this rubric only (the trial has
+            # several judgement rubrics), so a correction without --rubric
+            # corrects that verdict rather than scoring the others.
+            rubric = judged
+            print(
+                f"the run judged rubric {judged!r}; this edit corrects it "
+                "(pass --rubric for another)"
+            )
+    previous = current(read_annotations(args.log, log), key, kind, rubric)
+    if previous is not None and previous.rubric != rubric:
+        # A rubric-specific edit overrides a general judgement for that rubric
+        # only; superseding it would change every other rubric too.
+        previous = None
+    annotation = Annotation(
+        record_id=key,
+        kind=kind,
+        value=args.judgement if args.judgement is not None else args.note,
+        author=args.author,
+        source="editor",
+        rubric=rubric,
+        note=args.reason,
+        supersedes=previous.annotation_id if previous is not None else None,
+    )
+    path = append_annotations(args.log, [annotation])
+    replaced = f" (supersedes {previous.annotation_id})" if previous is not None else ""
+    print(f"annotation {annotation.annotation_id} written to {path}{replaced}")
+    return 0
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    """Re-score a saved log from its annotations; print stored versus re-scored metrics."""
+    from inspect_robots.analyzer import AnnotatedLog, rescore
+    from inspect_robots.annotation import annotations_path
+
+    item = AnnotatedLog.load(args.log)
+    rescored = rescore(item.log, item.annotations)
+    stored = item.log.results.metrics
+    for name in sorted(set(stored) | set(rescored.results.metrics)):
+        before, after = stored.get(name), rescored.results.metrics.get(name)
+        marker = "" if before == after else "  (changed)"
+        print(f"{name}: {_fmt_metric(before)} -> {_fmt_metric(after)}{marker}")
+    if args.out is not None:
+        out = Path(args.out)
+        if out.resolve() == Path(args.log).resolve():
+            raise SystemExit(f"--out {out} would overwrite the input log; pass a different path")
+        if out.resolve().parent != Path(args.log).resolve().parent:
+            # The log names its records, action and wire side-cars by paths
+            # relative to its own directory; elsewhere they would not resolve.
+            raise SystemExit(
+                f"--out {out} must be in the input log's directory "
+                f"({Path(args.log).resolve().parent}) so its records stay reachable"
+            )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rescored.to_dict(), indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {out}")
+        # The exported log keeps the run's original judgements (raw data is never
+        # rewritten), so its corrections travel beside it as its own annotations
+        # file; loading and re-scoring the export then reproduces these scores.
+        source, sidecar = annotations_path(args.log), annotations_path(out)
+        if source.exists():
+            sidecar.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"wrote {sidecar}")
+        elif sidecar.exists():
+            sidecar.unlink()
+    return 0
+
+
+def _fmt_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    """Run one registered analyzer over saved logs and print or save what it found."""
+    from inspect_robots.analyzer import Analysis, AnnotatedLog
+    from inspect_robots.errors import ConfigError
+    from inspect_robots.registry import resolve
+
+    try:
+        analyzer = resolve("analyzer", args.analyzer)
+    except (KeyError, ConfigError, ValueError) as exc:
+        names = ", ".join(sorted(registered("analyzer"))) or "(none)"
+        raise SystemExit(f"unknown analyzer {args.analyzer!r}; registered: {names}") from exc
+    analysis = analyzer.analyze([AnnotatedLog.load(path) for path in args.logs])
+    if not isinstance(analysis, Analysis):
+        raise SystemExit(
+            f"analyzer {args.analyzer!r} returned {type(analysis).__name__}; expected Analysis"
+        )
+    if args.json:
+        print(json.dumps(dict(analysis.data), indent=2, default=str))
+    else:
+        sys.stdout.write(analysis.text)
+    if analysis.files:
+        out_dir = Path(args.out) if args.out is not None else Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in analysis.files.items():
+            (out_dir / Path(name).name).write_text(content, encoding="utf-8")
+            print(f"wrote {out_dir / Path(name).name}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, dispatch one subcommand, and return its process exit code."""
     init_dotenv(os.environ)
@@ -2950,6 +3289,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_setup()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "edit":
+        return _cmd_edit(args)
+    if args.command == "score":
+        return _cmd_score(args)
+    if args.command == "analyze":
+        return _cmd_analyze(args)
     parser.print_help()
     return 0
 

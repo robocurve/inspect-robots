@@ -175,6 +175,25 @@ inspect-robots doctor --embodiment my_arms
 Both run the same checks, and neither touches hardware (keep your
 constructor hardware-free; connect in `reset()`).
 
+Two more checks cover what one `EmbodimentInfo` cannot show.
+[`check_policy_interfaces`](../../src/inspect_robots/conformance.py) takes every
+embodiment your package registers and fails when two share a `morphology` and a
+policy interface (the same action contract and observation layout): they are
+one embodiment registered twice.
+[`check_evaluation_interface`](../../src/inspect_robots/conformance.py) takes an
+embodiment object and checks the optional `health`, `prepare_trial`, `home` and
+`park` methods by signature, without calling them:
+
+```python
+from inspect_robots.conformance import check_evaluation_interface, check_policy_interfaces
+
+def test_policy_interfaces_are_distinct() -> None:
+    assert check_policy_interfaces([JointArm().info, EefArm().info]).ok
+
+def test_evaluation_interface() -> None:
+    assert check_evaluation_interface(MyEmbodiment()).ok
+```
+
 ### What the kit checks (errors)
 
 | Code | Requirement |
@@ -183,13 +202,17 @@ constructor hardware-free; connect in `reset()`).
 | `bounds` | Finite `low`/`high` on every dim. Without them the bounds clamp is skipped and no default delta limit can be derived. |
 | `dim_labels` | Every dim is named (`("left_j0", ..., "right_gripper")`), uniquely. The agent moves joints by these names. |
 | `state_alignment` | Absolute-target modes (`joint_pos`, `eef_abs_pose`) declare exactly one `StateSpec` field with `shape == (action_dim,)`: the proprioceptive reference the agent interpolates from. |
-| `guardrails` | `DeltaLimitApprover(action_space)` constructs. This catches absolute pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`), and displacement pose modes (`eef_delta_pose`) whose rotation representation's identity is not the zero vector (`quat_*`, `rot6d`; use `none`, `axis_angle`, or `euler_xyz`). |
+| `guardrails` | `DeltaLimitGuard(action_space)` constructs. This catches absolute pose modes (`eef_abs_pose`) whose rotation representation cannot be clamped per dimension (`quat_*`, `axis_angle`, `euler_xyz`; use `none` or `rot6d`), and displacement pose modes (`eef_delta_pose`) whose rotation representation's identity is not the zero vector (`quat_*`, `rot6d`; use `none`, `axis_angle`, or `euler_xyz`). |
+| `policy_interface` | From `check_policy_interfaces`: no two embodiments share both a `morphology` and a policy interface. |
+| `evaluation_interface` | From `check_evaluation_interface`: `health`, `home` and `park` take no arguments and `prepare_trial` takes the scene. |
 
 ### Warnings
 
 - `control_hz` undeclared: agent motion durations fall back to 10 Hz step
   counting.
 - Zero-width dims (`low == high`): nothing can be commanded there.
+- `park()` without `health()` (from `check_evaluation_interface`): `eval()`
+  cannot refuse to start a trial on an unhealthy platform.
 
 ## What the kit cannot check
 
@@ -222,6 +245,6 @@ The reference adapters (`inspect-robots-yam`, `plugins/inspect-robots-isaacsim`)
 share a shape worth reusing: hardware access behind injected seams (driver
 factory, camera reader, clock) so the full suite runs in CI; scalar-only
 constructor kwargs so `-E key=value` works from the CLI; a hard safety clamp
-inside `step()` independent of any approver; 100% coverage with the real
+inside `step()` independent of any guard; 100% coverage with the real
 drivers behind `pragma: no cover` seams; and a preflight or `doctor` run
 documented as the first step on new hardware.

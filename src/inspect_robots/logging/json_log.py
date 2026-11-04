@@ -27,7 +27,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from inspect_robots.log import EvalLog, EvalSpec
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
     from inspect_robots.types import Action, Observation, StepResult
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -70,7 +70,7 @@ def _sanitize(obj: object) -> object:
 class JsonLogSink:
     """Persist the final [`EvalLog`][inspect_robots.log.EvalLog] as JSON.
 
-    Per-step data lives in the ``TrialRecord``/``FrameStore``, not here; this
+    Per-step data lives in the ``Record``/``FrameStore``, not here; this
     sink only writes the final log (``path`` holds where it landed).
     """
 
@@ -100,7 +100,7 @@ class JsonLogSink:
         """Ignore live transitions because the final log is the canonical payload."""
         return None
 
-    def on_trial_end(self, record: TrialRecord) -> None:
+    def on_trial_end(self, record: Record) -> None:
         """Ignore individual trajectories because their results arrive in the final log."""
         return None
 

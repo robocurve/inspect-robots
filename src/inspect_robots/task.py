@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from inspect_robots.errors import ConfigError
+from inspect_robots.rubric import Rubric, check_unique, merge
 from inspect_robots.scene import Scene
 from inspect_robots.scorer import Scorer
 
@@ -66,10 +67,13 @@ class TaskEnvelope:
 
 @dataclass
 class Task:
-    """A benchmark: scenes + scorer(s) + horizon, independent of any embodiment.
+    """A task: scenes, rubrics, a time budget and a number of trials, independent of any embodiment.
 
-    ``scorer`` accepts scorer objects or **registry names** (e.g.
-    ``scorer="success_at_end"``), or a sequence mixing both.
+    Declare what each trial is measured against with ``rubrics`` (see
+    [`Rubric`][inspect_robots.rubric.Rubric]), or pass ``scorer`` as shorthand
+    for one rubric per scorer, named after the scorer. ``scorer`` accepts scorer
+    objects or **registry names** (e.g. ``scorer="success_at_end"``), or a
+    sequence mixing both. Declare exactly one of the two.
 
     Declare exactly one rollout horizon. ``max_steps`` is already resolved;
     ``max_seconds`` is keyword-only and is resolved against the paired
@@ -78,13 +82,21 @@ class Task:
 
     name: str
     scenes: Sequence[Scene]
-    scorer: Scorer | str | Sequence[Scorer | str]
+    scorer: Scorer | str | Sequence[Scorer | str] | None = None
     max_steps: int | None = None
     epochs: int | Epochs = 1
     metadata: Mapping[str, Any] = field(default_factory=dict)
     max_seconds: float | None = field(default=None, kw_only=True)
+    rubrics: Sequence[Rubric] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
+        if (self.scorer is None) == (not self.rubrics):
+            raise ConfigError(
+                f"Task {self.name!r}: declare exactly one of rubrics or scorer.\n"
+                "fix: pass rubrics=[Rubric(...)], or scorer=... as shorthand "
+                "for one rubric per scorer"
+            )
+        check_unique(self.rubrics, f"Task {self.name!r}")
         if (self.max_steps is None) == (self.max_seconds is None):
             raise ConfigError(
                 f"Task {self.name!r}: declare exactly one of max_steps or max_seconds"
@@ -115,8 +127,28 @@ class Task:
         _ = self.scorers
 
     @property
+    def task_rubrics(self) -> tuple[Rubric, ...]:
+        """The rubrics that apply to every scene, in declared order.
+
+        With the ``scorer`` shorthand, one rubric per scorer, named after it, so
+        results keep the scorer's name as their key.
+        """
+        if self.rubrics:
+            return tuple(self.rubrics)
+        return tuple(Rubric(name=s.name, scorer=s) for s in self._shorthand_scorers())
+
+    def rubrics_for(self, scene: Scene) -> tuple[Rubric, ...]:
+        """A scene's effective rubrics: the task's, with the scene's own replacing or adding."""
+        return merge(self.task_rubrics, scene.rubrics)
+
+    @property
     def scorers(self) -> list[Scorer]:
-        """Resolve registry names while preserving the declared scorer order."""
+        """The task-level rubrics' scorers, resolved, in declared order."""
+        return [rubric.resolve_scorer() for rubric in self.task_rubrics]
+
+    def _shorthand_scorers(self) -> list[Scorer]:
+        """Resolve the ``scorer`` shorthand's registry names, preserving order."""
+        assert self.scorer is not None  # only called when no rubrics are declared
         # A str IS a Sequence: treat it as a single registry name, never as a
         # sequence of one-character "scorers".
         if isinstance(self.scorer, str) or not isinstance(self.scorer, Sequence):

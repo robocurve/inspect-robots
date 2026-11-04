@@ -9,8 +9,8 @@ should prioritise.
 Report these as important, in roughly this order:
 
 - **Robot safety:** any change that lets an action reach an embodiment without
-  passing the configured `Approver`, weakens `ClampApprover` or
-  `DeltaLimitApprover` limits, or changes rollout stop and horizon handling so a
+  passing the configured `Guard`, weakens `ClampGuard` or
+  `DeltaLimitGuard` limits, or changes rollout stop and horizon handling so a
   run can exceed `max_steps`/`max_seconds`. Real arms run this code.
 - **Correctness of the eval loop:** wrong observation/action alignment, off-by-one
   steps, scores computed from the wrong epoch or scene, swallowed exceptions that

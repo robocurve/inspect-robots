@@ -27,9 +27,12 @@ from inspect_robots.console import (
     _stdin_readable,
 )
 from inspect_robots.errors import EmbodimentFault
+from inspect_robots.rubric import SAFETY, reads_judgements
+from inspect_robots.types import HORIZON_REASONS
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.rollout import Record
+    from inspect_robots.rubric import Rubric
     from inspect_robots.scene import Scene
 
 
@@ -39,6 +42,36 @@ _PROMPT = "did the robot succeed? [y/n/partial/skip] (partial scores as failure)
 _NOTES_PROMPT = "grader notes (Enter for none): "
 _PROMPT_ANSWERS = frozenset({"y", "yes", "n", "no", "partial", "skip"})
 _DEFINITIVE_REASONS = frozenset({"success", "failure"})
+
+
+def adopts_embodiment_verdict(record: Record, scene: Scene) -> bool:
+    """Whether a grader may adopt the embodiment's definitive outcome as the verdict.
+
+    A ``success``/``failure`` termination establishes whether the task was
+    done, nothing more. A scene with a judgement-scored safety rubric must be
+    judged on that criterion instead, so the outcome is not adopted there.
+    """
+    if not (record.terminated and record.termination_reason in _DEFINITIVE_REASONS):
+        return False
+    return safety_rubric_to_judge(record, scene) is None
+
+
+def safety_rubric_to_judge(record: Record, scene: Scene) -> Rubric | None:
+    """The safety rubric a grader must judge instead of adopting a definitive outcome.
+
+    The first judgement-scored safety rubric of a scene whose trial ended with
+    ``success``/``failure``, else ``None``. Graders judge it and record it in
+    ``record.metadata["judged_rubric"]``, so the verdict counts for safety and
+    any other judgement rubric abstains rather than inheriting it.
+    """
+    if not (record.terminated and record.termination_reason in _DEFINITIVE_REASONS):
+        return None
+    for rubric in scene.rubrics:
+        if rubric.kind == SAFETY and reads_judgements(rubric):
+            return rubric
+    return None
+
+
 _NO_TERMIOS_STATE = object()
 _END_HINT = "Esc ends the episode"
 _END_HINT_PHRASE = "ends the episode"
@@ -677,7 +710,7 @@ class OperatorSession:
                 message = f"{message} {hint}"
             raise EmbodimentFault(message) from exc
 
-    def prompt_verdict(self, record: TrialRecord, scene: Scene) -> None:
+    def prompt_verdict(self, record: Record, scene: Scene) -> None:
         """Capture or adopt the terminal operator's verdict on the trial record (R6).
 
         Any sticky status is closed before output or prompting, and stale stdin is
@@ -685,9 +718,10 @@ class OperatorSession:
         A verdict already captured by the console is announced and preserved.
         A terminated episode with a definitive embodiment verdict adopts and announces
         that verdict instead of asking the operator to confirm the same outcome a second
-        time. When prompting, a non-blank string at ``scene.metadata["rubric"]``
-        is displayed first. Prompted verdicts are followed by one optional,
-        stripped, case-preserved grader note.
+        time, unless the scene has an operator-scored safety rubric (see
+        ``adopts_embodiment_verdict``). When prompting, a non-blank string at
+        ``scene.metadata["rubric"]`` is displayed first. Prompted verdicts are
+        followed by one optional, stripped, case-preserved grader note.
         """
         self.status(None)
         from inspect_robots.transcript import operator_event
@@ -695,7 +729,7 @@ class OperatorSession:
         if record.operator_judgement is not None:
             self.write_line(f"operator verdict adopted from console: {record.operator_judgement}")
             return
-        if record.terminated and record.termination_reason in _DEFINITIVE_REASONS:
+        if adopts_embodiment_verdict(record, scene):
             verdict = "y" if record.termination_reason == "success" else "n"
             record.operator_judgement = verdict
             record.events.append(
@@ -705,13 +739,29 @@ class OperatorSession:
                 f"operator verdict adopted from embodiment: {record.termination_reason}"
             )
             return
+        safety = safety_rubric_to_judge(record, scene)
+        if safety is not None:
+            # The embodiment reported the outcome; the operator judges safety.
+            record.metadata["judged_rubric"] = safety.name
+            self.write_line(
+                f"embodiment reported {record.termination_reason}; "
+                f"judge the safety rubric {safety.name!r}:"
+            )
+            for line in (safety.text or safety.name).splitlines():
+                self.write_line(f"  {line}")
         rubric = scene.metadata.get("rubric")
-        if isinstance(rubric, str) and rubric.strip():
+        if safety is None and isinstance(rubric, str) and rubric.strip():
             self.write_line("rubric:")
             for line in rubric.splitlines():
                 self.write_line(f"  {line}")
-        if record.truncated and record.termination_reason == "max_steps":
-            self.write_line("note: this trial hit the step limit before terminating")
+        for judged in () if safety is not None else scene.rubrics:
+            if judged.text.strip():
+                self.write_line(f"rubric {judged.name} ({judged.kind}):")
+                for line in judged.text.splitlines():
+                    self.write_line(f"  {line}")
+        if record.truncated and record.termination_reason in HORIZON_REASONS:
+            limit = "time limit" if record.termination_reason == "max_seconds" else "step limit"
+            self.write_line(f"note: this trial hit the {limit} before terminating")
         elif record.truncated and record.termination_reason is not None:
             # Neutral on purpose: the record cannot distinguish a
             # policy-requested stop from an embodiment truncation, so the

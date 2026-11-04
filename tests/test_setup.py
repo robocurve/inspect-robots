@@ -1288,12 +1288,12 @@ def test_scan_can_skips_undecodable_type_file(tmp_path: Path) -> None:
 def test_scan_serial_lists_sorted_absolute_paths(tmp_path: Path) -> None:
     serial_by_id = tmp_path / "serial-by-id"
     serial_by_id.mkdir()
-    for name in ("usb-controller-z", "usb-controller-a"):
+    for name in ("usb-action_manager-z", "usb-action_manager-a"):
         (serial_by_id / name).touch()
 
     assert _scan_serial(serial_by_id) == [
-        str(serial_by_id / "usb-controller-a"),
-        str(serial_by_id / "usb-controller-z"),
+        str(serial_by_id / "usb-action_manager-a"),
+        str(serial_by_id / "usb-action_manager-z"),
     ]
 
 
@@ -4641,15 +4641,15 @@ def test_run_setup_serial_slots_support_number_and_manual_absolute_path(
     _register_device_slots(
         monkeypatch,
         (
-            DeviceSlot("controller_port", "serial", "controller serial port"),
+            DeviceSlot("controller_port", "serial", "action_manager serial port"),
             DeviceSlot("debug_port", "serial", "debug serial port"),
         ),
     )
     serial_by_id = tmp_path / "serial-by-id"
     serial_by_id.mkdir()
-    listed = serial_by_id / "usb-controller"
+    listed = serial_by_id / "usb-action_manager"
     listed.touch()
-    manual = "/remote/serial-controller"
+    manual = "/remote/serial-action_manager"
     input_fn, _ = _scripted_input([*_slot_defaults(), "", "1", manual])
     out = io.StringIO()
 
@@ -4677,7 +4677,7 @@ def test_run_setup_slot_duplicate_guard_is_same_kind_only(
         (
             DeviceSlot("top_cam", "v4l2", "top camera"),
             DeviceSlot("side_cam", "v4l2", "side camera"),
-            DeviceSlot("controller_port", "serial", "controller serial port"),
+            DeviceSlot("controller_port", "serial", "action_manager serial port"),
         ),
     )
     by_id = tmp_path / "by-id"
@@ -4809,14 +4809,14 @@ def test_run_setup_device_group_all_or_none_keeps_ungrouped_slots(
         (
             DeviceSlot("left_channel", "can", "left CAN channel", "arms"),
             DeviceSlot("right_channel", "can", "right CAN channel", "arms"),
-            DeviceSlot("controller_port", "serial", "controller serial port"),
+            DeviceSlot("controller_port", "serial", "action_manager serial port"),
         ),
     )
     sysfs_net = tmp_path / "net"
     _make_can_interfaces(sysfs_net, "can0", "can1")
     serial_by_id = tmp_path / "serial"
     serial_by_id.mkdir()
-    serial = serial_by_id / "controller"
+    serial = serial_by_id / "action_manager"
     serial.touch()
     if not go_back:
         path = _config_path(tmp_path)
@@ -4854,7 +4854,7 @@ def test_run_setup_device_group_all_or_none_keeps_ungrouped_slots(
         "slot-body needs all arms slots or none; writing none unless you go back" in out.getvalue()
     )
     assert f"controller_port = {serial}" in text
-    assert sum(prompt.startswith("controller serial port") for prompt in prompts) == 1
+    assert sum(prompt.startswith("action_manager serial port") for prompt in prompts) == 1
     assert ("left_channel = can0" in text) is go_back
     assert ("right_channel = can1" in text) is go_back
     assert "old-left" not in text
