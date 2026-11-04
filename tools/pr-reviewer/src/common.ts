@@ -14,7 +14,7 @@ export function monthlyReviewLimit(pr: number, month: string): number {
   if (month === '2026-09' && (pr === 512 || pr === 513)) return LIMITS.month + 15_000_000;
   // Jay authorized review for PR 599 on 2026-11-04 (up to $250, then "increase any
   // cap comfortably" for its final run); PR 599's own lifetime cap still binds.
-  if (month === '2026-11' && pr === 599) return LIMITS.month + 100_000_000;
+  if (month === '2026-11' && pr === 599) return LIMITS.month + 250_000_000;
   // Jay authorized $10 extra on 2026-09-24 to finish PRs 475 and 476.
   // Both share one monthly total; this is not $10 per PR and expires in October.
   return LIMITS.month + (month === '2026-09' && (pr === 475 || pr === 476) ? 10_000_000 : 0);

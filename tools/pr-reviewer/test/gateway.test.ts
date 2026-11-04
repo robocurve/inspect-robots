@@ -49,6 +49,26 @@ describe('Codex private budget gateway', () => {
       expect(creates).toBe(allowed ? 1 : 0);
     }
   });
+  it('runs on a configured service tier and scales every charge by its price multiplier', async () => {
+    const ledger = env.LEDGER.getByName(crypto.randomUUID());
+    await ledger.register(job);
+    const token = await ledger.openSession(job.id);
+    const gateway = new ModelGateway(createExecutionContext(), { LEDGER: { getByName: () => ledger }, OPENAI_API_KEY: 'sk-test-only', REVIEW_SERVICE_TIER: 'ultrafast', REVIEW_PRICE_MULTIPLIER: '6' });
+    let sent: any = null;
+    vi.stubGlobal('fetch', vi.fn(async (url: string | Request, init?: RequestInit) => {
+      const r = new Request(url, init);
+      if (r.url.endsWith('/input_tokens')) return Response.json({ input_tokens: 100 });
+      sent = await r.json();
+      return new Response('data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10}}}\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+    }));
+    await (await gateway.respond(token, request)).text();
+    expect(sent.service_tier).toBe('ultrafast');
+    expect(await ledger.remaining(`99-${job.head}`, 99)).toBe(5_000_000 - 1800 * 6);
+    const bad = new ModelGateway(createExecutionContext(), { LEDGER: { getByName: () => ledger }, OPENAI_API_KEY: 'sk-test-only', REVIEW_SERVICE_TIER: 'warp' });
+    await expect(bad.respond(await ledger.openSession(job.id), request)).rejects.toThrow('invalid_service_tier');
+    const badPrice = new ModelGateway(createExecutionContext(), { LEDGER: { getByName: () => ledger }, OPENAI_API_KEY: 'sk-test-only', REVIEW_PRICE_MULTIPLIER: '0' });
+    await expect(badPrice.respond(await ledger.openSession(job.id), request)).rejects.toThrow('invalid_price_multiplier');
+  });
   it('denies expired capabilities and paid provider tools before inference', async () => {
     const s = await setup(); const send = vi.fn(); vi.stubGlobal('fetch', send);
     expect((await s.gateway.respond(s.token, JSON.stringify({ input: [], tools: [{ type: 'web_search' }] }))).status).toBe(400);

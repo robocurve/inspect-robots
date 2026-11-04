@@ -3,7 +3,7 @@ import { JAY_ID, LIMITS, monthlyReviewLimit, RunOutput, SHA, type Execution, typ
 
 // An author's monthly cap may exceed the shared ceiling only by this much, and
 // only where a PR's own monthly exception (monthlyReviewLimit) lets it be spent.
-const MAX_AUTHOR_EXCEPTION = 100_000_000;
+const MAX_AUTHOR_EXCEPTION = 300_000_000;
 
 export class ReviewLedger extends DurableObject<ReviewerEnv> {
   private prLimit(pr: number): number {
