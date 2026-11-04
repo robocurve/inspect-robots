@@ -37,6 +37,7 @@ from inspect_robots._setup import (
     _suggest_can_pinning,
     _usb_device_dir,
     _v4l2_color_capture,
+    _valid_max_steps,
     run_setup,
 )
 from inspect_robots.conformance import DeviceSlot, NumberSlot, OptionSlot
@@ -5338,3 +5339,10 @@ def test_render_config_managed_policy_args_missing_from_policy_args() -> None:
     )
     assert "[policy.args]" not in rendered
     assert "[empty_section]" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"), [("80", True), ("0300", True), ("0", False), ("x", False)]
+)
+def test_valid_max_steps_accepts_a_zero_padded_integer(value: str, valid: bool) -> None:
+    assert _valid_max_steps(value) is valid
