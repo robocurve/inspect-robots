@@ -1,4 +1,4 @@
-"""Rollout hardening: error taxonomy, transcript events, approver, FrameStore."""
+"""Rollout hardening: error taxonomy, transcript events, guard, FrameStore."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ import numpy as np
 import pytest
 
 from inspect_robots import eval
-from inspect_robots.approver import Approver, AutoApprover, ClampApprover
-from inspect_robots.controller import DefaultController
+from inspect_robots.action_manager import DefaultActionManager
 from inspect_robots.errors import EmbodimentFault, PolicyError, SafetyAbort, _CancelledTrial
 from inspect_robots.frames import FrameStore
+from inspect_robots.guard import ClampGuard, Guard, PassThroughGuard
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.rollout import (
-    TrialRecord,
+    Record,
     _connection_failure,
     _policy_error,
     derive_seed,
@@ -39,9 +39,9 @@ def _run(
     policy: object,
     embodiment: object,
     *,
-    approver: Approver | None = None,
+    guard: Guard | None = None,
     frame_store: FrameStore | None = None,
-) -> TrialRecord:
+) -> Record:
     return rollout(
         policy,  # type: ignore[arg-type]
         embodiment,  # type: ignore[arg-type]
@@ -49,8 +49,8 @@ def _run(
         max_steps=40,
         seed=0,
         epoch=0,
-        controller=DefaultController(),
-        approver=approver or AutoApprover(),
+        action_manager=DefaultActionManager(),
+        guard=guard or PassThroughGuard(),
         sink=NullSink(),
         frame_store=frame_store,
     )
@@ -120,7 +120,7 @@ def test_keyboard_interrupt_from_step_carries_partial_record_and_transcript() ->
 
 def test_safety_abort_propagates() -> None:
     with pytest.raises(SafetyAbort, match="e-stop"):
-        _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_VetoApprover())
+        _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_VetoApprover())
 
 
 def test_transcript_records_events() -> None:
@@ -137,8 +137,8 @@ def test_transcript_records_events() -> None:
 
 def test_clamp_approver_bounds_action() -> None:
     space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
-    approver = ClampApprover(space)
-    out = approver.review(Action(data=np.array([0.5, -0.5])), {})
+    guard = ClampGuard(space)
+    out = guard.review(Action(data=np.array([0.5, -0.5])), {})
     assert np.allclose(out.data, [0.05, -0.05])
     assert out.meta.get("clamped") is True
 
@@ -146,43 +146,43 @@ def test_clamp_approver_bounds_action() -> None:
 def test_clamp_approver_nan_raises_safety_abort() -> None:
     # A NaN has no meaningful clamp; it must never reach hardware.
     space = Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]))
-    approver = ClampApprover(space)
+    guard = ClampGuard(space)
     with pytest.raises(SafetyAbort, match="NaN"):
-        approver.review(Action(data=np.array([0.0, float("nan")])), {})
+        guard.review(Action(data=np.array([0.0, float("nan")])), {})
 
 
 def test_clamp_approver_nan_aborts_even_without_bounds() -> None:
-    approver = ClampApprover(Box(shape=(2,)))  # no low/high
+    guard = ClampGuard(Box(shape=(2,)))  # no low/high
     with pytest.raises(SafetyAbort, match="NaN"):
-        approver.review(Action(data=np.array([float("nan"), 0.0])), {})
+        guard.review(Action(data=np.array([float("nan"), 0.0])), {})
 
 
 def test_clamp_approver_inf_clamps_without_abort() -> None:
     # ±inf is out-of-range, not poisonous: it clamps to the finite bound.
     space = Box(shape=(2,), low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]))
-    approver = ClampApprover(space)
-    out = approver.review(Action(data=np.array([float("inf"), float("-inf")])), {})
+    guard = ClampGuard(space)
+    out = guard.review(Action(data=np.array([float("inf"), float("-inf")])), {})
     assert np.allclose(out.data, [1.0, -1.0])
     assert out.meta.get("clamped") is True
 
 
 def test_clamp_approver_low_only_bound() -> None:
-    approver = ClampApprover(Box(shape=(2,), low=np.array([0.0, 0.0])))
-    out = approver.review(Action(data=np.array([-0.5, 0.5])), {})
+    guard = ClampGuard(Box(shape=(2,), low=np.array([0.0, 0.0])))
+    out = guard.review(Action(data=np.array([-0.5, 0.5])), {})
     assert np.allclose(out.data, [0.0, 0.5])
     assert out.meta.get("clamped") is True
     in_bounds = Action(data=np.array([0.5, 0.5]))
-    assert approver.review(in_bounds, {}) is in_bounds  # identity pass-through
+    assert guard.review(in_bounds, {}) is in_bounds  # identity pass-through
 
 
 def test_clamp_approver_high_only_bound() -> None:
-    approver = ClampApprover(Box(shape=(2,), high=np.array([1.0, 1.0])))
-    out = approver.review(Action(data=np.array([2.0, 0.5])), {})
+    guard = ClampGuard(Box(shape=(2,), high=np.array([1.0, 1.0])))
+    out = guard.review(Action(data=np.array([2.0, 0.5])), {})
     assert np.allclose(out.data, [1.0, 0.5])
     assert out.meta.get("clamped") is True
     # inf on the unbounded side has nothing to clamp against: pass-through.
     unbounded_side = Action(data=np.array([float("-inf"), 0.0]))
-    assert approver.review(unbounded_side, {}) is unbounded_side
+    assert guard.review(unbounded_side, {}) is unbounded_side
 
 
 class _StopPolicy:
@@ -214,13 +214,27 @@ def test_policy_request_stop_default_reason() -> None:
     assert record.termination_reason == "policy_stop"
 
 
+@pytest.mark.parametrize("reason", ["", "  ", None, 7])
+def test_policy_request_stop_with_a_blank_or_odd_reason_uses_the_default(reason: object) -> None:
+    record = _run(_StopPolicy({"request_stop": True, "stop_reason": reason}), CubePickEmbodiment())
+    assert record.truncated is True
+    assert record.termination_reason == "policy_stop"
+
+
+def test_policy_request_stop_reason_is_trimmed() -> None:
+    record = _run(
+        _StopPolicy({"request_stop": True, "stop_reason": " done "}), CubePickEmbodiment()
+    )
+    assert record.termination_reason == "done"
+
+
 def test_request_stop_survives_approver_rewrite() -> None:
     class _MetaStrippingApprover:
         def review(self, action: Action, store: dict[str, object]) -> Action:
             return replace(action, data=np.asarray(action.data) * 0.5, meta={})
 
     policy = _StopPolicy({"request_stop": True, "stop_reason": "done"})
-    record = _run(policy, CubePickEmbodiment(), approver=_MetaStrippingApprover())
+    record = _run(policy, CubePickEmbodiment(), guard=_MetaStrippingApprover())
     assert record.truncated is True
     assert record.termination_reason == "done"
 
@@ -239,13 +253,13 @@ def test_embodiment_termination_wins_over_request_stop() -> None:
 
 
 def test_rollout_records_delta_clamped_approval_detail() -> None:
-    from inspect_robots.approver import DeltaLimitApprover
+    from inspect_robots.guard import DeltaLimitGuard
 
     emb = CubePickEmbodiment()
     # CubePick's scripted steps are 0.1-magnitude deltas; a tighter explicit
     # limit forces a clamp so the approval event carries the new detail.
-    approver = DeltaLimitApprover(emb.info.action_space, max_delta=0.05)
-    record = _run(ScriptedPolicy(), emb, approver=approver)
+    guard = DeltaLimitGuard(emb.info.action_space, max_delta=0.05)
+    record = _run(ScriptedPolicy(), emb, guard=guard)
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["detail"] == "delta_clamped"
@@ -336,20 +350,20 @@ def test_embodiment_fault_carries_partial_record() -> None:
 
 def test_safety_abort_carries_partial_record() -> None:
     with pytest.raises(SafetyAbort, match="e-stop") as excinfo:
-        _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_VetoApprover())
+        _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_VetoApprover())
     rec = excinfo.value.record
     assert rec is not None and rec.status == "error"
 
 
 class _CrashingApprover:
     def review(self, action: Action, store: dict[str, object]) -> Action:
-        raise ZeroDivisionError("approver crashed")
+        raise ZeroDivisionError("guard crashed")
 
 
 def test_approver_crash_wrapped_as_safety_abort() -> None:
-    # An approver that crashed cannot vouch for safety: treat it as an abort.
-    with pytest.raises(SafetyAbort, match="approver crashed") as excinfo:
-        _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_CrashingApprover())
+    # A guard that crashed cannot vouch for safety: treat it as an abort.
+    with pytest.raises(SafetyAbort, match="guard crashed") as excinfo:
+        _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_CrashingApprover())
     assert excinfo.value.record is not None
 
 
@@ -485,7 +499,7 @@ def test_approver_introduced_non_finite_action_is_a_safety_abort() -> None:
         patch.object(embodiment, "step", step),
         pytest.raises(SafetyAbort, match="non-finite"),
     ):
-        _run(ScriptedPolicy(), embodiment, approver=_NonFiniteApprover())
+        _run(ScriptedPolicy(), embodiment, guard=_NonFiniteApprover())
 
     step.assert_not_called()
 
@@ -505,7 +519,7 @@ def test_approver_introduced_wrong_dim_action_is_a_safety_abort() -> None:
             SafetyAbort, match="returned a 1-D action but embodiment 'cubepick' expects 2-D"
         ),
     ):
-        _run(ScriptedPolicy(), embodiment, approver=_WrongDimApprover())
+        _run(ScriptedPolicy(), embodiment, guard=_WrongDimApprover())
 
     step.assert_not_called()
 
@@ -515,7 +529,7 @@ def test_approver_introduced_wrong_dim_action_is_a_safety_abort() -> None:
 # --------------------------------------------------------------------------- #
 def test_clamp_approver_records_approval_event() -> None:
     space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
-    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=ClampApprover(space))
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=ClampGuard(space))
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["modified"] is True
@@ -530,10 +544,139 @@ class _HalvingApprover:
 
 
 def test_modified_action_records_approval_event_without_detail() -> None:
-    record = _run(ScriptedPolicy(), CubePickEmbodiment(), approver=_HalvingApprover())
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_HalvingApprover())
     approvals = [e for e in record.events if e.kind == "approval"]
     assert approvals
     assert approvals[0].data["detail"] is None
+
+
+class _CollisionApprover:
+    """Holds the first action and records why, as a collision approver would."""
+
+    def __init__(self) -> None:
+        self.held = False
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        if self.held:
+            return action
+        self.held = True
+        meta = {
+            **dict(action.meta),
+            "collision_blocked": True,
+            "collision_detail": "left_gripper-table@3/8",
+            "collision_pending": False,
+        }
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_third_party_approver_reasons_reach_approval_detail() -> None:
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_CollisionApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    # Boolean flags contribute their key name, string values render as
+    # ``key=value``, and falsy keys are not reasons.
+    assert approvals[0].data["detail"] == (
+        "collision_blocked, collision_detail=left_gripper-table@3/8"
+    )
+
+
+class _MetaStampingPolicy(ScriptedPolicy):
+    """Stamps a policy-owned meta key, as the agent plugin's ``chunk_final`` does."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [replace(a, meta={**a.meta, "chunk_final": True}) for a in chunk.actions]
+        return replace(chunk, actions=stamped)
+
+
+def test_approval_detail_excludes_policy_forwarded_meta() -> None:
+    # The approver forwards the policy's meta verbatim (as the built-ins do), so
+    # only keys it *newly* sets may appear in the detail — never policy keys
+    # like ``chunk_final``, even though the approver copies them forward.
+    record = _run(_MetaStampingPolicy(), CubePickEmbodiment(), guard=_CollisionApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == (
+        "collision_blocked, collision_detail=left_gripper-table@3/8"
+    )
+
+
+class _ArrayMetaPolicy(ScriptedPolicy):
+    """Stamps array-valued diagnostics into action meta, as policies may."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [
+            replace(a, meta={**a.meta, "diagnostics": np.array([1.0, 2.0])}) for a in chunk.actions
+        ]
+        return replace(chunk, actions=stamped)
+
+
+def test_approval_detail_ignores_forwarded_array_meta() -> None:
+    # Regression: ``Action.meta`` accepts arbitrary values, and forwarding a
+    # multi-element NumPy array (``bool()`` raises on it) through a clamping
+    # approver used to crash the rollout before the reviewed action executed.
+    space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
+    record = _run(_ArrayMetaPolicy(), CubePickEmbodiment(), guard=ClampGuard(space))
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    # The unchanged policy metadata is not a reason; the clamp still is.
+    assert approvals[0].data["detail"] == "clamped"
+
+
+class _ArrayReasonApprover:
+    """Holds the first action with a clear reason and an ambiguous array one."""
+
+    def __init__(self) -> None:
+        self.held = False
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        del store
+        if self.held:
+            return action
+        self.held = True
+        meta = {
+            **dict(action.meta),
+            "collision_blocked": True,
+            "collision_candidates": np.array([1.0, 2.0]),
+        }
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_approval_detail_skips_array_valued_approver_meta() -> None:
+    # A value without a scalar truth value can neither claim a reason nor crash
+    # approval reporting; the unambiguous boolean reason is still reported.
+    record = _run(ScriptedPolicy(), CubePickEmbodiment(), guard=_ArrayReasonApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "collision_blocked"
+
+
+class _FalsyFlagPolicy(ScriptedPolicy):
+    """Stamps a *falsy* flag into action meta, as a pending-state channel would."""
+
+    def act(self, observation: Observation) -> ActionChunk:
+        chunk = super().act(observation)
+        stamped = [replace(a, meta={**a.meta, "collision_pending": False}) for a in chunk.actions]
+        return replace(chunk, actions=stamped)
+
+
+class _FlagFlippingApprover:
+    """Flips a previously-falsy meta flag to truthy, claiming it as a reason."""
+
+    def review(self, action: Action, store: dict[str, object]) -> Action:
+        del store
+        meta = {**dict(action.meta), "collision_pending": True}
+        return replace(action, data=np.asarray(action.data, dtype=np.float64) * 0.0, meta=meta)
+
+
+def test_approval_detail_reports_falsy_flag_flipped_by_approver() -> None:
+    # A key present but falsy in the reviewed action counts as newly set to a
+    # truthy value once the approver flips it, so it is reported as a reason.
+    record = _run(_FalsyFlagPolicy(), CubePickEmbodiment(), guard=_FlagFlippingApprover())
+    approvals = [e for e in record.events if e.kind == "approval"]
+    assert approvals
+    assert approvals[0].data["detail"] == "collision_pending"
 
 
 def test_rollout_surfaces_approvals_in_observation_extra() -> None:
@@ -564,7 +707,7 @@ def test_rollout_surfaces_approvals_in_observation_extra() -> None:
 
     space = Box(shape=(2,), low=np.array([-0.05, -0.05]), high=np.array([0.05, 0.05]))
     policy = _ObsCapturingPolicy()
-    _run(policy, CubePickEmbodiment(), approver=ClampApprover(space))
+    _run(policy, CubePickEmbodiment(), guard=ClampGuard(space))
     assert len(policy.captured_extras) > 1
     # First inference sees empty approvals (step 0 hasn't approved anything yet)
     assert policy.captured_extras[0]["approvals"] == []
@@ -594,7 +737,7 @@ def test_non_finite_policy_action_errors_one_scene_and_eval_continues(
                 return ActionChunk(actions=[Action(data=np.array([np.nan, 0.0]))])
             return super().act(observation)
 
-    class _ClampReviewSpy(ClampApprover):
+    class _ClampReviewSpy(ClampGuard):
         def __init__(self, action_space: Box) -> None:
             super().__init__(action_space)
             self.finite_reviews: list[bool] = []
@@ -610,7 +753,7 @@ def test_non_finite_policy_action_errors_one_scene_and_eval_continues(
         max_steps=20,
     )
     embodiment = CubePickEmbodiment()
-    approver = _ClampReviewSpy(embodiment.info.action_space)
+    guard = _ClampReviewSpy(embodiment.info.action_space)
 
     (log,) = eval(
         task,
@@ -618,7 +761,7 @@ def test_non_finite_policy_action_errors_one_scene_and_eval_continues(
         embodiment,
         log_dir=str(tmp_path),
         fail_on_error=False,
-        approver=approver,
+        guard=guard,
     )
 
     assert log.status != "error"
@@ -628,7 +771,7 @@ def test_non_finite_policy_action_errors_one_scene_and_eval_continues(
     assert "PolicyError" in log.samples[0].error
     assert "non-finite" in log.samples[0].error
     assert log.samples[1].status == "success"
-    assert approver.finite_reviews and all(approver.finite_reviews)
+    assert guard.finite_reviews and all(guard.finite_reviews)
 
 
 def test_fail_on_error_proportion_halts(tmp_path: Path) -> None:
@@ -944,7 +1087,7 @@ def test_rollout_rejects_invalid_max_steps(invalid_steps: Any) -> None:
             max_steps=invalid_steps,
             seed=0,
             epoch=0,
-            controller=DefaultController(),
-            approver=AutoApprover(),
+            action_manager=DefaultActionManager(),
+            guard=PassThroughGuard(),
             sink=NullSink(),
         )

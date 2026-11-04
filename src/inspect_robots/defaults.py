@@ -34,6 +34,7 @@ from __future__ import annotations
 import configparser
 import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -53,6 +54,10 @@ _ENV_SIM_EMBODIMENT = "INSPECT_ROBOTS_SIM_EMBODIMENT"
 _ADHOC_SCORER_FALLBACK = "operator"
 _ADHOC_MAX_STEPS_FALLBACK = 300
 
+# A digit string with a leading zero (a RealSense serial such as
+# "035622060973") is an identifier, not a number: int() would drop the zeros.
+_ZERO_PADDED = re.compile(r"[+-]?0[0-9]")
+
 
 def _parse_value(text: str) -> Any:
     """Best-effort scalar parse for ``k=v`` args (bool/int/float/None/str).
@@ -71,6 +76,20 @@ def _parse_value(text: str) -> Any:
         return low == "true"
     if low in ("none", "null"):
         return None
+    # int() and float() skip surrounding whitespace, so match the same text.
+    if _ZERO_PADDED.match(text.strip()):
+        return text
+    return _parse_number(text)
+
+
+def _parse_number(text: str) -> Any:
+    """Parse an int or a finite float, or return ``text`` unchanged.
+
+    Settings that are always numbers, such as ``max_steps`` and
+    ``rerun_port``, use this directly: unlike :func:`_parse_value`, it parses
+    a zero-padded ``0300`` to ``300``, since their leading zeros carry no
+    meaning.
+    """
     for caster in (int, float):
         try:
             val = caster(text)
@@ -119,6 +138,9 @@ class Defaults:
     # a single fixed function, never registry-selected, so the issue #44
     # leak hazard cannot occur. Applies to every --auto-task run.
     taskgen_args: dict[str, Any] = field(default_factory=dict)
+    # [guards] lists extra guards as specs, in file order: each key is a guard
+    # name and its value the parameters ("max_delta=0.02"), or empty.
+    guards: tuple[str, ...] = ()
 
 
 def config_path(env: Mapping[str, str]) -> Path | None:
@@ -178,7 +200,7 @@ def _read_config(path: Path) -> Defaults:
     source = str(path)
     max_steps: int | None = None
     if raw_steps := parser.get("defaults", "max_steps", fallback=None):
-        parsed = _parse_value(raw_steps)
+        parsed = _parse_number(raw_steps)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
             raise _die(path, f"[defaults] max_steps must be an integer >= 1, got {raw_steps!r}")
         max_steps = parsed
@@ -209,7 +231,7 @@ def _read_config(path: Path) -> Defaults:
 
     rerun_port: int | None = None
     if raw_port := parser.get("defaults", "rerun_port", fallback=None):
-        parsed_port = _parse_value(raw_port)
+        parsed_port = _parse_number(raw_port)
         if (
             not isinstance(parsed_port, int)
             or isinstance(parsed_port, bool)
@@ -244,6 +266,10 @@ def _read_config(path: Path) -> Defaults:
         sim_embodiment_args=_parse_args_section(parser, "sim_embodiment.args"),
         grader_args=_parse_args_section(parser, "grader.args"),
         taskgen_args=_parse_args_section(parser, "taskgen.args"),
+        guards=tuple(
+            f"{name}:{value.strip()}" if value.strip() else name
+            for name, value in (parser.items("guards") if parser.has_section("guards") else ())
+        ),
         policy_args_owner=policy,
         embodiment_args_owner=embodiment,
         sim_embodiment_args_owner=sim_embodiment,
@@ -277,11 +303,11 @@ def _set_default(env: Mapping[str, str], key: str, value: str) -> Path:
     trade-off of editing the file through the CLI.
     """
     if key == "max_steps":
-        parsed = _parse_value(value)
+        parsed = _parse_number(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or parsed < 1:
             raise SystemExit(f"max_steps must be an integer >= 1, got {value!r}")
     if key == "rerun_port":
-        parsed = _parse_value(value)
+        parsed = _parse_number(value)
         if not isinstance(parsed, int) or isinstance(parsed, bool) or not 1 <= parsed <= 65535:
             raise SystemExit(f"rerun_port must be an integer in 1-65535, got {value!r}")
     if key in ("store_frames", "rerun", "rerun_save") and not isinstance(_parse_value(value), bool):

@@ -130,7 +130,7 @@ every policy. Turning them off requires an explicit `--disable-guardrails`.
 The policy slot is not limited to VLAs. With the
 [inspect-robots-agent](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-agent)
 plugin, a frontier LLM drives the same rig through tool calls, one
-approver-checked motion chunk per call.
+guard-checked motion chunk per call.
 
 Put a `.env` with your API key in the working directory (the CLI loads it
 automatically):

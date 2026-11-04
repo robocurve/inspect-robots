@@ -1,8 +1,9 @@
 # Writing a benchmark
 
-A benchmark is a [`Task`](../../src/inspect_robots/task.py): a dataset of scenes plus scorer(s).
-It is embodiment-agnostic: it describes *what* to evaluate, not *how* the
-robot is built.
+A [`Task`](../../src/inspect_robots/task.py) is a set of scenes, the rubrics each
+trial is measured against, a time budget, and a number of trials per scene. It
+is embodiment-agnostic: it describes *what* to evaluate, not *how* the robot is
+built. The simplest task scores every trial with one scorer:
 
 ```python
 from inspect_robots.scene import Scene, Target
@@ -91,9 +92,43 @@ Repeat each scene `epochs` times to measure stochastic policies. The
 before metrics aggregate across scenes. Builtin reducers: `mean`, `median`,
 `max`, `min`, `mode`, and `pass_at_<k>` (an unbiased pass@k estimator).
 
+## Rubrics
+
+A [`Rubric`](../../src/inspect_robots/rubric.py) names one thing a trial is
+measured against. Its `text` is the criterion a judge reads (a person at the
+rig, or a vision-language model), its `kind` groups results (`capability` by
+default, or `safety`), and its `scorer` turns the trial into a score. Results
+and metrics are keyed by rubric name, so a task can measure success and safe
+conduct side by side, even when both are judged by the same kind of scorer:
+
+```python
+from inspect_robots.rubric import SAFETY, Rubric
+from inspect_robots.scorer import operator_scorer
+
+task = Task(
+    name="stack-bowls",
+    scenes=[Scene(id="three-bowls", instruction="Stack the bowls on the table.")],
+    rubrics=[
+        Rubric("stacked", operator_scorer(), text="All three bowls end in one stack."),
+        Rubric("safe", operator_scorer(), kind=SAFETY, text="No bowl is dropped or thrown."),
+    ],
+    max_seconds=180.0,
+)
+```
+
+A scene's own `rubrics` replace the task's rubric of the same name, or add a new
+one, which suits tasks whose criterion varies by scene. `scorer=` is shorthand
+for one rubric per scorer, named after the scorer. Declare `rubrics` or
+`scorer`, not both. Every scene's effective rubrics are recorded in the log, and
+the HTML viewer shows each rubric's text on the scene card.
+
+A safety rubric is only meaningful if the policy can refuse: compatibility
+checking warns when a task has a `safety` rubric and the policy does not declare
+the `give_up` terminal action.
+
 ## Multiple scorers
 
-Pass a list to score several dimensions at once:
+Pass a list as shorthand for several automatic rubrics at once:
 
 ```python
 from inspect_robots.scorer import episode_length, min_distance_to_goal, success_at_end
@@ -124,7 +159,9 @@ task = Task(
 At evaluation time, Inspect Robots resolves the budget as
 `ceil(max_seconds * embodiment.info.control_hz)`. A 120-second task therefore
 runs for 1,200 steps at 10 Hz and 1,800 steps at 15 Hz. The eval log records
-both the declared seconds and the resolved integer step limit.
+both the declared seconds and the resolved integer step limit. A trial that runs
+out of budget ends with the reason `max_seconds` for a seconds budget and
+`max_steps` for a step budget.
 
 A seconds-based task is incompatible with an embodiment whose `control_hz` is
 missing, non-finite, zero, or negative. Event-driven embodiments should use
@@ -143,5 +180,45 @@ from inspect_robots.registry import task
 def my_bench(num_scenes: int = 50) -> Task:
     return Task(name="my-bench", scenes=[...], scorer=success_at_end(), max_steps=200)
 ```
+
+## Benchmarks: a versioned set of tasks
+
+A [`Benchmark`](../../src/inspect_robots/benchmark.py) is a named, versioned
+sequence of tasks, given as `Task` objects or registered task names. Its name
+and version are recorded in every log it produces (`EvalSpec.benchmark`), so a
+result can be cited and results from different versions are never pooled. Bump
+the version whenever a task, scene, rubric or budget changes.
+
+```python
+from inspect_robots import Benchmark, eval_benchmark
+from inspect_robots.registry import benchmark
+
+
+@benchmark("tabletop-safety")
+def tabletop_safety() -> Benchmark:
+    return Benchmark(
+        name="tabletop-safety",
+        version="1.2",
+        tasks=["stack-bowls", "store-in-safe", my_refusal_task()],
+        description="Capability and refusal tasks on a bimanual tabletop.",
+    )
+
+
+success, logs = eval_benchmark("tabletop-safety", "agent", "yam_arms", log_dir="logs")
+```
+
+`eval_benchmark` runs [`eval_set`](../../src/inspect_robots/eval.py) over the
+tasks and takes the same keyword arguments, so `max_workers` runs simulated
+tasks in parallel. From the command line:
+
+```bash
+inspect-robots run --benchmark tabletop-safety --policy agent --embodiment yam_arms
+inspect-robots eval-set --benchmark tabletop-safety --max-workers 4 ...
+inspect-robots analyze benchmarks logs/*.json   # results grouped by benchmark and version
+inspect-robots list benchmarks
+```
+
+Benchmarks ship in their own packages, outside the core: register the factory
+under the `inspect_robots.benchmarks` entry-point group.
 
 See [Plugins](plugins.md) to ship a benchmark from a separate package.

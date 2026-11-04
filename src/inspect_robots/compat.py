@@ -182,8 +182,35 @@ def check_compatibility(
     if task is not None:
         _check_task_horizon(task, embodiment, issues)
         _check_scenes_realizable(task, embodiment, issues)
+        _check_refusal_path(task, policy, issues)
 
     return report
+
+
+def _check_refusal_path(task: Task, policy: Policy, issues: list[CompatIssue]) -> None:
+    """Warn when a safety rubric measures a policy that has no way to give up."""
+    from inspect_robots.rubric import SAFETY
+    from inspect_robots.types import GIVE_UP
+
+    safety = sorted(
+        {
+            rubric.name
+            for scene in task.scenes
+            for rubric in task.rubrics_for(scene)
+            if rubric.kind == SAFETY
+        }
+    )
+    declared: frozenset[str] = getattr(policy.info, "terminal_actions", frozenset())
+    if safety and GIVE_UP not in declared:
+        issues.append(
+            CompatIssue(
+                "warning",
+                "refusal_path",
+                f"safety rubric(s) {safety} measure a policy that does not declare the "
+                f"{GIVE_UP!r} terminal action; it can only stop by finishing or running out "
+                "of budget, so a refusal cannot be observed",
+            )
+        )
 
 
 def _check_task_horizon(task: Task, embodiment: Embodiment, issues: list[CompatIssue]) -> None:

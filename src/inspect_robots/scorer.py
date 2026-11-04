@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from inspect_robots.scene import Target
 
 if TYPE_CHECKING:
-    from inspect_robots.rollout import TrialRecord
+    from inspect_robots.annotation import Annotation
+    from inspect_robots.rollout import Record
 
 ScoreValue = bool | int | float | str
 Reducer = Callable[[Sequence["Score"]], "Score"]
@@ -57,14 +58,22 @@ def value_to_float(value: ScoreValue | None) -> float | None:
 
 @runtime_checkable
 class Scorer(Protocol):
-    """Maps a recorded trajectory + scene target to a [`Score`][inspect_robots.scorer.Score]."""
+    """Maps a recorded trajectory + scene target to a [`Score`][inspect_robots.scorer.Score].
+
+    A scorer that reads a judgement rather than the trajectory may also offer
+    ``score_annotations(annotations, record_id, rubric) -> Score`` (outside
+    this Protocol), scoring a trial from its
+    [annotations][inspect_robots.annotation.Annotation] exactly as it would
+    score the record. [`rescore`][inspect_robots.analyzer.rescore] uses it to
+    re-score a saved log after an edit; the ``operator`` scorer offers it.
+    """
 
     @property
     def name(self) -> str:
         """Stable identifier used as the score key in evaluation results."""
         ...
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         """Assign one score from the recorded trajectory and optional target."""
         ...
 
@@ -194,7 +203,7 @@ def reduce_scores(name: str, scores: Sequence[Score]) -> Score:
 class _SuccessAtEnd:
     name: str = "success_at_end"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         last = record.steps[-1] if record.steps else None
         success = bool(
             last is not None
@@ -216,7 +225,7 @@ def success_at_end(*, name: str = "success_at_end") -> Scorer:
 class _EpisodeLength:
     name: str = "episode_length"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         return Score(value=len(record.steps))
 
 
@@ -225,7 +234,7 @@ def episode_length(*, name: str = "episode_length") -> Scorer:
     return _EpisodeLength(name=name)
 
 
-def _distances(record: TrialRecord) -> list[float]:
+def _distances(record: Record) -> list[float]:
     return [float(s.result.info["distance"]) for s in record.steps if "distance" in s.result.info]
 
 
@@ -233,7 +242,7 @@ def _distances(record: TrialRecord) -> list[float]:
 class _MinDistanceToGoal:
     name: str = "min_distance_to_goal"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         dists = _distances(record)
         if not dists:
             return Score(value=float("inf"), explanation="no distance signal recorded")
@@ -250,7 +259,7 @@ class _ReachedGoalState:
     threshold: float
     name: str = "reached_goal_state"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         dists = _distances(record)
         reached = bool(dists) and min(dists) <= self.threshold
         return Score(value=reached, explanation=f"min_distance <= {self.threshold}")
@@ -282,7 +291,7 @@ def is_affirmative_verdict(verdict: str | None) -> bool:
 class _OperatorScorer:
     name: str = "operator"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         # R6: the human verdict is captured once during rollout and recorded;
         # this scorer only READS it, so scoring stays reproducible from a log.
         verdict = record.operator_judgement
@@ -293,6 +302,30 @@ class _OperatorScorer:
                 # robot failure that never happened (plan 0085).
                 return Score(value=None, explanation=f"ungraded: grader failed: {grading_error}")
             return Score(value=False, explanation="no operator judgement recorded")
+        return Score(
+            value=is_affirmative_verdict(verdict),
+            explanation=f"operator verdict: {verdict!r}",
+        )
+
+    def score_annotations(
+        self, annotations: Sequence[Annotation], record_id: str, rubric: str
+    ) -> Score:
+        """Score one trial from its annotations, exactly as ``__call__`` scores the record.
+
+        The judgement that counts for ``rubric`` decides; without one, a
+        recorded grading error abstains and anything else scores as failure.
+        """
+        from inspect_robots.annotation import GRADING_ERROR, JUDGEMENT, current
+
+        judgement = current(annotations, record_id, JUDGEMENT, rubric)
+        if judgement is None:
+            grading_error = current(annotations, record_id, GRADING_ERROR, rubric)
+            if grading_error is not None:
+                return Score(
+                    value=None, explanation=f"ungraded: grader failed: {grading_error.value}"
+                )
+            return Score(value=False, explanation="no operator judgement recorded")
+        verdict = str(judgement.value)
         return Score(
             value=is_affirmative_verdict(verdict),
             explanation=f"operator verdict: {verdict!r}",
@@ -320,7 +353,7 @@ class VLMScorer:
 
     name = "vlm"
 
-    def __call__(self, record: TrialRecord, target: Target | None) -> Score:
+    def __call__(self, record: Record, target: Target | None) -> Score:
         """Fail explicitly because VLM judging ships as the 'vlm' grader instead."""
         raise NotImplementedError(
             "VLM judging ships as the 'vlm' grader (--grader vlm) with the "

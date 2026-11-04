@@ -1,7 +1,7 @@
 """FrameStore — rollout-owned streaming of camera frames to disk (R5).
 
 A long multi-camera episode would exhaust memory if every frame were retained in
-the [`TrialRecord`][inspect_robots.rollout.TrialRecord]. Instead the rollout streams frames to
+the [`Record`][inspect_robots.rollout.Record]. Instead the rollout streams frames to
 disk through a [`FrameStore`][inspect_robots.frames.FrameStore] and keeps only lightweight
 [`FrameRef`][inspect_robots.frames.FrameRef]
 handles. This is owned by the rollout, NOT by any log sink, so trajectories are

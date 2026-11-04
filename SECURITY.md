@@ -19,6 +19,6 @@ once a fix is released.
 ## Safety note
 
 Inspect Robots can command physical robots. The framework provides an error taxonomy
-and an approver safety gate, but **operators are responsible for hardware
+and a guard safety gate, but **operators are responsible for hardware
 safety** — workspace limits, e-stops, and supervision during real-world runs.
 Treat any policy as untrusted until validated in simulation.

@@ -26,7 +26,7 @@ from inspect_robots.spaces import (
     StateSpec,
 )
 from inspect_robots.task import Task
-from inspect_robots.types import Action, Observation, StepResult
+from inspect_robots.types import Action, Observation, StepResult, Termination
 from inspect_robots_capx import CapxPolicy, CapxPolicyConfig, capx_policy
 from inspect_robots_capx.policy import (
     _EXECUTION_REPORT_CHAR_LIMIT,
@@ -309,27 +309,28 @@ def test_raw_and_fenced_code_paths(reply: str, expected_code: str) -> None:
     assert np.array_equal(chunk.actions[-1].data, np.array([0.1, -0.1, 1.0]))
 
 
-@pytest.mark.parametrize("word", ["FINISH", "GIVE_UP"])
-def test_control_words_return_one_action_stop_hold(word: str) -> None:
+@pytest.mark.parametrize(("word", "kind"), [("FINISH", "done"), ("GIVE_UP", "give_up")])
+def test_control_words_return_one_action_terminal_hold(word: str, kind: str) -> None:
     policy = _bound_policy(_ScriptedTransport([_completion(word)]))
 
     chunk = policy.act(_observation())
 
     assert len(chunk.actions) == 1
     assert np.array_equal(chunk.actions[0].data, np.array([0.0, 0.0, 1.0]))
-    assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": word}
+    assert chunk.terminal == Termination(kind)
+    assert chunk.actions[0].meta == {}
 
 
 @pytest.mark.parametrize(
     ("reply", "reason"),
-    [("FINISH.", "FINISH"), ("GIVE_UP!", "GIVE_UP"), ("finish", "FINISH")],
+    [("FINISH.", "done"), ("GIVE_UP!", "give_up"), ("finish", "done")],
 )
 def test_control_words_tolerate_punctuation_and_case(reply: str, reason: str) -> None:
     policy = _bound_policy(_ScriptedTransport([_completion(reply)]))
 
     chunk = policy.act(_observation())
 
-    assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": reason}
+    assert chunk.terminal == Termination(reason)
 
 
 def test_prose_wrapped_fenced_code_executes_the_fenced_block() -> None:
@@ -403,7 +404,7 @@ def test_clean_perception_turn_resets_consecutive_failure_counter() -> None:
     policy.act(_observation())
     stopped = policy.act(_observation())
 
-    assert stopped.actions[0].meta["stop_reason"] == "FINISH"
+    assert stopped.terminal == Termination("done")
 
 
 def test_call_budget_forces_give_up_after_clean_empty_turn() -> None:
@@ -414,7 +415,7 @@ def test_call_budget_forces_give_up_after_clean_empty_turn() -> None:
 
     chunk = policy.act(_observation())
 
-    assert chunk.actions[0].meta == {"request_stop": True, "stop_reason": "GIVE_UP"}
+    assert chunk.terminal == Termination("give_up", "LLM call budget exhausted")
 
 
 def test_execution_report_is_eager_and_code_lands_on_first_action() -> None:

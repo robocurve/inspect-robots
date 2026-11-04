@@ -215,6 +215,27 @@ class StateSpec:
         return frozenset(f.key for f in self.fields)
 
 
+def reference_state_fields(state: StateSpec | None, dim: int, mode: str) -> list[str]:
+    """The state fields that can serve as the reference for absolute-target control.
+
+    Candidates are the fields whose shape is ``(dim,)``. An embodiment may expose
+    several, e.g. a 14-D ``joint_pos`` next to a 14-D Cartesian ``eef_state``; then
+    the one whose key starts with the control mode's family (``eef`` for ``eef_*``
+    modes, ``joint`` otherwise) wins when it is unique. Control is well defined
+    only when exactly one key is returned; the tool layer and the conformance
+    check both apply this rule, so ``doctor`` accepts what a rollout accepts.
+    """
+    if state is None:
+        return []
+    matching = [f.key for f in state.fields if f.shape == (dim,)]
+    if len(matching) > 1:
+        family = "eef" if mode.startswith("eef") else "joint"
+        preferred = [key for key in matching if key.startswith(family)]
+        if len(preferred) == 1:
+            return preferred
+    return matching
+
+
 @dataclass(frozen=True)
 class ObservationSpace:
     """The observations an embodiment provides / a policy requires.

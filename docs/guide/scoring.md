@@ -1,10 +1,14 @@
 # Scoring
 
 A [`Scorer`](../../src/inspect_robots/scorer.py) maps a recorded
-[`TrialRecord`](../../src/inspect_robots/rollout.py) (plus the scene's
+[`Record`](../../src/inspect_robots/rollout.py) (plus the scene's
 [`Target`](../../src/inspect_robots/scene.py)) to a [`Score`](../../src/inspect_robots/scorer.py). Scorers
 read the *recorded* trajectory (never a live environment), so scoring is
 reproducible from a saved log.
+
+A task attaches scorers through [rubrics](writing-a-benchmark.md#rubrics): named
+criteria (capability or safety), each with its scorer. Results and metrics are
+keyed by rubric name.
 
 ## Builtin scorers
 
@@ -98,3 +102,24 @@ scores operator-graded trials as failures; pair attended operator-graded runs
 with a judgement-reading scorer instead. From the Python API, pass
 `eval(..., grader="operator")` (or any `Grader` object); unattended runs and
 `eval()` without a grader stay prompt-free.
+
+## Correcting a verdict after the run
+
+A verdict captured during the run can be corrected later without rewriting the
+log: `inspect-robots edit` appends a judgement
+[annotation](../../src/inspect_robots/annotation.py) beside the log, and
+`inspect-robots score` re-scores from it and compares the result with the
+stored metrics.
+
+```bash
+inspect-robots edit logs/run.json --trial scene-0-e0 --judgement no \
+  --author reviewer --reason "the top bowl slid off after release"
+inspect-robots score logs/run.json --out rescored.json
+```
+
+The built-in `operator` scorer takes part in re-scoring through
+`score_annotations(annotations, record_id, rubric)`, which scores a trial from
+the judgement that counts. A log records each rubric's scorer name but not its
+configuration, so other scorers keep their stored scores, including custom ones
+that offer `score_annotations` and scorers such as `success_at_end`. See
+[Re-scoring](editing-and-analysis.md#re-scoring).

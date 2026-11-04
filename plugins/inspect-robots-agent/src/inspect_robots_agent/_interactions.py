@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
 
 import httpx
 
@@ -29,6 +31,10 @@ _USAGE_KEYS = {
 }
 
 
+class _PendingInteractionError(RuntimeError):
+    """The server accepted a generation, but its final usage is still unknown."""
+
+
 class InteractionsClient:
     """Send append-only chat deltas over Google's stateful Interactions API.
 
@@ -43,12 +49,15 @@ class InteractionsClient:
         self,
         provider: Provider,
         *,
-        timeout_s: float = 120.0,
+        service_tier: str | None = None,
+        timeout_s: float = 300.0,
         max_retries: int = 3,
         backoff_s: float = 1.0,
         transport: httpx.BaseTransport | None = None,
         capture: WireCapture | None = None,
     ) -> None:
+        self._timeout_s = timeout_s
+        self._service_tier = service_tier
         self._provider = provider
         self._model = provider.model.removeprefix("google/")
         self._max_retries = max_retries
@@ -103,7 +112,18 @@ class InteractionsClient:
             sent_previous = "previous_interaction_id" in body
             t_start = time.time() if self._capture is not None else 0.0
             try:
-                response = self._http.post("/interactions", json=body)
+                response = self._post_and_poll(body, attempt)
+            except _PendingInteractionError as exc:
+                self._record_attempt(
+                    attempt,
+                    body,
+                    None,
+                    None,
+                    str(exc),
+                    t_start,
+                    time.time() - t_start if self._capture is not None else 0.0,
+                )
+                raise
             except httpx.TransportError as exc:
                 last_error = str(exc)
                 self._record_attempt(
@@ -166,6 +186,78 @@ class InteractionsClient:
 
         raise RuntimeError(f"LLM request failed after {self._max_retries} attempts — {last_error}")
 
+    def _post_and_poll(self, body: dict[str, Any], attempt: int) -> httpx.Response:
+        # An accepted generation is never resubmitted after a polling failure.
+        request_id = str(uuid4())
+        started = time.monotonic()
+
+        def checkpoint(event: str, **details: Any) -> None:
+            if self._capture is not None:
+                self._capture.record_interaction(
+                    attempt=attempt,
+                    event=event,
+                    request_id=request_id,
+                    model=self._model,
+                    t=time.time(),
+                    **details,
+                )
+
+        checkpoint("submitted")
+        response = self._http.post("/interactions", json=body)
+        if response.status_code != 200:
+            return response
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
+            return response  # Preserve the existing response-shape diagnostics.
+        interaction_id = payload["id"]
+        checkpoint("accepted", interaction_id=interaction_id, status=payload.get("status"))
+        last_error = "generation still in progress"
+        while payload.get("status") in {"in_progress", "queued"}:
+            remaining = self._timeout_s - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            try:
+                polled = self._http.get(
+                    "/interactions/" + quote(interaction_id, safe=""), timeout=min(30.0, remaining)
+                )
+            except httpx.TransportError as exc:
+                last_error = str(exc)
+            else:
+                if polled.status_code == 200:
+                    try:
+                        updated = polled.json()
+                    except ValueError:
+                        updated = None
+                    if not isinstance(updated, dict) or updated.get("id") != interaction_id:
+                        last_error = "invalid interaction response while polling"
+                        break
+                    response, payload = polled, updated
+                    if payload.get("status") not in {"in_progress", "queued"}:
+                        break
+                else:
+                    last_error = f"HTTP {polled.status_code} while polling"
+                    if polled.status_code != 429 and polled.status_code < 500:
+                        break
+            time.sleep(min(1.0, max(0.0, remaining)))
+        if payload.get("status") in {"in_progress", "queued"}:
+            checkpoint(
+                "usage_pending",
+                interaction_id=interaction_id,
+                status=payload.get("status"),
+                error=last_error,
+            )
+            raise _PendingInteractionError(
+                f"LLM request timed out or polling failed; interaction {interaction_id} "
+                f"is saved for usage recovery ({last_error}). Generation was not resubmitted."
+            )
+        checkpoint(
+            "finished",
+            interaction_id=interaction_id,
+            status=payload.get("status"),
+            usage=payload.get("usage"),
+        )
+        return response
+
     def close(self) -> None:
         """Close the underlying blocking HTTP client."""
         self._http.close()
@@ -201,6 +293,8 @@ class InteractionsClient:
             "store": True,
             "tools": [_translate_tool(tool) for tool in tools],
         }
+        if self._service_tier is not None:
+            body["service_tier"] = self._service_tier
         if messages and messages[0].get("role") == "system":
             body["system_instruction"] = str(messages[0].get("content", ""))
         generation_config: dict[str, Any] = {}
@@ -348,7 +442,9 @@ def _parse_response(response: httpx.Response) -> tuple[AssistantMessage, str]:
         raise _shape_error("status", response.text)
     if status not in _SUCCESS_STATUSES:
         raise RuntimeError(f"Interactions response ended with status {status!r}")
-    steps = payload.get("steps")
+    # A completed turn with no output (0 output tokens) omits "steps";
+    # return an empty turn so the policy nudge path handles it.
+    steps = payload.get("steps", [])
     if not isinstance(steps, list):
         raise _shape_error("steps", response.text)
     interaction_id = payload.get("id")

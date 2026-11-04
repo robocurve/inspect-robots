@@ -30,7 +30,7 @@ jobs:
       - name: Runner artifact and Linux isolation tests
         run: sudo python3 -m unittest discover -s tools/issue-bot/sandbox -p 'test_*.py'
 
-  # Lint + strict typing, once, on a single interpreter. (mypy targets the 3.10
+  # Lint + strict typing, once, on a single interpreter. (mypy targets the 3.11
   # floor via pyproject; running it on 3.11 avoids NumPy's 3.12-only stub syntax.)
   quality:
     name: lint · type
@@ -113,7 +113,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            python-version: "3.10"
+            python-version: "3.11"
             numpy: "numpy>=1.24,<2"
           - os: ubuntu-latest
             python-version: "3.13"

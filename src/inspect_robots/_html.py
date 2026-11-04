@@ -1033,6 +1033,20 @@ def _render_transcript(
     return f"<pre>{_escape(dumped)}</pre>"
 
 
+def _rubric_details(entry: object) -> str:
+    """One scene rubric with text as a collapsed block; automatic checks have none."""
+    if not isinstance(entry, dict):
+        return ""
+    text = entry.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    label = f"Rubric: {entry.get('name')} ({entry.get('kind')})"
+    return (
+        f'<details class="rubric"><summary>{_escape(label)}</summary>'
+        f'<p class="rubric-text">{_escape(text)}</p></details>'
+    )
+
+
 def _score_chips(values: Mapping[str, float | None], *, prefix: str = "") -> str:
     """Render sorted score values as compact escaped chips."""
     return "".join(
@@ -1527,6 +1541,7 @@ def _scene_section(
         if isinstance(rubric_value, str) and rubric_value.strip()
         else ""
     )
+    rubric += "".join(_rubric_details(entry) for entry in scene.rubrics)
     error = "" if scene.error is None else f'<p class="error">{_escape(scene.error)}</p>'
 
     reduced = _score_chips(scene.reduced)
@@ -1555,6 +1570,15 @@ def _scene_section(
     reasons_block = (
         "" if not reasons else f'<h3>Termination reasons</h3><div class="score-row">{reasons}</div>'
     )
+    details = "".join(
+        (
+            f'<div class="grader-note"><span class="note-label">trial {index}</span>'
+            f"{_escape(detail)}</div>"
+        )
+        for index, detail in enumerate(scene.termination_details)
+        if detail is not None
+    )
+    details_block = "" if not details else f"<h3>Policy's stated reasons</h3>{details}"
     judgements = "".join(
         '<span class="score-chip">n/a</span>'
         if judgement is None
@@ -1630,7 +1654,8 @@ def _scene_section(
         f'<div class="scene-head"><h2>{_escape(scene.scene_id)}</h2>'
         f"{_status_badge(scene_status)}</div>{instruction}{rubric}{error}"
         f"{reduced_block}{epoch_block}"
-        f"{reasons_block}{judgements_block}{notes_block}{transcripts}{feedback_block}"
+        f"{reasons_block}{details_block}{judgements_block}{notes_block}{transcripts}"
+        f"{feedback_block}"
         f"{wires}</section>"
     )
 
