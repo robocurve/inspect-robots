@@ -321,7 +321,7 @@ class DeltaLimitGuard:
             # Store a copy, like rewind_reference: `approved` is either the
             # policy's own array (np.asarray aliases a float64 action, and a
             # policy may reuse its output buffer) or the array handed on in the
-            # returned action, which a later approver could mutate in place.
+            # returned action, which a later guard could mutate in place.
             store[_LAST_APPROVED_KEY] = approved.copy()
         else:
             approved = np.clip(data, self._low, self._high)
