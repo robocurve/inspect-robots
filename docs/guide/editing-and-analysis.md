@@ -78,6 +78,9 @@ inspect-robots analyze html logs/run.json --out pages/
 inspect-robots analyze terminations logs/*.json --json
 ```
 
+The HTML analyzer writes one page per input log. When logs from different
+directories share a filename, it adds a numeric suffix to keep every page.
+
 Write your own and register it like any other component:
 
 ```python

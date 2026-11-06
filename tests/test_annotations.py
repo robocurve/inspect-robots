@@ -537,6 +537,47 @@ def test_builtin_analyzers_read_logs_without_changing_them(tmp_path: Path) -> No
     assert list(html.files) == [f"{path.stem}.html"]
 
 
+def test_html_analyzer_keeps_same_named_logs_and_reserves_other_names(tmp_path: Path) -> None:
+    from inspect_robots.registry import resolve
+
+    _, log = _judged_log(tmp_path / "source")
+    items = [
+        AnnotatedLog(
+            path=tmp_path / folder / name,
+            log=replace(log, eval=replace(log.eval, task=task)),
+        )
+        for folder, name, task in (
+            ("a", "run.json", "first-robot-run"),
+            ("b", "run.json", "second-robot-run"),
+            ("c", "run-2.json", "third-robot-run"),
+        )
+    ]
+
+    analysis = resolve("analyzer", "html").analyze(items)
+
+    assert list(analysis.files) == ["run.html", "run-3.html", "run-2.html"]
+    for name, task in zip(
+        analysis.files, ("first-robot-run", "second-robot-run", "third-robot-run"), strict=True
+    ):
+        assert task in analysis.files[name]
+
+
+def test_cli_html_analysis_writes_each_same_named_log(tmp_path: Path) -> None:
+    paths = []
+    for folder, task in (("a", "first-robot-run"), ("b", "second-robot-run")):
+        path, _ = _judged_log(tmp_path / folder)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["eval"]["task"] = task
+        renamed = path.with_name("run.json")
+        renamed.write_text(json.dumps(data), encoding="utf-8")
+        paths.append(renamed)
+
+    out_dir = tmp_path / "pages"
+    assert main(["analyze", "html", *(str(path) for path in paths), "--out", str(out_dir)]) == 0
+    assert "first-robot-run" in (out_dir / "run.html").read_text(encoding="utf-8")
+    assert "second-robot-run" in (out_dir / "run-2.html").read_text(encoding="utf-8")
+
+
 def test_the_terminations_analyzer_lists_stated_reasons(tmp_path: Path) -> None:
     from inspect_robots.registry import resolve
 

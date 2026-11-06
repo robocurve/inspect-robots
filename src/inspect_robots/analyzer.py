@@ -302,7 +302,7 @@ class _DigestAnalyzer:
 
 
 class _HtmlAnalyzer:
-    """The ``inspect-robots view`` page for each log, as files named after the logs."""
+    """The ``inspect-robots view`` page for each log, with distinct output names."""
 
     name = "html"
 
@@ -312,8 +312,18 @@ class _HtmlAnalyzer:
 
         # Resolved from each log's own path, as `inspect-robots view` does, so the
         # page carries the same wire-capture and stored-frame evidence.
-        files = {
-            f"{item.path.stem}.html": render_html(
+        reserved = {f"{item.path.stem}.html".casefold() for item in logs}
+        used: set[str] = set()
+        files: dict[str, str] = {}
+        for item in logs:
+            name = f"{item.path.stem}.html"
+            if name.casefold() in used:
+                suffix = 2
+                while f"{item.path.stem}-{suffix}.html".casefold() in reserved | used:
+                    suffix += 1
+                name = f"{item.path.stem}-{suffix}.html"
+            used.add(name.casefold())
+            files[name] = render_html(
                 item.log,
                 title=item.path.name,
                 log_path=Path(item.path),
@@ -321,8 +331,6 @@ class _HtmlAnalyzer:
                 if item.log.stats.frames_dir is None
                 else resolve_frames_dir(item.log.stats.frames_dir, Path(item.path)),
             )
-            for item in logs
-        }
         return Analysis(
             name=self.name,
             text="".join(f"{name}\n" for name in files),
