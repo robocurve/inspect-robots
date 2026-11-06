@@ -60,8 +60,9 @@ the trajectory, or a custom scorer whose configuration the log does not record)
 are kept as stored. Only values
 whose inputs changed are recomputed, using the log's recorded epoch reducer, so
 a log with no edits re-scores to exactly its stored results. `--out` writes a
-new file in the input log's directory, with a copy of its annotations, so its
-records stay reachable; the input log is never rewritten.
+file in the input log's directory, with a copy of its annotations, so its
+records stay reachable. It refuses the input log and annotation sidecar paths
+to preserve the original run and edits.
 
 ## Analyzers
 

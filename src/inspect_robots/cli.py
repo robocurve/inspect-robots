@@ -3239,6 +3239,10 @@ def _cmd_score(args: argparse.Namespace) -> int:
         out = Path(args.out)
         if out.resolve() == Path(args.log).resolve():
             raise SystemExit(f"--out {out} would overwrite the input log; pass a different path")
+        if out.resolve().name.casefold().endswith(".annotations.jsonl"):
+            raise SystemExit(
+                f"--out {out} would overwrite an annotation sidecar; pass a different log path"
+            )
         if out.resolve().parent != Path(args.log).resolve().parent:
             # The log names its records, action and wire side-cars by paths
             # relative to its own directory; elsewhere they would not resolve.

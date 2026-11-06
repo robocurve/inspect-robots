@@ -724,6 +724,29 @@ def test_cli_score_refuses_to_overwrite_the_log(tmp_path: Path) -> None:
         main(["score", str(path), "--out", str(path)])
 
 
+def test_cli_score_refuses_to_overwrite_annotation_sidecars(tmp_path: Path) -> None:
+    path, log = _judged_log(tmp_path)
+    correction = Annotation(
+        record_id=trial_key(log.samples[0], 0),
+        kind=JUDGEMENT,
+        value="no",
+        author="reviewer",
+        source="editor",
+    )
+    sidecar = append_annotations(path, [correction])
+    original = sidecar.read_bytes()
+
+    with pytest.raises(SystemExit, match="annotation sidecar"):
+        main(["score", str(path), "--out", str(sidecar)])
+
+    assert sidecar.read_bytes() == original
+    assert read_annotations(path)[-1] == correction
+    other_sidecar = tmp_path / "other.Annotations.JSONL"
+    with pytest.raises(SystemExit, match="annotation sidecar"):
+        main(["score", str(path), "--out", str(other_sidecar)])
+    assert not other_sidecar.exists()
+
+
 def test_cli_score_marks_nothing_when_unedited(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
