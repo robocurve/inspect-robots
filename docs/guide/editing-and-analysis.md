@@ -19,7 +19,7 @@ note about one trial:
 | `value` | The verdict (`yes`, `no`, `partial`, ...) or the note text. |
 | `rubric` | The rubric a judgement is for; empty means every rubric that reads judgements. |
 | `author`, `source`, `created` | Who made it, how (`console`, `prompt`, `vlm`, `editor`), and when. |
-| `supersedes` | The `annotation_id` this one corrects, which then no longer counts. |
+| `supersedes` | The `annotation_id` this one corrects. It retires an annotation only for the same trial, kind, and rubric. |
 | `note`, `metadata` | Why, and anything else a tool records. |
 
 Judgements captured during the run, by the operator or a grader, are already

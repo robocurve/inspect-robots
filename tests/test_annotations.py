@@ -674,6 +674,58 @@ def test_a_cross_rubric_supersedes_does_not_retire_a_general_judgement() -> None
     assert current([general, scoped], "r", JUDGEMENT, "safety") == scoped
 
 
+@pytest.mark.parametrize(("record_id", "kind"), [("other-trial", JUDGEMENT), ("trial", NOTE)])
+def test_unrelated_correction_does_not_retire_a_trial_judgement(record_id: str, kind: str) -> None:
+    judgement = Annotation(
+        record_id="trial", kind=JUDGEMENT, value="yes", author="robot", source="run"
+    )
+    unrelated = Annotation(
+        record_id=record_id,
+        kind=kind,
+        value="no" if kind == JUDGEMENT else "note",
+        author="reviewer",
+        source="editor",
+        supersedes=judgement.annotation_id,
+    )
+
+    assert current([judgement, unrelated], "trial", JUDGEMENT) is judgement
+
+
+def test_unknown_supersedes_id_does_not_hide_a_trial_judgement() -> None:
+    judgement = Annotation(
+        record_id="trial", kind=JUDGEMENT, value="yes", author="robot", source="run"
+    )
+    correction = Annotation(
+        record_id="trial",
+        kind=JUDGEMENT,
+        value="no",
+        author="reviewer",
+        source="editor",
+        supersedes="unknown-id",
+    )
+
+    assert current([judgement, correction], "trial", JUDGEMENT) is correction
+
+
+def test_unrelated_sidecar_annotation_does_not_change_a_trial_score(tmp_path: Path) -> None:
+    path, log = _judged_log(tmp_path)
+    first = next(a for a in lift_annotations(log) if a.kind == JUDGEMENT)
+    unrelated = Annotation(
+        record_id=trial_key(log.samples[0], 1),
+        kind=NOTE,
+        value="inspection note",
+        author="reviewer",
+        source="editor",
+        supersedes=first.annotation_id,
+    )
+    append_annotations(path, [unrelated])
+
+    loaded = AnnotatedLog.load(path)
+    rescored = rescore(loaded.log, loaded.annotations)
+
+    assert rescored.samples[0].epochs[0]["stacked"] == log.samples[0].epochs[0]["stacked"]
+
+
 def test_cli_score_export_carries_its_corrections_so_rescoring_reproduces_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
