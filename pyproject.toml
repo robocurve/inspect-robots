@@ -34,6 +34,7 @@ classifiers = [
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
+doctor = ["packaging>=24"]
 rerun = ["rerun-sdk>=0.20", "pillow>=10"]
 viz = ["rerun-sdk>=0.20", "pillow>=10"]
 dev = [

@@ -602,24 +602,54 @@ viewer window is a separate design question from running the set at all.
 
 ## `inspect-robots doctor`
 
-`doctor` checks configured components before constructing the
-embodiment. It reports unregistered component names together with the
-registered names and missing declared runtime modules for each
-resolved component. For the embodiment, it also checks the values
-written for its declared device slots.  Missing camera or serial paths
-and missing CAN interfaces are reported together.  A path that cannot
-be checked, for example because a parent directory is not searchable,
-is reported as an error and the remaining slots are still checked.
-Device checks validate presence only and do not confirm that the
-device is functioning properly. Findings do not stop the remaining
-checks, and the command exits nonzero if any check fails.
+`doctor` checks configured components before constructing the embodiment.
+It reports unregistered names with the registered alternatives and, for known
+plugin providers, an install command. Missing declared runtime modules are
+reported for each resolved factory without constructing policies or importing
+the runtime modules. Plugins must declare these modules in
+`RUNTIME_REQUIREMENTS`; undeclared optional drivers cannot be detected.
 
-After construction, `doctor` checks the embodiment's spaces for adapter
-conformance.
+Install the optional version parser to check plugin distributions against
+framework requirements and the framework bounds declared by plugins:
 
 ```bash
+uv pip install "inspect-robots[doctor]"
 inspect-robots doctor --embodiment my_arms
 ```
+
+The version check reads installed distribution metadata, respects environment
+markers, and flags known releases missing required features. Plugin and core
+version numbers need not match. Upgrade commands are printed for incompatible
+packages. Without the extra, doctor reports how to enable this check.
+
+Additional host probes run in the same pass:
+
+- A configured Rerun viewer without a local display produces a warning with
+  `inspect-robots config set rerun false` or the run flag `--no-rerun`.
+  Use the same `--config FILE` when changing a per-rig config. Forwarded
+  displays and native macOS/Windows desktops follow setup's display rules.
+  Recordings remain available with the local viewer disabled.
+- Configured camera and serial device paths must exist. Stream URLs are
+  skipped. An unreadable path is reported while the other slots are checked.
+- On Linux, configured SocketCAN device slots must exist and have the UP
+  flag. Missing names list the interfaces present, with guidance for renamed
+  interfaces versus absent adapters. Down links get an `ip link set` command.
+  Other platforms report that CAN must be checked on Linux. These checks
+  read sysfs; they do not open cameras or CAN devices.
+- Policy constructor URL defaults and configured `url`, `server_url`,
+  `base_url`, and other `*_url` arguments are checked with a TCP connection
+  and a one-second socket timeout. Config args apply only to their owner;
+  explicitly disabled URLs are skipped. Configured URLs are checked even
+  when the policy name is unresolved. Connections close immediately,
+  without HTTP requests or inference. A reachable port does not establish
+  authentication, application health or model readiness. Failures include
+  an `nc` diagnostic command; start the policy's server separately.
+
+Findings print before embodiment construction. Errors make the command exit
+nonzero; display warnings and informational skips do not. After construction,
+`doctor` checks the embodiment's spaces for adapter conformance and closes it.
+It never calls reset or step. A constructor failure can prevent the conformance
+check, but the earlier preflight findings are still shown.
 
 ## `inspect-robots inspect`
 

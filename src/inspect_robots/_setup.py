@@ -1624,10 +1624,9 @@ def run_setup(
 
         # Native macOS/Windows desktops need no X11/Wayland display. SSH
         # without a display is still headless; a forwarded display takes precedence.
-        headless = not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")) and (
-            sys.platform not in {"darwin", "win32"}
-            or any(env.get(key) for key in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
-        )
+        from inspect_robots._doctor_probes import _viewer_headless
+
+        headless = _viewer_headless(env, sys.platform)
         defaults = _prompt_defaults(
             carried,
             headless=headless,

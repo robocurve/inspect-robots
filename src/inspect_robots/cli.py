@@ -3035,8 +3035,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     constructors hardware-free by convention, so doctor constructs the embodiment
     for conformance checks but never resets or steps it.
     """
+    from inspect_robots._doctor_probes import (
+        _device_probe,
+        _display_probe,
+        _install_hint,
+        _policy_server_probe,
+        _version_probe,
+    )
     from inspect_robots.conformance import (
-        check_device_slots,
         check_embodiment,
         missing_runtime_requirements,
     )
@@ -3044,24 +3050,33 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     defaults = load_defaults(os.environ)
     preflight_failed = False
+    host_issues = _version_probe() + _display_probe(defaults.rerun, os.environ, sys.platform)
     for key, kind, component, component_source in _doctor_configured_components(defaults):
         suffix = f" (from {component_source})" if component_source else ""
         print(f"{key}: {component}{suffix}")
         factories = registered(kind)
         component_factory = factories.get(component)
+        if key == "policy":
+            policy_kvs = _config_args(
+                "policy", component, defaults.policy_args_owner, defaults.policy_args
+            )
+            host_issues.extend(_policy_server_probe(component_factory, policy_kvs))
         if component_factory is None:
             # Keep this wording aligned with registry.resolve so
             # doctor and run commands report unresolved names
             # consistently.
             print(
                 f"  [error] resolution: no {kind} named {component!r}; "
-                f"available: {sorted(factories)}"
+                f"available: {sorted(factories)}{_install_hint(component)}"
             )
             preflight_failed = True
             continue
         for module, remedy in missing_runtime_requirements(component_factory).items():
             print(f"  [error] runtime-requirement: {module} missing → {remedy}")
             preflight_failed = True
+    for issue in host_issues:
+        print(f"  [{issue.severity}] {issue.code}: {issue.message}")
+    preflight_failed |= any(issue.severity == "error" for issue in host_issues)
     name, source = _pick_component(
         "embodiment", args.embodiment, defaults.embodiment, defaults.embodiment_source
     )
@@ -3075,9 +3090,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     for module, remedy in missing.items():
         print(f"  [error] runtime-requirement: {module} missing → {remedy}")
     # Check before construction so constructor failures do not hide device findings.
-    device_issues = check_device_slots(factory, kvs)
+    device_issues = _device_probe(factory, kvs, platform=sys.platform)
     for issue in device_issues:
         print(f"  [{issue.severity}] {issue.code}: {issue.message}")
+    if factory is None:
+        hint = _install_hint(name)
+        if hint:
+            print(f"  [error] resolution: {name!r}{hint}")
     embodiment = _resolve_or_exit("embodiment", name, **kvs)
     try:
         report = check_embodiment(embodiment.info)
@@ -3086,7 +3105,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(report.summary())
     if not report.ok:
         print("see the adapter authoring guide: docs/guide/adapters.md")
-    return 1 if not report.ok or missing or device_issues or preflight_failed else 0
+    device_failed = any(issue.severity == "error" for issue in device_issues)
+    return 1 if not report.ok or missing or device_failed or preflight_failed else 0
 
 
 def _cmd_setup() -> int:
