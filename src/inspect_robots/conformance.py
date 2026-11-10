@@ -24,7 +24,7 @@ import importlib.util
 import inspect
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -214,7 +214,7 @@ def missing_runtime_requirements(factory: object) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class ConformanceIssue:
-    """One finding: ``severity`` is ``"error"`` (fails the check) or ``"warning"``."""
+    """One finding: errors fail checks; warnings and informational findings do not."""
 
     severity: str
     code: str
@@ -247,6 +247,7 @@ def check_device_slots(
     configured: Mapping[str, object],
     *,
     sysfs_net: Path | None = None,
+    can_check: Callable[[DeviceSlot, str], list[ConformanceIssue]] | None = None,
 ) -> list[ConformanceIssue]:
     """Check for configured device-slot values that no longer resolve on this host.
 
@@ -257,7 +258,8 @@ def check_device_slots(
     embodiment's own health check probes the stream live.
 
     ``configured`` is the resolved ``[embodiment.args]``. A non-string or absent value is skipped by
-    this check. CAN validation checks presence only.
+    this check. CAN validation checks presence only unless ``can_check`` is supplied
+    to provide host-specific presence and state findings.
 
     Returns findings in slot order.
     """
@@ -271,6 +273,9 @@ def check_device_slots(
         if not isinstance(value, str):
             continue
         if slot.kind == "can":
+            if can_check is not None:
+                issues.extend(can_check(slot, value))
+                continue
             interfaces = _scan_can(net)
             if value not in interfaces:
                 present = ", ".join(interfaces) or "none"
