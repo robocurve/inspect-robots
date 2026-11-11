@@ -787,7 +787,8 @@ log the same video.
 The page shows "Loading video…" until the first frame arrives, then plays the
 video muted and looped. An "Open video" link sits beside the heading. If the
 browser cannot load the URL, the block falls back to the frame flipbook, or
-says "Video unavailable" when the page has no frames. A stalled connection
+says "Video unavailable" when that trial has no frames. Once the video has
+started playing, a later network error leaves the player in place. A stalled connection
 never reports an error, so the placeholder can stay up; the player controls
 and the link still work. An `http:` URL on an `https:` page may be blocked
 as mixed content.
@@ -796,7 +797,8 @@ Linked videos have no step timeline, so the transcript rail (turn
 highlighting, click-to-seek and Follow) is unavailable for them. Running
 logs ignore `--video-url` and keep the flipbook. In directory mode, pass
 `--force` after changing `--video-url` to re-render pages that are already
-current.
+current. Pages rendered with `--video-url` count as final, so a later plain
+`view` pass does not replace the linked video with an embedded MP4.
 
 ## `inspect-robots video`
 

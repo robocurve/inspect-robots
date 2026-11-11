@@ -2586,7 +2586,9 @@ def _render_view_directory(
         try:
             source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
-            suppressed_tier = args.serve or args.no_video
+            # A linked hosted video is the page's final media, so a later plain
+            # pass must not "upgrade" it to an embedded MP4 (plan 0091).
+            suppressed_tier = (args.serve or args.no_video) and args.video_url is None
             # The suppressed-tier stamp sits a full 2 microseconds below the
             # source mtime, and the gate allows 1 microsecond of slack:
             # filesystems round timestamps to their tick (100 ns on NTFS), so

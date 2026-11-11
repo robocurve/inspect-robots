@@ -3089,6 +3089,33 @@ def test_completed_page_pins_source_nanosecond_mtime_and_live_always_renders(
     assert rendered == ["run.live.json"]
 
 
+def test_view_directory_linked_video_pages_get_the_full_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    source = _write_log(_directory_view_log(created="2026-08-07T12:00:00Z"), logs, "done.json")
+    source_ns = 2_000_000_000
+    os.utime(source, ns=(source_ns, source_ns))
+
+    url = "https://h.org/{log}.mp4"
+    assert main(["view", str(logs), "--no-video", "--video-url", url]) == 0
+    page = logs / "html" / "done.html"
+    # Full tier: a later plain pass must not replace the linked video.
+    assert page.stat().st_mtime_ns == source_ns
+    render_page = cli._render_log_page
+    calls: list[object] = []
+
+    def record_render(*args: Any, **kwargs: Any) -> int:
+        calls.append(kwargs["video_url"])
+        return render_page(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_render_log_page", record_render)
+    assert main(["view", str(logs)]) == 0
+    assert calls == []
+    capsys.readouterr()
+
+
 def test_view_directory_two_level_video_stamp_skips_then_upgrades(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3211,6 +3238,13 @@ def test_view_directory_video_url_needs_log_and_is_forwarded(
     assert main(["view", str(logs), "--video-url", url]) == 0
     assert received == [url, url]
     capsys.readouterr()
+
+
+def test_view_directory_video_url_escaped_log_braces_do_not_count(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with pytest.raises(SystemExit, match="must contain"):
+        main(["view", str(logs), "--video-url", "https://h.org/{{log}}.mp4"])
 
 
 def test_view_renderer_popen_oserror_degrades_and_exits_zero(
@@ -8820,10 +8854,3 @@ def test_eval_set_summary_shows_why_a_run_with_metrics_failed(
     cli._print_eval_set_summary(False, [log], "logs")
     out = capsys.readouterr().out
     assert "operator=1  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))" in out
-
-
-def test_view_directory_video_url_escaped_log_braces_do_not_count(tmp_path: Path) -> None:
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    with pytest.raises(SystemExit, match="must contain"):
-        main(["view", str(logs), "--video-url", "https://h.org/{{log}}.mp4"])

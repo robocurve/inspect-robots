@@ -98,7 +98,13 @@ def validate_video_url_template(template: str) -> str:
 def _expand_video_url(template: str, *, log: str, scene: str, trial: int) -> str:
     """Substitute percent-encoded fields into an already-validated template."""
     values = {"log": log, "scene": scene, "trial": str(trial)}
-    return template.format_map({key: quote(value, safe="") for key, value in values.items()})
+    # quote() leaves dots alone, so a "." or ".." value would act as a path
+    # segment once the browser normalizes the URL; encode those dots too.
+    encoded = {
+        key: value.replace(".", "%2E") if value in {".", ".."} else quote(value, safe="")
+        for key, value in values.items()
+    }
+    return template.format_map(encoded)
 
 
 _FRAME_CLICK_SCRIPT = """document.addEventListener('click', (event) => {
@@ -137,6 +143,8 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
         linked.dataset.state = 'ready';
       }, {once: true});
       linkedVideo.addEventListener('error', () => {
+        // A mid-stream network drop after playback started keeps the player.
+        if (linked.dataset.state === 'ready') return;
         linkedLive = false;
         if (panels.length) {
           linked.remove();
@@ -146,7 +154,7 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
           linked.dataset.state = 'error';
           linked.querySelector('.linked-video-status').textContent = 'Video unavailable';
         }
-      }, {once: true});
+      });
     }
 
     const syncVideo = () => {
@@ -1596,7 +1604,8 @@ def _render_linked_media(
     return (
         f'<div class="run-media" data-trial="{_escape(trial_prefix)}" data-linked-video>'
         '<div class="run-media-head">Run video'
-        f'<a class="linked-video-link" href="{href}">Open video</a></div>'
+        f'<a class="linked-video-link" href="{href}" target="_blank" rel="noopener">'
+        "Open video</a></div>"
         '<div class="linked-video video-panel" data-state="loading">'
         f'<video muted loop playsinline controls preload="auto" data-src="{href}"></video>'
         '<div class="linked-video-status" role="status">Loading video…</div></div>'

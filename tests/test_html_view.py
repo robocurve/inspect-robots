@@ -2453,7 +2453,9 @@ def test_linked_video_replaces_the_composite_and_keeps_the_flipbook(
         f'<video muted loop playsinline controls preload="auto" data-src="{url}"></video>'
     ) in block
     assert '<div class="linked-video video-panel" data-state="loading">' in block
-    assert f'<a class="linked-video-link" href="{url}">Open video</a>' in block
+    assert (
+        f'<a class="linked-video-link" href="{url}" target="_blank" rel="noopener">Open video</a>'
+    ) in block
     assert 'role="status">Loading video…</div>' in block
     assert "data-steps" not in block and "data-follow" not in block
     assert "data:video/mp4" not in document and ' src="http' not in document
@@ -2531,5 +2533,17 @@ def test_flipbook_script_wires_the_linked_video_hooks() -> None:
         "'loadedmetadata'",
         "data-linked-failed",
         "Video unavailable",
+        "if (linked.dataset.state === 'ready') return;",
+        ".run-media[data-linked-video]:not([data-linked-failed]) .camera-panel { display: none; }",
     ):
         assert hook in document
+
+
+@pytest.mark.parametrize(("scene", "encoded"), [(".", "%2E"), ("..", "%2E%2E"), ("a.b", "a.b")])
+def test_dot_segments_are_encoded_so_they_cannot_climb_the_path(
+    tmp_path: Path, scene: str, encoded: str
+) -> None:
+    log = _log(transcripts=(_chat({"role": "user", "content": "hi"}),))
+    log = dataclasses.replace(log, samples=(dataclasses.replace(log.samples[0], scene_id=scene),))
+    document = render_html(log, title="x", video_url="https://h.org/v/{scene}/clip.mp4")
+    assert f'data-src="https://h.org/v/{encoded}/clip.mp4"' in document
