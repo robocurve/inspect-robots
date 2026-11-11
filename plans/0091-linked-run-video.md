@@ -26,10 +26,13 @@ away.
   conversion (`!r`) or a format spec (`:>3`) is rejected.
 - Validation at the CLI, before any render, and again in `render_html` for
   library callers: the template must parse and use only the fields above; it
-  must not contain whitespace; and the literal text before the first field
-  must already be a full `http://host/` or `https://host/` prefix
-  (`urllib.parse.urlsplit`), so a substituted value can only land in the
-  path, query or fragment and can never reach the scheme or host. CLI
+  must not contain whitespace or `\` (browsers read `\` as `/`, Python does
+  not); and when the template has a field, the literal text before the first
+  field must be a full `http://host/` or `https://host/` prefix: a non-empty
+  hostname followed by a literal `/` (`urllib.parse.urlsplit` path starting
+  with `/`). So `https://cdn{log}.x/` and `https://h:{trial}/` are rejected,
+  and a substituted value can only land in the path, query or fragment. Field
+  names are compared whole, so `{log.x}` and `{log[0]}` are unknown fields. CLI
   failures exit through `SystemExit` with a message naming `--video-url`.
 - Single-file mode: a literal URL without placeholders is allowed. A template
   without `{scene}` or `{trial}` gives every trial of a log the same video;
@@ -119,6 +122,10 @@ goes through `_escape`.
   reader sees "Loading video…" instead of a bare black box.
 - The "Open video" link gives readers without JavaScript, or with a failed
   load, a direct way to the file.
+- A stalled network never fires `error`, so the status can stay on
+  "Loading video…"; the docs note this, and the controls and link stay usable.
+  An `http:` URL on an `https:` page may be blocked as mixed content and then
+  falls back like any other error.
 - `.run-media[data-linked-video]:not([data-linked-failed]) .camera-tabs` and
   `.camera-panel` are hidden, so the flipbook stays out of sight unless the
   video fails.
