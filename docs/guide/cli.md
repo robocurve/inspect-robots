@@ -740,8 +740,8 @@ frame images instead: every camera with an embedded frame appears side by side
 (left wrist, centre, right wrist on a bimanual rig) on one shared timeline with
 play or pause and step scrubbing. Each camera shows its latest frame at or
 before the current step, and its caption names that frame's step, which can
-differ from the shared step when a camera has fewer embedded frames. The file contains its stylesheet and media inline, so it has no
-network dependency.
+differ from the shared step when a camera has fewer embedded frames. The file
+contains its stylesheet and media inline, so it has no network dependency.
 
 On composite-video pages, the transcript is also a timeline rail: the active
 turn highlights as the video plays, clicking a turn's step header seeks to its step, and the
