@@ -24,14 +24,17 @@ away.
   - `{trial}`: the trial index within the scene (`0`, `1`, ...).
   `{{` and `}}` are literal braces. Any other field, a positional `{}`, a
   conversion (`!r`) or a format spec (`:>3`) is rejected.
-- Validation at the CLI, before any render: the template must parse, use only
-  the fields above, and after substituting sample values be an absolute
-  `http` or `https` URL with a host (`urllib.parse.urlsplit`). Failures exit
-  through `SystemExit` with a message naming `--video-url`.
-- Single-file mode: a literal URL without placeholders is allowed. If one log
-  renders the same URL for more than one trial, `view` prints one stderr
-  warning (`--video-url resolves to the same URL for N trials; use {scene}
-  and {trial}`) and still renders.
+- Validation at the CLI, before any render, and again in `render_html` for
+  library callers: the template must parse and use only the fields above; it
+  must not contain whitespace; and the literal text before the first field
+  must already be a full `http://host/` or `https://host/` prefix
+  (`urllib.parse.urlsplit`), so a substituted value can only land in the
+  path, query or fragment and can never reach the scheme or host. CLI
+  failures exit through `SystemExit` with a message naming `--video-url`.
+- Single-file mode: a literal URL without placeholders is allowed. A template
+  without `{scene}` or `{trial}` gives every trial of a log the same video;
+  that is the intended publisher layout (one composite per single-trial log),
+  so it is documented rather than warned about.
 - Directory mode: the template must contain `{log}`, since a literal URL would
   give every page the same video. The option applies to every completed page
   of the pass. Changing `--video-url` needs `--force` to re-render pages that
@@ -39,7 +42,11 @@ away.
   `--force` lists it.
 - Started (running) logs ignore `--video-url`: the hosted file does not exist
   until the run finishes, and the live render loop should not reload a
-  missing video every two seconds. They keep today's flipbook.
+  missing video every two seconds. They keep today's flipbook. A single-file
+  render of a started log prints one stderr note saying the option was
+  ignored.
+- Trials with no policy transcript get no media block today (media lives
+  inside the transcript `<details>`), and they get no linked video either.
 - `--video-url` replaces the embedded composite for that page: no ffmpeg
   encode runs and the video budget is not charged. `--no-video` and
   `--video-url` combine (the publishing case); `--no-frames` and
@@ -75,8 +82,6 @@ away.
   `{log}` with `log_path=None` raises `ValueError` (the CLI always passes a
   path). `render_html` validates the template itself too, so library callers
   get the same guarantees.
-- `_VideoContext` gets the expanded-URL counter for the duplicate warning;
-  the warning prints once per page from `render_html` after all scenes render.
 - The flipbook panels are still built from the rendered frames
   (`rendered_frames`), exactly as the flipbook-only path builds them, so the
   fallback needs no extra frame payload.
@@ -85,8 +90,9 @@ away.
 
 ```html
 <div class="run-media" data-trial="scene-0-e0" data-linked-video>
-  <div class="run-media-head">Run video</div>
-  <div class="linked-video" data-state="loading">
+  <div class="run-media-head">Run video
+    <a class="linked-video-link" href="https://...">Open video</a></div>
+  <div class="linked-video video-panel" data-state="loading">
     <video muted loop playsinline controls preload="auto"
            data-src="https://..."></video>
     <div class="linked-video-status" role="status">Loading video…</div>
@@ -107,9 +113,12 @@ goes through `_escape`.
   `max-height`, so the placeholder has a size before metadata arrives. On
   `loadedmetadata` the script sets the box's `aspect-ratio` to
   `videoWidth / videoHeight`.
-- The `<video>` is transparent until `data-state="ready"`, so a browser never
-  shows a black or broken frame while loading. The status text is centred
-  over the box and hidden once ready.
+- The `<video>` stays visible with its controls, so a browser that waits for
+  a user gesture can still be started by hand. The status text sits over the
+  dark box with `pointer-events: none` and is hidden once ready, so the
+  reader sees "Loading video…" instead of a bare black box.
+- The "Open video" link gives readers without JavaScript, or with a failed
+  load, a direct way to the file.
 - `.run-media[data-linked-video]:not([data-linked-failed]) .camera-tabs` and
   `.camera-panel` are hidden, so the flipbook stays out of sight unless the
   video fails.
@@ -124,14 +133,18 @@ Inside the existing per-block `DOMContentLoaded` handler (`_FLIPBOOK_SCRIPT`):
   when the trial's `<details class="transcript">` is open (or absent), and on
   the first `toggle` to open otherwise, so a directory of collapsed trials
   does not download every video at page load.
-- `loadedmetadata`: set the aspect ratio. `canplay` (once): set
-  `data-state="ready"` and play if the transcript is open.
+- After assigning `src`, `load()` calls `play()` (errors swallowed), since
+  some browsers (iOS Safari, data saver) fetch only metadata until asked to
+  play and would never fire `canplay`.
+- `loadedmetadata`: set the aspect ratio. `loadeddata` (once): set
+  `data-state="ready"`.
 - `error` (once): if the block has flipbook panels, remove the linked box,
   set `data-linked-failed` on the block, and call `activate(active)` so the
   flipbook starts. Otherwise set `data-state="error"` and change the status
   text to "Video unavailable".
-- `syncVideo` (play on open, pause on collapse) covers the linked video too
-  once it is ready.
+- `syncVideo` (play on open, pause on collapse) already queries
+  `.video-panel video`; the linked box carries `video-panel`, so it is
+  covered. On open it first calls `load()`.
 
 ## Tests (test-first)
 
@@ -147,16 +160,17 @@ Inside the existing per-block `DOMContentLoaded` handler (`_FLIPBOOK_SCRIPT`):
   flipbook panels are still present for fallback; a page with no flipbook
   source still renders the linked box.
 - started logs ignore the option; `{log}` without `log_path` raises.
-- duplicate-URL warning prints once for a multi-trial log and not for a
-  per-trial template.
-- the script contains the `canplay`, `error` and `data-src` hooks (string
+- a multi-trial log with a `{log}`-only template gives every trial the same
+  URL without a warning.
+- the script contains the `loadeddata`, `error` and `data-src` hooks (string
   checks, as the existing script tests do).
 
 `tests/test_registry_cli.py`:
 
 - `--video-url` is forwarded to `render_html` in single-file and directory
   mode; an invalid template exits with a message before rendering; directory
-  mode without `{log}` exits.
+  mode without `{log}` exits; a started single-file log prints the
+  ignored-option note.
 
 Browser behaviour is checked by hand in headless Chromium (Playwright): a
 render pointing at a served MP4 shows "Loading video…" then plays; a bad URL
