@@ -766,6 +766,40 @@ pages remain upgradeable: the next eligible plain `view` pass re-renders them
 with the composite MP4. Reports created before this behavior need `--force`
 once to gain embedded video.
 
+### Linking a hosted run video
+
+If you host each run's composite MP4 yourself, `--video-url` makes the "Run
+video" block stream it instead of embedding one, which keeps published pages
+small:
+
+```bash
+inspect-robots view logs/ --no-video --frames-budget 12 \
+  --video-url 'https://runs.example.org/my-run/videos/{log}.mp4'
+```
+
+The URL must be `http` or `https`. `{log}` expands to the log file's stem,
+`{scene}` to the scene id and `{trial}` to the trial index; each value is
+percent-encoded. The scheme and host must be written out literally before
+the first placeholder. A logs directory needs `{log}`, so every page gets its
+own video. A template without `{scene}` or `{trial}` gives every trial of a
+log the same video.
+
+The page shows "Loading video…" until the first frame arrives, then plays
+the video muted and looped. An "Open video" link sits beside the heading. If
+the browser cannot load the URL, the block falls back to the frame flipbook,
+or says "Video unavailable" when that trial has no frames. Once the first
+frame has loaded, a later network error leaves the player in place. A
+stalled connection never reports an error, so the placeholder can stay up;
+the player controls and the link still work. An `http:` URL on an `https:`
+page may be blocked as mixed content.
+
+Linked videos have no step timeline, so the transcript rail (turn
+highlighting, click-to-seek and Follow) is unavailable for them. Running
+logs ignore `--video-url` and keep the flipbook. In directory mode, pass
+`--force` after changing `--video-url` to re-render pages that are already
+current. Pages rendered with `--video-url` count as final, so a later plain
+`view` pass does not replace the linked video with an embedded MP4.
+
 ## `inspect-robots video`
 
 Render a `--store-frames` run's stored camera frames into one MP4 per

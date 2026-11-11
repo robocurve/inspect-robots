@@ -75,7 +75,9 @@ from inspect_robots._html import (
     _display_status,
     _is_chat_transcript,
     _status_class,
+    _video_url_fields,
     render_html,
+    validate_video_url_template,
 )
 from inspect_robots._html_index import IndexEntry, render_index
 from inspect_robots._pointers import derive_blob_dir, read_jsonl_prefix, resolve_log_pointer
@@ -602,6 +604,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip embedded MP4 encoding while keeping the frame flipbook",
     )
     p_view.add_argument(
+        "--video-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "play each trial's run video from this http(s) URL instead of embedding "
+            "an MP4; {log} (log file stem), {scene} and {trial} are substituted. "
+            "Directory mode needs {log}. Running logs ignore it. The flipbook "
+            "stays as the fallback if the video fails to load"
+        ),
+    )
+    p_view.add_argument(
         "--frames-budget",
         type=float,
         default=50,
@@ -627,7 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "re-render existing pages in directory mode; use after changing "
-            "--no-frames, --no-video, --frames-budget, or --live-frames-budget "
+            "--no-frames, --no-video, --video-url, --frames-budget, or "
+            "--live-frames-budget "
             "(ignored for one file)"
         ),
     )
@@ -2378,6 +2392,7 @@ def _render_log_page(
     no_video: bool = False,
     serve_pass: bool = False,
     index_href: str | None = None,
+    video_url: str | None = None,
 ) -> int:
     """Render one already-parsed log through the shared single-page pipeline."""
     frames_dir = None
@@ -2399,6 +2414,7 @@ def _render_log_page(
         no_video=no_video,
         serve_pass=serve_pass,
         index_href=index_href,
+        video_url=video_url,
     )
     if atomic and out_path is not None:
         return _write_html_atomic(document, out_path)
@@ -2570,7 +2586,9 @@ def _render_view_directory(
         try:
             source_stat = log_path.stat()
             log = read_eval_log(str(log_path))
-            suppressed_tier = args.serve or args.no_video
+            # A linked hosted video is the page's final media, so a later plain
+            # pass must not "upgrade" it to an embedded MP4 (plan 0091).
+            suppressed_tier = (args.serve or args.no_video) and args.video_url is None
             # The suppressed-tier stamp sits a full 2 microseconds below the
             # source mtime, and the gate allows 1 microsecond of slack:
             # filesystems round timestamps to their tick (100 ns on NTFS), so
@@ -2608,6 +2626,7 @@ def _render_view_directory(
                     serve_pass=args.serve,
                     # Pages sit beside index.html in out_dir.
                     index_href="index.html",
+                    video_url=args.video_url,
                 )
                 if log.status != "started":
                     # Started pages re-render every pass by design (plan 0058);
@@ -2819,8 +2838,21 @@ def _cmd_view(args: argparse.Namespace) -> int:
         raise SystemExit("--frames-budget must be a non-negative finite number")
     if not (math.isfinite(args.live_frames_budget) and args.live_frames_budget >= 0):
         raise SystemExit("--live-frames-budget must be a non-negative finite number")
+    if args.video_url is not None:
+        try:
+            validate_video_url_template(args.video_url)
+        except ValueError as exc:
+            raise SystemExit(f"--video-url: {exc}") from None
 
     log_path = Path(args.log)
+    directory_mode = log_path.is_dir() or (args.serve and not log_path.exists())
+    if (
+        directory_mode
+        and args.video_url is not None
+        and "log" not in _video_url_fields(args.video_url)[1]
+    ):
+        # A literal URL would give every page in the directory the same video.
+        raise SystemExit("--video-url must contain {log} when rendering a logs directory")
     if args.serve and not log_path.exists():
         log_path.mkdir(parents=True, exist_ok=True)
     if log_path.is_dir():
@@ -2844,13 +2876,17 @@ def _cmd_view(args: argparse.Namespace) -> int:
 
     from inspect_robots import read_eval_log
 
+    log = read_eval_log(str(log_path))
+    if args.video_url is not None and log.status == "started":
+        print("note: --video-url is ignored for a running log", file=sys.stderr)
     document_size = _render_log_page(
-        read_eval_log(str(log_path)),
+        log,
         log_path,
         out_path,
         no_frames=args.no_frames,
         frames_budget=args.frames_budget,
         no_video=args.no_video,
+        video_url=args.video_url,
     )
     if stdout_mode:
         return 0
