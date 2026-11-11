@@ -20,7 +20,9 @@ import numpy.typing as npt
 import pytest
 
 from inspect_robots._html import (
+    _FLIPBOOK_SCRIPT,
     _JSON_STRING_LIMIT,
+    _camera_order,
     _frame_markup,
     _FrameBudget,
     _FrameContext,
@@ -1431,7 +1433,7 @@ def test_flipbook_reuses_frame_urls_and_requires_two_frames(
 
     assert len(sources) == 2 and all(document.count(source) == 1 for source in sources)
     assert document.count("document.addEventListener('DOMContentLoaded'") == 1
-    assert 'class="run-media" data-trial="scene-0-e0"' in document
+    assert 'class="run-media flipbook-media" data-trial="scene-0-e0"' in document
     assert 'class="flipbook-player"' in document
     assert (
         'class="flipbook-player"'
@@ -1446,7 +1448,115 @@ def test_flipbook_reuses_frame_urls_and_requires_two_frames(
 
     single = _chat({"role": "user", "content": _parts("top", 1)})
     one = render_html(_log(transcripts=(single,)), title="one", frames_dir=tmp_path)
-    assert 'class="run-media"' not in one
+    assert 'class="run-media' not in one
+
+
+def test_camera_order_groups_left_top_right_by_token() -> None:
+    assert _camera_order(["right_wrist", "top", "left_wrist"]) == [
+        "left_wrist",
+        "top",
+        "right_wrist",
+    ]
+    assert _camera_order(["cam_right_wrist", "cam_high", "Cam-Left wrist"]) == [
+        "Cam-Left wrist",
+        "cam_high",
+        "cam_right_wrist",
+    ]
+    assert _camera_order(["bright", "Right-Wrist", "leftover", "top"]) == [
+        "bright",
+        "leftover",
+        "top",
+        "Right-Wrist",
+    ]
+    assert _camera_order(["beta", "alpha"]) == ["beta", "alpha"]
+
+
+def test_flipbook_shows_every_camera_side_by_side_on_one_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: None)
+    cameras = ("top", "right_wrist", "left_wrist")
+    transcript = _chat(
+        {"role": "user", "content": [part for cam in cameras for part in _parts(cam, 0)]},
+        {"role": "user", "content": [part for cam in cameras for part in _parts(cam, 2)]},
+        {"role": "user", "content": [*_parts("top", 3), *_parts("top", 3)]},
+    )
+    for camera in cameras:
+        for step in (0, 2, 3):
+            _save_frame(tmp_path, camera, step, np.full((2, 2, 3), step, dtype=np.uint8))
+
+    document = render_html(_log(transcripts=(transcript,)), title="grid", frames_dir=tmp_path)
+    media = re.search(
+        r'<div class="run-media.*?<div class="conversation">', document, flags=re.DOTALL
+    )
+    assert media is not None
+    block = media.group()
+
+    assert "data-camera-tab" not in block and " hidden" not in block
+    assert block.count('class="flipbook-grid"') == 1
+    panels = re.findall(r'data-camera-panel="([^"]+)"', block)
+    assert panels == ["left_wrist", "top", "right_wrist"]
+    assert block.count('class="flipbook-player"') == 3
+    assert block.count('class="flipbook-loading">Loading…</span>') == 3
+    assert block.count('class="flipbook-controls"') == 1
+    assert block.count('aria-label="run step"') == 1
+    # Distinct steps across shown cameras: 0, 2, 3.
+    assert 'max="2"' in block
+    assert block.count('class="flipbook-label"') == 3
+    assert "data-panel-label>left_wrist · step 0</span>" in block
+    assert "data-step-label>step 0</span>" in block
+    assert '<div class="run-media flipbook-media" data-trial="scene-0-e0">' in block
+    noscript = "<noscript><style>.flipbook-media { display: none !important; }</style></noscript>"
+    assert noscript in document
+
+
+def test_composite_uses_left_top_right_camera_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    encoded: list[list[str]] = []
+
+    def fake_encode(
+        streams: Sequence[tuple[str, Sequence[tuple[int, Path]]]], *_args: object
+    ) -> tuple[bytes, tuple[str, ...], tuple[int, ...]]:
+        encoded.append([key for key, _frames in streams])
+        return b"composite", tuple(key for key, _frames in streams), (0, 1)
+
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", fake_encode)
+    cameras = ("top", "right_wrist", "left_wrist")
+    for camera in cameras:
+        for step in (0, 1):
+            _save_frame(tmp_path, camera, step, np.zeros((2, 2, 3), dtype=np.uint8))
+    transcript = _chat(
+        {"role": "user", "content": [part for cam in cameras for part in _parts(cam, 0)]},
+        {"role": "user", "content": [part for cam in cameras for part in _parts(cam, 1)]},
+    )
+
+    document = render_html(_log(transcripts=(transcript,)), title="order", frames_dir=tmp_path)
+
+    assert encoded == [["left_wrist", "top", "right_wrist"]]
+    assert '<div class="camera-order">left_wrist · top · right_wrist</div>' in document
+
+
+def test_flipbook_floor_counts_distinct_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: None)
+    transcript = _chat(
+        {"role": "user", "content": [*_parts("top", 1), *_parts("top", 1)]},
+    )
+    _save_frame(tmp_path, "top", 1, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_log(transcripts=(transcript,)), title="dupe", frames_dir=tmp_path)
+
+    assert 'class="run-media' not in document
+
+
+def test_flipbook_script_uses_one_shared_per_trial_state() -> None:
+    assert "flipbook-tab" not in _FLIPBOOK_SCRIPT
+    assert "data-camera-tab" not in _FLIPBOOK_SCRIPT
+    assert "inspect-robots:flipbook-run:${location.pathname}:${trial}`" in _FLIPBOOK_SCRIPT
+    assert "{step, paused}" in _FLIPBOOK_SCRIPT
 
 
 def test_mp4_tier_renders_one_composite_in_turn_order_without_autoplay(
@@ -1974,7 +2084,7 @@ def test_video_budget_without_flipbook_source_omits_camera_panel(
         video_budget_bytes=1,
     )
 
-    assert 'class="run-media"' not in document
+    assert 'class="run-media' not in document
 
 
 def test_wire_section_renders_blob_stubs_breakpoints_and_request_summary(

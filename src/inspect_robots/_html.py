@@ -11,7 +11,7 @@ import math
 import re
 import shutil
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -50,11 +50,7 @@ _FRAME_CLICK_SCRIPT = """document.addEventListener('click', (event) => {
 _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.run-media[data-trial]').forEach((block) => {
     const trial = block.dataset.trial;
-    const tabs = Array.from(block.querySelectorAll('[data-camera-tab]'));
-    const panels = Array.from(block.querySelectorAll('[data-camera-panel]'));
     const transcript = block.closest('details.transcript');
-    let timer = null;
-    let active = tabs.find((tab) => tab.classList.contains('active'))?.dataset.cameraTab;
 
     const syncVideo = () => {
       const video = block.querySelector('.video-panel video');
@@ -119,94 +115,93 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    const sourceFrames = (camera) => Array.from(document.querySelectorAll(
-      `[data-trial="${CSS.escape(trial)}"][data-camera="${CSS.escape(camera)}"]`
-    )).filter((element) => element.matches('img.frame'));
-    const storageKey = (camera) =>
-      `inspect-robots:flipbook:${location.pathname}:${trial}:${camera}`;
-    const tabKey = `inspect-robots:flipbook-tab:${location.pathname}:${trial}`;
-    try {
-      const storedTab = sessionStorage.getItem(tabKey);
-      if (storedTab && tabs.some((tab) => tab.dataset.cameraTab === storedTab)) {
-        active = storedTab;
-      }
-    } catch (_error) { /* Storage can be disabled without disabling playback. */ }
-    const readState = (camera) => {
-      try { return JSON.parse(sessionStorage.getItem(storageKey(camera))) || {}; }
-      catch (_error) { return {}; }
-    };
-    const writeState = (camera, state) => {
-      try { sessionStorage.setItem(storageKey(camera), JSON.stringify(state)); }
-      catch (_error) { /* Storage can be disabled without disabling playback. */ }
-    };
+    const panels = Array.from(block.querySelectorAll('.flipbook-panel[data-camera-panel]'));
+    const controls = block.querySelector('.flipbook-controls');
+    if (!panels.length || !controls) {
+      if (transcript) transcript.addEventListener('toggle', syncVideo);
+      syncVideo();
+      return;
+    }
+    const cameras = panels.map((panel) => {
+      const camera = panel.dataset.cameraPanel;
+      const byStep = new Map();
+      document.querySelectorAll(
+        `img.frame[data-trial="${CSS.escape(trial)}"][data-camera="${CSS.escape(camera)}"]`
+      ).forEach((frame) => {
+        const step = Number(frame.dataset.step);
+        if (Number.isFinite(step) && !byStep.has(step)) byStep.set(step, frame);
+      });
+      const frames = Array.from(byStep.entries()).sort((left, right) => left[0] - right[0]);
+      panel.hidden = !frames.length;
+      return {
+        camera,
+        frames,
+        player: panel.querySelector('.flipbook-player'),
+        label: panel.querySelector('[data-panel-label]'),
+      };
+    }).filter((entry) => entry.frames.length);
+    const timeline = Array.from(new Set(
+      cameras.flatMap((entry) => entry.frames.map(([step]) => step))
+    )).sort((left, right) => left - right);
+    const scrubber = controls.querySelector('[data-scrubber]');
+    const stepLabel = controls.querySelector('[data-step-label]');
+    const toggle = controls.querySelector('[data-play-toggle]');
+    const storageKey = `inspect-robots:flipbook-run:${location.pathname}:${trial}`;
+    let timer = null;
+    let position = 0;
+    let paused = false;
     const stopTimer = () => {
       if (timer !== null) window.clearInterval(timer);
       timer = null;
     };
-    const updateFlipbook = (panel, camera, index, paused) => {
-      const frames = sourceFrames(camera);
-      if (!frames.length) return;
-      const position = ((index % frames.length) + frames.length) % frames.length;
-      const player = panel.querySelector('.flipbook-player');
-      const scrubber = panel.querySelector('[data-scrubber]');
-      const step = panel.querySelector('[data-step-label]');
-      const toggle = panel.querySelector('[data-play-toggle]');
-      player.src = frames[position].src;
-      player.alt = frames[position].alt;
-      scrubber.max = String(frames.length - 1);
-      scrubber.value = String(position);
-      step.textContent = `step ${frames[position].dataset.step}`;
-      toggle.textContent = paused ? 'Play' : 'Pause';
-      panel.dataset.position = String(position);
-      panel.dataset.paused = String(paused);
-      writeState(camera, {index: position, paused});
-    };
-    const startFlipbook = (panel, camera) => {
-      stopTimer();
-      const state = readState(camera);
-      const index = Number.isInteger(state.index) ? state.index : 0;
-      const paused = state.paused === true;
-      updateFlipbook(panel, camera, index, paused);
-      if (!paused) timer = window.setInterval(() => {
-        updateFlipbook(panel, camera, Number(panel.dataset.position || 0) + 1, false);
-      }, 250);
-    };
-    const activate = (camera) => {
-      active = camera;
-      try { sessionStorage.setItem(tabKey, camera); }
-      catch (_error) { /* Storage can be disabled without disabling playback. */ }
-      stopTimer();
-      const expanded = !transcript || transcript.open;
-      tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.cameraTab === camera));
-      panels.forEach((panel) => {
-        const selected = panel.dataset.cameraPanel === camera;
-        panel.hidden = !selected;
-        const video = panel.querySelector('video');
-        if (video && (!selected || !expanded)) video.pause();
-        if (video && selected && expanded) void video.play().catch(() => {});
-        if (selected && expanded && panel.classList.contains('flipbook-panel')) {
-          startFlipbook(panel, camera);
+    const show = (index, nextPaused) => {
+      if (!timeline.length) return;
+      position = ((index % timeline.length) + timeline.length) % timeline.length;
+      paused = nextPaused;
+      const step = timeline[position];
+      cameras.forEach((entry) => {
+        let shown = entry.frames[0];
+        for (const frame of entry.frames) {
+          if (frame[0] > step) break;
+          shown = frame;
         }
+        if (entry.player.getAttribute('src') !== shown[1].src) entry.player.src = shown[1].src;
+        entry.player.alt = shown[1].alt;
+        entry.label.textContent = `${entry.camera} · step ${shown[0]}`;
       });
+      scrubber.max = String(timeline.length - 1);
+      scrubber.value = String(position);
+      stepLabel.textContent = `step ${step}`;
+      toggle.textContent = paused ? 'Play' : 'Pause';
+      try { sessionStorage.setItem(storageKey, JSON.stringify({step, paused})); }
+      catch (_error) { /* Storage can be disabled without disabling playback. */ }
     };
-    tabs.forEach((tab) => tab.addEventListener('click', () => activate(tab.dataset.cameraTab)));
-    panels.filter((panel) => panel.classList.contains('flipbook-panel')).forEach((panel) => {
-      const camera = panel.dataset.cameraPanel;
-      panel.querySelector('[data-play-toggle]').addEventListener('click', () => {
-        const paused = panel.dataset.paused !== 'true';
-        updateFlipbook(panel, camera, Number(panel.dataset.position || 0), paused);
-        if (camera === active) paused ? stopTimer() : startFlipbook(panel, camera);
-      });
-      panel.querySelector('[data-scrubber]').addEventListener('input', (event) => {
-        updateFlipbook(panel, camera, Number(event.target.value), true);
-        if (camera === active) stopTimer();
-      });
+    const run = () => {
+      stopTimer();
+      if (paused || !timeline.length || (transcript && !transcript.open)) return;
+      timer = window.setInterval(() => show(position + 1, false), 250);
+    };
+    let saved = {};
+    try { saved = JSON.parse(sessionStorage.getItem(storageKey)) || {}; }
+    catch (_error) { /* Storage can be disabled without disabling playback. */ }
+    let start = 0;
+    if (Number.isFinite(saved.step)) {
+      timeline.forEach((step, index) => { if (step <= saved.step) start = index; });
+    }
+    show(start, saved.paused === true);
+    toggle.addEventListener('click', () => {
+      show(position, !paused);
+      run();
+    });
+    scrubber.addEventListener('input', (event) => {
+      show(Number(event.target.value), true);
+      stopTimer();
     });
     if (transcript) transcript.addEventListener('toggle', () => {
-      activate(active);
+      run();
       syncVideo();
     });
-    if (active) activate(active);
+    run();
     syncVideo();
   });
 });"""
@@ -497,7 +492,6 @@ pre {
 .run-media { margin: 14px 0 20px; padding: 12px; background: var(--bg); border-radius: 7px; }
 .run-media-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-weight: 650; }
 .camera-order { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
-.camera-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .camera-tab, .flipbook-controls button {
   border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px;
   color: var(--text); background: var(--panel); cursor: pointer;
@@ -507,6 +501,18 @@ pre {
   display: block; width: 100%; max-height: 70vh; object-fit: contain; background: #000;
   border: 1px solid var(--line); border-radius: 6px;
 }
+.flipbook-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;
+  margin-top: 10px;
+}
+.flipbook-player:not([src]) { display: none; }
+.flipbook-loading { display: none; }
+.flipbook-player:not([src]) + .flipbook-loading {
+  display: flex; align-items: center; justify-content: center; aspect-ratio: 4 / 3;
+  color: var(--muted); font-size: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.flipbook-label { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
 .flipbook-controls { display: flex; gap: 9px; align-items: center; margin-top: 8px; }
 .flipbook-controls input { flex: 1; }
 .step-label { min-width: 62px; color: var(--muted); font-size: 12px; }
@@ -1421,14 +1427,11 @@ def _render_trial_media(
     for index, (camera, _step) in enumerate(rendered_frames):
         rendered_order.setdefault(camera, index)
     default_order = len(rendered_frames)
-    ordered_streams = sorted(
-        streams.items(),
-        key=lambda item: (
-            rendered_order.get(item[0], default_order),
-            item[0],
-        ),
+    incoming = sorted(
+        streams, key=lambda camera: (rendered_order.get(camera, default_order), camera)
     )
-    fallback_cameras = tuple(dict.fromkeys([*streams, *flipbook]))
+    ordered_streams = [(camera, streams[camera]) for camera in _camera_order(incoming)]
+    fallback_cameras = _camera_order(dict.fromkeys([*incoming, *flipbook]))
     if ordered_streams and not context.budget.truncated:
         from inspect_robots._video import _encode_composite_mp4
 
@@ -1470,48 +1473,66 @@ def _render_trial_media(
     return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
 
 
+_CAMERA_TOKEN_RE = re.compile(r"[_\-\s]+")
+
+
+def _camera_order(cameras: Iterable[str]) -> list[str]:
+    """Stable-sort cameras: ``left`` tokens first, ``right`` tokens last, the rest between.
+
+    Tokens are the lowercased name split on ``_``, ``-`` and whitespace, so a
+    bimanual rig reads left wrist, centre camera (``top``, ``cam_high``, ...),
+    right wrist, while ``bright`` or ``leftover`` stay in the middle group.
+    """
+
+    def group(camera: str) -> int:
+        tokens = set(_CAMERA_TOKEN_RE.split(camera.lower()))
+        return 0 if "left" in tokens else 2 if "right" in tokens else 1
+
+    return sorted(cameras, key=group)
+
+
 def _render_flipbook_media(
     trial_prefix: str,
     flipbook: Mapping[str, Sequence[int]],
     cameras: Sequence[str],
     reason: str | None,
 ) -> str:
-    """Render the existing per-camera tabbed flipbook fallback."""
-    panels = [
+    """Render every eligible camera side by side over one shared step timeline."""
+    shown = [
         (camera, panel)
         for camera in cameras
         if (panel := _flipbook_panel(camera, flipbook.get(camera, ())))
     ]
-    if not panels:
+    if not shown:
         return ""
-    tabs = "".join(
-        f'<button type="button" class="camera-tab{" active" if index == 0 else ""}" '
-        f'data-camera-tab="{_escape(camera)}">{_escape(camera)}</button>'
-        for index, (camera, _panel) in enumerate(panels)
-    )
+    timeline = sorted({step for camera, _panel in shown for step in flipbook[camera]})
     bodies = "".join(
-        f'<div class="camera-panel flipbook-panel" data-camera-panel="{_escape(camera)}"'
-        f"{'' if index == 0 else ' hidden'}>{panel}</div>"
-        for index, (camera, panel) in enumerate(panels)
+        f'<div class="camera-panel flipbook-panel" data-camera-panel="{_escape(camera)}">'
+        f"{panel}</div>"
+        for camera, panel in shown
     )
     reason_chip = "" if reason is None else f'<span class="chip">{_escape(reason)}</span>'
     return (
-        f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
+        f'<div class="run-media flipbook-media" data-trial="{_escape(trial_prefix)}">'
         f'<div class="run-media-head">Run video{reason_chip}</div>'
-        f'<div class="camera-tabs">{tabs}</div>{bodies}</div>'
+        f'<div class="flipbook-grid">{bodies}</div>'
+        '<div class="flipbook-controls"><button type="button" data-play-toggle>Pause</button>'
+        '<input type="range" min="0" value="0" data-scrubber '
+        f'max="{len(timeline) - 1}" aria-label="run step">'
+        f'<span class="step-label" data-step-label>step {timeline[0]}</span></div></div>'
     )
 
 
 def _flipbook_panel(camera: str, steps: Sequence[int]) -> str:
-    """Render controls for a camera only when at least two source frames exist."""
-    if len(steps) < 2:
+    """Render one camera's player only when it has at least two distinct source steps."""
+    distinct = sorted(set(steps))
+    if len(distinct) < 2:
         return ""
     return (
         f'<img class="flipbook-player" alt="camera {_escape(camera)} flipbook">'
-        '<div class="flipbook-controls"><button type="button" data-play-toggle>Pause</button>'
-        '<input type="range" min="0" value="0" data-scrubber '
-        f'max="{len(steps) - 1}" aria-label="{_escape(camera)} frame">'
-        f'<span class="step-label" data-step-label>step {steps[0]}</span></div>'
+        '<span class="flipbook-loading">Loading…</span>'
+        f'<span class="flipbook-label" data-panel-label>{_escape(camera)} · step {distinct[0]}'
+        "</span>"
     )
 
 
@@ -1825,6 +1846,7 @@ def render_html(
 {refresh}<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_escape(title)}</title>
 <style>{_STYLES}</style>
+<noscript><style>.flipbook-media {{ display: none !important; }}</style></noscript>
 <script>{_FRAME_CLICK_SCRIPT}</script>
 <script>{_FLIPBOOK_SCRIPT}</script>
 </head>
