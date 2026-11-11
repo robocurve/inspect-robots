@@ -20,6 +20,9 @@ export function monthlyReviewLimit(pr: number, month: string): number {
   // External PRs Jay asked to review and merge on 2026-11-04 after #599; each is
   // still bound by its own $5 head and $15 PR caps.
   if (month === '2026-11' && [549, 568, 569, 574, 578, 594].includes(pr)) return LIMITS.month + 250_000_000;
+  // Jay authorized a budget bump for PR 609 (side-by-side flipbook) on 2026-11-11;
+  // its own $20 head and $40 PR caps (wrangler.jsonc) still bind.
+  if (month === '2026-11' && pr === 609) return LIMITS.month + 250_000_000;
   // Jay authorized $10 extra on 2026-09-24 to finish PRs 475 and 476.
   // Both share one monthly total; this is not $10 per PR and expires in October.
   return LIMITS.month + (month === '2026-09' && (pr === 475 || pr === 476) ? 10_000_000 : 0);
