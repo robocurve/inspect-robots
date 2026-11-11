@@ -1473,19 +1473,23 @@ def _render_trial_media(
     return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
 
 
-_CAMERA_TOKEN_RE = re.compile(r"[_\-\s]+")
+_CAMERA_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+_CAMERA_TOKEN_RE = re.compile(r"[^0-9a-z]+")
 
 
 def _camera_order(cameras: Iterable[str]) -> list[str]:
     """Stable-sort cameras: ``left`` tokens first, ``right`` tokens last, the rest between.
 
-    Tokens are the lowercased name split on ``_``, ``-`` and whitespace, so a
-    bimanual rig reads left wrist, centre camera (``top``, ``cam_high``, ...),
-    right wrist, while ``bright`` or ``leftover`` stay in the middle group.
+    Tokens split camelCase boundaries, then any non-alphanumeric run of the
+    lowercased name, so ``cam_left_wrist``, ``observation.images.left`` and
+    ``leftWrist`` all lead and a bimanual rig reads left wrist, centre camera
+    (``top``, ``cam_high``, ...), right wrist; ``bright`` or ``leftover`` stay
+    in the middle group.
     """
 
     def group(camera: str) -> int:
-        tokens = set(_CAMERA_TOKEN_RE.split(camera.lower()))
+        spaced = _CAMERA_CAMEL_RE.sub(r"\1 \2", camera).lower()
+        tokens = set(_CAMERA_TOKEN_RE.split(spaced))
         return 0 if "left" in tokens else 2 if "right" in tokens else 1
 
     return sorted(cameras, key=group)

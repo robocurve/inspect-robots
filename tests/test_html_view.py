@@ -1462,6 +1462,12 @@ def test_camera_order_groups_left_top_right_by_token() -> None:
         "cam_high",
         "cam_right_wrist",
     ]
+    assert _camera_order(["observation.images.right", "rightWrist", "front", "leftWrist"]) == [
+        "leftWrist",
+        "front",
+        "observation.images.right",
+        "rightWrist",
+    ]
     assert _camera_order(["bright", "Right-Wrist", "leftover", "top"]) == [
         "bright",
         "leftover",
