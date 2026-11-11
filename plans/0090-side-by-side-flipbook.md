@@ -47,9 +47,9 @@ also changes the left-to-right layout of newly encoded composite MP4s.
 
 ### Markup (`_render_flipbook_media`)
 
-- No tabs. Every camera with at least two distinct source steps (the existing
-  two-frame floor, now counting distinct steps so a camera whose placeholders
-  repeat one cached step gets no frozen panel) renders in one `.flipbook-grid`
+- No tabs. The two-frame floor moves to the shared timeline: the block renders
+  only when the cameras together have at least two distinct steps, and then
+  every camera with at least one frame renders in one `.flipbook-grid`
   (`repeat(auto-fit, minmax(180px, 1fr))`, so it wraps on narrow screens),
   each as a `.camera-panel.flipbook-panel` with `data-camera-panel`, its
   `.flipbook-player` image followed by a `.flipbook-loading` "Loading…" span,
@@ -126,7 +126,8 @@ also changes the left-to-right layout of newly encoded composite MP4s.
   the encoder `left_wrist, top, right_wrist` and captions it that way.
 - Exactly one `.flipbook-controls` row per trial, scrubber
   `aria-label="run step"` and `max` = distinct-step count minus one.
-- A camera whose placeholders repeat one step gets no panel.
+- A trial whose placeholders repeat one step gets no player; a one-frame
+  camera beside a moving one gets a panel.
 - `_FLIPBOOK_SCRIPT` no longer mentions `flipbook-tab` and uses the per-trial
   key; the `<noscript>` rule is in the head.
 - Existing degrade tests (budget, encode failure, below-floor camera, no

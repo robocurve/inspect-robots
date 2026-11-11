@@ -736,10 +736,11 @@ available, a completed report rendered outside `--serve` also embeds one
 side-by-side composite MP4 above each trial transcript at the recorded control
 rate. Its caption names the cameras in left-to-right order, and one playhead
 keeps every view aligned. Otherwise a lightweight flipbook plays the existing
-frame images instead: every camera appears side by side (left wrist, centre,
-right wrist on a bimanual rig) on one shared timeline with play or pause and
-step scrubbing. Each camera's caption names the step it is showing, so a camera
-with fewer embedded frames is visibly behind. The file contains its stylesheet and media inline, so it has no
+frame images instead: every camera with an embedded frame appears side by side
+(left wrist, centre, right wrist on a bimanual rig) on one shared timeline with
+play or pause and step scrubbing. Each camera shows its latest frame at or
+before the current step, and its caption names that frame's step, which can
+differ from the shared step when a camera has fewer embedded frames. The file contains its stylesheet and media inline, so it has no
 network dependency.
 
 On composite-video pages, the transcript is also a timeline rail: the active
