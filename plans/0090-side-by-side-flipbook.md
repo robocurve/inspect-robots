@@ -29,7 +29,9 @@ include `left` first, names including `right` last, everything else in
 between; ties keep the incoming order. The middle group therefore holds the
 centre camera whatever it is called (`top`, `cam_high`, `overhead`), so ALOHA
 style `cam_left_wrist`/`cam_high`/`cam_right_wrist` reads left, high, right.
-Token matching keeps names like `bright` or `leftover` in the middle group.
+Tokens come from splitting camelCase boundaries and then any non-alphanumeric
+run of the lowercased name, so `observation.images.left` and `leftWrist` lead
+too, while `bright` or `leftover` stay in the middle group.
 It is applied at two call
 sites in `_render_trial_media`:
 
@@ -101,6 +103,14 @@ also changes the left-to-right layout of newly encoded composite MP4s.
   hides it entirely, rather than showing "Loading…" panels and dead controls. The page's per-turn frame strips still show
   every embedded frame. The player keeps no server-side `src`, so data URLs
   are not duplicated against the frame budget.
+- Known limitation: browsers can paint a large page before
+  `DOMContentLoaded` (measured about 25 ms on a 7 MB rig page), so a live
+  page's 2 s reload can briefly show the 4:3 "Loading…" box before the frame,
+  and the row height changes if the frame is not 4:3. The old code had the
+  same window with a broken-image icon of yet another size, so this is no
+  regression. Reserving the exact frame aspect ratio would need frame
+  dimensions threaded through the frame pipeline; left for a follow-up if it
+  proves distracting.
 
 ## Tests
 
@@ -133,6 +143,8 @@ also changes the left-to-right layout of newly encoded composite MP4s.
   line 31): describe the side-by-side flipbook and that the position and pause
   state survive reloads. No em dashes.
 - `changelog.d/608.changed.md`.
+- `src/inspect_robots/CLAUDE.md`: the `_html.py` row mentions the
+  side-by-side flipbook and `_camera_order`.
 
 ## Out of scope
 
