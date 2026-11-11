@@ -85,11 +85,13 @@ def validate_video_url_template(template: str) -> str:
     if "\\" in template:
         raise ValueError("the URL must not contain a backslash")
     prefix, fields = _video_url_fields(template)
-    split = urlsplit(prefix.replace("{", "").replace("}", ""))
+    split = urlsplit(prefix)
     if split.scheme.lower() not in _VIDEO_URL_SCHEMES or not prefix.lower().startswith(
         f"{split.scheme.lower()}://"
     ):
         raise ValueError("the URL must be an absolute http or https URL")
+    if "{" in split.netloc or "}" in split.netloc:
+        raise ValueError("the URL host must not contain braces")
     if not split.hostname or (fields and not split.path.startswith("/")):
         raise ValueError("the URL must name a literal host before any {field}")
     return template
@@ -1850,9 +1852,9 @@ def render_html(
     linked_template: str | None = None
     if video_url is not None:
         _prefix, fields = _video_url_fields(validate_video_url_template(video_url))
-        if "log" in fields and log_path is None:
-            raise ValueError("--video-url {log} needs log_path to name the log")
         if log.status != "started":
+            if "log" in fields and log_path is None:
+                raise ValueError("--video-url {log} needs log_path to name the log")
             linked_template = video_url
     git = (
         'git <span class="chip">unknown</span>'

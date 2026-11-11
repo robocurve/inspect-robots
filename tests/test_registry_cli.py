@@ -3245,6 +3245,11 @@ def test_view_directory_video_url_escaped_log_braces_do_not_count(tmp_path: Path
     logs.mkdir()
     with pytest.raises(SystemExit, match="must contain"):
         main(["view", str(logs), "--video-url", "https://h.org/{{log}}.mp4"])
+    # A served directory that does not exist yet is checked before it is created.
+    missing = tmp_path / "missing"
+    with pytest.raises(SystemExit, match="must contain"):
+        main(["view", str(missing), "--serve", "--video-url", "https://h.org/a.mp4"])
+    assert not missing.exists()
 
 
 def test_view_renderer_popen_oserror_degrades_and_exits_zero(

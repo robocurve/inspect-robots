@@ -2845,12 +2845,17 @@ def _cmd_view(args: argparse.Namespace) -> int:
             raise SystemExit(f"--video-url: {exc}") from None
 
     log_path = Path(args.log)
+    directory_mode = log_path.is_dir() or (args.serve and not log_path.exists())
+    if (
+        directory_mode
+        and args.video_url is not None
+        and "log" not in _video_url_fields(args.video_url)[1]
+    ):
+        # A literal URL would give every page in the directory the same video.
+        raise SystemExit("--video-url must contain {log} when rendering a logs directory")
     if args.serve and not log_path.exists():
         log_path.mkdir(parents=True, exist_ok=True)
     if log_path.is_dir():
-        if args.video_url is not None and "log" not in _video_url_fields(args.video_url)[1]:
-            # A literal URL would give every page in the directory the same video.
-            raise SystemExit("--video-url must contain {log} when rendering a logs directory")
         return _cmd_view_directory(args, log_path)
     if args.serve:
         raise SystemExit("--serve requires a logs directory")

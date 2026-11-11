@@ -787,8 +787,8 @@ log the same video.
 The page shows "Loading video…" until the first frame arrives, then plays the
 video muted and looped. An "Open video" link sits beside the heading. If the
 browser cannot load the URL, the block falls back to the frame flipbook, or
-says "Video unavailable" when that trial has no frames. Once the video has
-started playing, a later network error leaves the player in place. A stalled connection
+says "Video unavailable" when that trial has no frames. Once the first
+frame has loaded, a later network error leaves the player in place. A stalled connection
 never reports an error, so the placeholder can stay up; the player controls
 and the link still work. An `http:` URL on an `https:` page may be blocked
 as mixed content.

@@ -2395,6 +2395,7 @@ def test_video_url_template_accepts_http_urls_and_known_fields(template: str) ->
         ("https://cdn{log}.example.org/a.mp4", "literal host"),
         ("https://h.org:{trial}/a.mp4", "literal host"),
         ("https://h.org?{log}", "literal host"),
+        ("https://h{{x}}.org/{log}.mp4", "braces"),
     ],
 )
 def test_video_url_template_rejects_unsafe_or_malformed_values(template: str, message: str) -> None:
@@ -2501,6 +2502,11 @@ def test_linked_video_template_needs_a_log_path_and_is_validated() -> None:
         render_html(log, title="x", video_url="https://runs.example.org/{log}.mp4")
     with pytest.raises(ValueError, match="http or https"):
         render_html(log, title="x", video_url="javascript:alert(1)")
+    # A running log ignores the template, so it needs no path either.
+    started = dataclasses.replace(log, status="started")
+    assert "runs.example.org" not in render_html(
+        started, title="x", video_url="https://runs.example.org/{log}.mp4"
+    )
     # A template without {log} needs no path.
     document = render_html(log, title="x", video_url="https://runs.example.org/a.mp4")
     assert 'data-src="https://runs.example.org/a.mp4"' in document
