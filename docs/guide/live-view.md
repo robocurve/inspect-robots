@@ -22,13 +22,14 @@ the collapsed Raw transcript section to inspect the complete raw exchange,
 including state dumps and tool results.
 
 When frame storage is enabled, running pages show the most recent camera frames
-that fit the live frame budget. A camera player above each transcript can play
-or scrub those existing frames at about four frames per second. Its camera,
-position, and pause state survive the two-second browser refresh. Live and
-served pages always use this lightweight flipbook and never run ffmpeg.
+that fit the live frame budget. A player above each transcript shows every
+camera side by side and plays or scrubs those existing frames on one shared
+timeline at about four frames per second. Its position and pause state survive
+the two-second browser refresh. Live and served pages always use this
+lightweight flipbook and never run ffmpeg.
 
 After a run finishes, a plain `inspect-robots view logs` pass can replace the
-per-camera flipbook with one side-by-side composite MP4 per trial when ffmpeg
+flipbook with one side-by-side composite MP4 per trial when ffmpeg
 is installed. The composite shares one playhead across every camera. A page
 first created by `--serve` stays eligible for that upgrade. Use `--no-video`
 to keep the flipbook on a plain rendering pass.

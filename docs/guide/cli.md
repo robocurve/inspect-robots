@@ -735,10 +735,13 @@ frames at the exact observation turns where the model saw them. When ffmpeg is
 available, a completed report rendered outside `--serve` also embeds one
 side-by-side composite MP4 above each trial transcript at the recorded control
 rate. Its caption names the cameras in left-to-right order, and one playhead
-keeps every view aligned. Otherwise the player provides per-camera tabs, play
-or pause, and step scrubbing over the existing frame images as a lightweight
-flipbook. The file contains its stylesheet and media inline, so it has no
-network dependency.
+keeps every view aligned. Otherwise a lightweight flipbook plays the existing
+frame images instead: every camera with an embedded frame appears side by side
+(left wrist, centre, right wrist on a bimanual rig) on one shared timeline with
+play or pause and step scrubbing. Each camera shows its latest frame at or
+before the current step, and its caption names that frame's step, which can
+differ from the shared step when a camera has fewer embedded frames. The file
+contains its stylesheet and media inline, so it has no network dependency.
 
 On composite-video pages, the transcript is also a timeline rail: the active
 turn highlights as the video plays, clicking a turn's step header seeks to its step, and the
@@ -758,7 +761,7 @@ Use `--no-frames` to keep the transcript placeholders, or
 larger, so use a smaller budget or `--no-frames` when page size matters.
 
 Embedded MP4 data has a separate 30 MB per-page budget. A trial composite that
-exceeds it falls back to the per-camera flipbook, and later trials skip their
+exceeds it falls back to the flipbook, and later trials skip their
 composite encode. `--no-video` skips MP4 encoding without removing frames or
 the flipbook. Served and running pages also use the flipbook so the two-second
 live render loop never waits for ffmpeg. In directory mode these suppressed
