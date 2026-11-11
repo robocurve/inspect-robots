@@ -1501,15 +1501,21 @@ def _render_flipbook_media(
     cameras: Sequence[str],
     reason: str | None,
 ) -> str:
-    """Render every eligible camera side by side over one shared step timeline."""
+    """Render every camera with a frame side by side over one shared step timeline.
+
+    The floor is on the shared timeline: the block renders only when the
+    cameras together have at least two distinct steps, and then every camera
+    with at least one frame gets a panel (it holds its first frame until the
+    timeline reaches it).
+    """
     shown = [
-        (camera, panel)
+        (camera, _flipbook_panel(camera, flipbook[camera]))
         for camera in cameras
-        if (panel := _flipbook_panel(camera, flipbook.get(camera, ())))
+        if flipbook.get(camera)
     ]
-    if not shown:
-        return ""
     timeline = sorted({step for camera, _panel in shown for step in flipbook[camera]})
+    if len(timeline) < 2:
+        return ""
     bodies = "".join(
         f'<div class="camera-panel flipbook-panel" data-camera-panel="{_escape(camera)}">'
         f"{panel}</div>"
@@ -1528,14 +1534,11 @@ def _render_flipbook_media(
 
 
 def _flipbook_panel(camera: str, steps: Sequence[int]) -> str:
-    """Render one camera's player only when it has at least two distinct source steps."""
-    distinct = sorted(set(steps))
-    if len(distinct) < 2:
-        return ""
+    """Render one camera's player, loading placeholder and caption at its first step."""
     return (
         f'<img class="flipbook-player" alt="camera {_escape(camera)} flipbook">'
         '<span class="flipbook-loading">Loading…</span>'
-        f'<span class="flipbook-label" data-panel-label>{_escape(camera)} · step {distinct[0]}'
+        f'<span class="flipbook-label" data-panel-label>{_escape(camera)} · step {min(steps)}'
         "</span>"
     )
 

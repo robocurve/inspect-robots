@@ -1544,6 +1544,25 @@ def test_composite_uses_left_top_right_camera_order(
     assert '<div class="camera-order">left_wrist · top · right_wrist</div>' in document
 
 
+def test_flipbook_keeps_a_one_frame_camera_beside_a_moving_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: None)
+    transcript = _chat(
+        {"role": "user", "content": [*_parts("top", 0), *_parts("left_wrist", 2)]},
+        {"role": "user", "content": _parts("top", 1)},
+        {"role": "user", "content": _parts("top", 2)},
+    )
+    for camera, step in (("top", 0), ("top", 1), ("top", 2), ("left_wrist", 2)):
+        _save_frame(tmp_path, camera, step, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(_log(transcripts=(transcript,)), title="one", frames_dir=tmp_path)
+
+    assert re.findall(r'data-camera-panel="([^"]+)"', document) == ["left_wrist", "top"]
+    assert "data-panel-label>left_wrist · step 2</span>" in document
+    assert 'max="2"' in document
+
+
 def test_flipbook_floor_counts_distinct_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1731,10 +1750,10 @@ def test_mp4_budget_is_sticky_first_wins_and_skips_later_encodes(
     assert len(encoder_calls) == 1
 
 
-def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
+def test_single_frame_trial_degrades_to_no_panel_on_denial_and_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A camera below the two-frame flipbook floor vanishes quietly when its video is denied."""
+    """A trial below the two-step flipbook floor renders no player when its video is denied."""
     monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
     encoder_calls: list[object] = []
 
@@ -1768,8 +1787,8 @@ def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
     assert 'data-camera-panel="zz"' not in document
     assert len(encoder_calls) == 1
 
-    # Encode failure: the same sub-two-frame camera cannot fall back to a
-    # flipbook either, exercising the panel-less failure branch.
+    # Encode failure: a one-frame camera beside a moving one joins the shared
+    # flipbook rather than vanishing.
     monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", lambda *_args: None)
     for camera, steps in (("aa", (0, 1)), ("zz", (0,))):
         for step in steps:
@@ -1783,7 +1802,8 @@ def test_single_frame_camera_degrades_to_no_panel_on_denial_and_failure(
         title="failure no panel",
         frames_dir=tmp_path,
     )
-    assert 'data-camera-panel="zz"' not in document
+    # On the shared timeline a one-frame camera still gets a panel.
+    assert 'data-camera-panel="zz"' in document
     assert 'data-camera-panel="aa"' in document
 
 
