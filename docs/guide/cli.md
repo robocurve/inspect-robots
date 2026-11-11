@@ -784,14 +784,14 @@ the first placeholder. A logs directory needs `{log}`, so every page gets its
 own video. A template without `{scene}` or `{trial}` gives every trial of a
 log the same video.
 
-The page shows "Loading video…" until the first frame arrives, then plays the
-video muted and looped. An "Open video" link sits beside the heading. If the
-browser cannot load the URL, the block falls back to the frame flipbook, or
-says "Video unavailable" when that trial has no frames. Once the first
-frame has loaded, a later network error leaves the player in place. A stalled connection
-never reports an error, so the placeholder can stay up; the player controls
-and the link still work. An `http:` URL on an `https:` page may be blocked
-as mixed content.
+The page shows "Loading video…" until the first frame arrives, then plays
+the video muted and looped. An "Open video" link sits beside the heading. If
+the browser cannot load the URL, the block falls back to the frame flipbook,
+or says "Video unavailable" when that trial has no frames. Once the first
+frame has loaded, a later network error leaves the player in place. A
+stalled connection never reports an error, so the placeholder can stay up;
+the player controls and the link still work. An `http:` URL on an `https:`
+page may be blocked as mixed content.
 
 Linked videos have no step timeline, so the transcript rail (turn
 highlighting, click-to-seek and Follow) is unavailable for them. Running
