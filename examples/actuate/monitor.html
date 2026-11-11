@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Actuate Live Eval</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      background: #0e1116;
+      color: #f4f6f8;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: clamp(10px, 1.4vh, 18px);
+      height: 100vh;
+      padding: clamp(14px, 1.5vw, 28px);
+      overflow: hidden;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #8d96a3;
+      font-size: clamp(11px, 0.8vw, 16px);
+      font-weight: 750;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+    .eval-index {
+      color: #f4f6f8;
+      font-size: clamp(26px, 2.4vw, 46px);
+      font-weight: 850;
+      letter-spacing: 0.04em;
+    }
+    .section-title {
+      color: #8d96a3;
+      font-size: clamp(10px, 0.72vw, 14px);
+      font-weight: 750;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .current {
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      gap: clamp(8px, 1vh, 14px);
+      min-height: 0;
+    }
+    .cards { display: flex; gap: clamp(10px, 1.2vw, 22px); }
+    .cards[hidden] { display: none; }
+    .card {
+      flex: 1 1 0;
+      min-width: 0;
+      padding: clamp(12px, 1.35vw, 26px);
+      background: #151a22;
+      border: 1px solid #252d38;
+      border-top: 4px solid #596270;
+      border-radius: 12px;
+    }
+    .role, .task-label {
+      color: #8d96a3;
+      font-size: clamp(10px, 0.7vw, 14px);
+      font-weight: 750;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .model {
+      margin-top: clamp(7px, 0.8vh, 12px);
+      font-size: clamp(25px, 2.5vw, 50px);
+      font-weight: 850;
+      line-height: 1.04;
+      overflow-wrap: anywhere;
+    }
+    .cooling {
+      align-content: center;
+      font-size: clamp(19px, 1.45vw, 30px);
+      font-weight: 750;
+      text-align: center;
+    }
+    .task-box {
+      min-height: 0;
+      padding: clamp(10px, 1vw, 18px);
+      overflow-y: auto;
+      background: #11161d;
+      border: 1px solid #202833;
+      border-radius: 10px;
+    }
+    .instruction {
+      margin-top: clamp(7px, 0.8vh, 12px);
+      font-size: clamp(19px, 1.45vw, 30px);
+      font-weight: 520;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+    .panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: clamp(10px, 1.2vh, 16px);
+      min-height: 0;
+      padding-top: clamp(8px, 1vh, 14px);
+      border-top: 1px solid #252d38;
+    }
+    .panel-heading {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    .subtitle { color: #687280; font-size: clamp(9px, 0.65vw, 13px); }
+    .chart {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-around;
+      min-height: 0;
+    }
+    .leader-row {
+      display: grid;
+      grid-template-columns: minmax(130px, 28%) 1fr;
+      align-items: center;
+      gap: clamp(12px, 1.3vw, 24px);
+    }
+    .leader-name {
+      font-size: clamp(16px, 1.35vw, 27px);
+      font-weight: 800;
+      line-height: 1.05;
+      text-align: right;
+    }
+    .track {
+      position: relative;
+      height: clamp(16px, 1.55vw, 30px);
+      background: #1c222c;
+      border-radius: 999px;
+    }
+    .bar {
+      width: 2px;
+      height: 100%;
+      border-radius: 999px;
+      transition: width 600ms ease;
+    }
+    .bar-value {
+      position: absolute;
+      top: 50%;
+      left: 2px;
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      font-size: clamp(13px, 1vw, 20px);
+      font-weight: 750;
+      transform: translate(9px, -50%);
+      transition: left 600ms ease;
+      white-space: nowrap;
+    }
+    .count { color: #687280; font-size: 0.62em; font-weight: 600; }
+    .recent-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: clamp(10px, 1.2vw, 22px);
+      min-height: 0;
+    }
+    .recent-card {
+      display: flex;
+      flex-direction: column;
+      gap: clamp(4px, 0.6vh, 8px);
+      min-height: 0;
+      padding: clamp(8px, 0.85vw, 14px);
+      overflow: hidden;
+      background: #151a22;
+      border: 1px solid #252d38;
+      border-radius: 9px;
+    }
+    .recent-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .eval-tag {
+      flex: none;
+      color: #aab2bd;
+      font-size: clamp(9px, 0.62vw, 12px);
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .who {
+      min-width: 0;
+      font-size: clamp(11px, 0.78vw, 15px);
+      font-weight: 700;
+      line-height: 1.45;
+    }
+    .who .role-mini {
+      color: #687280;
+      font-weight: 650;
+    }
+    .recent-task {
+      min-width: 0;
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      color: #c9cfd7;
+      font-size: clamp(11px, 0.78vw, 15px);
+      line-height: 1.3;
+    }
+    .clips {
+      display: flex;
+      gap: 5px;
+      min-height: 0;
+    }
+    .clips video {
+      flex: 1 1 0;
+      min-width: 0;
+      width: 100%;
+      max-height: clamp(64px, 10vh, 150px);
+      object-fit: cover;
+      background: #0b0e13;
+      border-radius: 6px;
+    }
+    .score-badge {
+      flex: none;
+      min-width: 48px;
+      padding: 3px 9px;
+      color: #f4f6f8;
+      font-size: clamp(13px, 0.95vw, 19px);
+      font-weight: 800;
+      text-align: center;
+      background: #202833;
+      border-radius: 999px;
+    }
+    .muted { color: #687280; }
+    .pulse { animation: pulse 1.8s ease-in-out infinite; }
+    .failure {
+      color: #687280;
+      font-size: clamp(10px, 0.7vw, 14px);
+      align-self: center;
+    }
+    @keyframes pulse { 50% { opacity: 0.42; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span>Actuate · Live Eval</span>
+      <span id="eval-index" class="eval-index">Eval #–</span>
+    </header>
+
+    <section class="current">
+      <div class="section-title">Current Eval</div>
+      <div id="cooling" class="card cooling muted" hidden></div>
+      <div id="role-cards" class="cards">
+        <article class="card" data-role="tasker">
+          <div class="role">Task Maker</div>
+          <div class="model">Waiting…</div>
+        </article>
+        <article class="card" data-role="test_taker">
+          <div class="role">Test-Taker</div>
+          <div class="model">Waiting…</div>
+        </article>
+        <article class="card" data-role="grader">
+          <div class="role">Grader</div>
+          <div class="model">Waiting…</div>
+        </article>
+      </div>
+      <div class="task-box">
+        <div class="task-label">Task</div>
+        <div id="instruction" class="instruction muted pulse">generating…</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div class="section-title">Previous Evals</div>
+        <div id="recent-failure" class="failure"></div>
+      </div>
+      <div id="recent-list" class="recent-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div class="section-title">Leaderboard</div>
+        <div class="subtitle">mean score as test-taker</div>
+      </div>
+      <div id="chart" class="chart"></div>
+    </section>
+  </main>
+
+  <script>
+    const order = ["GPT-5.6 Sol", "Opus 5", "Gemini 3.7 Flash", "Kimi K3",
+                   "Gemini 3.1 Pro", "GPT-5", "GPT-5.4"];
+    const accents = {
+      "GPT-5.6 Sol": "#10a37f",
+      "Opus 5": "#d97757",
+      "Gemini 3.7 Flash": "#4796e3",
+      "Kimi K3": "#9067e8",
+      "Gemini 3.1 Pro": "#3fb6c9",
+      "GPT-5": "#d4608d",
+      "GPT-5.4": "#c9a54a"
+    };
+    const htmlEscapes = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#039;"
+    };
+    const chart = document.getElementById("chart");
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (character) => htmlEscapes[character]);
+    }
+
+    for (const name of order) {
+      const row = document.createElement("div");
+      row.className = "leader-row";
+      row.dataset.name = name;
+      row.innerHTML = `
+        <div class="leader-name" style="color: ${accents[name]}">${name}</div>
+        <div class="track">
+          <div class="bar" style="background: ${accents[name]}"></div>
+          <div class="bar-value">
+            <span class="score">—</span><span class="count">n=0</span>
+          </div>
+        </div>`;
+      chart.appendChild(row);
+    }
+
+    function renderStatus(data) {
+      document.getElementById("eval-index").textContent =
+        data.eval_index == null ? "Eval #–" : `Eval #${data.eval_index}`;
+      const cooling = data.cooling;
+      const coolingBanner = document.getElementById("cooling");
+      coolingBanner.hidden = !cooling;
+      document.getElementById("role-cards").hidden = Boolean(cooling);
+      if (cooling) {
+        const maxC = Number(cooling.max_c).toFixed(1);
+        const resumeC = Number(cooling.resume_c).toFixed(1).replace(/\.0$/, "");
+        coolingBanner.textContent =
+          `Cooling motors: ${maxC}°C at ${cooling.hottest}. ` +
+          `Evals resume below ${resumeC}°C.`;
+      }
+      for (const role of ["tasker", "test_taker", "grader"]) {
+        const card = document.querySelector(`[data-role="${role}"]`);
+        const model = card.querySelector(".model");
+        const name = data.roles && data.roles[role] ? data.roles[role] : "Waiting…";
+        const color = accents[name] || "#687280";
+        model.textContent = name;
+        model.style.color = color;
+        card.style.borderTopColor = color;
+      }
+      const instruction = document.getElementById("instruction");
+      if (cooling) {
+        instruction.textContent = "paused while motors cool";
+        instruction.classList.add("muted");
+        instruction.classList.remove("pulse");
+      } else {
+        instruction.textContent = data.task == null ? "generating…" : data.task;
+        instruction.classList.toggle("muted", data.task == null);
+        instruction.classList.toggle("pulse", data.task == null);
+      }
+    }
+
+    function renderLeaderboard(data) {
+      const byName = Object.fromEntries(data.map((entry) => [entry.name, entry]));
+      const scores = data.filter((entry) => entry.score != null).map((entry) => entry.score);
+      const maxScore = scores.length ? Math.max(...scores) : 0;
+      const ranked = [...order].sort((a, b) => {
+        const sa = byName[a] ? byName[a].score : null;
+        const sb = byName[b] ? byName[b].score : null;
+        if (sa == null && sb == null) return order.indexOf(a) - order.indexOf(b);
+        if (sa == null) return 1;
+        if (sb == null) return -1;
+        return sb - sa;
+      });
+      for (const name of order) {
+        const entry = byName[name] || { name, n: 0, score: null };
+        const row = document.querySelector(`[data-name="${name}"]`);
+        row.style.order = ranked.indexOf(name);
+        const percentage = entry.score != null && maxScore > 0
+          ? 80 * entry.score / maxScore
+          : null;
+        const width = percentage == null ? "2px" : `${percentage}%`;
+        row.querySelector(".bar").style.width = width;
+        row.querySelector(".bar-value").style.left = width;
+        row.querySelector(".score").textContent =
+          entry.score == null ? "—" : Number(entry.score).toFixed(2);
+        row.querySelector(".count").textContent = `n=${entry.n}`;
+      }
+    }
+
+    function roleName(entry, role, label) {
+      const name = entry.roles && entry.roles[role] ? entry.roles[role] : "unknown";
+      const color = accents[name] || "#687280";
+      return `<div><span class="role-mini">${label}</span> <span style="color: ${color}">${escapeHtml(name)}</span></div>`;
+    }
+
+    let lastRecent = null;
+    function renderRecent(data) {
+      const snapshot = JSON.stringify(data);
+      const list = document.getElementById("recent-list");
+      if (snapshot === lastRecent) {
+        document.getElementById("recent-failure").textContent = "";
+        return;
+      }
+      lastRecent = snapshot;
+      list.replaceChildren();
+      for (const entry of data) {
+        const card = document.createElement("article");
+        card.className = "recent-card";
+        const index = entry.eval_index == null ? "?" : entry.eval_index;
+        const score = entry.score == null ? "—" : Number(entry.score).toFixed(2);
+        const clips = entry.clips || {};
+        const clipHtml = ["left", "top", "right"]
+          .filter((cam) => typeof clips[cam] === "string")
+          .map((cam) =>
+            `<video src="/media/${encodeURIComponent(clips[cam])}" autoplay muted loop playsinline></video>`)
+          .join("");
+        card.innerHTML = `
+          <div class="recent-head">
+            <span class="eval-tag">Eval #${escapeHtml(index)}</span>
+            <div class="score-badge">${score}</div>
+          </div>
+          ${clipHtml ? `<div class="clips">${clipHtml}</div>` : ""}
+          <div class="who">
+            ${roleName(entry, "tasker", "Task Maker")}
+            ${roleName(entry, "test_taker", "Test-Taker")}
+            ${roleName(entry, "grader", "Grader")}
+          </div>
+          <div class="recent-task">${escapeHtml(entry.task || "Task unavailable")}</div>`;
+        list.appendChild(card);
+      }
+      while (list.children.length < 3) {
+        const placeholder = document.createElement("article");
+        placeholder.className = "recent-card muted";
+        placeholder.textContent = "Waiting for a completed eval…";
+        list.appendChild(placeholder);
+      }
+      document.getElementById("recent-failure").textContent = "";
+    }
+
+    function statusWaiting() {
+      const instruction = document.getElementById("instruction");
+      instruction.textContent = "waiting for orchestrator…";
+      instruction.classList.add("muted", "pulse");
+    }
+
+    async function pollStatus() {
+      try {
+        const response = await fetch("/api/status", { cache: "no-store" });
+        if (!response.ok) throw new Error("status unavailable");
+        renderStatus(await response.json());
+      } catch (error) {
+        statusWaiting();
+      }
+    }
+
+    async function pollSummary() {
+      try {
+        const [leaderboardResponse, recentResponse] = await Promise.all([
+          fetch("/api/leaderboard", { cache: "no-store" }),
+          fetch("/api/recent", { cache: "no-store" })
+        ]);
+        if (!leaderboardResponse.ok || !recentResponse.ok) {
+          throw new Error("summary unavailable");
+        }
+        renderLeaderboard(await leaderboardResponse.json());
+        renderRecent(await recentResponse.json());
+      } catch (error) {
+        document.getElementById("recent-failure").textContent =
+          "waiting for orchestrator…";
+      }
+    }
+
+    renderRecent([]);
+    pollStatus();
+    pollSummary();
+    setInterval(pollStatus, 2000);
+    setInterval(pollSummary, 3000);
+  </script>
+</body>
+</html>
