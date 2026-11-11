@@ -2190,6 +2190,7 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
         no_video: bool = False,
         serve_pass: bool = False,
         index_href: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         del (
             log,
@@ -2201,6 +2202,7 @@ def test_view_frames_budget_is_forwarded_as_decimal_megabytes(
             no_video,
             serve_pass,
             index_href,
+            video_url,
         )
         assert log_path == path
         received.append(frames_budget_bytes)
@@ -2251,6 +2253,7 @@ def test_view_live_frames_budget_matrix(
         no_video: bool,
         serve_pass: bool,
         index_href: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         del (
             rendered_log,
@@ -2261,6 +2264,7 @@ def test_view_live_frames_budget_matrix(
             no_video,
             serve_pass,
             index_href,
+            video_url,
         )
         received.append((live_frames_budget_bytes, wire_media_elided, refresh_seconds))
         return "<html></html>"
@@ -2693,6 +2697,7 @@ def test_view_directory_incremental_mtime_and_force(
         no_video: bool = False,
         serve_pass: bool = False,
         index_href: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         calls.append(log.eval.created)
         return render_html(
@@ -2707,6 +2712,7 @@ def test_view_directory_incremental_mtime_and_force(
             no_video=no_video,
             serve_pass=serve_pass,
             index_href=index_href,
+            video_url=video_url,
         )
 
     monkeypatch.setattr(cli, "render_html", record_render)
@@ -3142,6 +3148,68 @@ def test_view_no_video_is_parsed_and_forwarded(
 
     assert main(["view", str(path), "--no-video"]) == 0
     assert received == [(True, False)]
+    capsys.readouterr()
+
+
+def test_view_video_url_is_validated_and_forwarded_for_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_log(_step_limit_log(), tmp_path, "run.json")
+    received: list[object] = []
+
+    def fake_render(*args: object, **kwargs: object) -> str:
+        del args
+        received.append(kwargs["video_url"])
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render)
+
+    url = "https://runs.example.org/{log}.mp4"
+    assert main(["view", str(path), "--no-video", "--video-url", url]) == 0
+    assert main(["view", str(path)]) == 0
+    assert main(["view", str(path), "--video-url", "https://runs.example.org/a.mp4"]) == 0
+    assert received == [url, None, "https://runs.example.org/a.mp4"]
+    assert "ignored" not in capsys.readouterr().err
+
+    with pytest.raises(SystemExit, match=r"--video-url: .*http or https"):
+        main(["view", str(path), "--video-url", "javascript:alert(1)"])
+    assert len(received) == 3
+
+
+def test_view_video_url_notes_that_a_started_log_ignores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    live = dataclasses.replace(_step_limit_log(), status="started")
+    path = _write_log(live, tmp_path, "run.live.json")
+    monkeypatch.setattr(cli, "render_html", lambda *_args, **_kwargs: "<html></html>")
+
+    assert main(["view", str(path), "--video-url", "https://h.org/{log}.mp4"]) == 0
+    assert "note: --video-url is ignored for a running log" in capsys.readouterr().err
+
+
+def test_view_directory_video_url_needs_log_and_is_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_log(_step_limit_log(), logs, "a.json")
+    _write_log(_step_limit_log(), logs, "b.json")
+    received: list[object] = []
+
+    def fake_render(*args: object, **kwargs: object) -> str:
+        del args
+        received.append(kwargs["video_url"])
+        return "<html></html>"
+
+    monkeypatch.setattr(cli, "render_html", fake_render)
+
+    with pytest.raises(SystemExit, match=r"--video-url must contain \{log\}"):
+        main(["view", str(logs), "--video-url", "https://h.org/a.mp4"])
+    assert received == []
+
+    url = "https://h.org/{log}.mp4"
+    assert main(["view", str(logs), "--video-url", url]) == 0
+    assert received == [url, url]
     capsys.readouterr()
 
 
@@ -8752,3 +8820,10 @@ def test_eval_set_summary_shows_why_a_run_with_metrics_failed(
     cli._print_eval_set_summary(False, [log], "logs")
     out = capsys.readouterr().out
     assert "operator=1  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))" in out
+
+
+def test_view_directory_video_url_escaped_log_braces_do_not_count(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with pytest.raises(SystemExit, match="must contain"):
+        main(["view", str(logs), "--video-url", "https://h.org/{{log}}.mp4"])

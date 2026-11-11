@@ -33,6 +33,7 @@ from inspect_robots._html import (
     _VideoContext,
     _warn_video_degrade,
     render_html,
+    validate_video_url_template,
 )
 from inspect_robots._pngenc import png_data_url
 from inspect_robots.frames import FrameStore, _frame_filename, _safe
@@ -2351,3 +2352,184 @@ def test_the_html_analyzer_includes_the_wire_capture_view_shows(tmp_path: Path) 
     item = AnnotatedLog(path=log_path, log=log, annotations=())
     (document,) = _HtmlAnalyzer().analyze([item]).files.values()
     assert "Trial 0 Wire" in document and "claude-wire-only" in document
+
+
+# --- plan 0091: linked run video -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "https://runs.example.org/v/a.mp4",
+        "http://localhost:8000/a.mp4",
+        "https://runs.example.org/{log}/{scene}-{trial}.mp4",
+        "https://runs.example.org/{{literal}}/{log}.mp4",
+        "HTTPS://runs.example.org/{log}.mp4",
+    ],
+)
+def test_video_url_template_accepts_http_urls_and_known_fields(template: str) -> None:
+    assert validate_video_url_template(template) == template
+
+
+@pytest.mark.parametrize(
+    ("template", "message"),
+    [
+        ("ftp://runs.example.org/a.mp4", "http or https"),
+        ("javascript:alert(1)", "http or https"),
+        ("videos/a.mp4", "http or https"),
+        ("https:///a.mp4", "host"),
+        ("https://runs.example.org/{run}.mp4", "unknown field"),
+        ("https://runs.example.org/{}.mp4", "unknown field"),
+        ("https://runs.example.org/{0}.mp4", "unknown field"),
+        ("https://runs.example.org/{log!r}.mp4", "conversion"),
+        ("https://runs.example.org/{log:>3}.mp4", "format spec"),
+        ("https://runs.example.org/{log.attr}.mp4", "unknown field"),
+        ("https://runs.example.org/{log[0]}.mp4", "unknown field"),
+        ("https://runs.example.org/{log.mp4", "invalid template"),
+        ("https://runs.example.org/log}.mp4", "invalid template"),
+        ("https://runs.example.org/a b.mp4", "whitespace"),
+        ("https://runs.example.org/a\n.mp4", "whitespace"),
+        ("", "http or https"),
+        ("https://a\\b/{log}.mp4", "backslash"),
+        ("https://h.org/a\x00.mp4", "control characters"),
+        ("https://cdn{log}.example.org/a.mp4", "literal host"),
+        ("https://h.org:{trial}/a.mp4", "literal host"),
+        ("https://h.org?{log}", "literal host"),
+    ],
+)
+def test_video_url_template_rejects_unsafe_or_malformed_values(template: str, message: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        validate_video_url_template(template)
+
+
+def test_video_url_template_rejects_a_scheme_smuggled_through_a_field() -> None:
+    # The scheme is checked on the literal prefix, so a field cannot supply it.
+    with pytest.raises(ValueError, match="http or https"):
+        validate_video_url_template("{log}://runs.example.org/a.mp4")
+    with pytest.raises(ValueError, match="host"):
+        validate_video_url_template("https://{log}/a.mp4")
+
+
+def _two_frame_transcript(camera: str = "top") -> list[object]:
+    return _chat(
+        {"role": "user", "content": _parts(camera, 0)},
+        {"role": "user", "content": _parts(camera, 1)},
+    )
+
+
+def _linked_block(document: str) -> str:
+    match = re.search(
+        r'<div class="run-media"[^>]*data-linked-video.*?<div class="conversation">',
+        document,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return match.group()
+
+
+def test_linked_video_replaces_the_composite_and_keeps_the_flipbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    monkeypatch.setattr(
+        "inspect_robots._video._encode_composite_mp4",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("encoder called")),
+    )
+    _save_frame(tmp_path, "top", 0, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _log(transcripts=(_two_frame_transcript(),)),
+        title="linked",
+        log_path=tmp_path / "a5 run&1.json",
+        frames_dir=tmp_path,
+        video_url="https://runs.example.org/{log}/{scene}/{trial}.mp4?x=1&y={log}",
+    )
+
+    block = _linked_block(document)
+    url = "https://runs.example.org/a5%20run%261/scene-0/0.mp4?x=1&amp;y=a5%20run%261"
+    assert f'data-src="{url}"' in block
+    assert (
+        f'<video muted loop playsinline controls preload="auto" data-src="{url}"></video>'
+    ) in block
+    assert '<div class="linked-video video-panel" data-state="loading">' in block
+    assert f'<a class="linked-video-link" href="{url}">Open video</a>' in block
+    assert 'role="status">Loading video…</div>' in block
+    assert "data-steps" not in block and "data-follow" not in block
+    assert "data:video/mp4" not in document and ' src="http' not in document
+    assert 'data-camera-panel="top"' in block and 'class="flipbook-player"' in block
+    assert "no ffmpeg" not in block and "video budget" not in block
+    assert capsys.readouterr().err == ""
+
+
+def test_linked_video_without_a_flipbook_source_still_renders(tmp_path: Path) -> None:
+    transcript = _chat({"role": "user", "content": "no frames here"})
+
+    document = render_html(
+        _log(transcripts=(transcript,)),
+        title="linked",
+        log_path=tmp_path / "run.json",
+        video_url="https://runs.example.org/{log}.mp4",
+    )
+
+    block = _linked_block(document)
+    assert 'data-src="https://runs.example.org/run.mp4"' in block
+    assert "data-camera-panel" not in block and "camera-tabs" not in block
+
+
+def test_started_logs_ignore_the_linked_video(tmp_path: Path) -> None:
+    _save_frame(tmp_path, "top", 0, np.zeros((2, 2, 3), dtype=np.uint8))
+    _save_frame(tmp_path, "top", 1, np.ones((2, 2, 3), dtype=np.uint8))
+
+    document = render_html(
+        _log(status="started", transcripts=(_two_frame_transcript(),)),
+        title="live",
+        log_path=tmp_path / "run.live.json",
+        frames_dir=tmp_path,
+        video_url="https://runs.example.org/{log}.mp4",
+    )
+
+    assert "data-linked-video>" not in document and "runs.example.org" not in document
+    assert 'class="flipbook-player"' in document
+
+
+def test_linked_video_template_needs_a_log_path_and_is_validated() -> None:
+    log = _log(transcripts=(_chat({"role": "user", "content": "hi"}),))
+    with pytest.raises(ValueError, match=re.escape("{log} needs log_path")):
+        render_html(log, title="x", video_url="https://runs.example.org/{log}.mp4")
+    with pytest.raises(ValueError, match="http or https"):
+        render_html(log, title="x", video_url="javascript:alert(1)")
+    # A template without {log} needs no path.
+    document = render_html(log, title="x", video_url="https://runs.example.org/a.mp4")
+    assert 'data-src="https://runs.example.org/a.mp4"' in document
+
+
+def test_log_only_template_gives_every_trial_the_same_url_silently(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcripts = tuple(_chat({"role": "user", "content": "hi"}) for _ in range(3))
+    log = _log(transcripts=transcripts)
+
+    shared = render_html(
+        log, title="x", log_path=tmp_path / "r.json", video_url="https://h.org/{log}.mp4"
+    )
+    assert shared.count('data-src="https://h.org/r.mp4"') == 3
+    per_trial = render_html(
+        log, title="x", log_path=tmp_path / "r.json", video_url="https://h.org/{log}-{trial}.mp4"
+    )
+    for trial in range(3):
+        assert f'data-src="https://h.org/r-{trial}.mp4"' in per_trial
+    assert capsys.readouterr().err == ""
+
+
+def test_flipbook_script_wires_the_linked_video_hooks() -> None:
+    document = render_html(_log(), title="script")
+    for hook in (
+        "linkedVideo.dataset.src",
+        "'loadeddata'",
+        "'error'",
+        "'loadedmetadata'",
+        "data-linked-failed",
+        "Video unavailable",
+    ):
+        assert hook in document

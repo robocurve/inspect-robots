@@ -10,11 +10,13 @@ import json
 import math
 import re
 import shutil
+import string
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote, urlsplit
 
 import numpy as np
 import numpy.typing as npt
@@ -42,6 +44,63 @@ _BLOB_SHA_RE = re.compile(r"[0-9a-f]{64}")
 _CAMERA_FRAME_RE = re.compile(r"^(.+)_(\d{6,})\.npy$")
 _MISSING = object()
 
+_VIDEO_URL_FIELDS = frozenset({"log", "scene", "trial"})
+_VIDEO_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _video_url_fields(template: str) -> tuple[str, list[str]]:
+    """Return the literal text before the first field and every field name used."""
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        raise ValueError(f"invalid template: {exc}") from None
+    prefix = ""
+    fields: list[str] = []
+    for literal, field, spec, conversion in parsed:
+        if not fields:
+            prefix += literal
+        if field is None:
+            continue
+        if field not in _VIDEO_URL_FIELDS:
+            raise ValueError(f"unknown field {{{field}}}; use {{log}}, {{scene}} or {{trial}}")
+        if conversion is not None:
+            raise ValueError(f"conversion !{conversion} is not allowed in {{{field}}}")
+        if spec:
+            raise ValueError(f"format spec :{spec} is not allowed in {{{field}}}")
+        fields.append(field)
+    return prefix, fields
+
+
+def validate_video_url_template(template: str) -> str:
+    """Return ``template`` when it is a safe linked-video URL template, else raise.
+
+    The template may use ``{log}``, ``{scene}`` and ``{trial}``; ``{{`` and
+    ``}}`` are literal braces. The scheme (http or https) and the host must be
+    literal text before the first field, so substituted values can only land
+    in the path, query or fragment. Raises ``ValueError`` with a message that
+    names the problem.
+    """
+    if any(character.isspace() or not character.isprintable() for character in template):
+        raise ValueError("the URL must not contain whitespace or control characters")
+    if "\\" in template:
+        raise ValueError("the URL must not contain a backslash")
+    prefix, fields = _video_url_fields(template)
+    split = urlsplit(prefix.replace("{", "").replace("}", ""))
+    if split.scheme.lower() not in _VIDEO_URL_SCHEMES or not prefix.lower().startswith(
+        f"{split.scheme.lower()}://"
+    ):
+        raise ValueError("the URL must be an absolute http or https URL")
+    if not split.hostname or (fields and not split.path.startswith("/")):
+        raise ValueError("the URL must name a literal host before any {field}")
+    return template
+
+
+def _expand_video_url(template: str, *, log: str, scene: str, trial: int) -> str:
+    """Substitute percent-encoded fields into an already-validated template."""
+    values = {"log": log, "scene": scene, "trial": str(trial)}
+    return template.format_map({key: quote(value, safe="") for key, value in values.items()})
+
+
 _FRAME_CLICK_SCRIPT = """document.addEventListener('click', (event) => {
   const cell = event.target.closest('.frame-cell');
   if (cell) cell.classList.toggle('wide');
@@ -56,10 +115,46 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
     let timer = null;
     let active = tabs.find((tab) => tab.classList.contains('active'))?.dataset.cameraTab;
 
+    // Plan 0091: a linked run video streams from data-src; the flipbook stays
+    // hidden behind it and takes over only if the video fails to load.
+    const linked = block.querySelector('.linked-video');
+    const linkedVideo = linked ? linked.querySelector('video') : null;
+    let linkedLive = Boolean(linkedVideo);
+    let linkedRequested = false;
+    const loadLinked = () => {
+      if (!linkedLive || linkedRequested) return;
+      linkedRequested = true;
+      linkedVideo.src = linkedVideo.dataset.src;
+      // Some browsers fetch only metadata until asked to play.
+      void linkedVideo.play().catch(() => {});
+    };
+    if (linkedVideo) {
+      linkedVideo.addEventListener('loadedmetadata', () => {
+        const {videoWidth: width, videoHeight: height} = linkedVideo;
+        if (width && height) linked.style.aspectRatio = `${width} / ${height}`;
+      });
+      linkedVideo.addEventListener('loadeddata', () => {
+        linked.dataset.state = 'ready';
+      }, {once: true});
+      linkedVideo.addEventListener('error', () => {
+        linkedLive = false;
+        if (panels.length) {
+          linked.remove();
+          block.setAttribute('data-linked-failed', '');
+          if (active) activate(active);
+        } else {
+          linked.dataset.state = 'error';
+          linked.querySelector('.linked-video-status').textContent = 'Video unavailable';
+        }
+      }, {once: true});
+    }
+
     const syncVideo = () => {
+      const open = !transcript || transcript.open;
+      if (open) loadLinked();
       const video = block.querySelector('.video-panel video');
       if (!video) return;
-      if (!transcript || transcript.open) void video.play().catch(() => {});
+      if (open) void video.play().catch(() => {});
       else video.pause();
     };
 
@@ -184,7 +279,8 @@ _FLIPBOOK_SCRIPT = """document.addEventListener('DOMContentLoaded', () => {
         const video = panel.querySelector('video');
         if (video && (!selected || !expanded)) video.pause();
         if (video && selected && expanded) void video.play().catch(() => {});
-        if (selected && expanded && panel.classList.contains('flipbook-panel')) {
+        const flipbook = panel.classList.contains('flipbook-panel');
+        if (selected && expanded && !linkedLive && flipbook) {
           startFlipbook(panel, camera);
         }
       });
@@ -278,6 +374,9 @@ class _VideoContext:
     ffmpeg: str | None
     fps: float
     budget: _VideoBudget
+    # Plan 0091: a validated ``--video-url`` template and the ``{log}`` value.
+    linked_template: str | None = None
+    log_name: str = ""
 
 
 @dataclass
@@ -510,6 +609,19 @@ pre {
 .flipbook-controls { display: flex; gap: 9px; align-items: center; margin-top: 8px; }
 .flipbook-controls input { flex: 1; }
 .step-label { min-width: 62px; color: var(--muted); font-size: 12px; }
+.linked-video-link { margin-left: auto; font-size: 12px; font-weight: 500; }
+.linked-video {
+  position: relative; margin-top: 10px; aspect-ratio: 16 / 9; max-height: 70vh;
+  overflow: hidden; background: #000; border: 1px solid var(--line); border-radius: 6px;
+}
+.linked-video video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.linked-video-status {
+  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  color: #d8d2c8; font-weight: 600; letter-spacing: .02em;
+}
+.linked-video[data-state="ready"] .linked-video-status { display: none; }
+.run-media[data-linked-video]:not([data-linked-failed]) .camera-tabs,
+.run-media[data-linked-video]:not([data-linked-failed]) .camera-panel { display: none; }
 """.strip()
 
 
@@ -1470,13 +1582,30 @@ def _render_trial_media(
     return _render_flipbook_media(trial_prefix, flipbook, fallback_cameras, reason)
 
 
-def _render_flipbook_media(
+def _render_linked_media(
     trial_prefix: str,
-    flipbook: Mapping[str, Sequence[int]],
-    cameras: Sequence[str],
-    reason: str | None,
+    url: str,
+    rendered_frames: Sequence[tuple[str, int]],
 ) -> str:
-    """Render the existing per-camera tabbed flipbook fallback."""
+    """Render a hosted run video with the trial's flipbook kept as its load-error fallback."""
+    flipbook: dict[str, list[int]] = {}
+    for camera, step in rendered_frames:
+        flipbook.setdefault(camera, []).append(step)
+    fallback = _flipbook_tabs_and_panels(flipbook, tuple(flipbook))
+    href = _escape(url)
+    return (
+        f'<div class="run-media" data-trial="{_escape(trial_prefix)}" data-linked-video>'
+        '<div class="run-media-head">Run video'
+        f'<a class="linked-video-link" href="{href}">Open video</a></div>'
+        '<div class="linked-video video-panel" data-state="loading">'
+        f'<video muted loop playsinline controls preload="auto" data-src="{href}"></video>'
+        '<div class="linked-video-status" role="status">Loading video…</div></div>'
+        f"{fallback}</div>"
+    )
+
+
+def _flipbook_tabs_and_panels(flipbook: Mapping[str, Sequence[int]], cameras: Sequence[str]) -> str:
+    """Return camera tabs plus flipbook panels, or an empty string when no camera qualifies."""
     panels = [
         (camera, panel)
         for camera in cameras
@@ -1494,11 +1623,23 @@ def _render_flipbook_media(
         f"{'' if index == 0 else ' hidden'}>{panel}</div>"
         for index, (camera, panel) in enumerate(panels)
     )
+    return f'<div class="camera-tabs">{tabs}</div>{bodies}'
+
+
+def _render_flipbook_media(
+    trial_prefix: str,
+    flipbook: Mapping[str, Sequence[int]],
+    cameras: Sequence[str],
+    reason: str | None,
+) -> str:
+    """Render the existing per-camera tabbed flipbook fallback."""
+    body = _flipbook_tabs_and_panels(flipbook, cameras)
+    if not body:
+        return ""
     reason_chip = "" if reason is None else f'<span class="chip">{_escape(reason)}</span>'
     return (
         f'<div class="run-media" data-trial="{_escape(trial_prefix)}">'
-        f'<div class="run-media-head">Run video{reason_chip}</div>'
-        f'<div class="camera-tabs">{tabs}</div>{bodies}</div>'
+        f'<div class="run-media-head">Run video{reason_chip}</div>{body}</div>'
     )
 
 
@@ -1617,7 +1758,16 @@ def _scene_section(
         )
         residual.extend((trial, message) for message in unplaced)
         trial_prefix = f"{scene.scene_id}-e{trial}"
-        media = _render_trial_media(frames_dir, trial_prefix, rendered_frames, video_context)
+        if video_context.linked_template is not None:
+            url = _expand_video_url(
+                video_context.linked_template,
+                log=video_context.log_name,
+                scene=scene.scene_id,
+                trial=trial,
+            )
+            media = _render_linked_media(trial_prefix, url, rendered_frames)
+        else:
+            media = _render_trial_media(frames_dir, trial_prefix, rendered_frames, video_context)
         transcript_blocks.append(
             f'<details class="transcript"{" open" if open_transcript else ""}>'
             f"<summary>Trial {trial} transcript</summary>{media}{rendered}</details>"
@@ -1674,12 +1824,27 @@ def render_html(
     serve_pass: bool = False,
     video_budget_bytes: int = _VIDEO_BUDGET_BYTES,
     index_href: str | None = None,
+    video_url: str | None = None,
 ) -> str:
     """Return one self-contained HTML document describing the complete evaluation log.
 
     ``index_href`` adds a back link to a run index at that relative URL; leave it
     ``None`` for a standalone report that has no index beside it.
+
+    ``video_url`` is a ``validate_video_url_template`` template (plan 0091). On
+    a log that is not ``started`` it replaces each trial's embedded composite
+    MP4 with a ``<video>`` that streams the expanded URL, keeping the flipbook
+    as the load-error fallback. ``{log}`` expands to ``log_path``'s stem, so a
+    template using it needs ``log_path``. Raises ``ValueError`` on an invalid
+    template.
     """
+    linked_template: str | None = None
+    if video_url is not None:
+        _prefix, fields = _video_url_fields(validate_video_url_template(video_url))
+        if "log" in fields and log_path is None:
+            raise ValueError("--video-url {log} needs log_path to name the log")
+        if log.status != "started":
+            linked_template = video_url
     git = (
         'git <span class="chip">unknown</span>'
         if log.eval.git_commit is None
@@ -1747,7 +1912,11 @@ def render_html(
     if frame_ctx is not None and live_frames_budget_bytes is not None:
         _prime_live_frame_cache(log, frame_ctx)
     video_eligible = (
-        frame_ctx is not None and log.status != "started" and not serve_pass and not no_video
+        frame_ctx is not None
+        and log.status != "started"
+        and not serve_pass
+        and not no_video
+        and linked_template is None
     )
     ffmpeg = shutil.which("ffmpeg") if video_eligible else None
     if video_eligible:
@@ -1761,6 +1930,8 @@ def render_html(
         ffmpeg=ffmpeg,
         fps=fps,
         budget=_VideoBudget(limit=video_budget_bytes),
+        linked_template=linked_template,
+        log_name="" if log_path is None else log_path.stem,
     )
     scenes = "".join(
         _scene_section(
