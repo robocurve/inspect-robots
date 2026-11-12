@@ -407,6 +407,21 @@ def test_clean_perception_turn_resets_consecutive_failure_counter() -> None:
     assert stopped.terminal == Termination("done")
 
 
+@pytest.mark.parametrize("stop", ["FINISH", "GIVE_UP", "budget"])
+def test_terminal_hold_ignores_in_place_edits_of_the_observed_state(stop: str) -> None:
+    # Model code sees the observation's own state array as obs["state"][...].
+    # Editing it in place must not turn the terminal hold into a new target.
+    edit = "obs['state']['joint_pos'][:] = [0.9, -0.9, 0.0]"
+    replies = [_completion(edit)] if stop == "budget" else [_completion(edit), _completion(stop)]
+    policy = _bound_policy(_ScriptedTransport(replies), max_llm_calls=len(replies))
+
+    chunk = policy.act(_observation())
+
+    assert chunk.terminal is not None
+    assert len(chunk.actions) == 1
+    assert np.array_equal(chunk.actions[0].data, np.array([0.0, 0.0, 1.0]))
+
+
 def test_call_budget_forces_give_up_after_clean_empty_turn() -> None:
     policy = _bound_policy(
         _ScriptedTransport([_completion("print('nothing queued')")]),

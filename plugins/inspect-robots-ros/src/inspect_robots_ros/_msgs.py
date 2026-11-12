@@ -94,7 +94,10 @@ def parse_compressed_image(msg: Mapping[str, Any]) -> npt.NDArray[np.uint8]:
         raise ValueError("CompressedImage field 'data' must be a base64 string")
     try:
         encoded = base64.b64decode(data, validate=True)
-        with Image.open(BytesIO(encoded)) as image:
+        # Without ``formats`` Pillow picks a decoder from the payload's magic
+        # bytes, so a rosbridge peer could reach every decoder Pillow ships
+        # (EPS, for one, runs Ghostscript on the payload).
+        with Image.open(BytesIO(encoded), formats=("JPEG", "PNG")) as image:
             return np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
     except (binascii.Error, UnidentifiedImageError, OSError) as exc:
         image_format = msg.get("format", "unknown")
