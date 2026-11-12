@@ -468,7 +468,9 @@ class CapxPolicy(PolicyBase):
                 "policy.bind(embodiment.info) first"
             )
         sandbox.set_observation(observation)
-        state = observation.state[state_key]
+        # A copy: model code sees this same array as obs["state"][...] and may
+        # edit it in place before a FINISH, GIVE_UP or budget stop holds here.
+        state = np.array(observation.state[state_key], dtype=np.float64)
         self._messages.append(
             {
                 "role": "user",

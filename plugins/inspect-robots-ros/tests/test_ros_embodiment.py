@@ -15,7 +15,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 from _stub_server import StubRosbridgeServer
-from PIL import Image
+from PIL import EpsImagePlugin, Image
 
 from inspect_robots import (
     Action,
@@ -552,6 +552,34 @@ def test_compressed_image_decodes_rgb_uint8(image_format: str, ros_format: str) 
 def test_compressed_image_rejects_bad_data(msg: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match=r"CompressedImage|decode"):
         parse_compressed_image(msg)
+
+
+_EPS_PAYLOAD = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 8 8\n%%EndComments\nshowpage\n%%EOF\n"
+
+
+def _encoded_as(image_format: str) -> bytes:
+    if image_format == "EPS":
+        return _EPS_PAYLOAD
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), (1, 2, 3)).save(buffer, format=image_format)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("image_format", ["GIF", "BMP", "TIFF", "PPM", "EPS"])
+def test_compressed_image_refuses_formats_other_than_jpeg_and_png(
+    image_format: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The payload picks Pillow's decoder by its magic bytes unless the call
+    # restricts it. Pillow's EPS decoder runs Ghostscript on the payload, so
+    # pretend Ghostscript is installed and check that no process is started.
+    launched: list[object] = []
+    monkeypatch.setattr(EpsImagePlugin, "gs_binary", "gs", raising=False)
+    monkeypatch.setattr("subprocess.check_call", lambda *args, **kwargs: launched.append(args))
+    data = base64.b64encode(_encoded_as(image_format)).decode("ascii")
+
+    with pytest.raises(ValueError, match="as JPEG or PNG"):
+        parse_compressed_image({"format": "jpeg", "data": data})
+    assert launched == []
 
 
 def test_pose_stamped_reorders_xyzw_to_wxyz() -> None:
