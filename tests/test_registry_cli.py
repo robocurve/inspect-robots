@@ -8752,3 +8752,90 @@ def test_eval_set_summary_shows_why_a_run_with_metrics_failed(
     cli._print_eval_set_summary(False, [log], "logs")
     out = capsys.readouterr().out
     assert "operator=1  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))" in out
+
+
+def test_eval_set_summary_shows_errored_trial_count_next_to_metrics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Issue #614: errored trials are excluded from the metrics, so the row has
+    # to say how many were left out, the way `run` and `inspect` do.
+    log = _step_limit_log(task="partial", reasons=("max_steps",) * 4)
+    log = dataclasses.replace(
+        log,
+        results=dataclasses.replace(log.results, metrics={"success_at_end": 1.0}, errored_trials=2),
+    )
+    cli._print_eval_set_summary(True, [log], "logs")
+    out = capsys.readouterr().out
+    assert "[completed] partial  success_at_end=1  trials: 4 (2 errored)\n" in out
+
+
+def test_eval_set_summary_omits_errored_count_when_no_trial_errored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="clean", reasons=("max_steps",) * 4)
+    cli._print_eval_set_summary(True, [log], "logs")
+    out = capsys.readouterr().out
+    assert "[completed] clean  success_at_end=0\n" in out
+    assert "errored" not in out
+
+
+def test_eval_set_summary_errored_count_precedes_the_failure_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _step_limit_log(task="mixed", reasons=("max_steps",) * 3)
+    log = dataclasses.replace(
+        log,
+        status="error",
+        error="1 of 3 trial(s) ungraded: grader failed (HTTP 400)",
+        results=dataclasses.replace(log.results, metrics={"operator": 1.0}, errored_trials=1),
+    )
+    cli._print_eval_set_summary(False, [log], "logs")
+    out = capsys.readouterr().out
+    assert (
+        "operator=1  trials: 3 (1 errored)  (1 of 3 trial(s) ungraded: grader failed (HTTP 400))"
+        in out
+    )
+
+
+def test_eval_set_and_benchmark_rows_show_errored_trials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #614: a policy that raises on one scene still scores 1, but the row says so."""
+    from inspect_robots.benchmark import Benchmark
+    from inspect_robots.registry import benchmark as benchmark_decorator
+    from inspect_robots.registry import policy as policy_decorator
+    from inspect_robots.scene import Scene
+
+    class _BoomOnSecondScenePolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__()
+            self._resets = 0
+
+        def reset(self, scene: Scene) -> None:
+            self._resets += 1
+            if self._resets == 2:
+                raise RuntimeError("policy reset exploded")
+            super().reset(scene)
+
+    policy_name = "boom-on-second-scene-for-eval-set-row-test"
+    benchmark_name = "partial-errors-suite-for-eval-set-row-test"
+    policy_decorator(policy_name)(_BoomOnSecondScenePolicy)
+    benchmark_decorator(benchmark_name)(
+        lambda: Benchmark(name=benchmark_name, tasks=["cubepick-reach"])
+    )
+    monkeypatch.setenv("INSPECT_ROBOTS_CONFIG", str(tmp_path / "none.ini"))
+    tail = ["--policy", policy_name, "--embodiment", "cubepick", "--no-prompt", "--log-dir"]
+    try:
+        for index, head in enumerate(
+            (["eval-set", "cubepick-reach"], ["run", "--benchmark", benchmark_name])
+        ):
+            capsys.readouterr()
+            rc = main([*head, *tail, str(tmp_path / f"logs{index}")])
+            out = capsys.readouterr().out
+            assert rc == 0  # exit code and status are unchanged for partial errors
+            assert "run status: completed" in out
+            assert "[completed] cubepick-reach" in out
+            assert "trials: 4 (1 errored)" in out
+    finally:
+        reg._FACTORIES["policy"].pop(policy_name, None)
+        reg._FACTORIES["benchmark"].pop(benchmark_name, None)

@@ -594,6 +594,10 @@ still run. A `SafetyAbort` or `EmbodimentFault` that escapes `eval()` (raised
 outside a trial) and `KeyboardInterrupt` still propagate. A halt inside a
 trial ends that task with an error log and the set continues to the next task.
 
+When some trials of a task errored, its row adds the count after the metrics
+(`trials: 4 (2 errored)`), as `run` does. Errored trials stay out of the
+metrics, and the count does not change the status or the exit code.
+
 `--retry-attempts` is accepted and threaded through to `eval_set()`, whose
 resumption-of-a-partial-run behavior is reserved for a follow-up: passing it
 today does not yet skip already-finished scenes. `--rerun`'s live viewer
