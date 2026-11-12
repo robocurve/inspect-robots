@@ -144,6 +144,18 @@ def test_absolute_first_action_passes_then_limits() -> None:
     assert out.meta.get("delta_clamped") is True
 
 
+def test_absolute_first_reference_is_a_copy_of_the_action_buffer() -> None:
+    # A policy may reuse one output buffer; the reference must not move with it.
+    guard = DeltaLimitGuard(_abs_space(), max_delta=0.1)
+    store: dict[str, object] = {}
+    buffer = np.array([0.0, 0.0])
+    guard.review(Action(data=buffer), store)
+    buffer[:] = [0.9, 0.9]
+    out = guard.review(Action(data=buffer), store)
+    assert np.allclose(out.data, [0.1, 0.1])
+    assert out.meta.get("delta_clamped") is True
+
+
 def test_absolute_identity_within_limit_and_reference_advances() -> None:
     guard = DeltaLimitGuard(_abs_space(), max_delta=0.5)
     store: dict[str, object] = {}

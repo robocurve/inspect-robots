@@ -318,7 +318,10 @@ class DeltaLimitGuard:
             else:
                 ref = np.asarray(reference, dtype=np.float64)
                 approved = np.clip(data, ref - self._delta, ref + self._delta)
-            store[_LAST_APPROVED_KEY] = approved
+            # A copy, as in rewind_reference: the first approved action is the
+            # caller's own array, and a policy that reuses that buffer for its
+            # next action would otherwise move the reference along with it.
+            store[_LAST_APPROVED_KEY] = approved.copy()
         else:
             approved = np.clip(data, self._low, self._high)
         if np.array_equal(approved, data):
