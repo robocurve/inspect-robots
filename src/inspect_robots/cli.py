@@ -2077,6 +2077,12 @@ def _print_eval_set_summary(success: bool, logs: Sequence[EvalLog], log_dir: str
         metrics = ", ".join(
             f"{name}={_format_metric(value)}" for name, value in sorted(log.results.metrics.items())
         )
+        if metrics and log.results.errored_trials:
+            # Errored trials are left out of the metrics (issue #614), so say
+            # how many, in the wording `run` and `inspect` use.
+            metrics += (
+                f"  trials: {log.results.total_trials} ({log.results.errored_trials} errored)"
+            )
         detail = metrics or (log.error or "")
         if metrics and not ok and log.error:
             # A run can fail yet keep metrics (e.g. ungraded trials abstain);
