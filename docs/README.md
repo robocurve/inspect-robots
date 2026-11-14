@@ -41,3 +41,4 @@ to the module that defines it.
 ## Cookbooks
 
 - [Evaluate a GR00T fine-tune on real YAM arms](cookbooks/gr00t-on-yam.md)
+- [Run a paired robot pilot for adaptive Fable 5.2](guide/fable-adaptive-eval.md)

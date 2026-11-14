@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from inspect_robots.rollout import Record
 from inspect_robots_agent._anthropic import _DEFAULT_MAX_OUTPUT_TOKENS, AnthropicClient
 from inspect_robots_agent._depth import depth_parts, resolve_depth
+from inspect_robots_agent._events import ObservationEvents, routine_camera_observation
 from inspect_robots_agent._gemini_live import GeminiLiveClient
 from inspect_robots_agent._interactions import InteractionsClient
 from inspect_robots_agent._llm import (
@@ -112,6 +113,10 @@ _SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultr
 _INTERACTIONS_SERVICE_TIERS = frozenset({"standard", "flex", "priority"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
 _DEPTH_MODES = frozenset({"render", "off"})
+_EFFORT_POLICIES = ("fixed", "event")
+_CAMERA_HISTORY_POLICIES = ("full", "transition_witness")
+_FABLE_52 = "claude-fable-5-2"
+_WRIST_CAMERAS = ("left_cam", "right_cam")
 
 
 class _Unset:
@@ -318,6 +323,8 @@ class AgentPolicyConfig(PolicyConfig):
     #: Evaluation notes appended verbatim to every trial's system prompt
     #: (scoring regime, budget use); ``None`` when not configured.
     eval_notes: str | None = None
+    effort_policy: str = "fixed"
+    camera_history_policy: str = "full"
 
 
 @dataclass(frozen=True, eq=False)
@@ -408,6 +415,8 @@ class LLMAgentPolicy(PolicyBase):
         max_retries: int = 3,
         backoff_s: float = 1.0,
         timeout_s: float | None = None,
+        effort_policy: str = "fixed",
+        camera_history_policy: str = "full",
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -595,6 +604,21 @@ class LLMAgentPolicy(PolicyBase):
                 f"depth must be one of {sorted(_DEPTH_MODES)}, got {depth!r}.\n"
                 "fix: pass -P depth=render or -P depth=off"
             )
+        if effort_policy not in _EFFORT_POLICIES:
+            raise ConfigError(
+                f"effort_policy must be one of {_EFFORT_POLICIES}, got {effort_policy!r}"
+            )
+        if camera_history_policy not in _CAMERA_HISTORY_POLICIES:
+            raise ConfigError(
+                f"camera_history_policy must be one of {_CAMERA_HISTORY_POLICIES}, "
+                f"got {camera_history_policy!r}"
+            )
+        event_effort = effort_policy == "event"
+        event_cameras = camera_history_policy == "transition_witness"
+        if event_effort and (wire != "messages" or resolved_effort != "high"):
+            raise ConfigError("effort_policy=event requires -P wire=messages and -P effort=high")
+        if event_cameras and images != "always":
+            raise ConfigError("camera_history_policy=transition_witness requires -P images=always")
         if wire != "messages":
             # Claude fast mode and the Messages output cap cannot apply on
             # other wires, so reject those mismatches during construction.
@@ -632,6 +656,8 @@ class LLMAgentPolicy(PolicyBase):
         resolved_image_horizon: int | None = None if wire in {"gemini-live", "interactions"} else 2
         if not isinstance(image_horizon, _Unset):
             resolved_image_horizon = image_horizon
+        if (event_effort or event_cameras) and resolved_image_horizon is not None:
+            raise ConfigError("event policies require -P image_horizon=none")
         if wire == "gemini-live" and image_horizon is not _UNSET and image_horizon is not None:
             raise ConfigError(
                 "image_horizon is not supported on wire='gemini-live'.\n"
@@ -811,6 +837,17 @@ class LLMAgentPolicy(PolicyBase):
             if wire == "messages"
             else None
         )
+        fable_append_only = (
+            wire == "messages"
+            and provider.model == _FABLE_52
+            and provider.base_url.rstrip("/") == _ANTHROPIC_BASE
+            and resolved_image_horizon is None
+        )
+        if event_effort and not fable_append_only:
+            raise ConfigError(
+                "effort_policy=event is supported for direct Anthropic Fable 5.2 only.\n"
+                "fix: pass -P model=anthropic/claude-fable-5-2 on the Claude API"
+            )
         self._capture = WireCapture() if wire_capture else None
         self._client: (
             ChatClient | ResponsesClient | AnthropicClient | GeminiLiveClient | InteractionsClient
@@ -825,6 +862,8 @@ class LLMAgentPolicy(PolicyBase):
                 backoff_s=resolved_backoff_s,
                 transport=transport,
                 capture=self._capture,
+                per_message_effort=event_effort,
+                preserve_no_tool_thinking=fable_append_only,
                 **timeout_kw,
             )
         elif wire == "responses":
@@ -875,6 +914,8 @@ class LLMAgentPolicy(PolicyBase):
         self._images = images
         self._depth = depth
         self._image_horizon = resolved_image_horizon
+        self._event_effort = event_effort
+        self._event_cameras = event_cameras
         self._prior_learnings_text = prior_learnings_text
         self._eval_notes = eval_notes_text
         self._pre_check = pre_check
@@ -904,6 +945,8 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
             eval_notes=eval_notes_text,
+            effort_policy=effort_policy,
+            camera_history_policy=camera_history_policy,
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(
@@ -924,6 +967,10 @@ class LLMAgentPolicy(PolicyBase):
         self._trial_started: float | None = None
         self._revealed: set[str] = set()
         self._max_steps: int | None = None
+        self._events: ObservationEvents | None = None
+        self._active_effort = "high"
+        self._previous_reduced: Observation | None = None
+        self._event_trace: list[dict[str, Any]] = []
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -961,6 +1008,16 @@ class LLMAgentPolicy(PolicyBase):
         """Start a fresh per-trial conversation with the scene goal and call budget."""
         if isinstance(self._client, ResponsesClient):
             self._client._reset_cache_tracking()
+        if isinstance(self._client, AnthropicClient):
+            self._client.reset_assistant_history()
+        self._events = (
+            ObservationEvents(self._state_labels)
+            if self._event_effort or self._event_cameras
+            else None
+        )
+        self._active_effort = "high"
+        self._previous_reduced = None
+        self._event_trace.clear()
         self._hindsight = None
         if self._adapter is not None:
             self._adapter.start_trial()
@@ -1048,6 +1105,26 @@ class LLMAgentPolicy(PolicyBase):
                 "llm_calls": self._calls_used,
                 **{key: value for key, value in self._usage_totals.items() if key != "llm_calls"},
             }
+        if self._event_trace:
+            record.metadata["observation_events"] = list(self._event_trace)
+
+    def _set_event_effort(self, effort: str) -> None:
+        if self._event_effort and effort != self._active_effort:
+            self._messages.append(
+                {"role": "system", "content": [], "output_config": {"effort": effort}}
+            )
+            self._active_effort = effort
+
+    def _record_observation_event(self, observation: Observation, reason: str) -> None:
+        if self._events is not None:
+            self._event_trace.append(
+                {
+                    "call": self._calls_used,
+                    "step": observation.extra.get("env_step"),
+                    "reason": reason,
+                    "effort": self._active_effort if self._event_effort else self._effort,
+                }
+            )
 
     def transcript(self) -> list[dict[str, Any]] | None:
         """Return an image-free deep copy of the current trial's conversation."""
@@ -1105,8 +1182,31 @@ class LLMAgentPolicy(PolicyBase):
                     narration += (
                         f" Missing camera(s) in this observation: {_quoted_names(missing)}."
                     )
+        event = None
+        if self._events is not None:
+            step = observation.extra.get("env_step")
+            interrupted = (
+                motion is not None
+                and isinstance(motion.issued_step, int)
+                and isinstance(step, int)
+                and 0 <= step - motion.issued_step < motion.chunk_len
+            )
+            event = self._events.observe(
+                observation,
+                previous_target=motion.target if motion is not None else None,
+                recovery=interrupted
+                or bool(observation.extra.get("replan"))
+                or bool(observation.extra.get("approvals"))
+                or bool(observation.extra.get("operator_messages")),
+            )
+        wire_observation = (
+            routine_camera_observation(observation)
+            if self._event_cameras and event is None
+            else observation
+        )
+        reduced = wire_observation is not observation
         observation_content = _observation_content(
-            observation,
+            wire_observation,
             self._state_labels,
             max_steps=self._max_steps,
             reveal=reveal,
@@ -1115,6 +1215,16 @@ class LLMAgentPolicy(PolicyBase):
             setpoint_lines=adapter.control.setpoint_lines(observation),
             wall_s=None if self._trial_started is None else self._clock() - self._trial_started,
         )
+        previous = self._previous_reduced
+        if previous is not None and event in ("gripper_command", "gripper_motion"):
+            witness = _image_parts(previous, reveal=_WRIST_CAMERAS)
+            if witness:
+                observation_content[1:1] = [
+                    {"type": "text", "text": "Previous observation at full wrist resolution:"},
+                    *witness,
+                    {"type": "text", "text": "Current camera views follow."},
+                ]
+        self._previous_reduced = observation if reduced else None
         if self._images == "on_demand":
             available = _quoted_names(tuple(observation.images))
             camera_line = (
@@ -1124,6 +1234,8 @@ class LLMAgentPolicy(PolicyBase):
             )
             observation_content[0]["text"] += f"\n{camera_line}"
         self._messages.append({"role": "user", "content": observation_content})
+        self._set_event_effort("medium" if event is None else "high")
+        self._record_observation_event(observation, event or "routine")
         summary = f"{len(observation.images)} camera(s)"
         if self._images == "on_demand":
             summary += " available"
@@ -1137,6 +1249,7 @@ class LLMAgentPolicy(PolicyBase):
             self._echo(f"[agent] >> observation: {summary}")
         failures = 0
         rejections = 0
+        recovered = False
         while True:
             if self._calls_used >= self._max_llm_calls:
                 return self._forced_give_up(adapter, observation, "LLM call budget exhausted")
@@ -1168,6 +1281,8 @@ class LLMAgentPolicy(PolicyBase):
                     f"out={message.usage.get('output_tokens', 0)}"
                 )
             raw_message = message.raw()
+            if not message.tool_calls and isinstance(self._client, AnthropicClient):
+                self._client.remember_assistant_turn(raw_message)
             self._messages.append(raw_message)
             content = raw_message.get("content")
             if isinstance(content, str) and content:
@@ -1197,6 +1312,8 @@ class LLMAgentPolicy(PolicyBase):
                         ),
                     }
                 )
+                if not recovered and self._calls_used < self._max_llm_calls:
+                    recovered = self._append_event_recovery(observation, reduced=reduced)
                 continue
 
             chunk: ActionChunk | None = None
@@ -1373,6 +1490,24 @@ class LLMAgentPolicy(PolicyBase):
                 raise RuntimeError(
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
+            if closed_after_failure and not recovered and self._calls_used < self._max_llm_calls:
+                recovered = self._append_event_recovery(observation, reduced=reduced)
+
+    def _append_event_recovery(self, observation: Observation, *, reduced: bool) -> bool:
+        needs_effort = self._event_effort and self._active_effort != "high"
+        needs_detail = self._event_cameras and reduced
+        if not (needs_effort or needs_detail):
+            return False
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": "Retry from the same observation; the robot has not moved."}
+        ]
+        if needs_detail:
+            parts.extend(_image_parts(observation, reveal=_WRIST_CAMERAS))
+            self._previous_reduced = None
+        self._messages.append({"role": "user", "content": parts})
+        self._set_event_effort("high")
+        self._record_observation_event(observation, "recovery")
+        return True
 
     def _forced_give_up(
         self, adapter: ToolAdapter, observation: Observation, why: str
