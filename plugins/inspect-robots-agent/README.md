@@ -393,6 +393,7 @@ preserves the request and provider response, including the actual returned
 |---|---|---|
 | `-P images=` | `always` | Attach every observation's frames; use `on_demand` for model-requested frames |
 | `-P image_horizon=` | `2` on the stateless HTTP wires; unset on `gemini-live` and `interactions` | Keep frames from the newest two image-bearing messages in each outgoing request; unset on `gemini-live` and `interactions` |
+| `-P camera_history_policy=` | `full` | With `transition_witness`, keep the overhead view and send smaller wrist views on routine turns. Use with `images=always` and `image_horizon=none`. |
 
 On the stateless HTTP wires, set `-P image_horizon=none` to send the full image
 history. `image_horizon` is unset and rejects an explicit value on
@@ -403,6 +404,14 @@ per observation with three cameras and can reach a 413 response around 85
 observations. The HTTP default replaces older outgoing camera parts with
 deterministic text stubs; the saved conversation, transcript, and separately
 stored frames remain complete and unchanged.
+
+On the first-party Claude Messages API, Fable 5.2 supports
+`-P effort_policy=event -P effort=high -P image_horizon=none`. This keeps
+high as the top-level effort and uses the per-message effort beta to request
+medium for routine observations. The default `effort_policy=fixed` keeps the
+configured effort for the trial. The camera and effort options can be tested
+independently. See the [paired robot pilot](../../docs/guide/fable-adaptive-eval.md)
+for the event rules, full commands, and evaluation measures.
 
 Set `-P prior_learnings=path/to/learnings.md` to append a nonempty UTF-8 notes
 file to the system prompt after any embodiment notes. The file is read once

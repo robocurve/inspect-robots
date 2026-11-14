@@ -21,6 +21,7 @@ from ._capture import WireCapture
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _FAST_MODE_BETA = "fast-mode-2026-02-01"
+_PER_MESSAGE_EFFORT_BETA = "mid-conversation-output-config-2026-07-01"
 
 #: Applied by ``policy.py`` when the user leaves ``max_output_tokens`` unset.
 #: Lives here so the number has one home, but the policy owns resolution: the
@@ -57,6 +58,8 @@ class AnthropicClient:
         *,
         max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         speed: str | None = None,
+        per_message_effort: bool = False,
+        preserve_no_tool_thinking: bool = False,
         timeout_s: float | None = None,
         max_retries: int = 3,
         backoff_s: float = 1.0,
@@ -75,6 +78,8 @@ class AnthropicClient:
             else min(_MAX_READ_TIMEOUT_S, max(120.0, max_output_tokens / 125.0))
         )
         self._speed = speed
+        self._per_message_effort = per_message_effort
+        self._preserve_no_tool_thinking = preserve_no_tool_thinking
         self._max_retries = max_retries
         self._backoff_s = backoff_s
         self._capture = capture
@@ -83,19 +88,46 @@ class AnthropicClient:
         # within a conversation; a gateway that recycles them would replay the
         # later turn's blocks for both turns.
         self._raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]] = {}
+        # Tool-less replies have no provider tool id. Their canonical dict
+        # stays in the policy's history. Hold that object alongside its wire
+        # blocks until pruning so Python cannot recycle its identity.
+        self._raw_blocks_by_turn: dict[int, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+        self._pending_no_tool_blocks: list[dict[str, Any]] = []
         headers = {"anthropic-version": _ANTHROPIC_VERSION}
         if provider.api_key:
             headers["x-api-key"] = provider.api_key
+        betas: list[str] = []
         if speed == "fast":
             # The beta header is what makes POST /v1/messages the beta
             # endpoint over raw HTTP; there is no separate URL.
-            headers["anthropic-beta"] = _FAST_MODE_BETA
+            betas.append(_FAST_MODE_BETA)
+        if per_message_effort:
+            betas.append(_PER_MESSAGE_EFFORT_BETA)
+        if betas:
+            headers["anthropic-beta"] = ",".join(betas)
         self._http = httpx.Client(
             base_url=provider.base_url,
             headers=headers,
             timeout=httpx.Timeout(resolved_timeout, connect=_CONNECT_TIMEOUT_S),
             transport=transport,
         )
+
+    @property
+    def preserves_no_tool_thinking(self) -> bool:
+        """Whether to keep opaque response blocks on the tool-less nudge path."""
+        return self._preserve_no_tool_thinking
+
+    def remember_assistant_turn(self, message: dict[str, Any]) -> None:
+        """Associate the last tool-less response with its canonical history dict."""
+        if self._pending_no_tool_blocks:
+            self._raw_blocks_by_turn[id(message)] = (message, self._pending_no_tool_blocks)
+            self._pending_no_tool_blocks = []
+
+    def reset_assistant_history(self) -> None:
+        """Discard opaque response blocks when the policy starts a new trial."""
+        self._raw_blocks_by_tool_use_id.clear()
+        self._raw_blocks_by_turn.clear()
+        self._pending_no_tool_blocks = []
 
     def complete(
         self,
@@ -113,8 +145,24 @@ class AnthropicClient:
             for tool_use_id, blocks in self._raw_blocks_by_tool_use_id.items()
             if tool_use_id in history_ids
         }
+        self._pending_no_tool_blocks = []
+        if self._raw_blocks_by_turn:
+            history_turns = {id(message) for message in messages}
+            self._raw_blocks_by_turn = {
+                turn_id: entry
+                for turn_id, entry in self._raw_blocks_by_turn.items()
+                if turn_id in history_turns
+            }
 
-        system, translated = _translate_messages(messages, self._raw_blocks_by_tool_use_id)
+        system, translated = _translate_messages(
+            messages,
+            self._raw_blocks_by_tool_use_id,
+            per_message_effort=self._per_message_effort,
+            stable_prefix=self._preserve_no_tool_thinking or self._per_message_effort,
+            raw_blocks_by_turn={
+                turn_id: entry[1] for turn_id, entry in self._raw_blocks_by_turn.items()
+            },
+        )
         body: dict[str, Any] = {
             "model": self._provider.model,
             "max_tokens": self._max_output_tokens,
@@ -188,6 +236,8 @@ class AnthropicClient:
                             self._raw_blocks_by_tool_use_id[str(block["id"])] = list(
                                 payload["content"]
                             )
+                    if self._preserve_no_tool_thinking and not message.tool_calls:
+                        self._pending_no_tool_blocks = list(payload.get("content") or [])
                     return message
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code not in _RETRYABLE_STATUSES and response.status_code < 500:
@@ -346,11 +396,15 @@ def _with_cache_breakpoint(turn: dict[str, Any]) -> dict[str, Any]:
 def _translate_messages(
     messages: list[dict[str, Any]],
     raw_blocks_by_tool_use_id: dict[str, list[dict[str, Any]]],
+    *,
+    per_message_effort: bool = False,
+    stable_prefix: bool = False,
+    raw_blocks_by_turn: dict[int, list[dict[str, Any]]] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Translate chat history to (system, messages) for the Messages API.
 
     A leading system message is hoisted to the top-level ``system`` field; a
-    system message anywhere else raises, since this loop never produces one.
+    later system message is allowed only as an effort update on the opt-in wire.
     Consecutive tool messages merge into a single user turn: splitting
     ``tool_result`` blocks across messages is legal but silently trains the
     model out of parallel tool calls.
@@ -375,6 +429,14 @@ def _translate_messages(
     for index, message in enumerate(messages):
         role = message.get("role")
         if role == "system":
+            if "output_config" in message:
+                if not per_message_effort or message.get("content") != []:
+                    raise RuntimeError("effort updates require the Messages beta and empty content")
+                flush_results()
+                translated.append(
+                    {"role": "system", "content": [], "output_config": message["output_config"]}
+                )
+                continue
             if index != 0:
                 raise RuntimeError(
                     f"system message at index {index}; the Messages API takes a single "
@@ -410,17 +472,19 @@ def _translate_messages(
         flush_results()
         if role == "assistant":
             calls = message.get("tool_calls") or []
-            cached = raw_blocks_by_tool_use_id.get(str(calls[0]["id"])) if calls else None
+            if calls:
+                cached = raw_blocks_by_tool_use_id.get(str(calls[0]["id"]))
+            else:
+                cached = raw_blocks_by_turn.get(id(message)) if raw_blocks_by_turn else None
             # A cache hit replaces every synthesized block for this message,
             # text included: emitting both would show the model its own text
             # twice and drop the thinking block that must be replayed verbatim.
             # A miss synthesizes text + tool_use with no thinking block, which
             # is lossy for a tool-use turn. No tool-use turn misses within a
             # trial (the cache is populated on every 200 that carries a tool
-            # call, and the rollout is serial). A text-only turn does miss,
-            # via the nudge path, but carries no tool_use and so no signature
-            # or ordering constraint. The miss path also serves foreign
-            # histories and non-thinking models.
+            # call, and the rollout is serial). Preserved thinking also
+            # needs blocks from tool-less turns to keep the chain unbroken.
+            # The miss path serves foreign histories and legacy call sites.
             blocks = cached if cached is not None else _assistant_blocks(message)
             if not blocks:
                 # The nudge retry path appends exactly this; an assistant
@@ -434,20 +498,26 @@ def _translate_messages(
             continue
         if role != "user":
             raise RuntimeError(f"unsupported message role {role!r}")
-        turn = {"role": role, "content": _translate_content(message["content"])}
+        content = _translate_content(message["content"])
+        if stable_prefix and isinstance(content, str):
+            # Use the same representation before and after a rolling
+            # breakpoint moves off this message.
+            content = [{"type": "text", "text": content}]
+        turn = {"role": role, "content": content}
         if message.get("cache_anchor") is True:
             turn = _with_cache_breakpoint(turn)
             anchor_turn = turn
         translated.append(turn)
 
     flush_results()
-    if translated and translated[-1] is not anchor_turn:
-        # Anthropic's 20-block lookback can miss after unusually heavy retry
-        # churn, causing one harmless full-prefix write. The nudge string also
-        # changes from a wrapped final block to a bare string once superseded,
-        # so that final-breakpoint entry can miss once; the anchor still hits
-        # and both cases self-heal on the next ordinary cycle.
-        translated[-1] = _with_cache_breakpoint(translated[-1])
+    for index in range(len(translated) - 1, -1, -1):
+        turn = translated[index]
+        if turn["role"] != "system":
+            if turn is not anchor_turn:
+                # The effort-only system message after a new observation
+                # has no content block on which to put a breakpoint.
+                translated[index] = _with_cache_breakpoint(turn)
+            break
     return system, translated
 
 

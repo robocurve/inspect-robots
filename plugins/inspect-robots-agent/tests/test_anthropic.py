@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +148,73 @@ def test_optional_fields_omitted_when_unset() -> None:
     assert "tools" not in body
     assert "output_config" not in body
     assert "system" not in body
+
+
+def test_effort_changes_append_without_moving_existing_messages_or_breaking_tools() -> None:
+    first = _anthropic_response(_thinking(), _tool_use("toolu_a"), _tool_use("toolu_b"))
+    later = _anthropic_response(_thinking("moving"), _tool_use("toolu_c"))
+    seen, handler = _capture(first, later, _anthropic_response(_text("ok")))
+    client = _client(handler, speed="fast", per_message_effort=True)
+    history: list[dict[str, Any]] = [_SYSTEM, _USER]
+    turn = client.complete(history, [], reasoning_effort="high")
+    history.extend(
+        [
+            turn.raw(),
+            {"role": "tool", "tool_call_id": "toolu_a", "content": "executed a"},
+            {"role": "tool", "tool_call_id": "toolu_b", "content": "executed b"},
+            {"role": "user", "content": "Current observation: routine"},
+            {"role": "system", "content": [], "output_config": {"effort": "medium"}},
+        ]
+    )
+    turn = client.complete(history, [], reasoning_effort="high")
+    history.extend(
+        [
+            turn.raw(),
+            {"role": "tool", "tool_call_id": "toolu_c", "content": "executed c"},
+            {"role": "user", "content": "Current observation: contact"},
+            {"role": "system", "content": [], "output_config": {"effort": "high"}},
+        ]
+    )
+    client.complete(history, [], reasoning_effort="high")
+
+    bodies = [json.loads(request.content) for request in seen]
+    assert all(body["output_config"] == {"effort": "high"} for body in bodies)
+    assert all(body["system"] == bodies[0]["system"] for body in bodies)
+    assert seen[0].headers["anthropic-beta"].split(",") == [
+        "fast-mode-2026-02-01",
+        "mid-conversation-output-config-2026-07-01",
+    ]
+    middle = bodies[1]["messages"]
+    final = bodies[2]["messages"]
+    assert middle[1]["content"] == first["content"]
+    assert [block["tool_use_id"] for block in middle[2]["content"]] == ["toolu_a", "toolu_b"]
+    assert middle[-1] == history[6]
+    assert final[4:6] == [middle[4], {"role": "assistant", "content": later["content"]}]
+    assert final[-1] == history[-1]
+    assert middle[-2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert final[-2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in final[3]["content"][0]
+    # The provider ignores cache-control for thinking-block binding.
+    for body in bodies:
+        for message in body["messages"]:
+            for block in message["content"]:
+                block.pop("cache_control", None)
+    for earlier_body, later_body in pairwise(bodies):
+        earlier = earlier_body["messages"]
+        assert later_body["messages"][: len(earlier)] == earlier
+
+
+def test_effort_update_without_opt_in_is_rejected_before_network() -> None:
+    seen, handler = _capture(_anthropic_response(_text("ok")))
+    history: list[dict[str, Any]] = [
+        _USER,
+        {"role": "system", "content": [], "output_config": {"effort": "medium"}},
+    ]
+
+    with pytest.raises(RuntimeError, match="effort updates require the Messages beta"):
+        _client(handler).complete(history, [])
+
+    assert seen == []
 
 
 def test_none_effort_disables_thinking_without_output_config() -> None:
@@ -567,6 +635,51 @@ def test_thinking_block_is_replayed_verbatim_on_the_next_turn() -> None:
     assert replayed[0] == _thinking()
     assert [b["type"] for b in replayed] == ["thinking", "text", "tool_use"]
     assert sum(1 for b in replayed if b["type"] == "text") == 1
+
+
+def test_preserved_thinking_survives_tool_less_nudge_and_prunes_on_reset() -> None:
+    initial = _anthropic_response(_thinking("first"), _tool_use("toolu_1"))
+    tool_less = _anthropic_response(_thinking(""), stop_reason="end_turn")
+    retry = _anthropic_response(_thinking("after nudge"), _tool_use("toolu_2"))
+    seen, handler = _capture(initial, tool_less, retry, _anthropic_response(_text("ok")))
+    client = _client(handler, preserve_no_tool_thinking=True)
+    assert client.preserves_no_tool_thinking
+    history: list[dict[str, Any]] = [_USER]
+    first = client.complete(history, [])
+    history.extend(
+        [
+            first.raw(),
+            {"role": "tool", "tool_call_id": "toolu_1", "content": "moved"},
+            {"role": "user", "content": "New observation"},
+        ]
+    )
+
+    tool_less_turn = client.complete(history, []).raw()
+    client.remember_assistant_turn(tool_less_turn)
+    assert tool_less_turn == {"role": "assistant", "content": None}
+    history.extend(
+        [tool_less_turn, {"role": "user", "content": "Respond with exactly one tool call."}]
+    )
+    fourth = client.complete(history, [])
+    history.extend(
+        [
+            fourth.raw(),
+            {"role": "tool", "tool_call_id": "toolu_2", "content": "moved"},
+            {"role": "user", "content": "One more observation"},
+        ]
+    )
+    client.complete(history, [])
+
+    bodies = [json.loads(request.content) for request in seen]
+    assert bodies[2]["messages"][-2] == {"role": "assistant", "content": tool_less["content"]}
+    assistants = [m["content"] for m in bodies[3]["messages"] if m["role"] == "assistant"]
+    assert assistants == [initial["content"], tool_less["content"], retry["content"]]
+    assert bodies[2]["messages"][-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert bodies[3]["messages"][5]["content"] == [
+        {"type": "text", "text": "Respond with exactly one tool call."}
+    ]
+    client.complete([_USER], [])
+    assert client._raw_blocks_by_turn == {}
 
 
 def test_multi_tool_turn_replays_cached_blocks_once() -> None:

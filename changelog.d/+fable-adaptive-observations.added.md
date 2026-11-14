@@ -1,0 +1,1 @@
+**Agent plugin:** add opt-in per-turn reasoning effort for Claude Fable 5.2 and event-triggered wrist camera detail for robot evaluations. Include a paired robot pilot against the fixed high-effort policy.
