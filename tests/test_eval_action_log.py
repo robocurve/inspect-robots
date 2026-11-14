@@ -20,8 +20,8 @@ from inspect_robots.guard import ClampGuard
 from inspect_robots.logging.sink import NullSink
 from inspect_robots.mock import CubePickEmbodiment, ScriptedPolicy
 from inspect_robots.rollout import Record, StepRecord
-from inspect_robots.scene import Scene
-from inspect_robots.scorer import success_at_end
+from inspect_robots.scene import Scene, Target
+from inspect_robots.scorer import Score, success_at_end
 from inspect_robots.spaces import ActionSemantics, Box
 from inspect_robots.task import Task
 from inspect_robots.types import Action, ActionChunk, Observation, StepResult
@@ -123,6 +123,41 @@ def test_action_log_records_executed_clamped_action(tmp_path: Path) -> None:
     (step_line,) = _read_jsonl(tmp_path / record.metadata["actions"])[1:]
     np.testing.assert_array_equal(step_line["action"], [0.1, -0.1])
     assert step_line["action"] != [0.5, -0.5]
+
+
+@pytest.mark.parametrize("reuse_buffer", [False, True])
+def test_reused_policy_buffer_preserves_executed_actions_and_scores(
+    tmp_path: Path, reuse_buffer: bool
+) -> None:
+    class _BufferPolicy(ScriptedPolicy):
+        def __init__(self) -> None:
+            super().__init__(chunk_size=1)
+            self.buffer = np.zeros(2)
+
+        def act(self, observation: Observation) -> ActionChunk:
+            self.num_inferences += 1
+            self.buffer[:] = 0.01 * self.num_inferences
+            data = self.buffer if reuse_buffer else self.buffer.copy()
+            return ActionChunk(actions=[Action(data=data)])
+
+    class _Motion:
+        name = "smooth_motion"
+
+        def __call__(self, record: Record, target: Target | None) -> Score:
+            # The custom scorer example in docs/guide/scoring.md.
+            return Score(value=-sum(abs(float(s.action.data.sum())) for s in record.steps))
+
+    sink = _RecordingSink()
+    task = replace(_task(max_steps=3), scorer=_Motion())
+    (log,) = eval(task, _BufferPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path), sinks=[sink])
+
+    (record,) = sink.records
+    expected = [[0.01, 0.01], [0.02, 0.02], [0.03, 0.03]]
+    np.testing.assert_allclose([s.action.data for s in record.steps], expected)
+    assert log.results.metrics["smooth_motion"] == pytest.approx(-0.12)
+    rows = _read_jsonl(tmp_path / record.metadata["actions"])[1:]
+    np.testing.assert_allclose([row["action"] for row in rows], expected)
+    np.testing.assert_allclose([c.actions[0] for c in record.chunks], expected)
 
 
 def test_errored_trial_writes_partial_action_log(tmp_path: Path) -> None:

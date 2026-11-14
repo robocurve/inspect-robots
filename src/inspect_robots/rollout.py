@@ -671,6 +671,10 @@ def rollout(
                 )
 
             store[_EXECUTED_ACTION_KEY] = action
+            # Keep the command as issued: policies may reuse their output
+            # buffers on the next inference. Scorers and action side-cars read
+            # the steps after the rollout, when that buffer may have changed.
+            recorded_action = replace(action, data=np.array(action.data, copy=True))
             try:
                 result: StepResult = embodiment.step(action)
             except InspectRobotsError as exc:
@@ -692,7 +696,7 @@ def rollout(
                 StepRecord(
                     t=t,
                     observation=obs_rec,
-                    action=action,
+                    action=recorded_action,
                     result=result_rec,
                     image_refs=refs,
                     result_image_refs=result_refs,
