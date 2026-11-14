@@ -1751,6 +1751,22 @@ def test_sleep_rejects_bad_arguments() -> None:
         assert result.error == "seconds must be a positive number", bad
 
 
+def test_sleep_caps_an_arbitrary_precision_json_integer() -> None:
+    toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
+    observation = Observation(state={"q": np.array([0.0])})
+    for seconds in (10**100, 10**400):
+        result = toolset.execute(
+            _tool_call("sleep", {"seconds": seconds, "note": "wait"}), observation
+        )
+        assert result.error is None, seconds
+        assert result.sleep == 180.0
+        assert result.chunk is not None and len(result.chunk.actions) == 1800
+    negative = toolset.execute(
+        _tool_call("sleep", {"seconds": -(10**400), "note": "wait"}), observation
+    )
+    assert negative.error == "seconds must be a positive number"
+
+
 def test_sleep_raises_on_a_non_finite_reference_before_any_move() -> None:
     toolset = build_toolset(_absolute_space(), _absolute_obs_space(), control_hz=10.0)
     toolset.start_trial()
