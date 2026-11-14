@@ -38,7 +38,7 @@ from inspect_robots.errors import (
     SafetyAbort,
     _CancelledTrial,
 )
-from inspect_robots.frames import FrameStore, _safe
+from inspect_robots.frames import FrameStore, _encode_component, _safe
 from inspect_robots.grader import Grader
 from inspect_robots.guard import Guard, PassThroughGuard, build_guard
 from inspect_robots.log import (
@@ -142,7 +142,7 @@ def _write_action_log(
     action_space: Box,
 ) -> str | None:
     """Atomically persist one trial's executed actions, degrading on write failure."""
-    trial_id = f"{_safe(record.scene_id)}-e{record.epoch}"
+    trial_id = f"{_encode_component(_safe(record.scene_id))}-e{record.epoch}"
     relative_path = Path("actions") / run_stamp / f"{trial_id}.jsonl"
     path = Path(log_dir) / relative_path
     semantics = action_space.semantics
@@ -297,7 +297,7 @@ def _write_record(
     Non-finite action values are written as strings (``"nan"``, ``"inf"``) so
     a chunk that failed the trial is still recorded as the policy produced it.
     """
-    directory = records_dir / f"{_safe(record.scene_id)}-e{record.epoch}"
+    directory = records_dir / f"{_encode_component(_safe(record.scene_id))}-e{record.epoch}"
     semantics = action_space.semantics
     document = {
         "record_id": record.record_id,

@@ -79,6 +79,33 @@ def test_every_trial_gets_a_unique_record_and_directory(tmp_path: Path) -> None:
     assert log.version == EvalLog.SCHEMA_VERSION == 3
 
 
+@pytest.mark.parametrize("scene_ids", [("Layout", "layout"), ("A/b", "a/b")])
+def test_trial_artifacts_keep_case_distinct_scene_identities(
+    tmp_path: Path, scene_ids: tuple[str, str]
+) -> None:
+    task = Task(
+        name="case-distinct",
+        scenes=[Scene(id=key, instruction="reach the cube") for key in scene_ids],
+        scorer=success_at_end(),
+        max_steps=1,
+    )
+    (log,) = ir_eval(task, ScriptedPolicy(), CubePickEmbodiment(), log_dir=str(tmp_path))
+    # Detect collisions even on case-sensitive CI; readback also exercises
+    # actual overwrites on macOS's usual case-insensitive filesystem.
+    action_paths = [sample.trial_metadata[0]["actions"] for sample in log.samples]
+    record_paths = [str(sample.record_dirs[0]) for sample in log.samples]
+    assert len({path.casefold() for path in action_paths}) == 2
+    assert len({path.casefold() for path in record_paths}) == 2
+    for sample, action_path, record_path in zip(
+        log.samples, action_paths, record_paths, strict=True
+    ):
+        action_header = json.loads((tmp_path / action_path).read_text().splitlines()[0])
+        document, chunks = _record_files(tmp_path, record_path)
+        assert action_header["scene_id"] == sample.scene_id
+        assert document["scene_id"] == sample.scene_id
+        assert document["record_id"] == chunks[0]["record_id"] == sample.record_ids[0]
+
+
 def test_chunks_are_recorded_as_produced_not_as_executed(tmp_path: Path) -> None:
     (log,) = ir_eval(
         _task(),

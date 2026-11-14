@@ -197,6 +197,10 @@ including the prefix of an errored or cancelled trial. A zero-step trial writes
 the header alone. The trial metadata stores the relative path in `actions`, so
 consumers should follow that pointer instead of reconstructing filenames.
 
+Action and record paths percent-encode uppercase letters in the sanitized
+scene ID so IDs that differ only in case remain separate on case-insensitive
+filesystems. The raw scene ID stays in each file's contents.
+
 Action side-cars are owned by `eval()`, not a sink. They are therefore still
 written when `sinks=` replaces `JsonLogSink`. Pass `store_actions=False` to
 disable them. A filesystem failure emits a warning, leaves no final file or
