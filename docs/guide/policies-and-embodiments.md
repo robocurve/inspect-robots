@@ -76,6 +76,13 @@ same step, and ending a trial is never a claim of success: scoring stays with
 the task's scorers. A kind the policy did not declare fails the trial with a
 `PolicyError`, so a typo cannot pass for a refusal.
 
+`success` and `failure` are reserved for embodiment outcomes. A policy that
+emits either kind fails the trial with a `PolicyError` before the associated
+action is executed, even if the kind was declared. This also applies to the
+legacy `meta["request_stop"]` / `stop_reason` channel. Use `done` or `give_up`
+for policy stops so reports cannot mistake a policy's claim for an observed
+outcome. Existing saved logs retain their recorded reasons.
+
 ## A language-model policy: the policy adapter
 
 A multimodal language model becomes a policy through a

@@ -198,6 +198,21 @@ class Record:
     policy_transcript: Any = None
 
 
+def _policy_terminal(terminal: Termination, record: Record, t: int) -> Termination:
+    """Keep policy stop reasons distinct from definitive embodiment outcomes."""
+    if terminal.kind in {"success", "failure"}:
+        raise _record_failure(
+            record,
+            PolicyError(
+                f"terminal action {terminal.kind!r} is reserved for embodiment outcomes; "
+                "use 'done' or 'give_up' for a policy stop and let the task's scorers "
+                "judge the result"
+            ),
+            t,
+        )
+    return terminal
+
+
 def _declared_terminal(
     policy: Policy, terminal: Termination, record: Record, t: int
 ) -> Termination:
@@ -221,10 +236,10 @@ def _declared_terminal(
             ),
             t,
         )
-    return terminal
+    return _policy_terminal(terminal, record, t)
 
 
-def _legacy_stop(action: Action) -> Termination | None:
+def _legacy_stop(action: Action, record: Record, t: int) -> Termination | None:
     """Read the pre-Termination stop request from ``action.meta``, if any."""
     if not action.meta.get("request_stop"):
         return None
@@ -232,9 +247,13 @@ def _legacy_stop(action: Action) -> Termination | None:
     # Termination needs a non-blank kind; the legacy channel never validated
     # stop_reason, so anything blank or non-string falls back to the default.
     reason = action.meta.get("stop_reason")
-    return Termination(
-        kind=reason.strip() if isinstance(reason, str) and reason.strip() else "policy_stop",
-        reason=detail if isinstance(detail, str) else "",
+    return _policy_terminal(
+        Termination(
+            kind=reason.strip() if isinstance(reason, str) and reason.strip() else "policy_stop",
+            reason=detail if isinstance(detail, str) else "",
+        ),
+        record,
+        t,
     )
 
 
@@ -604,7 +623,7 @@ def rollout(
             terminal = (
                 _declared_terminal(policy, action.terminal, record, t)
                 if action.terminal is not None
-                else _legacy_stop(action)
+                else _legacy_stop(action, record, t)
             )
 
             store.pop(_GUARD_TRACE_KEY, None)
