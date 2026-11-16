@@ -195,14 +195,15 @@ def test_terminal_on_the_last_allowed_step_is_not_reported_as_horizon() -> None:
     assert record.termination_reason == DONE
 
 
-def test_embodiment_termination_wins_over_a_terminal_action() -> None:
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_embodiment_termination_wins_over_a_terminal_action(outcome: str) -> None:
     class _InstantSuccess(CubePickEmbodiment):
         def step(self, action: Action) -> StepResult:
             result = super().step(action)
-            return replace(result, terminated=True, termination_reason="success")
+            return replace(result, terminated=True, termination_reason=outcome)
 
     record = _run(_TerminalPolicy(Termination(GIVE_UP), moves=1), _InstantSuccess())
-    assert record.termination_reason == "success"
+    assert record.termination_reason == outcome
     assert record.termination_detail is None
 
 
@@ -257,6 +258,53 @@ def test_legacy_stop_meta_still_ends_the_trial(
     record = _run(_LegacyStopPolicy(meta))
     assert record.termination_reason == reason
     assert record.termination_detail == detail
+
+
+@pytest.mark.parametrize("kind", ["success", "failure"])
+@pytest.mark.parametrize("channel", ["terminal-only", "with-actions", "legacy"])
+def test_policy_cannot_claim_an_embodiment_outcome(kind: str, channel: str) -> None:
+    policy = (
+        _LegacyStopPolicy({"request_stop": True, "stop_reason": kind})
+        if channel == "legacy"
+        else _TerminalPolicy(
+            Termination(kind, "policy claim"),
+            moves=0 if channel == "terminal-only" else 1,
+            declared=frozenset({kind}),
+        )
+    )
+
+    with pytest.raises(PolicyError, match="reserved for embodiment outcomes") as caught:
+        _run(policy)
+
+    record = caught.value.record
+    assert record is not None
+    assert record.status == "error"
+    assert record.steps == []
+    assert record.termination_reason is None
+
+
+def test_policy_success_claim_is_saved_as_an_error(tmp_path: Path) -> None:
+    from inspect_robots.cli import _outcome_line
+
+    task = Task(name="t", scenes=[_SCENE], scorer=success_at_end(), max_steps=40)
+    policy = _LegacyStopPolicy({"request_stop": True, "stop_reason": "success"})
+    ir_eval(task, policy, CubePickEmbodiment(), log_dir=str(tmp_path))
+
+    (log_file,) = tmp_path.glob("*.json")
+    log = read_eval_log(str(log_file))
+    assert log.status == "error"
+    assert log.results.errored_trials == 1
+    assert log.samples[0].epochs == ({},)
+    assert "reserved for embodiment outcomes" in (log.samples[0].error or "")
+    assert _outcome_line(log) == ("no reason recorded", False)
+
+
+def test_declared_custom_policy_stop_still_ends_the_trial() -> None:
+    policy = _TerminalPolicy(Termination("refuse", "unsafe"), declared=frozenset({"refuse"}))
+    record = _run(policy)
+    assert record.termination_reason == "refuse"
+    assert record.termination_detail == "unsafe"
+    assert record.status == "success"
 
 
 def test_termination_details_reach_the_log(tmp_path: Path) -> None:

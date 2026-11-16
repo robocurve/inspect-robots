@@ -60,7 +60,9 @@ class Termination:
     kind the policy declares in ``PolicyInfo.terminal_actions``) and becomes the
     record's termination reason; ``reason`` is the policy's stated explanation,
     recorded verbatim as the termination detail. Ending a trial is not a claim of
-    success: scoring stays with the task's scorers.
+    success: scoring stays with the task's scorers. The rollout rejects
+    ``"success"`` and ``"failure"`` as policy terminal kinds because those
+    reasons are reserved for embodiment outcomes.
     """
 
     kind: str
