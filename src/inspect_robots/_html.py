@@ -278,6 +278,7 @@ class _VideoContext:
     ffmpeg: str | None
     fps: float
     budget: _VideoBudget
+    frame_index: _FrameIndex | None = None
 
 
 @dataclass
@@ -1351,10 +1352,31 @@ def _render_trial_wire(
     )
 
 
+class _FrameIndex:
+    """Snapshot one render's directory entries, retaining every legacy prefix match."""
+
+    def __init__(self, frames_dir: Path):
+        self.versioned: dict[str, list[Path]] = {}
+        self.legacy: dict[str, list[Path]] = {}
+        for path in frames_dir.glob("*.npy"):
+            identity = _parse_frame_filename(path.name)
+            if identity is not None:
+                self.versioned.setdefault(identity[0], []).append(path)
+            else:
+                # Legacy names do not delimit trial and camera. Preserve all
+                # possible splits, including a trial embedded in another trial.
+                for match in re.finditer("_", path.name):
+                    prefix = path.name[: match.start()]
+                    remainder = path.name[match.end() :]
+                    if _CAMERA_FRAME_RE.fullmatch(remainder) is not None:
+                        self.legacy.setdefault(prefix, []).append(path)
+
+
 def _trial_camera_streams(
     frames_dir: Path,
     trial_prefix: str,
     legacy_display_names: Mapping[str, str] | None = None,
+    frame_index: _FrameIndex | None = None,
 ) -> dict[str, list[tuple[int, Path]]]:
     """Discover exact versioned identities and merge legacy frames by safe label."""
     streams: dict[str, list[tuple[int, Path]]] = {}
@@ -1365,13 +1387,23 @@ def _trial_camera_streams(
     # prefix is the same trial, so a run's other trials are never parsed.
     # Prefixes are escaped; raw identifiers never reach a glob expression.
     versioned = glob.escape(f"~f1~{_encode_component(trial_prefix)}~")
-    for path in sorted(frames_dir.glob(f"{versioned}*.npy")):
+    versioned_paths = (
+        frames_dir.glob(f"{versioned}*.npy")
+        if frame_index is None
+        else frame_index.versioned.get(trial_prefix, [])
+    )
+    for path in sorted(versioned_paths):
         identity = _parse_frame_filename(path.name)
         if identity is not None and identity[0] == trial_prefix:
             _, camera, step = identity
             streams.setdefault(camera, []).append((step, path))
             replaced.add(f"{marker}{_safe(camera)}_{step:06d}.npy")
-    for path in sorted(frames_dir.glob(f"{glob.escape(marker)}*.npy")):
+    legacy_paths = (
+        frames_dir.glob(f"{glob.escape(marker)}*.npy")
+        if frame_index is None
+        else frame_index.legacy.get(_safe(trial_prefix), [])
+    )
+    for path in sorted(legacy_paths):
         remainder = path.name[len(marker) :]
         match = _CAMERA_FRAME_RE.fullmatch(remainder)
         if match is None:
@@ -1409,7 +1441,10 @@ def _render_trial_media(
         flipbook.setdefault(camera, []).append(step)
     available_streams = (
         _trial_camera_streams(
-            frames_dir, trial_prefix, {_safe(camera): camera for camera in flipbook}
+            frames_dir,
+            trial_prefix,
+            {_safe(camera): camera for camera in flipbook},
+            context.frame_index,
         )
         if context.enabled and frames_dir is not None
         else {}
@@ -1761,6 +1796,11 @@ def render_html(
         ffmpeg=ffmpeg,
         fps=fps,
         budget=_VideoBudget(limit=video_budget_bytes),
+        frame_index=(
+            _FrameIndex(frames_dir)
+            if video_eligible and frames_dir is not None and transcript_count > 1
+            else None
+        ),
     )
     scenes = "".join(
         _scene_section(

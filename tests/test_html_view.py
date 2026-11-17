@@ -24,6 +24,7 @@ from inspect_robots._html import (
     _frame_markup,
     _FrameBudget,
     _FrameContext,
+    _FrameIndex,
     _load_frame,
     _render_chat_transcript,
     _render_tool_call,
@@ -1868,8 +1869,10 @@ def test_invalid_versioned_frame_does_not_substitute_stale_legacy_pixels(
     assert png_data_url(stale) not in document
 
 
+@pytest.mark.parametrize("indexed", [False, True])
 def test_discovery_preserves_exact_trials_and_merges_versioned_and_legacy_frames(
     tmp_path: Path,
+    indexed: bool,
 ) -> None:
     store = FrameStore(str(tmp_path))
     frame = np.full((2, 3, 3), 22, dtype=np.uint8)
@@ -1880,17 +1883,21 @@ def test_discovery_preserves_exact_trials_and_merges_versioned_and_legacy_frames
     np.save(tmp_path / "pick-e0_top-e0_rgb_000000.npy", np.full_like(frame, 11))
     np.save(tmp_path / "pick-e0_top-e0_rgb_000001.npy", frame)
     (tmp_path / "~f1~pick-e0~bad%GG_000000.npy").write_bytes(b"malformed name")
-    streams = _trial_camera_streams(tmp_path, "pick-e0")
+    frame_index = _FrameIndex(tmp_path) if indexed else None
+    streams = _trial_camera_streams(tmp_path, "pick-e0", frame_index=frame_index)
     assert streams == {
         "top-e0_rgb": [(0, Path(ref.path)), (1, tmp_path / "pick-e0_top-e0_rgb_000001.npy")]
     }
-    assert _trial_camera_streams(tmp_path, "pick-e0_top-e0") == {
+    assert _trial_camera_streams(tmp_path, "pick-e0_top-e0", frame_index=frame_index) == {
         "rgb": [(0, Path(other.path)), (1, tmp_path / "pick-e0_top-e0_rgb_000001.npy")],
     }
     raw_trial = "Raw[*]/Trial"
     raw_ref = store.put(raw_trial, 0, "Camera", frame)
     store.put("RawX/Trial", 0, "intruder", frame)
-    assert _trial_camera_streams(tmp_path, raw_trial) == {"Camera": [(0, Path(raw_ref.path))]}
+    frame_index = _FrameIndex(tmp_path) if indexed else None
+    assert _trial_camera_streams(tmp_path, raw_trial, frame_index=frame_index) == {
+        "Camera": [(0, Path(raw_ref.path))]
+    }
 
 
 @pytest.mark.parametrize("placeholders", [False, True])
@@ -2351,3 +2358,62 @@ def test_the_html_analyzer_includes_the_wire_capture_view_shows(tmp_path: Path) 
     item = AnnotatedLog(path=log_path, log=log, annotations=())
     (document,) = _HtmlAnalyzer().analyze([item]).files.values()
     assert "Trial 0 Wire" in document and "claude-wire-only" in document
+
+
+def test_frame_index_matches_direct_discovery_for_legacy_prefixes(tmp_path: Path) -> None:
+    # A legacy name can belong to more than one trial. Indexing must retain
+    # the old interpretation for each, including sanitized camera aliases.
+    for name in (
+        "pick_e0_camera_left_000001.npy",
+        "pick_e0_camera_left_000002.npy",
+        "pick_e0_camera_right_000001.npy",
+        "malformed_name.npy",
+        "unrelated.txt",
+        "~f1~bad%GG~top_000000.npy",
+    ):
+        (tmp_path / name).write_bytes(b"name-only discovery fixture")
+    index = _FrameIndex(tmp_path)
+    for trial in ("pick_e0", "pick_e0_camera", "absent", "Raw[*]/Trial"):
+        assert _trial_camera_streams(tmp_path, trial, frame_index=index) == _trial_camera_streams(
+            tmp_path, trial
+        )
+
+
+def test_report_scans_frames_once_and_refreshes_each_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("inspect_robots._html.shutil.which", lambda _name: "/fake/ffmpeg")
+    transcript = _chat({"role": "user", "content": _parts("top", 1)})
+    log = _log(transcripts=(transcript,))
+    log = dataclasses.replace(
+        log,
+        samples=(log.samples[0], dataclasses.replace(log.samples[0], scene_id="scene-1")),
+    )
+    store = FrameStore(str(tmp_path))
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+    store.put("scene-0-e0", 1, "top", image)
+    store.put("scene-1-e0", 1, "top", image)
+    scans: list[str] = []
+    original_glob = Path.glob
+
+    def counted_glob(path: Path, pattern: str) -> Any:
+        if path == tmp_path:
+            scans.append(pattern)
+        return original_glob(path, pattern)
+
+    seen: list[list[int]] = []
+
+    def encode(streams: Any, fps: float, ffmpeg: str) -> None:
+        seen.append([step for _camera, frames in streams for step, _path in frames])
+
+    monkeypatch.setattr(Path, "glob", counted_glob)
+    monkeypatch.setattr("inspect_robots._video._encode_composite_mp4", encode)
+    render_html(log, title="first", frames_dir=tmp_path)
+    assert scans == ["*.npy"]
+    assert seen == [[1], [1]]
+    store.put("scene-1-e0", 2, "top", image)
+    render_html(log, title="second", frames_dir=tmp_path)
+    assert scans == ["*.npy", "*.npy"]
+    assert seen == [[1], [1], [1], [1, 2]]
+    render_html(log, title="disabled", frames_dir=tmp_path, no_video=True)
+    assert scans == ["*.npy", "*.npy"]
