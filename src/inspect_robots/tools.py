@@ -624,11 +624,13 @@ class ControlTools:
         if (
             isinstance(seconds, bool)
             or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds)
+            # math.isfinite() and float() raise OverflowError on an
+            # arbitrary-precision JSON integer.
+            or (isinstance(seconds, float) and not math.isfinite(seconds))
             or seconds <= 0
         ):
             return ToolResult(error="seconds must be a positive number")
-        seconds = min(float(seconds), _SLEEP_MAX_S)
+        seconds = float(min(seconds, _SLEEP_MAX_S))
         if self._absolute:
             self._settle(observation)
             held = self._held_target
