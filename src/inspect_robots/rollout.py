@@ -175,6 +175,9 @@ class Record:
     # In-memory only, likewise: the observation a trial that ended before its
     # first step stopped on (an immediate refusal), so a grader still has frames.
     unstepped_observation: Observation | None = None
+    # In-memory only, likewise: the observation a handoff trial started from.
+    # Such a trial has no steps, so this is where a grader finds initial frames.
+    initial_observation: Observation | None = None
     terminated: bool = False
     truncated: bool = False
     termination_reason: str | None = None

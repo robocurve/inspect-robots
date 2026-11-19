@@ -683,6 +683,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("-E", dest="embodiment_args", action="append", metavar="k=v")
     _add_config_arg(p_doctor)
 
+    p_handoff = sub.add_parser(
+        "handoff",
+        help="agent-side commands for a handoff trial (run by the agent, not the operator)",
+    )
+    p_handoff.add_argument("action", choices=("done", "wait", "status"))
+    p_handoff.add_argument("--reason", default="", help="with done: what the agent did")
+    p_handoff.add_argument(
+        "--timeout", type=float, default=600.0, help="with wait: seconds to wait at most"
+    )
+    p_handoff.add_argument(
+        "--dir", default=None, help="control directory (default: $INSPECT_ROBOTS_HANDOFF_DIR)"
+    )
+
     p_setup = sub.add_parser(
         "setup",
         help="interactive first-run wizard: pick defaults and discover camera devices, "
@@ -3294,6 +3307,30 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_handoff(args: argparse.Namespace) -> int:
+    """Agent side of a handoff trial: report done, wait for grading, or print the phase."""
+    from inspect_robots.handoff import ENV_DIR, FINISHED, TIMED_OUT, HandoffChannel
+
+    directory = args.dir or os.environ.get(ENV_DIR)
+    if not directory:
+        print(f"error: no handoff trial here: set --dir or ${ENV_DIR}", file=sys.stderr)
+        return 2
+    channel = HandoffChannel(directory)
+    if channel.phase() is None:
+        print(f"error: no handoff trial at {directory}", file=sys.stderr)
+        return 2
+    if args.action == "done":
+        channel.signal_done(args.reason)
+        print("done reported; the robot is no longer yours. Run `handoff wait`, then exit.")
+        return 0
+    if args.action == "status":
+        print(channel.phase())
+        return 0
+    phase = channel.wait(args.timeout)
+    print(phase)
+    return 0 if phase in (FINISHED, TIMED_OUT) else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, dispatch one subcommand, and return its process exit code."""
     init_dotenv(os.environ)
@@ -3339,6 +3376,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_score(args)
     if args.command == "analyze":
         return _cmd_analyze(args)
+    if args.command == "handoff":
+        return _cmd_handoff(args)
     parser.print_help()
     return 0
 

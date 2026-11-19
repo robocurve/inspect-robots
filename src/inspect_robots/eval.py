@@ -41,6 +41,7 @@ from inspect_robots.errors import (
 from inspect_robots.frames import FrameStore, _safe
 from inspect_robots.grader import Grader
 from inspect_robots.guard import Guard, PassThroughGuard, build_guard
+from inspect_robots.handoff import DEFAULT_TIME_LIMIT_S, HandoffAgent, handoff, supports_handoff
 from inspect_robots.log import (
     EvalLog,
     EvalResults,
@@ -558,7 +559,7 @@ def _survivor_warning(log: EvalLog) -> str | None:
 
 def eval(
     task: Task | str,
-    policy: Policy | str,
+    policy: Policy | str | HandoffAgent,
     embodiment: Embodiment | str,
     *,
     log_dir: str = "logs",
@@ -728,7 +729,7 @@ def eval(
 
 def _run_eval(
     task: Task,
-    policy: Policy,
+    policy: Policy | HandoffAgent,
     embodiment: Embodiment,
     *,
     log_dir: str,
@@ -758,25 +759,34 @@ def _run_eval(
     # runs before the compatibility check so the policy can adopt the
     # embodiment's spaces. Duck-typed — bind is not part of the Policy
     # Protocol, so existing policies are untouched.
-    bind = getattr(policy, "bind", None)
-    if callable(bind):
-        bind(embodiment.info)
-    _bind_contributed_tools(policy, embodiment)
+    if isinstance(policy, HandoffAgent):
+        # A handoff agent commands the robot itself (plan 0090): there are no
+        # spaces to reconcile, only the release/retake hooks to require.
+        if not supports_handoff(embodiment):
+            raise ConfigError(
+                f"embodiment {embodiment.info.name!r} cannot run handoff trials: it needs "
+                "release(workdir) and retake() hooks"
+            )
+    else:
+        bind = getattr(policy, "bind", None)
+        if callable(bind):
+            bind(embodiment.info)
+        _bind_contributed_tools(policy, embodiment)
 
-    # Fail fast on incompatible pairings before touching any hardware/sim.
-    # This also validates the embodiment rate needed by a seconds-based task
-    # before the resolved horizon is exposed to an adapter (plan 0026).
-    report = assert_compatible(policy, embodiment, task, remap=remap)
-    # Soft mismatches (e.g. action-frame differences) permit rollout with
-    # reduced guarantees, but the caller must see them: surface every
-    # warning issue as a Python UserWarning instead of silently dropping
-    # the report (issue #593).
-    for issue in report.warnings:
-        warnings.warn(
-            f"compatibility warning [{issue.code}]: {issue.message}",
-            UserWarning,
-            stacklevel=3,  # point at the caller's eval(...) call, like the survivor warning
-        )
+        # Fail fast on incompatible pairings before touching any hardware/sim.
+        # This also validates the embodiment rate needed by a seconds-based task
+        # before the resolved horizon is exposed to an adapter (plan 0026).
+        report = assert_compatible(policy, embodiment, task, remap=remap)
+        # Soft mismatches (e.g. action-frame differences) permit rollout with
+        # reduced guarantees, but the caller must see them: surface every
+        # warning issue as a Python UserWarning instead of silently dropping
+        # the report (issue #593).
+        for issue in report.warnings:
+            warnings.warn(
+                f"compatibility warning [{issue.code}]: {issue.message}",
+                UserWarning,
+                stacklevel=3,  # point at the caller's eval(...) call, like the survivor warning
+            )
     task_envelope = task.resolve_envelope(embodiment.info.control_hz)
 
     # Horizon-aware embodiments (plan 0013): an optional bind_task() hook runs
@@ -824,7 +834,20 @@ def _run_eval(
 
     sink_list: list[LogSink] = sinks if sinks is not None else [JsonLogSink(log_dir)]
     bus = _Broadcast(sink_list)
-    action_manager = action_manager or DefaultActionManager(policy.config.replan_interval)
+    handoff_limit = DEFAULT_TIME_LIMIT_S
+    if isinstance(policy, HandoffAgent):
+        handoff_limit = policy.time_limit_s or task.max_seconds or DEFAULT_TIME_LIMIT_S
+        policy_name = policy.name
+        policy_config = _describe(policy.config())
+        default_checkpoint = None
+        replan_interval = None
+    else:
+        policy_name = policy.info.name
+        policy_config = _describe(asdict(policy.config))
+        default_checkpoint = getattr(policy.info, "checkpoint", None)
+        replan_interval = policy.config.replan_interval
+    is_handoff = isinstance(policy, HandoffAgent)
+    action_manager = action_manager or DefaultActionManager(replan_interval)
     if isinstance(guard, (list, tuple)):
         guard = build_guard(guard, embodiment.info.action_space)
     guard = cast(Guard | None, guard) or PassThroughGuard()
@@ -841,12 +864,12 @@ def _run_eval(
     grader_name, grader_config = grader_identity
     spec = EvalSpec(
         task=task.name,
-        policy=policy.info.name,
+        policy=policy_name,
         embodiment=embodiment.info.name,
         created=_now_iso(),
         inspect_robots_version=__version__,
         git_commit=_git_commit(),
-        policy_config=_describe(asdict(policy.config)),
+        policy_config=policy_config,
         embodiment_info={
             "control_hz": embodiment.info.control_hz,
             "is_simulated": embodiment.info.is_simulated,
@@ -857,15 +880,15 @@ def _run_eval(
         grader=grader_name,
         grader_config=grader_config,
         seed=seed,
-        max_steps=task_envelope.max_steps,
-        max_seconds=task.max_seconds,
+        max_steps=None if is_handoff else task_envelope.max_steps,
+        max_seconds=handoff_limit if is_handoff else task.max_seconds,
         rubrics=[rubric.describe() for rubric in task.task_rubrics],
         reducer=epoch_spec.reducer,
         benchmark=benchmark.describe() if benchmark is not None else None,
         environment_id=environment_id or getattr(embodiment.info, "environment_id", None),
         environment_revision=environment_revision
         or getattr(embodiment.info, "environment_revision", None),
-        policy_checkpoint=policy_checkpoint or getattr(policy.info, "checkpoint", None),
+        policy_checkpoint=policy_checkpoint or default_checkpoint,
     )
     records_dir: Path | None = Path(log_dir) / "records" / run_stamp if store_records else None
     run_configuration = {
@@ -873,16 +896,17 @@ def _run_eval(
         "inspect_robots_version": spec.inspect_robots_version,
         "git_commit": spec.git_commit,
         "seed": seed,
-        "max_steps": task_envelope.max_steps,
-        "max_seconds": task.max_seconds,
+        "max_steps": spec.max_steps,
+        "max_seconds": spec.max_seconds,
         "policy": {
             "name": spec.policy,
             "checkpoint": spec.policy_checkpoint,
             "config": spec.policy_config,
         },
         "embodiment": {"name": spec.embodiment, **spec.embodiment_info},
-        "action_manager": _describe(action_manager),
-        "guard": _describe(guard),
+        # A handoff agent's commands never pass through either.
+        "action_manager": None if is_handoff else _describe(action_manager),
+        "guard": None if is_handoff else _describe(guard),
         "grader": {"name": spec.grader, "config": spec.grader_config},
     }
     bus.bind_spaces(embodiment.info.action_space, embodiment.info.observation_space)
@@ -981,22 +1005,36 @@ def _run_eval(
                     )
             if not policy_start_failed:
                 try:
-                    record = rollout(
-                        policy,
-                        embodiment,
-                        scene,
-                        max_steps=task_envelope.max_steps,
-                        horizon_reason=(
-                            "max_seconds" if task.max_seconds is not None else "max_steps"
-                        ),
-                        seed=trial_seed,
-                        epoch=epoch,
-                        action_manager=action_manager,
-                        guard=guard,
-                        sink=bus,
-                        frame_store=frame_store,
-                        operator_input=operator_input,
-                    )
+                    if isinstance(policy, HandoffAgent):
+                        record = handoff(
+                            policy,
+                            embodiment,
+                            scene,
+                            time_limit_s=handoff_limit,
+                            seed=trial_seed,
+                            epoch=epoch,
+                            workdir=Path(log_dir)
+                            / "handoff"
+                            / run_stamp
+                            / _safe(f"{scene.id}-e{epoch}"),
+                        )
+                    else:
+                        record = rollout(
+                            policy,
+                            embodiment,
+                            scene,
+                            max_steps=task_envelope.max_steps,
+                            horizon_reason=(
+                                "max_seconds" if task.max_seconds is not None else "max_steps"
+                            ),
+                            seed=trial_seed,
+                            epoch=epoch,
+                            action_manager=action_manager,
+                            guard=guard,
+                            sink=bus,
+                            frame_store=frame_store,
+                            operator_input=operator_input,
+                        )
                 except _CancelledTrial as exc:
                     status = "cancelled"
                     error = str(exc)
