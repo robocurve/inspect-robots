@@ -78,6 +78,9 @@ inspect-robots analyze html logs/run.json --out pages/
 inspect-robots analyze terminations logs/*.json --json
 ```
 
+The `terminations` analyzer counts each recorded trial. If an older log has
+no termination reason for a trial, the report counts its reason as `unknown`.
+
 Write your own and register it like any other component:
 
 ```python

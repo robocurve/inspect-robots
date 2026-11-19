@@ -225,7 +225,12 @@ class _TerminationsAnalyzer:
         stated: list[dict[str, Any]] = []
         for item in logs:
             for sample in item.log.samples:
-                for index, reason in enumerate(sample.termination_reasons):
+                for index in range(len(sample.epochs)):
+                    reason = (
+                        sample.termination_reasons[index]
+                        if index < len(sample.termination_reasons)
+                        else None
+                    )
                     counts[reason or "unknown"] += 1
                     detail = (
                         sample.termination_details[index]

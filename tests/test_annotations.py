@@ -555,7 +555,45 @@ def test_the_terminations_analyzer_lists_stated_reasons(tmp_path: Path) -> None:
     counts = resolve("analyzer", "terminations").analyze(
         [replace(item, log=replace(log, samples=(unknown,)))]
     )
-    assert counts.data["counts"] == {"unknown": 1}
+    assert counts.data["counts"] == {"unknown": 2}
+
+
+def test_cli_terminations_counts_trials_in_a_log_predating_termination_reasons(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "success",
+                "eval": {
+                    "task": "reach",
+                    "policy": "scripted",
+                    "embodiment": "cubepick",
+                    "created": "2026-01-01",
+                    "inspect_robots_version": "0.1.0",
+                },
+                "stats": {
+                    "started_at": "a",
+                    "completed_at": "b",
+                    "duration_s": 1,
+                    "total_steps": 4,
+                },
+                "results": {"total_scenes": 1, "total_trials": 2},
+                "samples": [
+                    {"scene_id": "s", "status": "success", "epochs": [{"reach": 1}, {"reach": 0}]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = ["analyze", "terminations", str(path)]
+    assert main(args) == 0
+    assert capsys.readouterr().out.splitlines() == ["2 trial(s)", "  unknown: 2"]
+    assert main([*args, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"counts": {"unknown": 2}, "stated": []}
 
 
 # -- the CLI -----------------------------------------------------------------
