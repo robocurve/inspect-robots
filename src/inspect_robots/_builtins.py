@@ -9,6 +9,7 @@ from __future__ import annotations
 from inspect_robots.grader import operator_grader, vlm_grader
 from inspect_robots.logging import JsonLogSink, LiveLogSink, RerunSink
 from inspect_robots.mock import CubePickEmbodiment, NoopPolicy, RandomPolicy, ScriptedPolicy
+from inspect_robots.mock.handoff_cubepick import CubeTouchedGrader, HandoffCubePick
 from inspect_robots.registry import (
     analyzer,
     embodiment,
@@ -32,6 +33,7 @@ from inspect_robots.task import Task
 
 # Embodiments
 embodiment("cubepick")(CubePickEmbodiment)
+embodiment("cubepick-handoff")(HandoffCubePick)
 
 # Policies
 policy("scripted")(ScriptedPolicy)
@@ -48,6 +50,7 @@ scorer("operator")(operator_scorer)
 # Graders
 grader("operator")(operator_grader)
 grader("vlm")(vlm_grader)
+grader("cubepick-touched")(CubeTouchedGrader)
 
 # Sinks
 sink("json")(JsonLogSink)
@@ -66,6 +69,24 @@ def _cubepick_reach(num_scenes: int = 4, max_steps: int = 80) -> Task:
         ],
         scorer=success_at_end(),
         max_steps=max_steps,
+    )
+
+
+@task("cubepick-touch")
+def _cubepick_touch(num_scenes: int = 1, max_seconds: float = 480.0) -> Task:
+    """Touch the cube, then park: a handoff task graded from the final state."""
+    return Task(
+        name="cubepick-touch",
+        scenes=[
+            Scene(
+                id=f"scene-{i}",
+                instruction="Touch the cube with the end effector, then park the robot.",
+                init_seed=i,
+            )
+            for i in range(num_scenes)
+        ],
+        scorer=operator_scorer(),
+        max_seconds=max_seconds,
     )
 
 

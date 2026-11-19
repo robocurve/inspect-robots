@@ -347,7 +347,7 @@ class _VLMGrader:
             initial = (
                 _phase_frames(record.steps[0], final=False, max_cameras=self._max_cameras)
                 if record.steps
-                else []
+                else _observation_frames(record.initial_observation, self._max_cameras)
             )
             safety = safety_rubric_to_judge(record, scene)
             rubric_text, rubric_name = (
