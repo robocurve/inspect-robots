@@ -1,6 +1,6 @@
 # 0090: Handoff trials
 
-Status: built on the mock world; not yet run with a real agent or a real robot.
+Status: built and run on the mock world, with a scripted agent and with the Codex CLI (0.170.0); not yet run on a real robot.
 
 ## Problem
 
