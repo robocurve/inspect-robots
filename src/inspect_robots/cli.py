@@ -66,6 +66,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
+from urllib.parse import quote
 
 from inspect_robots import __version__
 from inspect_robots._claims import DeviceClaim, claim_devices
@@ -568,7 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="render saved eval logs as self-contained HTML reports",
         description=(
             "Render one EvalLog JSON file, or every top-level *.json in a logs "
-            "directory with a browsable index. A directory log named index.json "
+            "directory with a browsable index. A log named index.json (in any letter case) "
             "uses index_log.html (or the next collision-free suffix)."
         ),
     )
@@ -2449,7 +2450,7 @@ def _index_entry(log: EvalLog, log_path: Path, page: str) -> IndexEntry:
     model = log.eval.policy_config.get("model")
     return IndexEntry(
         name=log_path.name,
-        page=page,
+        page=quote(page, safe=""),
         created=log.eval.created,
         instruction=_index_instruction(log),
         policy=log.eval.policy,
@@ -2487,10 +2488,10 @@ def _unreadable_index_entry(log_path: Path, error: Exception) -> IndexEntry:
 
 def _directory_page_names(log_paths: Sequence[Path]) -> dict[Path, str]:
     """Assign collision-free report names without consulting existing files."""
-    names = {path: f"{path.stem}.html" for path in log_paths if path.stem != "index"}
-    reserved = set(names.values())
+    names = {path: f"{path.stem}.html" for path in log_paths if path.stem.casefold() != "index"}
+    reserved = {name.casefold() for name in names.values()}
     for path in log_paths:
-        if path.stem != "index":
+        if path in names:
             continue
         candidate = "index_log.html"
         suffix = 2

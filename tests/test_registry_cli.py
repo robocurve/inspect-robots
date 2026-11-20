@@ -2744,6 +2744,44 @@ def test_view_directory_index_log_uses_collision_free_page(tmp_path: Path) -> No
     assert 'href="index_log.html"' in (html_dir / "index.html").read_text(encoding="utf-8")
 
 
+def test_view_directory_links_to_literal_filename(tmp_path: Path) -> None:
+    _write_log(
+        _directory_view_log(created="2026-07-30T12:00:00Z"),
+        tmp_path,
+        "run #1%20.json",
+    )
+
+    assert main(["view", str(tmp_path)]) == 0
+    output = tmp_path / "html"
+    assert (output / "run #1%20.html").is_file()
+    index = (output / "index.html").read_text(encoding="utf-8")
+    assert ">run #1%20.json</a>" in index
+    assert ' href="run%20%231%2520.html"' in index
+    assert ' data-href="run%20%231%2520.html"' in index
+
+
+def test_view_directory_reserves_index_names_across_case(tmp_path: Path) -> None:
+    for stem in ("INDEX", "Index_Log", "INDEX_LOG_2"):
+        _write_log(
+            _directory_view_log(created="2026-07-30T12:00:00Z", instruction=f"trial {stem}"),
+            tmp_path,
+            f"{stem}.json",
+        )
+
+    assert main(["view", str(tmp_path)]) == 0
+    output = tmp_path / "html"
+    index = (output / "index.html").read_text(encoding="utf-8")
+    for stem, page in (
+        ("INDEX", "index_log_3.html"),
+        ("Index_Log", "Index_Log.html"),
+        ("INDEX_LOG_2", "INDEX_LOG_2.html"),
+    ):
+        assert f'href="{page}">{stem}.json</a>' in index
+        report = (output / page).read_text(encoding="utf-8")
+        assert f"trial {stem}" in report
+        assert '<a class="back-link" href="index.html">' in report
+
+
 def test_view_directory_index_log_suffix_uses_run_targets_not_filesystem(
     tmp_path: Path,
 ) -> None:

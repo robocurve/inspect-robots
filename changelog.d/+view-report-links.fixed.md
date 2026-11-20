@@ -1,0 +1,1 @@
+Directory report links now open the correct run when a log filename contains spaces, `#`, or literal percent escapes. The viewer also reserves `index.html` and its fallback report names case-insensitively so a run named `INDEX.json` remains accessible on case-insensitive filesystems.
