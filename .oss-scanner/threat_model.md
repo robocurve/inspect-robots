@@ -16,8 +16,10 @@ Treat all of these as attacker-controlled:
 
 - **Remote policy servers:** `plugins/inspect-robots-xpolicylab` (msgpack and
   msgpack-numpy over websockets), `plugins/inspect-robots-capx` (HTTP perception
-  and IK servers, `np.load` of returned arrays). Users often point these at
-  shared lab or cloud servers they do not control.
+  and IK servers, `np.load` of returned arrays), `plugins/inspect-robots-dream`
+  (action chunks and error text from Dream Labs' hosted API, through the
+  `dreamlabs-client` package). Users often point these at shared lab or cloud
+  servers they do not control.
 - **LLM responses:** `plugins/inspect-robots-agent` (OpenAI-compatible and
   Anthropic wire formats) and `src/inspect_robots/_chatwire.py` (VLM grader,
   `taskgen`, `summarize`). Model output can be steered by prompt injection via

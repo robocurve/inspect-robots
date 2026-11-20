@@ -1,0 +1,26 @@
+"""Dream Labs' Dream-1 as an Inspect Robots policy for the bimanual YAM.
+
+::
+
+    inspect-robots run --embodiment yam_arena --policy dream -E scene=station -E control_hz=20 \\
+        --instruction "put apple into the bowl"
+
+The policy is registered as ``dream`` through the ``inspect_robots.policies`` entry point. The
+Dream client runs in the same process, so install the ``client`` extra next to the embodiment.
+"""
+
+from __future__ import annotations
+
+from importlib.metadata import version
+from typing import Any
+
+from inspect_robots_dream.policy import DreamPolicy
+
+__all__ = ["DreamPolicy", "dream_policy"]
+
+__version__ = version("inspect-robots-dream")
+
+
+def dream_policy(**kwargs: Any) -> DreamPolicy:
+    """Build the ``dream`` policy; the CLI's ``-P key=value`` pairs arrive as keyword arguments."""
+    return DreamPolicy(**kwargs)
