@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -630,7 +630,7 @@ provides-extras = ["all", "dev", "rerun", "viz"]
 
 [[package]]
 name = "inspect-robots-agent"
-version = "0.30.0"
+version = "0.31.0"
 source = { editable = "plugins/inspect-robots-agent" }
 dependencies = [
     { name = "httpx" },

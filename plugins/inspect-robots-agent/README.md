@@ -227,6 +227,62 @@ to the model, labeled with the environment step when it was received. The
 model treats these lines as trusted guidance from the human supervising the
 robot. The framework also saves the feedback in the eval log.
 
+## IR+: controller tools, several calls per turn (`-P toolset=plus`)
+
+When a coding agent drives robot arms directly (Codex with the arms' Python
+driver), it writes itself a small controller before it starts the task. GPT-6.2
+Astra did so in almost every one of 159 such trials on Robocurve's YAM rigs, a
+little differently each time, and the same few functions recur. `toolset=plus`
+offers those functions as the agent's tools, with the settings the agent's own
+versions clustered around, and lets one turn hold a sequence of them, the way
+the coding agent ran several moves and a camera check from one script.
+
+| Tool | What it does |
+|---|---|
+| `go` (Cartesian spaces) or `move_joints` (joint spaces) | Move to absolute `targets` by dimension name, easing in and out over `seconds` (default 1.3) |
+| `grip` | Set a gripper's opening (any dimension whose label contains `gripper`); 0.5 s |
+| `park` | Return to the pose the trial started in, all dimensions or one `arm` (label prefix); 2.5 s |
+| `state` | Read the state and the held setpoint now, between moves |
+| `look` | See the cameras now; the frames come with the turn's next observation, labelled with the step they were taken at |
+| `wait` | Hold every setpoint for `seconds` |
+| `done`, `give_up` | End the trial, as in the default toolset |
+
+How a turn runs:
+
+- **Several calls per turn:** the calls run one after another, in order. Each
+  motion plays out before the next call starts, and its tool result (how much
+  played, the remaining offset from its target) is written once it has. The
+  model gets the next observation, and the next LLM call, only when every call
+  of the turn has run, so a grasp sequence costs one call instead of five.
+- **A failure skips the rest:** a call that fails (a target out of bounds, an
+  unknown name) skips the turn's remaining calls; `done` or `give_up` ends the
+  trial after the calls before it.
+- **Notes are optional:** every tool takes a `note`, none requires one.
+
+How a move is built: the core move tool validates it (bounds, pinned
+dimensions, `max_speed_frac`, the pre-check) and sets the held setpoint, then
+its straight line is re-timed with smoothstep (3u² − 2u³) over the longer of
+`seconds` and 1.5 times the speed-limited duration. Smoothstep peaks at 1.5
+times its average speed, so an eased move never moves a dimension faster than
+the plain move tool would. A move is never faster than the speed limit allows,
+so with the default `max_speed_frac=0.1` a full gripper close takes about 15 s
+whatever `grip` asks; raise `max_speed_frac` for faster arms. On a Cartesian
+space the embodiment's own IK follows the eased line, as it does for `move_to`.
+The coding agents' controllers instead solved IK once at the goal and moved the
+joints there together, which needs a kinematic model of the arm; that is not
+done here.
+
+`toolset=plus` needs an absolute action space (`joint_pos` or `eef_abs_pose`),
+`images=always` (the default) and the `chat`, `responses` or `messages` wire.
+Everything else is the default agent's: the observation after every turn, the
+image horizon, the call and step budgets.
+
+```bash
+inspect-robots run --embodiment <absolute-mode embodiment> --policy agent \
+    -P model=openai/gpt-6.2-astra -P wire=responses -P toolset=plus \
+    --instruction "Stack the bowls on the table."
+```
+
 ## Motor temperatures, `sleep` and the wall clock
 
 An embodiment may put `extra["motor_temps"]` on its observations, in the
