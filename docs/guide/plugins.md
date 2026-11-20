@@ -98,7 +98,7 @@ class instead of comparing names.
 
 ## First-party plugins
 
-Six plugins ship from the Inspect Robots repository as separate packages, covering policies,
+Seven plugins ship from the Inspect Robots repository as separate packages, covering policies,
 embodiments, and attended operator input:
 
 - [`inspect-robots-ros`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-ros):
@@ -121,6 +121,10 @@ embodiments, and attended operator input:
   Model-generated Python calls separately served SAM3, Contact-GraspNet, and
   Pyroki helpers, then queues guard-checked joint targets behind `--policy
   capx`.
+- [`inspect-robots-dream`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-dream):
+  run Dream Labs' hosted Dream-1 on a bimanual YAM behind `--policy dream`. An
+  instruction Dream refuses as unsafe ends the trial with the `give_up`
+  terminal action.
 - [`inspect-robots-voice`](https://github.com/robocurve/inspect-robots/tree/main/plugins/inspect-robots-voice):
   transcribe local microphone speech into feedback during an attended run with
   `--voice`, or narrate streamed policy notes through local Kokoro speech with
