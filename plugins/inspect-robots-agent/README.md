@@ -245,6 +245,7 @@ the coding agent ran several moves and a camera check from one script.
 | `state` | Read the state and the held setpoint now, between moves |
 | `look` | See the cameras now; the frames come with the turn's next observation, labelled with the step they were taken at |
 | `wait` | Hold every setpoint for `seconds` |
+| `sequence` | Run a list of `steps` (`{"tool": ..., "args": {...}}`, up to 20, any tool above) in one call; one result lists each step's |
 | `done`, `give_up` | End the trial, as in the default toolset |
 
 How a turn runs:
@@ -254,9 +255,17 @@ How a turn runs:
   played, the remaining offset from its target) is written once it has. The
   model gets the next observation, and the next LLM call, only when every call
   of the turn has run, so a grasp sequence costs one call instead of five.
-- **A failure skips the rest:** a call that fails (a target out of bounds, an
-  unknown name) skips the turn's remaining calls; `done` or `give_up` ends the
-  trial after the calls before it.
+- **`sequence` is one call holding several steps:** its steps run exactly as
+  the same calls made separately would, and their results come back as one
+  numbered tool result. Models given several-calls-per-turn kept to one call
+  per turn in Isaac Sim (GPT-6.2 Astra, Stack Bowls), even with parallel tool
+  calls on: they batch independent calls, not steps that depend on each other.
+  The coding agents batched inside one call too, a script running `go`, `grip`,
+  `go` and a camera grab in a row. `sequence` offers that shape.
+- **A failure skips the rest:** a call or step that fails (a target out of
+  bounds, an unknown name) skips the turn's remaining calls and steps; `done`
+  or `give_up` ends the trial after the calls before it. A sequence's steps
+  cannot end the trial; call `done` or `give_up` on its own.
 - **Notes are optional:** every tool takes a `note`, none requires one.
 
 How a move is built: the core move tool validates it (bounds, pinned

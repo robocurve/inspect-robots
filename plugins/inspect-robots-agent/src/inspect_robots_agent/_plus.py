@@ -17,8 +17,9 @@ settings that cluster tightly:
 What the agent did with them mattered as much as the functions: one turn ran a
 whole sequence (approach, descend, grip, lift, look) and looked at the cameras
 wherever in that sequence it chose. ``toolset="plus"`` offers those functions as
-tools on any absolute action space, and lets one turn hold several calls, run in
-order (see ``LLMAgentPolicy``).
+tools on any absolute action space, lets one turn hold several calls, run in
+order (see ``LLMAgentPolicy``), and offers ``sequence``, one call holding several
+steps, which is how the agents' scripts batched them.
 
 The motion tools are built on the core move tool (`inspect_robots.tools`), so its
 validation, bounds, per-dimension speed limits, pinned dimensions, held setpoint
@@ -58,8 +59,10 @@ MAX_SECONDS = 10.0
 EASE_PEAK = 1.5
 #: The longest ``wait`` may hold, as for the core ``sleep``.
 WAIT_MAX_SECONDS = 180.0
+#: The most steps one ``sequence`` call may hold.
+SEQUENCE_MAX_STEPS = 20
 #: Tool names, in listing order (the motion tool is ``go`` on Cartesian spaces).
-TOOL_NAMES = ("go", "move_joints", "grip", "park", "state", "look", "wait")
+TOOL_NAMES = ("go", "move_joints", "grip", "park", "state", "look", "wait", "sequence")
 
 _NOTE = {
     "type": "string",
@@ -134,8 +137,43 @@ class PlusTools:
             Tool("state", self._state_schema(), self._state, CONTROL, order=3),
             Tool("look", self._look_schema(), self._look, CONTROL, order=4),
             Tool("wait", self._wait_schema(), self._wait, CONTROL, order=5),
+            Tool("sequence", self._sequence_schema(), self._sequence, CONTROL, order=6),
         ]
         return ToolLibrary(tools)
+
+    @property
+    def step_tools(self) -> tuple[str, ...]:
+        """The tools a ``sequence`` step may name, in listing order."""
+        names = [self._move_name, "grip", "park", "state", "look", "wait"]
+        return tuple(name for name in names if name != "grip" or self._grippers)
+
+    def sequence_steps(self, arguments: Mapping[str, Any]) -> list[tuple[str, str]] | str:
+        """A ``sequence`` call's steps as ``(tool, JSON arguments)``, or an error to report.
+
+        A step is ``{"tool": name, "args": {...}}``; a step without ``args``
+        takes its other keys as the arguments (``{"tool": "grip", "opening": 0}``).
+        The steps' own arguments are checked when each runs, as separate calls are.
+        """
+        steps = arguments.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return "steps must be a non-empty list of {tool, args} objects"
+        if len(steps) > SEQUENCE_MAX_STEPS:
+            return f"a sequence holds at most {SEQUENCE_MAX_STEPS} steps; got {len(steps)}"
+        allowed = self.step_tools
+        out: list[tuple[str, str]] = []
+        for number, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                return f"step {number} must be an object with `tool` and `args`"
+            tool = step.get("tool")
+            if tool not in allowed:
+                return f"step {number}: tool must be one of: {', '.join(allowed)}; got {tool!r}"
+            args = (
+                step["args"] if "args" in step else {k: v for k, v in step.items() if k != "tool"}
+            )
+            if not isinstance(args, dict):
+                return f"step {number}: args must be an object"
+            out.append((tool, json.dumps(args)))
+        return out
 
     # -- runs ---------------------------------------------------------------------------
 
@@ -200,6 +238,12 @@ class PlusTools:
             note=f"waiting {result.sleep:g} s ({len(result.chunk)} steps) holding the setpoint",
             sleep=result.sleep,
         )
+
+    def _sequence(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        # The agent policy expands a sequence into its steps before anything runs.
+        steps = self.sequence_steps(arguments)
+        error = steps if isinstance(steps, str) else "sequence runs only in the agent policy"
+        return ToolResult(error=error)
 
     def _move(
         self,
@@ -363,6 +407,35 @@ class PlusTools:
             "where in the turn they were taken. Every camera if `cameras` is omitted.",
             {"cameras": {"type": "array", "items": {"type": "string"}}},
             [],
+        )
+
+    def _sequence_schema(self) -> dict[str, Any]:
+        allowed = list(self.step_tools)
+        return self._function(
+            "sequence",
+            "Run several steps in one call, in order, exactly as the same calls made one "
+            "after another would run: each motion plays out before the next step starts, "
+            "`state` and `look` report what is true at their place, and a failing step "
+            "skips the rest. Use it for a whole routine (approach, descend, grip, lift, "
+            "look) instead of one step per turn. Returns one result listing each step's. "
+            f"At most {SEQUENCE_MAX_STEPS} steps.",
+            {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string", "enum": allowed},
+                            "args": {
+                                "type": "object",
+                                "description": "The arguments that tool takes on its own.",
+                            },
+                        },
+                        "required": ["tool"],
+                    },
+                }
+            },
+            ["steps"],
         )
 
     def _wait_schema(self) -> dict[str, Any]:

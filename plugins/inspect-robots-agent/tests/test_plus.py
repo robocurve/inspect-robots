@@ -150,7 +150,17 @@ def test_tool_list_for_cartesian_and_joint_spaces() -> None:
         policy.bind(_Arms(mode).info)
         assert policy._adapter is not None and policy._plus is not None
         library = policy._plus_library(policy._adapter, policy._plus)
-        assert library.names == (move, "grip", "park", "state", "look", "wait", "done", "give_up")
+        assert library.names == (
+            move,
+            "grip",
+            "park",
+            "state",
+            "look",
+            "wait",
+            "sequence",
+            "done",
+            "give_up",
+        )
         schemas = {s["function"]["name"]: s["function"] for s in library.schemas()}
         assert schemas["grip"]["parameters"]["properties"]["gripper"]["enum"] == [
             "left_gripper",
@@ -158,6 +168,8 @@ def test_tool_list_for_cartesian_and_joint_spaces() -> None:
         ]
         assert schemas["park"]["parameters"]["properties"]["arm"]["enum"] == ["left", "right"]
         assert schemas[move]["parameters"]["required"] == ["targets"]
+        step = schemas["sequence"]["parameters"]["properties"]["steps"]["items"]
+        assert step["properties"]["tool"]["enum"] == [move, "grip", "park", "state", "look", "wait"]
 
 
 def test_a_turn_runs_its_calls_in_order_and_the_model_sees_one_observation(
@@ -265,12 +277,94 @@ def test_seconds_are_validated(tmp_path: Path) -> None:
     assert errors[3] == "gripper must be one of: left_gripper, right_gripper"
 
 
+def test_a_sequence_runs_like_separate_calls_and_answers_once(tmp_path: Path) -> None:
+    steps = [
+        {"tool": "go", "args": {"targets": {"left_x": 0.5}}},
+        {"tool": "look", "args": {"cameras": ["top"]}},
+        {"tool": "grip", "gripper": "left_gripper", "opening": 0.0},  # args inline
+        {"tool": "state"},
+        {"tool": "wait", "args": {"seconds": 0.5}},
+    ]
+    script = _Script(
+        _calls(
+            ("sequence", {"steps": steps, "note": "pick"}), ("go", {"targets": {"right_x": 0.2}})
+        ),
+        _calls(_DONE),
+    )
+    arms = _Arms()
+    _run(script, arms, tmp_path)
+    assert len(script.requests) == 2
+    first_move, grip, last_move = round(DEFAULT_SECONDS * 10), 32, round(DEFAULT_SECONDS * 10)
+    assert len(arms.actions) == first_move + grip + 5 + last_move + 1
+    results = _tool_messages(script.requests[1])
+    assert len(results) == 2  # one answer for the sequence, one for the go after it
+    lines = results[0].split("\n")
+    assert [line.split(":")[0] for line in lines if line[:1].isdigit()] == [
+        "1. go",
+        "2. look",
+        "3. grip",
+        "4. state",
+        "5. wait",
+    ]
+    assert lines[0].startswith("1. go: executing go over 13 steps")
+    assert "eef_state" in results[0] and "setpoint" in results[0]
+    assert results[1].startswith("executing go over 13 steps")
+    texts = [
+        p["text"] for p in script.requests[1]["messages"][-1]["content"] if p["type"] == "text"
+    ]
+    assert any(t.startswith("From look at step 13") for t in texts)
+    assert arms.actions[-1][2] == pytest.approx(0.2)
+
+
+def test_a_failing_step_skips_the_rest_of_its_sequence_and_turn(tmp_path: Path) -> None:
+    steps = [
+        {"tool": "go", "args": {"targets": {"left_x": 0.3}}},
+        {"tool": "grip", "args": {"gripper": "middle", "opening": 0}},
+        {"tool": "go", "args": {"targets": {"left_x": 0.9}}},
+    ]
+    script = _Script(
+        _calls(("sequence", {"steps": steps}), ("state", {})),
+        _calls(_DONE),
+    )
+    arms = _Arms()
+    _run(script, arms, tmp_path)
+    results = _tool_messages(script.requests[1])
+    lines = results[0].split("\n")
+    assert lines[1] == "2. grip: gripper must be one of: left_gripper, right_gripper"
+    assert lines[2] == "3. go: skipped: an earlier call in this turn failed"
+    assert results[1] == "skipped: an earlier call in this turn failed"
+    assert arms.actions[-1][0] == pytest.approx(0.3)
+
+
+def test_a_malformed_sequence_fails_as_one_call(tmp_path: Path) -> None:
+    state = _calls(("state", {}))
+    bad: list[dict[str, Any]] = [
+        {"steps": []},
+        {"steps": [{"tool": "done"}]},
+        {"steps": [{"tool": "go", "args": [1]}]},
+        {"steps": ["go"]},
+        {"steps": [{"tool": "state"}] * 21},
+    ]
+    responses = []
+    for arguments in bad:
+        responses += [_calls(("sequence", arguments)), state]
+    script = _Script(*responses, _calls(_DONE))
+    _run(script, _Arms(), tmp_path)
+    errors = [_tool_messages(script.requests[2 * i + 1])[-1] for i in range(len(bad))]
+    assert errors[0] == "steps must be a non-empty list of {tool, args} objects"
+    assert errors[1].startswith("step 1: tool must be one of: go, grip, park, state, look, wait")
+    assert errors[2] == "step 1: args must be an object"
+    assert errors[3] == "step 1 must be an object with `tool` and `args`"
+    assert errors[4] == "a sequence holds at most 20 steps; got 21"
+
+
 def test_system_prompt_allows_several_calls_per_turn() -> None:
     policy = _policy(_Script(_calls(_DONE)))
     policy.bind(_Arms().info)
     policy.reset(Scene(id="s", instruction="x", init_seed=0))
     system = policy._messages[0]["content"]
     assert "several tool calls in one turn" in system and "optional `note`" in system
+    assert "`sequence` holds several steps in one call" in system
     assert "exactly one tool call per turn" not in system
     assert "Every move tool call must include" not in system
     assert "re-check the observation after every motion" not in system

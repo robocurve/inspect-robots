@@ -196,7 +196,8 @@ _PLUS_PROMPT_EDITS = (
         "Respond with exactly one tool call per turn. ",
         "You may make several tool calls in one turn: they run one after another, in "
         "order, each motion playing out before the next call starts, and a call that "
-        "fails skips the rest of the turn. `state` and `look` report what is true at "
+        "fails skips the rest of the turn. `sequence` holds several steps in one call "
+        "and runs them the same way. `state` and `look` report what is true at "
         "their place in the turn. The next observation arrives when the turn's calls "
         "have run. ",
     ),
@@ -365,12 +366,33 @@ class _PendingMotion:
 
 
 @dataclass(eq=False)
+class _PlusSequence:
+    """A ``sequence`` call being run: its step results, sent as one tool result at the end."""
+
+    call_id: str
+    size: int
+    lines: list[str]
+
+
+@dataclass(frozen=True, eq=False)
+class _PlusCall:
+    """One call (or one step of a ``sequence``) waiting to run in an IR+ turn."""
+
+    id: str
+    name: str
+    arguments: str
+    #: The sequence this is a step of, and its 1-based place there.
+    sequence: _PlusSequence | None = None
+    number: int = 0
+
+
+@dataclass(eq=False)
 class _PlusTurn:
     """An IR+ turn in progress: its calls still to run, and what the next observation completes."""
 
-    calls: list[Any]
-    #: The call whose motion or wait is playing: (call id, result note, narration source).
-    in_flight: tuple[str, str, _PendingMotion | _PendingSleep] | None = None
+    calls: list[_PlusCall]
+    #: The call whose motion or wait is playing: (call, result note, narration source).
+    in_flight: tuple[_PlusCall, str, _PendingMotion | _PendingSleep] | None = None
     #: Camera frames taken by ``look`` during the turn, delivered with the next observation.
     frames: list[dict[str, Any]] | None = None
     #: A call failed or ended the trial: the rest are skipped with this reason.
@@ -1543,7 +1565,8 @@ class LLMAgentPolicy(PolicyBase):
                     raise RuntimeError(f"LLM produced no tool call in {failures} consecutive turns")
                 self._messages.append({"role": "user", "content": _PLUS_NUDGE})
                 continue
-            turn = _PlusTurn(calls=list(message.tool_calls), frames=[])
+            calls = [_PlusCall(c.id, c.name, c.arguments) for c in message.tool_calls]
+            turn = _PlusTurn(calls=calls, frames=[])
             self._plus_turn = turn
             chunk = self._plus_continue(turn, tools, observation, depth)
             if chunk is not None:
@@ -1569,25 +1592,39 @@ class LLMAgentPolicy(PolicyBase):
     ) -> ActionChunk | None:
         """Finish the call whose motion just played, then run the turn's next calls.
 
-        Returns the next motion's chunk, or ``None`` once every call has run.
+        A ``sequence`` call is replaced by its steps, which run as separate calls
+        would and report together. Returns the next motion's chunk, or ``None``
+        once every call has run.
         """
         if turn.in_flight is not None:
-            call_id, note, played = turn.in_flight
+            call, note, played = turn.in_flight
             turn.in_flight = None
             if isinstance(played, _PendingSleep):
                 narration = _sleep_narration(played, _thermal_status(observation), observation)
             else:
                 narration = self._motion_narration(played, observation, with_frames=False)
-            self._plus_result(call_id, f"{note}. {narration}")
+            self._plus_report(call, f"{note}. {narration}")
         while turn.calls:
             call = turn.calls.pop(0)
             if turn.skip is not None:
-                self._plus_result(call.id, f"skipped: {turn.skip}")
+                self._plus_report(call, f"skipped: {turn.skip}")
+                continue
+            if call.name == "sequence" and call.sequence is None:
+                steps = self._plus_sequence_steps(call.arguments)
+                if isinstance(steps, str):
+                    turn.skip = "an earlier call in this turn failed"
+                    self._plus_report(call, steps)
+                    continue
+                sequence = _PlusSequence(call.id, len(steps), [])
+                turn.calls[:0] = [
+                    _PlusCall(f"{call.id}#{number}", name, arguments, sequence, number)
+                    for number, (name, arguments) in enumerate(steps, start=1)
+                ]
                 continue
             result = tools.execute(call.name, call.arguments, observation)
             if result.error is not None:
                 turn.skip = "an earlier call in this turn failed"
-                self._plus_result(call.id, result.error)
+                self._plus_report(call, result.error)
                 continue
             if call.name == "look":
                 names = _unique_names(result.capture or ())
@@ -1596,23 +1633,21 @@ class LLMAgentPolicy(PolicyBase):
                     where = _step_label(observation) or "this point in the turn"
                     assert turn.frames is not None
                     turn.frames += [{"type": "text", "text": f"From look at {where}:"}, *parts]
-                    self._plus_result(
-                        call.id, f"captured {_quoted_names(names)}; the frames follow"
-                    )
+                    self._plus_report(call, f"captured {_quoted_names(names)}; the frames follow")
                 else:
-                    self._plus_result(call.id, "no camera images are available in this observation")
+                    self._plus_report(call, "no camera images are available in this observation")
                 continue
             chunk = result.chunk
             if chunk is None:
-                self._plus_result(call.id, result.note)
+                self._plus_report(call, result.note)
                 continue
             if chunk.terminal is not None:
                 self._hindsight = (
                     chunk.actions[0].meta.get("stop_hindsight") if chunk.actions else None
                 )
-                self._plus_result(call.id, result.note)
+                self._plus_report(call, result.note)
                 for rest in turn.calls:
-                    self._plus_result(rest.id, "skipped: the trial ends with an earlier call")
+                    self._plus_report(rest, "skipped: the trial ends with an earlier call")
                 turn.calls.clear()
                 self._plus_turn = None
                 return chunk
@@ -1628,10 +1663,39 @@ class LLMAgentPolicy(PolicyBase):
                 pending = _PendingMotion(
                     issued_step=issued, chunk_len=len(chunk), target=result.target
                 )
-            turn.in_flight = (call.id, result.note, pending)
+            turn.in_flight = (call, result.note, pending)
             self._echo(f"[agent] -- {result.note}")
             return chunk
         return None
+
+    def _plus_sequence_steps(self, arguments: str) -> list[tuple[str, str]] | str:
+        """Decode a ``sequence`` call's arguments into its steps, or an error to report."""
+        assert self._plus is not None
+        try:
+            decoded = json.loads(arguments)
+        except (TypeError, ValueError):
+            return "arguments for sequence are not valid JSON"
+        if not isinstance(decoded, dict):
+            return "arguments for sequence must be a JSON object"
+        return self._plus.sequence_steps(decoded)
+
+    def _plus_report(self, call: _PlusCall, text: str) -> None:
+        """Answer a call; a sequence's steps are gathered and answered together after the last."""
+        sequence = call.sequence
+        if sequence is None:
+            self._plus_result(call.id, text)
+            return
+        line = f"{call.number}. {call.name}: {text}"
+        sequence.lines.append(line)
+        self._echo(f"[agent] -- sequence {line}")
+        if len(sequence.lines) == sequence.size:
+            self._messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": sequence.call_id,
+                    "content": "\n".join(sequence.lines),
+                }
+            )
 
     def _plus_result(self, call_id: str, text: str) -> None:
         self._messages.append({"role": "tool", "tool_call_id": call_id, "content": text})
