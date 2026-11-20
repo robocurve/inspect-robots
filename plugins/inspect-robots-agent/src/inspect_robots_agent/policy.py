@@ -179,6 +179,12 @@ of {budget} LLM calls for the whole trial."""
 #: IR+ prompt edits: several calls per turn, notes optional.
 _PLUS_PROMPT_EDITS = (
     (
+        "Work toward the user's goal in small, deliberate motions; re-check the "
+        "observation after every motion. ",
+        "Work toward the user's goal in deliberate steps; check the result (with "
+        "`look`, or in the next observation) wherever it matters. ",
+    ),
+    (
         "Every move tool call must include a `note`: in one or two sentences, say what "
         "you observe in the current observation and why you chose this motion. The user "
         "is watching these notes to see what you see and what you decide, so write them "

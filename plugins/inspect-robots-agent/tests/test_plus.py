@@ -273,6 +273,7 @@ def test_system_prompt_allows_several_calls_per_turn() -> None:
     assert "several tool calls in one turn" in system and "optional `note`" in system
     assert "exactly one tool call per turn" not in system
     assert "Every move tool call must include" not in system
+    assert "re-check the observation after every motion" not in system
 
 
 def test_configuration_errors() -> None:
