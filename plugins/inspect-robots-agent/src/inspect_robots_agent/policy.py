@@ -59,7 +59,7 @@ from inspect_robots_agent._llm import (
     _has_openrouter_variant,
     resolve_provider,
 )
-from inspect_robots_agent._plus import PlusTools
+from inspect_robots_agent._plus import KinematicsFactory, PlusTools, load_kinematics
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 
@@ -354,6 +354,8 @@ class AgentPolicyConfig(PolicyConfig):
     eval_notes: str | None = None
     #: ``default`` or ``plus`` (IR+: controller tools, several calls per turn).
     toolset: str = "default"
+    #: IR+'s arm model: the ``module:factory`` it was given (``None`` for the default toolset).
+    kinematics: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -391,8 +393,8 @@ class _PlusTurn:
     """An IR+ turn in progress: its calls still to run, and what the next observation completes."""
 
     calls: list[_PlusCall]
-    #: The call whose motion or wait is playing: (call, result note, narration source).
-    in_flight: tuple[_PlusCall, str, _PendingMotion | _PendingSleep] | None = None
+    #: The call whose motion or wait is playing: (call, its report from the next observation).
+    in_flight: tuple[_PlusCall, Callable[[Observation], str]] | None = None
     #: Camera frames taken by ``look`` during the turn, delivered with the next observation.
     frames: list[dict[str, Any]] | None = None
     #: A call failed or ended the trial: the rest are skipped with this reason.
@@ -479,6 +481,7 @@ class LLMAgentPolicy(PolicyBase):
         backoff_s: float = 1.0,
         timeout_s: float | None = None,
         toolset: str = "default",
+        kinematics: str | KinematicsFactory | None = None,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -671,6 +674,12 @@ class LLMAgentPolicy(PolicyBase):
                 "toolset=plus attaches camera images to every observation and offers `look` "
                 f"between moves; it does not combine with images={images!r}.\n"
                 "fix: drop -P images= when using -P toolset=plus"
+            )
+        if toolset == "plus" and kinematics is None:
+            raise ConfigError(
+                "toolset=plus moves the arms by IK on their kinematic model and needs it.\n"
+                "fix: pass -P kinematics=<module>:<factory> (a factory returning one ArmModel "
+                "per arm; see inspect_robots_agent._plus)"
             )
         if toolset == "plus" and wire not in _PLUS_WIRES:
             raise ConfigError(
@@ -966,6 +975,7 @@ class LLMAgentPolicy(PolicyBase):
         self._eval_notes = eval_notes_text
         self._pre_check = pre_check
         self._toolset = toolset
+        self._kinematics = kinematics
         self._plus: PlusTools | None = None
         self._plus_turn: _PlusTurn | None = None
         self._explicit_base_url = bool(base_url)
@@ -995,6 +1005,12 @@ class LLMAgentPolicy(PolicyBase):
             pre_check=pre_check_identity,
             eval_notes=eval_notes_text,
             toolset=toolset,
+            kinematics=(
+                kinematics
+                if kinematics is None or isinstance(kinematics, str)
+                else f"{getattr(kinematics, '__module__', '?')}:"
+                f"{getattr(kinematics, '__qualname__', repr(kinematics))}"
+            ),
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(
@@ -1030,18 +1046,30 @@ class LLMAgentPolicy(PolicyBase):
         self._plus = None
         if self._toolset == "plus":
             space = embodiment_info.action_space
-            authored = space.semantics.dim_labels if space.semantics is not None else None
-            labels = authored or tuple(str(i) for i in range(space.shape[0]))
+            semantics = space.semantics
+            if semantics is None or semantics.control_mode != "joint_pos":
+                mode = None if semantics is None else semantics.control_mode
+                raise ConfigError(
+                    "toolset=plus commands joint positions, as the coding agents' controllers "
+                    f"did; this embodiment's action space is {mode!r}.\n"
+                    "fix: use the embodiment's joint-position interface, or drop -P toolset=plus"
+                )
+            labels = semantics.dim_labels or tuple(str(i) for i in range(space.shape[0]))
+            assert self._kinematics is not None
             try:
+                models = load_kinematics(self._kinematics)(embodiment_info)
                 self._plus = PlusTools(
                     adapter.control,
                     tuple(labels),
                     np.asarray(space.low, dtype=np.float64),
                     np.asarray(space.high, dtype=np.float64),
-                    pose="move_to" in adapter.control.library.names,
+                    models,
+                    max_step=semantics.max_step,
                 )
-            except ValueError as exc:
-                raise ConfigError(f"{exc}.\nfix: drop -P toolset=plus for this embodiment") from exc
+            except (ValueError, ImportError, AttributeError) as exc:
+                raise ConfigError(
+                    f"toolset=plus: {exc}.\nfix: check -P kinematics= for this embodiment"
+                ) from exc
         self._state_labels = adapter.control.state_labels()
         self._embodiment_name = embodiment_info.name
         self._embodiment_docs = getattr(embodiment_info, "docs", None)
@@ -1597,13 +1625,9 @@ class LLMAgentPolicy(PolicyBase):
         once every call has run.
         """
         if turn.in_flight is not None:
-            call, note, played = turn.in_flight
+            call, report = turn.in_flight
             turn.in_flight = None
-            if isinstance(played, _PendingSleep):
-                narration = _sleep_narration(played, _thermal_status(observation), observation)
-            else:
-                narration = self._motion_narration(played, observation, with_frames=False)
-            self._plus_report(call, f"{note}. {narration}")
+            self._plus_report(call, report(observation))
         while turn.calls:
             call = turn.calls.pop(0)
             if turn.skip is not None:
@@ -1651,19 +1675,10 @@ class LLMAgentPolicy(PolicyBase):
                 turn.calls.clear()
                 self._plus_turn = None
                 return chunk
-            issued = observation.extra.get("env_step")
-            if result.sleep is not None:
-                pending: _PendingMotion | _PendingSleep = _PendingSleep(
-                    seconds=result.sleep,
-                    before=_thermal_status(observation),
-                    issued_step=issued if isinstance(issued, int) else None,
-                    steps=len(chunk),
-                )
-            else:
-                pending = _PendingMotion(
-                    issued_step=issued, chunk_len=len(chunk), target=result.target
-                )
-            turn.in_flight = (call, result.note, pending)
+            assert self._plus is not None
+            taken = self._plus.take_report()
+            fallback = result.note or "moved"
+            turn.in_flight = (call, taken if taken is not None else _constant(fallback))
             self._echo(f"[agent] -- {result.note}")
             return chunk
         return None
@@ -1910,3 +1925,8 @@ def agent_policy(**kwargs: Any) -> LLMAgentPolicy:
     forwards ``-P key=value`` pairs here.
     """
     return LLMAgentPolicy(**kwargs)
+
+
+def _constant(text: str) -> Callable[[Observation], str]:
+    """A report that says ``text`` whatever the observation."""
+    return lambda _: text

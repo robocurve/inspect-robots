@@ -1,17 +1,23 @@
 """IR+ (``toolset="plus"``) end to end through ``eval()``.
 
-Conversations are scripted with httpx.MockTransport: no network, no LLM.
+Conversations are scripted with httpx.MockTransport: no network, no LLM. The
+arms are a test model whose joints are the grasp point's position and the
+tool's Euler angles, so IK has an exact answer to check against.
 """
 
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
+import numpy.typing as npt
 import pytest
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from inspect_robots import eval as ir_eval
 from inspect_robots.embodiment import EmbodimentInfo
@@ -30,7 +36,37 @@ from inspect_robots.spaces import (
 from inspect_robots.task import Task
 from inspect_robots.types import Action, Observation, StepResult
 from inspect_robots_agent import LLMAgentPolicy
-from inspect_robots_agent._plus import DEFAULT_SECONDS, GRIP_SECONDS, PARK_SECONDS, smoothstep
+from inspect_robots_agent._plus import (
+    DEFAULT_SECONDS,
+    PARK_SECONDS,
+    SETTLE_SECONDS,
+    ArmModel,
+    smoothstep,
+)
+
+Vec = npt.NDArray[np.float64]
+DOWN = np.diag([1.0, -1.0, -1.0])
+LABELS = tuple(
+    f"{side}_{part}"
+    for side in ("left", "right")
+    for part in (*(f"j{i}" for i in range(6)), "gripper")
+)
+SETTLE = round(SETTLE_SECONDS * 10)
+
+
+class _TestArm:
+    """Joints 0-2 are the grasp point (m), joints 3-5 the tool's ZYX Euler angles (rad) on DOWN."""
+
+    joint_low = np.array([-0.5, -0.5, -0.5, -3.0, -3.0, -3.0])
+    joint_high = np.array([0.5, 0.5, 0.5, 3.0, 3.0, 3.0])
+
+    def fk(self, q: Vec) -> tuple[Vec, Vec]:
+        q = np.asarray(q, dtype=np.float64)
+        return q[:3].copy(), Rotation.from_euler("ZYX", q[3:6]).as_matrix() @ DOWN
+
+
+def _kinematics(info: EmbodimentInfo) -> Mapping[str, ArmModel]:
+    return {"left": _TestArm(), "right": _TestArm()}
 
 
 def _calls(*calls: tuple[str, dict[str, Any]]) -> dict[str, Any]:
@@ -70,33 +106,43 @@ class _Script:
         return httpx.Response(200, json=payload)
 
 
-class _Arms:
-    """Two one-dimensional arms with grippers; the state follows each command at once."""
+def _start() -> Vec:
+    arm = np.array([0.3, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0])
+    return np.asarray(np.r_[arm, arm * np.array([1, -1, 1, 1, 1, 1, 1])], dtype=np.float64)
 
-    def __init__(self, mode: str = "eef_abs_pose") -> None:
-        axis = "x" if mode == "eef_abs_pose" else "j"
-        self.labels = (f"left_{axis}", "left_gripper", f"right_{axis}", "right_gripper")
-        self.key = "eef_state" if mode == "eef_abs_pose" else "joint_pos"
-        self.q = np.array([0.0, 1.0, 0.0, 1.0])
-        self.actions: list[np.ndarray] = []
+
+class _Arms:
+    """Two six-joint arms with grippers; the joints follow each command at once."""
+
+    def __init__(self, mode: str = "joint_pos") -> None:
+        self.q = _start()
+        self.actions: list[Vec] = []
+        low = np.tile(np.r_[_TestArm.joint_low, 0.0], 2)
+        high = np.tile(np.r_[_TestArm.joint_high, 1.0], 2)
+        max_step = tuple(0.1 if label.endswith("gripper") else None for label in LABELS)
         self.info = EmbodimentInfo(
             name="arms",
             action_space=Box(
-                shape=(4,),
-                low=np.array([-1.0, 0.0, -1.0, 0.0]),
-                high=np.array([1.0, 1.0, 1.0, 1.0]),
-                semantics=ActionSemantics(mode, rotation_repr="none", dim_labels=self.labels),
+                shape=(14,),
+                low=low,
+                high=high,
+                semantics=ActionSemantics(
+                    mode,  # type: ignore[arg-type]
+                    rotation_repr="none",
+                    dim_labels=LABELS,
+                    max_step=max_step,
+                ),
             ),
             observation_space=ObservationSpace(
                 cameras=(CameraSpec(name="top", height=2, width=2, channels=3),),
-                state=StateSpec(fields=(StateField(key=self.key, shape=(4,)),)),
+                state=StateSpec(fields=(StateField(key="joint_pos", shape=(14,)),)),
             ),
             control_hz=10.0,
             is_simulated=True,
         )
 
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
-        self.q = np.array([0.0, 1.0, 0.0, 1.0])
+        self.q = _start()
         self.actions = []
         return self._observe(scene.instruction)
 
@@ -111,13 +157,14 @@ class _Arms:
     def _observe(self, instruction: str | None) -> Observation:
         frame = np.full((2, 2, 3), len(self.actions) % 255, dtype=np.uint8)
         return Observation(
-            images={"top": frame}, state={self.key: self.q.copy()}, instruction=instruction
+            images={"top": frame},
+            state={"joint_pos": self.q.copy(), "joint_eff": np.full(14, 0.5)},
+            instruction=instruction,
         )
 
 
 def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
-    # Half of each range per second: a full gripper close is 2 s at the speed limit.
-    kwargs.setdefault("max_speed_frac", 0.5)
+    kwargs.setdefault("kinematics", _kinematics)
     return LLMAgentPolicy(
         model="test/model",
         base_url="http://llm.test/v1",
@@ -129,7 +176,7 @@ def _policy(script: _Script, **kwargs: Any) -> LLMAgentPolicy:
     )
 
 
-def _run(script: _Script, arms: _Arms, tmp_path: Path, max_steps: int = 200) -> None:
+def _run(script: _Script, arms: _Arms, tmp_path: Path, max_steps: int = 400) -> None:
     task = Task(
         name="t",
         scenes=[Scene(id="s0", instruction="tidy up", init_seed=0)],
@@ -144,158 +191,150 @@ def _tool_messages(request: dict[str, Any]) -> list[str]:
     return [m["content"] for m in request["messages"] if m.get("role") == "tool"]
 
 
-def test_tool_list_for_cartesian_and_joint_spaces() -> None:
-    for mode, move in (("eef_abs_pose", "go"), ("joint_pos", "move_joints")):
-        policy = _policy(_Script(_calls(_DONE)))
-        policy.bind(_Arms(mode).info)
-        assert policy._adapter is not None and policy._plus is not None
-        library = policy._plus_library(policy._adapter, policy._plus)
-        assert library.names == (
-            move,
-            "grip",
-            "park",
-            "state",
-            "look",
-            "wait",
-            "sequence",
-            "done",
-            "give_up",
-        )
-        schemas = {s["function"]["name"]: s["function"] for s in library.schemas()}
-        assert schemas["grip"]["parameters"]["properties"]["gripper"]["enum"] == [
-            "left_gripper",
-            "right_gripper",
-        ]
-        assert schemas["park"]["parameters"]["properties"]["arm"]["enum"] == ["left", "right"]
-        assert schemas[move]["parameters"]["required"] == ["targets"]
-        step = schemas["sequence"]["parameters"]["properties"]["steps"]["items"]
-        assert step["properties"]["tool"]["enum"] == [move, "grip", "park", "state", "look", "wait"]
+def test_tool_list_and_schemas() -> None:
+    policy = _policy(_Script(_calls(_DONE)))
+    policy.bind(_Arms().info)
+    assert policy._adapter is not None and policy._plus is not None
+    library = policy._plus_library(policy._adapter, policy._plus)
+    assert library.names == (
+        "go",
+        "move_joints",
+        "grip",
+        "park",
+        "state",
+        "look",
+        "wait",
+        "sequence",
+        "done",
+        "give_up",
+    )
+    schemas = {s["function"]["name"]: s["function"] for s in library.schemas()}
+    go = schemas["go"]["parameters"]
+    assert go["required"] == ["arm", "x", "y", "z"]
+    assert set(go["properties"]) == {
+        "arm",
+        "x",
+        "y",
+        "z",
+        "yaw",
+        "tilt",
+        "roll",
+        "rotation",
+        "gripper",
+        "seconds",
+        "note",
+    }
+    assert go["properties"]["arm"]["enum"] == ["left", "right"]
+    assert schemas["move_joints"]["parameters"]["properties"]["joints"]["minItems"] == 6
+    step = schemas["sequence"]["parameters"]["properties"]["steps"]["items"]
+    assert step["properties"]["tool"]["enum"] == [
+        "go",
+        "move_joints",
+        "grip",
+        "park",
+        "state",
+        "look",
+        "wait",
+    ]
 
 
-def test_a_turn_runs_its_calls_in_order_and_the_model_sees_one_observation(
-    tmp_path: Path,
-) -> None:
+def test_go_solves_ik_once_and_eases_the_joints(tmp_path: Path) -> None:
+    script = _Script(
+        _calls(("go", {"arm": "left", "x": 0.4, "y": 0.1, "z": 0.05, "yaw": 90, "tilt": 30})),
+        _calls(_DONE),
+    )
+    arms = _Arms()
+    _run(script, arms, tmp_path)
+    # The largest joint change is yaw's pi/2 rad: 1.65 s at 0.95 rad/s, over the default 1.3 s.
+    steps = round(np.pi / 2 / 0.95 * 10)
+    assert len(arms.actions) == steps + SETTLE + 1  # the move, its settle, done's hold
+    final = arms.actions[steps - 1][:6]
+    rotation = Rotation.from_euler("ZYX", final[3:]).as_matrix() @ DOWN
+    expected = Rotation.from_euler("ZYX", [90, -30, 0], degrees=True).as_matrix() @ DOWN
+    assert np.allclose(final[:3], [0.4, 0.1, 0.05], atol=1e-4)
+    assert np.allclose(rotation, expected, atol=1e-4)
+    start = _start()[:6]
+    path = np.array([a[:6] for a in arms.actions[:steps]])
+    eased = start + np.outer(smoothstep(np.arange(1, steps + 1) / steps), final - start)
+    assert np.allclose(path, eased)  # every joint together, slow, fast, slow
+    assert all(np.allclose(a[7:], _start()[7:]) for a in arms.actions)  # right arm held
+    result = _tool_messages(script.requests[1])[0]
+    assert result.startswith(
+        f"left arm moved over {steps / 10:.1f}s; now grasp point (+0.400, +0.100, +0.050) m"
+    )
+    assert "yaw +90.0, tilt +30.0, roll +0.0 deg; gripper 1.000 (0 mm from the target)" in result
+
+
+def test_rotation_matrix_and_default_duration(tmp_path: Path) -> None:
+    script = _Script(
+        _calls(("go", {"arm": "right", "x": 0.3, "y": -0.05, "z": 0.2, "rotation": DOWN.tolist()})),
+        _calls(_DONE),
+    )
+    arms = _Arms()
+    _run(script, arms, tmp_path)
+    steps = round(DEFAULT_SECONDS * 10)  # a 5 cm move: the default 1.3 s
+    assert len(arms.actions) == steps + SETTLE + 1
+    assert np.allclose(arms.actions[-1][7:13], [0.3, -0.05, 0.2, 0, 0, 0], atol=1e-4)
+
+
+def test_an_unreachable_target_moves_nothing(tmp_path: Path) -> None:
+    script = _Script(_calls(("go", {"arm": "left", "x": 0.9, "y": 0.0, "z": 0.2})), _calls(_DONE))
+    arms = _Arms()
+    _run(script, arms, tmp_path)
+    error = _tool_messages(script.requests[1])[0]
+    assert re.match(
+        r"unreachable; the closest solution puts the grasp point 400 mm and 0 deg", error
+    )
+    assert error.endswith("at (+0.500, +0.000, +0.200); nothing moved")
+    assert len(arms.actions) == 1  # only done's hold
+
+
+def test_grip_ramps_at_the_gripper_limit_and_park_returns(tmp_path: Path) -> None:
     script = _Script(
         _calls(
-            ("go", {"targets": {"left_x": 0.5}, "note": "reach"}),
-            ("look", {"cameras": ["top"]}),
-            ("grip", {"gripper": "left_gripper", "opening": 0.0}),
-            ("state", {}),
-            ("go", {"targets": {"right_x": -0.5}, "seconds": 2.0}),
-            ("wait", {"seconds": 0.5}),
+            ("grip", {"arm": "left", "opening": 0.0}),
+            ("move_joints", {"arm": "left", "joints": [0.1, 0.2, 0.1, 0.0, 0.5, 0.0]}),
+            ("state", {"arm": "left"}),
+            ("park", {"arm": "left"}),
         ),
         _calls(_DONE),
     )
     arms = _Arms()
     _run(script, arms, tmp_path)
-    assert len(script.requests) == 2  # the whole sequence took one model call
-    # 0.5 is 6 steps at the limit (with the core's headroom), 9 eased: the default 1.3 s wins.
-    first_move = round(DEFAULT_SECONDS * 10)
-    # A full close is 21 steps at the limit, 32 eased: longer than grip's own 0.5 s.
-    grip = 32
-    assert grip > GRIP_SECONDS * 10
-    assert len(arms.actions) == first_move + grip + 20 + 5 + 1  # moves, wait, done
-    left = [a[0] for a in arms.actions[:first_move]]
-    expected = 0.5 * smoothstep(np.arange(1, first_move + 1) / first_move)
-    assert np.allclose(left, expected)  # eased: slow, fast, slow
-    assert arms.actions[first_move + grip - 1][1] == 0.0  # gripped
-    assert arms.actions[-1][0] == 0.5 and arms.actions[-1][2] == -0.5  # done holds the setpoint
     results = _tool_messages(script.requests[1])
-    assert (
-        results[0].startswith("executing go over 13 steps (1.3s)")
-        and "Target reached" in results[0]
+    # 1.0 to 0.0 at 0.1 per step: 10 steps, longer than grip's 0.5 s.
+    assert [a[6] for a in arms.actions[:10]] == pytest.approx([0.9 - 0.1 * i for i in range(10)])
+    assert results[0] == "left gripper commanded 0.00; reads 0.000 after 1.0s"
+    assert results[1].startswith(
+        "left arm moved over 1.3s; now joints [+0.100, +0.200, +0.100, +0.000, +0.500, +0.000]"
     )
-    assert results[1] == "captured 'top'; the frames follow"
-    assert results[2].startswith("executing grip over 32 steps (3.2s)")
-    assert "eef_state" in results[3] and "setpoint" in results[3]
-    assert results[4].startswith("executing go over 20 steps (2.0s)")
-    assert results[5].startswith("waiting 0.5 s (5 steps)") and "Slept 0.5 s" in results[5]
-    observation = script.requests[1]["messages"][-1]["content"]
-    texts = [p["text"] for p in observation if p["type"] == "text"]
-    assert texts[0].startswith("Current observation.")
-    assert any(t.startswith("From look at step 13") for t in texts)
-
-
-def test_a_failed_call_skips_the_rest_of_the_turn(tmp_path: Path) -> None:
-    script = _Script(
-        _calls(("go", {"targets": {"nope": 1.0}}), ("go", {"targets": {"left_x": 0.3}})),
-        _calls(_DONE),
-    )
-    arms = _Arms()
-    _run(script, arms, tmp_path)
-    results = _tool_messages(script.requests[1])
-    assert results[0].startswith("unknown dimension 'nope'")
-    assert results[1] == "skipped: an earlier call in this turn failed"
-    assert script.requests[1]["messages"][-1]["content"][0]["text"].startswith(
-        "The turn moved nothing"
-    )
-    assert len(arms.actions) == 1  # only done's hold
-
-
-def test_done_mid_turn_ends_the_trial_after_the_calls_before_it(tmp_path: Path) -> None:
-    script = _Script(
-        _calls(("go", {"targets": {"left_x": 0.2}}), _DONE, ("go", {"targets": {"left_x": 0.9}}))
-    )
-    arms = _Arms()
-    _run(script, arms, tmp_path)
-    assert len(script.requests) == 1
-    assert arms.actions[-1][0] == pytest.approx(0.2)
-
-
-def test_park_returns_one_arm_to_where_the_trial_started(tmp_path: Path) -> None:
-    script = _Script(
-        _calls(("move_joints", {"targets": {"left_j": 0.5, "right_j": 0.4}})),
-        _calls(("park", {"arm": "left"})),
-        _calls(_DONE),
-    )
-    arms = _Arms("joint_pos")
-    _run(script, arms, tmp_path)
-    parked = arms.actions[-2]
-    assert parked[0] == 0.0 and parked[2] == pytest.approx(0.4)
-    assert _tool_messages(script.requests[2])[-1].startswith(
-        f"executing park over {round(PARK_SECONDS * 10)} steps"
-    )
-
-
-def test_seconds_are_validated(tmp_path: Path) -> None:
-    state = _calls(("state", {}))  # a turn that works, so failures never pile up to an abort
-    script = _Script(
-        _calls(("go", {"targets": {"left_x": 0.2}, "seconds": -1})),
-        state,
-        _calls(("go", {"targets": {"left_x": 0.2}, "seconds": 11})),
-        state,
-        _calls(("look", {"cameras": ["side"]})),
-        state,
-        _calls(("grip", {"gripper": "middle", "opening": 0})),
-        _calls(_DONE),
-    )
-    _run(script, _Arms(), tmp_path)
-    errors = [_tool_messages(script.requests[i])[-1] for i in (1, 3, 5, 7)]
-    assert errors[0] == "seconds must be a positive number of seconds when given"
-    assert errors[1] == "seconds 11 is over the 10 s limit for one move"
-    assert errors[2].startswith("unknown camera 'side'")
-    assert errors[3] == "gripper must be one of: left_gripper, right_gripper"
+    assert results[2].startswith("left: joints [+0.100") and "joint effort [+0.50" in results[2]
+    assert "tilt -28.6" in results[2]  # pitch +0.5 rad leans the tip back (-x)
+    parked = round(PARK_SECONDS * 10)
+    assert results[3].startswith(f"left arm parked over {parked / 10:.1f}s at its start pose")
+    assert np.allclose(arms.actions[-2][:7], _start()[:7])  # gripper open again too
 
 
 def test_a_sequence_runs_like_separate_calls_and_answers_once(tmp_path: Path) -> None:
     steps = [
-        {"tool": "go", "args": {"targets": {"left_x": 0.5}}},
+        {"tool": "go", "args": {"arm": "left", "x": 0.35, "y": 0.0, "z": 0.1}},
         {"tool": "look", "args": {"cameras": ["top"]}},
-        {"tool": "grip", "gripper": "left_gripper", "opening": 0.0},  # args inline
+        {"tool": "grip", "arm": "left", "opening": 0.5},  # args inline
         {"tool": "state"},
         {"tool": "wait", "args": {"seconds": 0.5}},
     ]
     script = _Script(
         _calls(
-            ("sequence", {"steps": steps, "note": "pick"}), ("go", {"targets": {"right_x": 0.2}})
+            ("sequence", {"steps": steps, "note": "pick"}),
+            ("go", {"arm": "right", "x": 0.3, "y": 0.0, "z": 0.2}),
         ),
         _calls(_DONE),
     )
     arms = _Arms()
     _run(script, arms, tmp_path)
     assert len(script.requests) == 2
-    first_move, grip, last_move = round(DEFAULT_SECONDS * 10), 32, round(DEFAULT_SECONDS * 10)
-    assert len(arms.actions) == first_move + grip + 5 + last_move + 1
+    move = round(DEFAULT_SECONDS * 10) + SETTLE
+    assert len(arms.actions) == move + 5 + 5 + move + 1
     results = _tool_messages(script.requests[1])
     assert len(results) == 2  # one answer for the sequence, one for the go after it
     lines = results[0].split("\n")
@@ -306,34 +345,32 @@ def test_a_sequence_runs_like_separate_calls_and_answers_once(tmp_path: Path) ->
         "4. state",
         "5. wait",
     ]
-    assert lines[0].startswith("1. go: executing go over 13 steps")
-    assert "eef_state" in results[0] and "setpoint" in results[0]
-    assert results[1].startswith("executing go over 13 steps")
-    texts = [
-        p["text"] for p in script.requests[1]["messages"][-1]["content"] if p["type"] == "text"
-    ]
-    assert any(t.startswith("From look at step 13") for t in texts)
-    assert arms.actions[-1][2] == pytest.approx(0.2)
+    assert lines[0].startswith(
+        "1. go: left arm moved over 1.3s; now grasp point (+0.350, +0.000, +0.100)"
+    )
+    assert "3. grip: left gripper commanded 0.50; reads 0.500 after 0.5s" in lines
+    assert "5. wait: waited 0.5s" in lines
+    assert results[1].startswith("right arm moved over 1.3s")
+    observation = script.requests[1]["messages"][-1]["content"]
+    texts = [p["text"] for p in observation if p["type"] == "text"]
+    assert any(t.startswith(f"From look at step {move}") for t in texts)
 
 
 def test_a_failing_step_skips_the_rest_of_its_sequence_and_turn(tmp_path: Path) -> None:
     steps = [
-        {"tool": "go", "args": {"targets": {"left_x": 0.3}}},
-        {"tool": "grip", "args": {"gripper": "middle", "opening": 0}},
-        {"tool": "go", "args": {"targets": {"left_x": 0.9}}},
+        {"tool": "go", "args": {"arm": "left", "x": 0.35, "y": 0.0, "z": 0.1}},
+        {"tool": "grip", "args": {"arm": "middle", "opening": 0}},
+        {"tool": "park", "args": {"arm": "left"}},
     ]
-    script = _Script(
-        _calls(("sequence", {"steps": steps}), ("state", {})),
-        _calls(_DONE),
-    )
+    script = _Script(_calls(("sequence", {"steps": steps}), ("state", {})), _calls(_DONE))
     arms = _Arms()
     _run(script, arms, tmp_path)
     results = _tool_messages(script.requests[1])
     lines = results[0].split("\n")
-    assert lines[1] == "2. grip: gripper must be one of: left_gripper, right_gripper"
-    assert lines[2] == "3. go: skipped: an earlier call in this turn failed"
+    assert lines[1] == "2. grip: arm must be one of: left, right"
+    assert lines[2] == "3. park: skipped: an earlier call in this turn failed"
     assert results[1] == "skipped: an earlier call in this turn failed"
-    assert arms.actions[-1][0] == pytest.approx(0.3)
+    assert arms.actions[-1][:3] == pytest.approx([0.35, 0.0, 0.1], abs=1e-4)
 
 
 def test_a_malformed_sequence_fails_as_one_call(tmp_path: Path) -> None:
@@ -352,10 +389,40 @@ def test_a_malformed_sequence_fails_as_one_call(tmp_path: Path) -> None:
     _run(script, _Arms(), tmp_path)
     errors = [_tool_messages(script.requests[2 * i + 1])[-1] for i in range(len(bad))]
     assert errors[0] == "steps must be a non-empty list of {tool, args} objects"
-    assert errors[1].startswith("step 1: tool must be one of: go, grip, park, state, look, wait")
+    assert errors[1].startswith("step 1: tool must be one of: go, move_joints, grip, park")
     assert errors[2] == "step 1: args must be an object"
     assert errors[3] == "step 1 must be an object with `tool` and `args`"
     assert errors[4] == "a sequence holds at most 20 steps; got 21"
+
+
+def test_arguments_are_validated(tmp_path: Path) -> None:
+    state = _calls(("state", {}))  # a turn that works, so failures never pile up to an abort
+    bad: list[tuple[str, dict[str, Any]]] = [
+        ("go", {"arm": "left", "x": 0.3, "y": 0.0}),
+        ("go", {"arm": "left", "x": 0.3, "y": 0.0, "z": 0.1, "rotation": [[1, 0], [0, 1]]}),
+        ("go", {"arm": "left", "x": 0.3, "y": 0.0, "z": 0.1, "seconds": 25}),
+        ("move_joints", {"arm": "left", "joints": [0.1, 0.2]}),
+        ("move_joints", {"arm": "left", "joints": [0.9, 0, 0, 0, 0, 0]}),
+        ("grip", {"arm": "left", "opening": "wide"}),
+        ("look", {"cameras": ["side"]}),
+        ("state", {"arm": "middle"}),
+    ]
+    responses = []
+    for call in bad:
+        responses += [_calls(call), state]
+    script = _Script(*responses, _calls(_DONE))
+    _run(script, _Arms(), tmp_path)
+    errors = [_tool_messages(script.requests[2 * i + 1])[-1] for i in range(len(bad))]
+    assert errors == [
+        "z is required",
+        "rotation must be a 3x3 matrix (rows)",
+        "that move would take 25.0s, over the 20s limit for one move; nothing moved",
+        "joints must be 6 angles (rad), in the arm's joint order",
+        "joint 0 target +0.900 is outside its limits [-0.500, +0.500]; nothing moved",
+        "opening must be a number, 0 closed .. 1 open",
+        "unknown camera 'side'; available now: 'top'",
+        "arm must be one of: left, right",
+    ]
 
 
 def test_system_prompt_allows_several_calls_per_turn() -> None:
@@ -375,14 +442,26 @@ def test_configuration_errors() -> None:
         LLMAgentPolicy(model="test/model", base_url="http://x/v1", env={}, toolset="minus")
     with pytest.raises(ConfigError, match="does not combine with images"):
         _policy(_Script(_calls(_DONE)), images="on_demand")
+    with pytest.raises(ConfigError, match="needs it"):
+        _policy(_Script(_calls(_DONE)), kinematics=None)
     with pytest.raises(ConfigError, match="supports wire"):
         LLMAgentPolicy(
             model="google/gemini-3.7-flash",
             env={"GEMINI_API_KEY": "k"},
             wire="interactions",
             toolset="plus",
+            kinematics=_kinematics,
         )
-    policy = _policy(_Script(_calls(_DONE)))
-    with pytest.raises(ConfigError, match="needs an absolute action space"):
-        policy.bind(CubePickEmbodiment().info)
-    assert policy.config.toolset == "plus"
+    with pytest.raises(ConfigError, match="commands joint positions"):
+        _policy(_Script(_calls(_DONE))).bind(_Arms("eef_abs_pose").info)
+    with pytest.raises(ConfigError, match="commands joint positions"):
+        _policy(_Script(_calls(_DONE))).bind(CubePickEmbodiment().info)
+    with pytest.raises(ConfigError, match="its model 6 joints"):
+        _policy(_Script(_calls(_DONE)), kinematics=lambda info: {"up": _TestArm()}).bind(
+            _Arms().info
+        )
+    with pytest.raises(ConfigError, match="must be 'module:factory'"):
+        _policy(_Script(_calls(_DONE)), kinematics="nope").bind(_Arms().info)
+    policy = _policy(_Script(_calls(_DONE)), kinematics="test_plus:_kinematics")
+    assert policy.config.toolset == "plus"  # type: ignore[attr-defined]
+    assert policy.config.kinematics == "test_plus:_kinematics"  # type: ignore[attr-defined]

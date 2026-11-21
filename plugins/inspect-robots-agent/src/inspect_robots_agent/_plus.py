@@ -3,75 +3,135 @@
 Driving YAM arms directly through Codex on Robocurve's rigs, GPT-6.2 Astra wrote
 a small controller of its own in almost every trial (159 trials, 503 Python files
 on 2026-11-19), a little differently each time. The same functions recur, with
-settings that cluster tightly:
+settings that cluster tightly, and IR+ offers their consensus as tools:
 
-- ``go`` / ``move``: move to a target over a duration, easing in and out
-  (smoothstep in 131 of 157 definitions), never faster than a speed limit,
-  default 1.3 s;
-- ``grip``: set the gripper opening and wait about 0.5 s;
-- ``park``: return to the pose the arm started in (about 2.5 s);
-- ``state`` / ``status``: print the joints, gripper and end-effector pose;
-- ``snap`` / ``capture``: grab the cameras' current images;
-- waits between steps.
+| Tool | In the trials (trials defining it) |
+|---|---|
+| ``go`` | go 91, goto 7, pos 6, xyz 10; with ik/solve 150, down/orient/rot/ori 85 |
+| ``move_joints`` | move 96, joint(s) 46, moveq 11 |
+| ``grip`` | grip 140 |
+| ``park`` | park 111, home 25, rest 8 |
+| ``state`` | state 89, status 34, stat 11, report 10 |
+| ``look`` | snap 79, capture 27, frame 17, grab 17, shot 7 |
+| ``wait`` | time.sleep in every trial |
 
-What the agent did with them mattered as much as the functions: one turn ran a
-whole sequence (approach, descend, grip, lift, look) and looked at the cameras
-wherever in that sequence it chose. ``toolset="plus"`` offers those functions as
-tools on any absolute action space, lets one turn hold several calls, run in
-order (see ``LLMAgentPolicy``), and offers ``sequence``, one call holding several
-steps, which is how the agents' scripts batched them.
+and ``sequence``, several of them in one call, as one script ran them.
 
-The motion tools are built on the core move tool (`inspect_robots.tools`), so its
-validation, bounds, per-dimension speed limits, pinned dimensions, held setpoint
-and pre-check apply unchanged; only the timing differs. The waypoints follow the
-same straight line in the action space, eased with smoothstep over
-``max(seconds, the speed-limited duration x 1.5)`` (smoothstep's peak speed is
-1.5 times its average, so the eased move never exceeds the limit the linear one
-keeps). Where the action space is Cartesian, the embodiment's own IK follows that
-path, as it does for ``move_to``; the agents' controllers instead solved IK once
-at the goal and interpolated the joints, which needs a kinematic model of the arm
-and is not done here.
+How they move, as the controllers did (medians over the definitions):
+
+- **IK once, at the goal:** least squares over the arm's joints on the arm's
+  kinematic model, residual = [position error (m), 0.22 x rotation error
+  (rotation vector, rad)], within the joint limits, seeded from the measured
+  joints, then the trial's start pose, then the model's own seeds; accepted
+  within 6 mm and 0.05 rad, else nothing moves and the tool says how close the
+  best solution came.
+- **Joints, eased:** from the measured joints straight to the solution, all
+  joints together, eased with smoothstep (3u^2 - 2u^3) over
+  max(seconds, the largest joint change / 0.95 rad/s), default 1.3 s, then
+  0.2 s to settle. The controllers streamed this at 40-60 Hz; here it plays at
+  the embodiment's control rate.
+- **Orientation:** yaw, tilt and roll in degrees. All zero points the tool
+  straight down, turned as the arm faces at the trial's start; yaw turns it
+  about the vertical, tilt leans its tip forward (+x), roll leans it toward the
+  arm's right (-y): R = Rz(yaw) Ry(-tilt) Rx(-roll) R_down. Or a full 3x3
+  rotation matrix, as some controllers took.
+- **Gripper:** set within the move, or by ``grip`` with 0.5 s to settle.
+- **Park:** the joints and gripper the trial started with, over 2.5 s.
+
+Each move's result is the pose it reached, read back from the measured joints
+(the controllers printed it after every move).
+
+IR+ needs a joint-position action space and the arms' kinematic model: a factory
+(``kinematics``) that maps the embodiment to one ``ArmModel`` per arm, keyed by
+the arms' label prefix (``left_j0`` .. ``left_gripper`` is arm ``left``).
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
 
-from inspect_robots.policy_adapter import state_lines
+from inspect_robots.embodiment import EmbodimentInfo
 from inspect_robots.tools import CONTROL, ControlTools, Tool, ToolLibrary, ToolResult
 from inspect_robots.types import Action, ActionChunk, Observation
 
-#: A move's duration when the call gives none (the agents' controllers' median).
+Vec = npt.NDArray[np.float64]
+
+#: A move's duration when the call gives none (the controllers' median).
 DEFAULT_SECONDS = 1.3
-#: How long ``grip`` takes to change the opening and let it settle.
+#: The fastest any joint moves on average over a move, rad/s.
+JOINT_SPEED = 0.95
+#: Held still after every move so the arm settles before the next step.
+SETTLE_SECONDS = 0.2
+#: How long ``grip`` takes, at least.
 GRIP_SECONDS = 0.5
-#: How long ``park`` takes to return to the trial's starting pose.
+#: How long ``park`` takes, at least.
 PARK_SECONDS = 2.5
-#: The longest one move may take, as for the core move tool.
-MAX_SECONDS = 10.0
-#: Smoothstep's peak speed over its average: eased moves stretch the linear step count by this.
-EASE_PEAK = 1.5
-#: The longest ``wait`` may hold, as for the core ``sleep``.
+#: The longest one move may take.
+MAX_MOVE_SECONDS = 20.0
+#: The longest ``wait`` may hold.
 WAIT_MAX_SECONDS = 180.0
+#: Smoothstep's peak speed over its average: an eased gripper change needs this many more steps.
+EASE_PEAK = 1.5
+#: IK: the rotation error's weight against the position error (m per rad).
+ROT_WEIGHT = 0.22
+#: IK: a solution counts within this position (m) and rotation (rad) error.
+POS_TOL, ROT_TOL = 0.006, 0.05
 #: The most steps one ``sequence`` call may hold.
 SEQUENCE_MAX_STEPS = 20
-#: Tool names, in listing order (the motion tool is ``go`` on Cartesian spaces).
+#: Tool names, in listing order.
 TOOL_NAMES = ("go", "move_joints", "grip", "park", "state", "look", "wait", "sequence")
+#: The tools a ``sequence`` step may name.
+STEP_TOOLS = TOOL_NAMES[:-1]
 
-_NOTE = {
-    "type": "string",
-    "description": (
-        "Optional: what you observe and why you chose this call, in a sentence. "
-        "The user reads these notes live and in the saved transcript."
-    ),
+_NOTE = {"type": "string", "description": "optional: what you see and why you chose this"}
+_GRIPPER = {
+    "type": "number",
+    "description": "optional: the gripper's opening during the move, 0 closed .. 1 open",
 }
-_FALLBACK_NOTE = "(no note given)"
+
+
+@runtime_checkable
+class ArmModel(Protocol):
+    """One arm's kinematics in its own base frame (+x forward, +y left, +z up).
+
+    ``fk`` maps the arm's joint angles (radians, in action-label order) to the
+    grasp point's position (m) and the tool's 3x3 rotation, whose third column
+    points along the tool toward the grasp point. ``joint_low`` and
+    ``joint_high`` are the joints' limits. A model may also offer
+    ``ik_seeds(position)``: extra joint vectors to start IK from.
+    """
+
+    joint_low: Vec
+    joint_high: Vec
+
+    def fk(self, q: Vec) -> tuple[Vec, Vec]:
+        """Grasp-point position and tool rotation for joint angles ``q``."""
+        ...
+
+
+#: ``kinematics(embodiment_info) -> {arm prefix: ArmModel}``.
+KinematicsFactory = Callable[[EmbodimentInfo], Mapping[str, ArmModel]]
+
+
+def load_kinematics(spec: str | KinematicsFactory) -> KinematicsFactory:
+    """Resolve ``-P kinematics=module:attr`` to the factory it names (a callable passes through)."""
+    if callable(spec):
+        return spec
+    module, _, attr = str(spec).partition(":")
+    if not module or not attr:
+        raise ValueError(f"kinematics must be 'module:factory', got {spec!r}")
+    factory = getattr(importlib.import_module(module), attr)
+    if not callable(factory):
+        raise ValueError(f"kinematics {spec!r} is not callable")
+    return factory  # type: ignore[no-any-return]
 
 
 def smoothstep(u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -79,79 +139,131 @@ def smoothstep(u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     return u * u * (3.0 - 2.0 * u)
 
 
-class PlusTools:
-    """IR+'s control tools for one bound embodiment, sharing ``control``'s held setpoint.
+@dataclass
+class _Arm:
+    name: str
+    model: ArmModel
+    joints: list[int]  # action indices of the arm's joints, in the model's order
+    gripper: int | None
+    low: Vec  # joint limits: the model's within the action space's
+    high: Vec
+    down: Vec | None = None  # the tool pointing straight down, turned as the arm faced at the start
 
-    ``labels``, ``low`` and ``high`` describe the action space; ``pose`` says it
-    is Cartesian (the motion tool is then ``go``, else ``move_joints``). Raises
-    ``ValueError`` for a displacement action space, which has no target to go to.
+
+class PlusTools:
+    """IR+'s tools for one bound embodiment, sharing ``control``'s held setpoint.
+
+    Raises ``ValueError`` when the arms in ``models`` don't match the action
+    space's labels. Each move registers a report, read back from the
+    observation after it has played (``take_report``).
     """
 
     def __init__(
         self,
         control: ControlTools,
         labels: tuple[str, ...],
-        low: npt.NDArray[np.float64],
-        high: npt.NDArray[np.float64],
+        low: Vec,
+        high: Vec,
+        models: Mapping[str, ArmModel],
         *,
-        pose: bool,
+        max_step: Sequence[float | None] | None = None,
     ) -> None:
-        base = [name for name in control.library.names if name in ("move_to", "move_joints")]
-        if not base:
+        try:
+            from scipy.optimize import least_squares  # type: ignore[import-untyped]
+            from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
+        except ImportError as exc:  # pragma: no cover - scipy ships with the plus extra
             raise ValueError(
-                "toolset=plus needs an absolute action space (joint or end-effector "
-                "targets); this embodiment takes displacements"
-            )
+                "toolset=plus needs scipy for its IK: pip install 'inspect-robots-agent[plus]'"
+            ) from exc
+        self._least_squares = least_squares
+        self._rotation = Rotation
         self._control = control
-        self._base_move = base[0]
         self._labels = labels
         self._low = np.asarray(low, dtype=np.float64)
         self._high = np.asarray(high, dtype=np.float64)
-        self._move_name = "go" if pose else "move_joints"
-        self._grippers = tuple(label for label in labels if "gripper" in label.lower())
-        prefixes = tuple(dict.fromkeys(label.split("_", 1)[0] for label in labels))
-        self._arms = prefixes if len(prefixes) > 1 and all("_" in label for label in labels) else ()
-        self._start: npt.NDArray[np.float64] | None = None
+        self._max_step = tuple(max_step) if max_step is not None else (None,) * len(labels)
+        if not models:
+            raise ValueError("the kinematics factory returned no arms")
+        self._arms: dict[str, _Arm] = {}
+        for name, model in models.items():
+            mine = [i for i, label in enumerate(labels) if label.startswith(f"{name}_")]
+            grippers = [i for i in mine if "gripper" in labels[i].lower()]
+            joints = [i for i in mine if i not in grippers]
+            jlow = np.asarray(model.joint_low, dtype=np.float64)
+            jhigh = np.asarray(model.joint_high, dtype=np.float64)
+            if not joints or len(joints) != len(jlow):
+                raise ValueError(
+                    f"arm {name!r}: the action space has {len(joints)} joint dimensions "
+                    f"labelled {name}_*, its model {len(jlow)} joints"
+                )
+            self._arms[name] = _Arm(
+                name=name,
+                model=model,
+                joints=joints,
+                gripper=grippers[0] if grippers else None,
+                low=np.maximum(jlow, self._low[joints]),
+                high=np.minimum(jhigh, self._high[joints]),
+            )
+        self._start: Vec | None = None
+        self._report: Callable[[Observation], str] | None = None
 
     # -- trial state -------------------------------------------------------------------
 
     def start_trial(self) -> None:
-        """Forget the previous trial's starting pose; the next observation sets it."""
+        """Forget the previous trial's start pose; the next observation sets it."""
         self._start = None
+        self._report = None
+        for arm in self._arms.values():
+            arm.down = None
 
     def observe(self, observation: Observation) -> None:
-        """Remember the trial's starting pose (the setpoint before any move) for ``park``."""
-        if self._start is None:
-            self._start = self._control.hold_target(observation).copy()
+        """Remember the trial's start pose (for ``park`` and the orientation's zero)."""
+        if self._start is not None:
+            return
+        self._start = self._readback(observation)
+        for arm in self._arms.values():
+            _, rotation = arm.model.fk(self._start[arm.joints])
+            arm.down = _down_like(np.asarray(rotation, dtype=np.float64))
+
+    def take_report(self) -> Callable[[Observation], str] | None:
+        """The last move's report, once: call it with the observation after the move."""
+        report, self._report = self._report, None
+        return report
 
     # -- the library ------------------------------------------------------------------
 
     @property
     def library(self) -> ToolLibrary:
-        """The motion tool, ``grip`` (given a gripper), ``park``, ``state``, ``look``, ``wait``."""
-        tools = [Tool(self._move_name, self._move_schema(), self._go, CONTROL, order=0)]
+        """Every IR+ tool (``grip`` only given grippers), in ``TOOL_NAMES`` order."""
+        tools = [
+            Tool("go", self._go_schema(), self._go, CONTROL, order=0),
+            Tool("move_joints", self._move_joints_schema(), self._move_joints, CONTROL, order=1),
+        ]
         if self._grippers:
-            tools.append(Tool("grip", self._grip_schema(), self._grip, CONTROL, order=1))
+            tools.append(Tool("grip", self._grip_schema(), self._grip, CONTROL, order=2))
         tools += [
-            Tool("park", self._park_schema(), self._park, CONTROL, order=2),
-            Tool("state", self._state_schema(), self._state, CONTROL, order=3),
-            Tool("look", self._look_schema(), self._look, CONTROL, order=4),
-            Tool("wait", self._wait_schema(), self._wait, CONTROL, order=5),
-            Tool("sequence", self._sequence_schema(), self._sequence, CONTROL, order=6),
+            Tool("park", self._park_schema(), self._park, CONTROL, order=3),
+            Tool("state", self._state_schema(), self._state, CONTROL, order=4),
+            Tool("look", self._look_schema(), self._look, CONTROL, order=5),
+            Tool("wait", self._wait_schema(), self._wait, CONTROL, order=6),
+            Tool("sequence", self._sequence_schema(), self._sequence, CONTROL, order=7),
         ]
         return ToolLibrary(tools)
 
     @property
     def step_tools(self) -> tuple[str, ...]:
         """The tools a ``sequence`` step may name, in listing order."""
-        names = [self._move_name, "grip", "park", "state", "look", "wait"]
-        return tuple(name for name in names if name != "grip" or self._grippers)
+        return tuple(name for name in STEP_TOOLS if name != "grip" or self._grippers)
+
+    @property
+    def _grippers(self) -> bool:
+        return any(arm.gripper is not None for arm in self._arms.values())
 
     def sequence_steps(self, arguments: Mapping[str, Any]) -> list[tuple[str, str]] | str:
         """A ``sequence`` call's steps as ``(tool, JSON arguments)``, or an error to report.
 
         A step is ``{"tool": name, "args": {...}}``; a step without ``args``
-        takes its other keys as the arguments (``{"tool": "grip", "opening": 0}``).
+        takes its other keys as the arguments (``{"tool": "park", "arm": "left"}``).
         The steps' own arguments are checked when each runs, as separate calls are.
         """
         steps = arguments.get("steps")
@@ -177,39 +289,131 @@ class PlusTools:
 
     # -- runs ---------------------------------------------------------------------------
 
+    def _arm(self, arguments: Mapping[str, Any]) -> _Arm | str:
+        name = arguments.get("arm")
+        if name not in self._arms:
+            return f"arm must be one of: {', '.join(self._arms)}"
+        return self._arms[name]
+
     def _go(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        targets = arguments.get("targets")
-        if not isinstance(targets, dict) or not targets:
-            return ToolResult(error="targets must be a non-empty object of name: value")
-        return self._move(targets, arguments.get("seconds"), arguments.get("note"), observation)
+        arm = self._arm(arguments)
+        if isinstance(arm, str):
+            return ToolResult(error=arm)
+        self.observe(observation)
+        try:
+            position = np.array([_number(arguments, key) for key in ("x", "y", "z")])
+            rotation = self._target_rotation(arm, arguments)
+        except ValueError as exc:
+            return ToolResult(error=str(exc))
+        readback = self._readback(observation)
+        solved = self._ik(arm, position, rotation, readback[arm.joints])
+        if isinstance(solved, str):
+            return ToolResult(error=solved)
+        result = self._joint_move(
+            arm, solved, arguments.get("gripper"), arguments.get("seconds"), observation
+        )
+        if result.chunk is not None:
+            took = self._took(result)
+            self._report = lambda obs: (
+                f"{arm.name} arm moved over {took:.1f}s; now {self._pose(arm, obs)} "
+                f"({self._offset_mm(arm, obs, position):.0f} mm from the target)"
+            )
+        return result
+
+    def _move_joints(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
+        arm = self._arm(arguments)
+        if isinstance(arm, str):
+            return ToolResult(error=arm)
+        self.observe(observation)
+        joints = arguments.get("joints")
+        count = len(arm.joints)
+        if (
+            not isinstance(joints, list)
+            or len(joints) != count
+            or not all(_finite(value) for value in joints)
+        ):
+            return ToolResult(
+                error=f"joints must be {count} angles (rad), in the arm's joint order"
+            )
+        target = np.asarray(joints, dtype=np.float64)
+        outside = [i for i in range(count) if not arm.low[i] <= target[i] <= arm.high[i]]
+        if outside:
+            i = outside[0]
+            return ToolResult(
+                error=f"joint {i} target {target[i]:+.3f} is outside its limits "
+                f"[{arm.low[i]:+.3f}, {arm.high[i]:+.3f}]; nothing moved"
+            )
+        result = self._joint_move(
+            arm, target, arguments.get("gripper"), arguments.get("seconds"), observation
+        )
+        if result.chunk is not None:
+            took = self._took(result)
+            self._report = lambda obs: (
+                f"{arm.name} arm moved over {took:.1f}s; now joints "
+                f"{_q(self._readback(obs)[arm.joints])}; {self._pose(arm, obs)}"
+            )
+        return result
 
     def _grip(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        gripper = arguments.get("gripper", self._grippers[0] if len(self._grippers) == 1 else None)
-        if gripper not in self._grippers:
-            return ToolResult(error=f"gripper must be one of: {', '.join(self._grippers)}")
+        arm = self._arm(arguments)
+        if isinstance(arm, str):
+            return ToolResult(error=arm)
+        if arm.gripper is None:
+            return ToolResult(error=f"the {arm.name} arm has no gripper")
         opening = arguments.get("opening")
-        return self._move(
-            {gripper: opening}, GRIP_SECONDS, arguments.get("note"), observation, name="grip"
+        if not _finite(opening):
+            return ToolResult(error="opening must be a number, 0 closed .. 1 open")
+        index = arm.gripper
+        target = float(np.clip(float(opening), self._low[index], self._high[index]))  # type: ignore[arg-type]
+        hz = self._control.resolved_hz
+        held = self._control.hold_target(observation).copy()
+        start = float(held[index])
+        limit = self._max_step[index]
+        ramp = math.ceil(abs(target - start) / limit - 1e-9) if limit else 1
+        steps = max(ramp, round(GRIP_SECONDS * hz), 1)
+        actions = []
+        for i in range(1, steps + 1):
+            data = held.copy()
+            data[index] = start + (target - start) * min(1.0, i / max(ramp, 1))
+            actions.append(Action(data=data))
+        chunk = self._chunk(actions, observation)
+        seconds = steps / hz
+        self._report = lambda obs: (
+            f"{arm.name} gripper commanded {target:.2f}; reads "
+            f"{self._readback(obs)[index]:.3f} after {seconds:.1f}s"
         )
+        return ToolResult(chunk=chunk, note=f"setting the {arm.name} gripper to {target:.2f}")
 
     def _park(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         self.observe(observation)
         assert self._start is not None
-        arm = arguments.get("arm")
-        if arm is not None and arm not in self._arms:
-            return ToolResult(error=f"arm must be one of: {', '.join(self._arms)}")
-        pinned = set(self._control.pinned_labels)
-        targets = {
-            label: float(self._start[index])
-            for index, label in enumerate(self._labels)
-            if label not in pinned and (arm is None or label.startswith(f"{arm}_"))
-        }
-        return self._move(targets, PARK_SECONDS, arguments.get("note"), observation, name="park")
+        arm = self._arm(arguments)
+        if isinstance(arm, str):
+            return ToolResult(error=arm)
+        gripper = None if arm.gripper is None else float(self._start[arm.gripper])
+        result = self._joint_move(arm, self._start[arm.joints], gripper, PARK_SECONDS, observation)
+        if result.chunk is not None:
+            took = self._took(result)
+            self._report = lambda obs: (
+                f"{arm.name} arm parked over {took:.1f}s at its start pose; {self._pose(arm, obs)}"
+            )
+        return result
 
     def _state(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        lines = state_lines(observation, self._control.state_labels())
-        lines += self._control.setpoint_lines(observation)
-        return ToolResult(note="\n".join(lines) or "no state is available in this observation")
+        name = arguments.get("arm")
+        if name is not None and name not in self._arms:
+            return ToolResult(error=f"arm must be one of: {', '.join(self._arms)}")
+        self.observe(observation)
+        readback = self._readback(observation)
+        effort = observation.state.get("joint_eff")
+        lines = []
+        for arm in self._arms.values() if name is None else [self._arms[name]]:
+            line = f"{arm.name}: joints {_q(readback[arm.joints])}; {self._pose(arm, observation)}"
+            if effort is not None and np.asarray(effort).shape == readback.shape:
+                values = np.asarray(effort, dtype=np.float64)[arm.joints]
+                line += "; joint effort [" + ", ".join(f"{v:+.2f}" for v in values) + "] N·m"
+            lines.append(line)
+        return ToolResult(note="\n".join(lines))
 
     def _look(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         requested = arguments.get("cameras")
@@ -228,16 +432,15 @@ class PlusTools:
         return ToolResult(capture=tuple(requested))
 
     def _wait(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
-        sleep = {"seconds": arguments.get("seconds"), "note": _note(arguments.get("note"))}
+        seconds = arguments.get("seconds")
+        sleep = {"seconds": seconds, "note": "wait"}
         result = self._control.library.execute("sleep", json.dumps(sleep), observation)
         if result.chunk is None:
             return result
         assert result.sleep is not None
-        return ToolResult(
-            chunk=result.chunk,
-            note=f"waiting {result.sleep:g} s ({len(result.chunk)} steps) holding the setpoint",
-            sleep=result.sleep,
-        )
+        took = result.sleep
+        self._report = lambda obs: f"waited {took:.1f}s"
+        return ToolResult(chunk=result.chunk, note=f"waiting {took:g} s", sleep=took)
 
     def _sequence(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         # The agent policy expands a sequence into its steps before anything runs.
@@ -245,70 +448,158 @@ class PlusTools:
         error = steps if isinstance(steps, str) else "sequence runs only in the agent policy"
         return ToolResult(error=error)
 
-    def _move(
+    # -- motion -------------------------------------------------------------------------
+
+    def _joint_move(
         self,
-        targets: Mapping[str, object],
+        arm: _Arm,
+        target: Vec,
+        gripper: object,
         seconds: object,
-        note: object,
         observation: Observation,
-        *,
-        name: str | None = None,
     ) -> ToolResult:
-        """Validate with the core move tool, then re-time its straight line with smoothstep."""
-        hz = self._control.resolved_hz
-        cap = math.ceil(MAX_SECONDS * hz)
+        """Ease the arm's joints (and gripper) from where they are to ``target``, then settle."""
         if seconds is None:
             duration = DEFAULT_SECONDS
-        elif (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds)
-            or seconds <= 0
-        ):
-            return ToolResult(error="seconds must be a positive number of seconds when given")
-        elif seconds > MAX_SECONDS:
-            return ToolResult(
-                error=f"seconds {seconds:g} is over the {MAX_SECONDS:g} s limit for one move"
-            )
+        elif not _finite(seconds) or float(seconds) <= 0:  # type: ignore[arg-type]
+            return ToolResult(error="seconds must be a positive number when given")
         else:
-            duration = float(seconds)
-        held = self._control.hold_target(observation)
+            duration = float(seconds)  # type: ignore[arg-type]
+        if gripper is not None and not _finite(gripper):
+            return ToolResult(error="gripper must be a number, 0 closed .. 1 open")
+        hz = self._control.resolved_hz
+        held = self._control.hold_target(observation).copy()
         start = held.copy()
-        labels = self._control.state_labels()
-        if labels is not None:
-            readback = np.asarray(observation.state[labels[0]], dtype=np.float64)
-            for label in targets:
-                if label in self._labels and readback.shape == start.shape:
-                    index = self._labels.index(label)
-                    start[index] = readback[index]  # named dimensions move from where they are
-        base = self._control.library.execute(
-            self._base_move,
-            json.dumps({"targets": dict(targets), "note": _note(note)}),
-            observation,
+        start[arm.joints] = self._readback(observation)[arm.joints]
+        end = start.copy()
+        end[arm.joints] = target
+        if arm.gripper is not None and gripper is not None:
+            index = arm.gripper
+            end[index] = float(np.clip(float(gripper), self._low[index], self._high[index]))  # type: ignore[arg-type]
+        biggest = float(np.max(np.abs(end[arm.joints] - start[arm.joints])))
+        duration = max(duration, biggest / JOINT_SPEED)
+        for index, limit in enumerate(self._max_step):
+            if limit:
+                duration = max(duration, EASE_PEAK * abs(end[index] - start[index]) / limit / hz)
+        if duration > MAX_MOVE_SECONDS:
+            return ToolResult(
+                error=f"that move would take {duration:.1f}s, over the {MAX_MOVE_SECONDS:g}s "
+                "limit for one move; nothing moved"
+            )
+        steps = max(1, round(duration * hz))
+        fractions = smoothstep(np.arange(1, steps + 1, dtype=np.float64) / steps)
+        actions = [Action(data=start + (end - start) * f) for f in fractions]
+        actions += [Action(data=end.copy()) for _ in range(round(SETTLE_SECONDS * hz))]
+        chunk = self._chunk(actions, observation)
+        return ToolResult(chunk=chunk, note=f"moving the {arm.name} arm over {steps / hz:.1f}s")
+
+    def _chunk(self, actions: list[Action], observation: Observation) -> ActionChunk:
+        clipped = [Action(data=np.clip(a.data, self._low, self._high)) for a in actions]
+        clipped[-1] = Action(data=clipped[-1].data, meta={"chunk_final": True})
+        chunk = ActionChunk(actions=clipped, control_hz=self._control.control_hz)
+        self._control.track(chunk, observation)
+        return chunk
+
+    def _took(self, result: ToolResult) -> float:
+        assert result.chunk is not None
+        settle = round(SETTLE_SECONDS * self._control.resolved_hz)
+        return (len(result.chunk) - settle) / self._control.resolved_hz
+
+    def _ik(self, arm: _Arm, position: Vec, rotation: Vec, current: Vec) -> Vec | str:
+        """Joints putting the grasp point at ``position`` with ``rotation``, or why not."""
+        rot = self._rotation
+
+        def residual(q: Vec) -> Vec:
+            p, r = arm.model.fk(q)
+            rotvec = rot.from_matrix(rotation.T @ np.asarray(r)).as_rotvec()
+            return np.asarray(
+                np.r_[np.asarray(p) - position, ROT_WEIGHT * rotvec], dtype=np.float64
+            )
+
+        seeds = [current]
+        if self._start is not None:
+            seeds.append(self._start[arm.joints])
+        extra = getattr(arm.model, "ik_seeds", None)
+        if callable(extra):
+            seeds += [np.asarray(s, dtype=np.float64) for s in extra(position)]
+        lo, hi = arm.low, arm.high
+        best: tuple[Vec, float, float] | None = None
+        for seed in seeds:
+            x0 = np.clip(seed, lo + 1e-6, hi - 1e-6)
+            sol = self._least_squares(
+                residual, x0, bounds=(lo, hi), xtol=1e-10, ftol=1e-10, gtol=1e-10, max_nfev=150
+            )
+            r = residual(sol.x)
+            pos_err = float(np.linalg.norm(r[:3]))
+            rot_err = float(np.linalg.norm(r[3:]) / ROT_WEIGHT)
+            if best is None or pos_err + 0.1 * rot_err < best[1] + 0.1 * best[2]:
+                best = (np.asarray(sol.x, dtype=np.float64), pos_err, rot_err)
+            if pos_err <= POS_TOL and rot_err <= ROT_TOL:
+                return np.asarray(sol.x, dtype=np.float64)
+        assert best is not None
+        reached, _ = arm.model.fk(best[0])
+        return (
+            f"unreachable; the closest solution puts the grasp point {best[1] * 1000:.0f} mm "
+            f"and {math.degrees(best[2]):.0f} deg off, at {_xyz(np.asarray(reached))}; "
+            "nothing moved"
         )
-        if base.error is not None or base.chunk is None or base.target is None:
-            return ToolResult(error=_renamed(base.error, self._base_move, self._move_name))
-        linear_steps = len(base.chunk)
-        steps = max(math.ceil(EASE_PEAK * linear_steps), round(duration * hz), 1)
-        if steps > cap:
-            # An eased move this long would pass the cap; play the speed-limited straight line.
-            chunk, eased = base.chunk, False
-        else:
-            target = base.target
-            fractions = smoothstep(np.arange(1, steps + 1, dtype=np.float64) / steps)
-            actions = [
-                Action(data=np.clip(start + (target - start) * f, self._low, self._high))
-                for f in fractions
-            ]
-            actions[-1] = Action(data=target.copy(), meta={"chunk_final": True})
-            chunk = ActionChunk(actions=actions, control_hz=self._control.control_hz)
-            self._control.track(chunk, observation)
-            eased = True
-        played = len(chunk)
-        note_text = f"executing {name or self._move_name} over {played} steps ({played / hz:.1f}s)"
-        if not eased:
-            note_text += "; linear, since easing it would pass the 10 s limit"
-        return ToolResult(chunk=chunk, note=note_text, target=base.target)
+
+    # -- orientation and readback -----------------------------------------------------
+
+    def _target_rotation(self, arm: _Arm, arguments: Mapping[str, Any]) -> Vec:
+        given = arguments.get("rotation")
+        if given is not None:
+            try:
+                matrix = np.asarray(given, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rotation must be a 3x3 matrix (rows)") from exc
+            if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+                raise ValueError("rotation must be a 3x3 matrix (rows)")
+            u, _, vt = np.linalg.svd(matrix)  # the nearest rotation
+            fixed = u @ vt
+            if np.linalg.det(fixed) < 0:
+                raise ValueError("rotation must be a rotation matrix (determinant +1)")
+            return np.asarray(fixed, dtype=np.float64)
+        yaw, tilt, roll = (_number(arguments, key, 0.0) for key in ("yaw", "tilt", "roll"))
+        return self._orientation(arm, yaw, tilt, roll)
+
+    def _orientation(self, arm: _Arm, yaw: float, tilt: float, roll: float) -> Vec:
+        assert arm.down is not None, "observe() sets the orientation's zero"
+        turn = self._rotation.from_euler("ZYX", [yaw, -tilt, -roll], degrees=True).as_matrix()
+        return np.asarray(turn @ arm.down, dtype=np.float64)
+
+    def _angles(self, arm: _Arm, rotation: Vec) -> tuple[float, float, float]:
+        assert arm.down is not None
+        yaw, tilt, roll = self._rotation.from_matrix(rotation @ arm.down.T).as_euler(
+            "ZYX", degrees=True
+        )
+        return float(yaw), float(-tilt), float(-roll)
+
+    def _readback(self, observation: Observation) -> Vec:
+        """The measured action-space vector (joints and grippers), else the held setpoint."""
+        labels = self._control.state_labels()
+        held = self._control.hold_target(observation)
+        if labels is not None and labels[0] in observation.state:
+            value = np.asarray(observation.state[labels[0]], dtype=np.float64)
+            if value.shape == held.shape:
+                return value
+        return np.asarray(held, dtype=np.float64).copy()
+
+    def _pose(self, arm: _Arm, observation: Observation) -> str:
+        readback = self._readback(observation)
+        position, rotation = arm.model.fk(readback[arm.joints])
+        yaw, tilt, roll = self._angles(arm, np.asarray(rotation, dtype=np.float64))
+        text = (
+            f"grasp point {_xyz(np.asarray(position))} m, yaw {yaw:+.1f}, tilt {tilt:+.1f}, "
+            f"roll {roll:+.1f} deg"
+        )
+        if arm.gripper is not None:
+            text += f"; gripper {readback[arm.gripper]:.3f}"
+        return text
+
+    def _offset_mm(self, arm: _Arm, observation: Observation, target: Vec) -> float:
+        position, _ = arm.model.fk(self._readback(observation)[arm.joints])
+        return float(np.linalg.norm(np.asarray(position) - target)) * 1000.0
 
     # -- schemas ------------------------------------------------------------------------
 
@@ -328,75 +619,96 @@ class PlusTools:
             },
         }
 
-    def _seconds(self, default: float) -> dict[str, Any]:
+    @property
+    def _arm_property(self) -> dict[str, Any]:
+        return {"type": "string", "enum": list(self._arms), "description": "which arm"}
+
+    @property
+    def _seconds(self) -> dict[str, Any]:
         return {
             "type": "number",
             "description": (
-                f"How long the move takes (default {default:g} s, at most {MAX_SECONDS:g} s). "
-                "A move is never faster than the embodiment's speed limit allows."
+                f"how long the move takes (default {DEFAULT_SECONDS:g}s; never faster than "
+                f"{JOINT_SPEED:g} rad/s for the joint that moves most)"
             ),
         }
 
-    def _move_schema(self) -> dict[str, Any]:
-        kind = (
-            "end-effector targets (meters for positions, radians for rotations, per the "
-            "dimension labels)"
-            if self._move_name == "go"
-            else "joint targets (per the dimension labels)"
-        )
+    def _go_schema(self) -> dict[str, Any]:
+        number = {"type": "number"}
+        row = {"type": "array", "items": number, "minItems": 3, "maxItems": 3}
         return self._function(
-            self._move_name,
-            f"Move to absolute {kind}, easing in and out over `seconds`. Dimensions you "
-            "leave out keep their last commanded target. Returns when the move is "
-            "issued; with other calls in the same turn, the next one starts after it "
-            "has played. Embodiment bounds: " + self._control.bounds_text,
+            "go",
+            "Move one arm so its grasp point (between the fingertips) is at x, y, z (metres, "
+            "in that arm's own base frame: +x forward, +y left, +z up) with the given tool "
+            "orientation. Orientation in degrees: all zero points the tool straight down, "
+            "turned as the arm faced at the trial's start; yaw turns it about the vertical "
+            "(positive: counterclockwise seen from above), tilt leans its tip forward (+x), "
+            "roll leans it to the side (positive toward the arm's right, -y). Exactly, "
+            "R = Rz(yaw) Ry(-tilt) Rx(-roll) R_down; or give `rotation`, a full 3x3 matrix "
+            "(rows, the tool's axes in the base frame, the third along the tool toward the "
+            "grasp point) instead. Inverse kinematics on the arm's model finds the joints "
+            f"(within {POS_TOL * 1000:.0f} mm and {math.degrees(ROT_TOL):.0f} deg, or nothing "
+            "moves); the joints then move there together, easing in and out, and settle "
+            f"{SETTLE_SECONDS:g}s. Returns the pose reached.",
             {
-                "targets": {
-                    "type": "object",
-                    "description": "Target values by dimension name: " + ", ".join(self._labels),
-                    "additionalProperties": {"type": "number"},
-                },
-                "seconds": self._seconds(DEFAULT_SECONDS),
+                "arm": self._arm_property,
+                "x": number,
+                "y": number,
+                "z": number,
+                "yaw": number,
+                "tilt": number,
+                "roll": number,
+                "rotation": {"type": "array", "items": row, "minItems": 3, "maxItems": 3},
+                "gripper": _GRIPPER,
+                "seconds": self._seconds,
             },
-            ["targets"],
+            ["arm", "x", "y", "z"],
+        )
+
+    def _move_joints_schema(self) -> dict[str, Any]:
+        count = len(next(iter(self._arms.values())).joints)
+        return self._function(
+            "move_joints",
+            f"Move one arm's {count} joints (radians, in the arm's joint order) to these angles "
+            "together, easing in and out. Returns the joints and pose reached.",
+            {
+                "arm": self._arm_property,
+                "joints": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": count,
+                    "maxItems": count,
+                },
+                "gripper": _GRIPPER,
+                "seconds": self._seconds,
+            },
+            ["arm", "joints"],
         )
 
     def _grip_schema(self) -> dict[str, Any]:
-        properties: dict[str, Any] = {
-            "opening": {
-                "type": "number",
-                "description": "The gripper target, in its dimension's units.",
-            }
-        }
-        required = ["opening"]
-        if len(self._grippers) > 1:
-            properties["gripper"] = {"type": "string", "enum": list(self._grippers)}
-            required.insert(0, "gripper")
         return self._function(
             "grip",
-            f"Set a gripper's opening over {GRIP_SECONDS:g} s; everything else holds.",
-            properties,
-            required,
+            f"Set one gripper's opening (0 closed .. 1 open) and wait at least {GRIP_SECONDS:g}s; "
+            "returns the reading then.",
+            {"arm": self._arm_property, "opening": {"type": "number"}},
+            ["arm", "opening"],
         )
 
     def _park_schema(self) -> dict[str, Any]:
-        properties: dict[str, Any] = {}
-        description = f"Return to the pose this trial started in, over {PARK_SECONDS:g} s"
-        if self._arms:
-            properties["arm"] = {
-                "type": "string",
-                "enum": list(self._arms),
-                "description": "Only this arm's dimensions; every dimension if omitted.",
-            }
-            description += " (one arm, or every dimension)"
-        return self._function("park", description + ".", properties, [])
+        return self._function(
+            "park",
+            "Move one arm back to the joints and gripper opening it started the trial with "
+            f"(at least {PARK_SECONDS:g}s).",
+            {"arm": self._arm_property},
+            ["arm"],
+        )
 
     def _state_schema(self) -> dict[str, Any]:
         return self._function(
             "state",
-            "Read the state now (proprioception and the held setpoint), between moves in "
-            "the same turn.",
-            {},
+            "Read the arms now: joint angles, grasp-point position and orientation (as go "
+            "takes them), gripper reading, joint effort. One arm, or every arm if none is given.",
+            {"arm": self._arm_property},
             [],
         )
 
@@ -409,12 +721,19 @@ class PlusTools:
             [],
         )
 
+    def _wait_schema(self) -> dict[str, Any]:
+        return self._function(
+            "wait",
+            f"Hold still for this many seconds (up to {WAIT_MAX_SECONDS:g}).",
+            {"seconds": {"type": "number"}},
+            ["seconds"],
+        )
+
     def _sequence_schema(self) -> dict[str, Any]:
-        allowed = list(self.step_tools)
         return self._function(
             "sequence",
             "Run several steps in one call, in order, exactly as the same calls made one "
-            "after another would run: each motion plays out before the next step starts, "
+            "after another would run: each move plays out before the next step starts, "
             "`state` and `look` report what is true at their place, and a failing step "
             "skips the rest. Use it for a whole routine (approach, descend, grip, lift, "
             "look) instead of one step per turn. Returns one result listing each step's. "
@@ -425,7 +744,7 @@ class PlusTools:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "tool": {"type": "string", "enum": allowed},
+                            "tool": {"type": "string", "enum": list(self.step_tools)},
                             "args": {
                                 "type": "object",
                                 "description": "The arguments that tool takes on its own.",
@@ -438,19 +757,40 @@ class PlusTools:
             ["steps"],
         )
 
-    def _wait_schema(self) -> dict[str, Any]:
-        return self._function(
-            "wait",
-            f"Hold every setpoint for `seconds` (at most {WAIT_MAX_SECONDS:g}).",
-            {"seconds": {"type": "number"}},
-            ["seconds"],
-        )
+
+def _down_like(rotation: Vec) -> Vec:
+    """The tool pointing straight down, turned about the vertical as ``rotation`` is."""
+    heading = rotation[:, 0].copy()
+    heading[2] = 0.0
+    if np.linalg.norm(heading) < 1e-6:  # the tool's x axis is vertical: use its y axis
+        heading = np.cross(rotation[:, 1], [0.0, 0.0, 1.0])
+        heading[2] = 0.0
+    x = heading / np.linalg.norm(heading)
+    z = np.array([0.0, 0.0, -1.0])
+    y = np.cross(z, x)
+    return np.column_stack([x, y, z])
 
 
-def _note(note: object) -> str:
-    return note if isinstance(note, str) and note.strip() else _FALLBACK_NOTE
+def _finite(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
-def _renamed(error: str | None, base: str, name: str) -> str:
-    text = error or "the move could not be built"
-    return text.replace(base, name) if base != name else text
+def _number(arguments: Mapping[str, Any], key: str, default: float | None = None) -> float:
+    value = arguments.get(key, default)
+    if value is None:
+        raise ValueError(f"{key} is required")
+    if not _finite(value):
+        raise ValueError(f"{key} must be a number")
+    return float(value)
+
+
+def _q(values: Vec) -> str:
+    return "[" + ", ".join(f"{v:+.3f}" for v in values) + "]"
+
+
+def _xyz(position: Vec) -> str:
+    return f"({position[0]:+.3f}, {position[1]:+.3f}, {position[2]:+.3f})"
