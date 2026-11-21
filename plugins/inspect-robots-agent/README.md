@@ -241,7 +241,7 @@ whole routine of them.
 |---|---|---|
 | `go` | `arm`, `x`, `y`, `z`, `yaw`, `tilt`, `roll` (or `rotation`), `gripper`, `seconds` | IK once for the goal pose, then all the arm's joints eased there together; returns the pose reached |
 | `move_joints` | `arm`, `joints`, `gripper`, `seconds` | The same joint move to given angles |
-| `grip` | `arm`, `opening` | Set a gripper (0 closed .. 1 open), at least 0.5 s; returns the reading |
+| `grip` | `arm`, `opening` | Ease a gripper to an opening (0 closed .. 1 open) from the arm's last command, at least 0.5 s; returns the reading |
 | `park` | `arm` | Back to the joints and gripper the trial started with, at least 2.5 s |
 | `state` | `arm` | Joints, grasp-point pose (as `go` takes it), gripper, joint effort |
 | `look` | `cameras` | See the cameras now; the frames come with the turn's next observation, labelled with the step they were taken at |
@@ -261,10 +261,16 @@ How the motion works, as the controllers did it:
   together, smoothstep (3u² − 2u³) over max(`seconds`, the largest joint
   change / 0.95 rad/s), default 1.3 s, then 0.2 s to settle. The grasp point
   follows whatever path the joints give it, not a straight line.
+- **Control rate:** each move is streamed one command per control step, at the
+  embodiment's `control_hz`. The controllers streamed at 40 to 55 Hz; run the
+  embodiment at 40 Hz to match (`yam_arms -E control_hz=40`), and scale
+  `--max-steps` with it to keep the same time budget.
 - **Orientation:** degrees. All zero points the tool straight down, turned as
-  the arm faced at the trial's start; `yaw` turns it about the vertical, `tilt`
-  leans its tip forward (+x), `roll` toward the arm's right (−y):
-  R = Rz(yaw) Ry(−tilt) Rx(−roll) R_down. Or a full 3x3 `rotation`.
+  the arm model's `down` says (for i2rt's YAM model, the controllers'
+  `down(π)`), or as the arm faces at the trial's start if the model gives none;
+  `yaw` turns it about the vertical, `tilt` leans its tip forward (+x), `roll`
+  toward the arm's right (−y): R = Rz(yaw) Ry(−tilt) Rx(−roll) R_down. Or a
+  full 3x3 `rotation`.
 - **Grippers:** a gripper never changes faster than the action space's
   `max_step` allows.
 - **No Cartesian box:** like the controllers, IR+ checks joint limits only,
@@ -298,16 +304,20 @@ extra), and the arms' kinematic model, given as `-P kinematics=module:factory`.
 The factory takes the `EmbodimentInfo` and returns one `ArmModel` per arm
 prefix: `fk(q) -> (position, rotation)` of the grasp point in that arm's base
 frame (+x forward, +y left, +z up, the rotation's third column along the tool),
-`joint_low`, `joint_high`, and optionally `ik_seeds(position)`. Everything
-else is the default agent's: the observation after every turn, the image
-horizon, the call and step budgets.
+`joint_low`, `joint_high`, and optionally `ik_seeds(position)` and `down`.
+Everything else is the default agent's: the observation after every turn, the
+image horizon, the call and step budgets.
+
+On YAM arms, inspect-robots-yam's `i2rt_kinematics` is i2rt's MuJoCo model of
+the arm, solved at its `grasp_site`, the model the controllers loaded:
 
 ```bash
 pip install 'inspect-robots-agent[plus]'
-inspect-robots run --embodiment <joint-position embodiment> --policy agent \
+inspect-robots run --embodiment yam_arms -E control_interface=joints -E control_hz=40 \
+    --max-steps 3600 --policy agent \
     -P model=openai/gpt-6.2-astra -P wire=responses -P toolset=plus \
-    -P kinematics=my_arms.kinematics:arm_models \
-    --instruction "Stack the bowls on the table."
+    -P kinematics=inspect_robots_yam.ir_plus:i2rt_kinematics \
+    --instruction "Stand all three bottles upright."
 ```
 
 ## Motor temperatures, `sleep` and the wall clock

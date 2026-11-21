@@ -114,12 +114,13 @@ def _start() -> Vec:
 class _Arms:
     """Two six-joint arms with grippers; the joints follow each command at once."""
 
-    def __init__(self, mode: str = "joint_pos") -> None:
+    def __init__(self, mode: str = "joint_pos", hz: float = 10.0) -> None:
         self.q = _start()
         self.actions: list[Vec] = []
         low = np.tile(np.r_[_TestArm.joint_low, 0.0], 2)
         high = np.tile(np.r_[_TestArm.joint_high, 1.0], 2)
-        max_step = tuple(0.1 if label.endswith("gripper") else None for label in LABELS)
+        # A full gripper stroke in no less than 1 s, at any rate (inspect-robots-yam's rule).
+        max_step = tuple(1.0 / hz if label.endswith("gripper") else None for label in LABELS)
         self.info = EmbodimentInfo(
             name="arms",
             action_space=Box(
@@ -137,7 +138,7 @@ class _Arms:
                 cameras=(CameraSpec(name="top", height=2, width=2, channels=3),),
                 state=StateSpec(fields=(StateField(key="joint_pos", shape=(14,)),)),
             ),
-            control_hz=10.0,
+            control_hz=hz,
             is_simulated=True,
         )
 
@@ -265,6 +266,53 @@ def test_go_solves_ik_once_and_eases_the_joints(tmp_path: Path) -> None:
     assert "yaw +90.0, tilt +30.0, roll +0.0 deg; gripper 1.000 (0 mm from the target)" in result
 
 
+def test_moves_stream_at_the_embodiments_rate(tmp_path: Path) -> None:
+    script = _Script(
+        _calls(
+            ("go", {"arm": "left", "x": 0.35, "y": 0.0, "z": 0.2}),
+            ("grip", {"arm": "left", "opening": 0.0}),
+        ),
+        _calls(_DONE),
+    )
+    arms = _Arms(hz=40.0)
+    _run(script, arms, tmp_path)
+    move = round(DEFAULT_SECONDS * 40)  # 52 steps of 25 ms
+    settle = round(SETTLE_SECONDS * 40)
+    grip = round(1.5 * 40)  # a full close eased at 1/40 per step at most: 1.5 s
+    assert len(arms.actions) == move + settle + grip + settle + 1
+    path = np.array([a[0] for a in arms.actions[:move]])
+    assert np.allclose(path, 0.3 + 0.05 * smoothstep(np.arange(1, move + 1) / move))
+    results = _tool_messages(script.requests[1])
+    assert results[0].startswith("left arm moved over 1.3s")
+    assert results[1] == "left gripper commanded 0.00; reads 0.000 after 1.5s"
+
+
+def test_an_arm_model_can_fix_the_orientation_zero(tmp_path: Path) -> None:
+    turned = Rotation.from_euler("Z", 90, degrees=True).as_matrix() @ DOWN
+
+    class _Turned(_TestArm):
+        down = turned
+
+    script = _Script(
+        _calls(("go", {"arm": "left", "x": 0.3, "y": 0.0, "z": 0.2, "yaw": -90})),
+        _calls(_DONE),
+    )
+    arms = _Arms()
+    task = Task(
+        name="t",
+        scenes=[Scene(id="s0", instruction="tidy up", init_seed=0)],
+        scorer=success_at_end(),
+        max_steps=200,
+    )
+    policy = _policy(script, kinematics=lambda info: {"left": _Turned(), "right": _Turned()})
+    logs = ir_eval(task, policy, arms, log_dir=str(tmp_path))
+    assert logs[0].status == "success", logs[0].error
+    # yaw -90 from a zero turned +90: the start orientation, so nothing turns.
+    assert np.allclose(arms.actions[-1][3:6], 0.0, atol=1e-4)
+    result = _tool_messages(script.requests[1])[0]
+    assert "yaw -90.0, tilt +0.0, roll +0.0 deg" in result
+
+
 def test_rotation_matrix_and_default_duration(tmp_path: Path) -> None:
     script = _Script(
         _calls(("go", {"arm": "right", "x": 0.3, "y": -0.05, "z": 0.2, "rotation": DOWN.tolist()})),
@@ -302,9 +350,12 @@ def test_grip_ramps_at_the_gripper_limit_and_park_returns(tmp_path: Path) -> Non
     arms = _Arms()
     _run(script, arms, tmp_path)
     results = _tool_messages(script.requests[1])
-    # 1.0 to 0.0 at 0.1 per step: 10 steps, longer than grip's 0.5 s.
-    assert [a[6] for a in arms.actions[:10]] == pytest.approx([0.9 - 0.1 * i for i in range(10)])
-    assert results[0] == "left gripper commanded 0.00; reads 0.000 after 1.0s"
+    # 1.0 to 0.0, eased, at most 0.1 per step: 1.5 x 10 steps, longer than grip's 0.5 s.
+    eased = 1.0 - smoothstep(np.arange(1, 16) / 15)
+    assert [a[6] for a in arms.actions[:15]] == pytest.approx(list(eased))
+    assert np.max(np.abs(np.diff(np.r_[1.0, eased]))) <= 0.1 + 1e-9
+    assert all(np.allclose(a[:6], _start()[:6]) for a in arms.actions[:17])  # joints held
+    assert results[0] == "left gripper commanded 0.00; reads 0.000 after 1.5s"
     assert results[1].startswith(
         "left arm moved over 1.3s; now joints [+0.100, +0.200, +0.100, +0.000, +0.500, +0.000]"
     )
@@ -334,7 +385,8 @@ def test_a_sequence_runs_like_separate_calls_and_answers_once(tmp_path: Path) ->
     _run(script, arms, tmp_path)
     assert len(script.requests) == 2
     move = round(DEFAULT_SECONDS * 10) + SETTLE
-    assert len(arms.actions) == move + 5 + 5 + move + 1
+    grip = 8 + SETTLE  # 1.0 to 0.5 at most 0.1 per step, eased: 7.5 steps, over grip's 0.5 s
+    assert len(arms.actions) == move + grip + 5 + move + 1
     results = _tool_messages(script.requests[1])
     assert len(results) == 2  # one answer for the sequence, one for the go after it
     lines = results[0].split("\n")
@@ -348,7 +400,7 @@ def test_a_sequence_runs_like_separate_calls_and_answers_once(tmp_path: Path) ->
     assert lines[0].startswith(
         "1. go: left arm moved over 1.3s; now grasp point (+0.350, +0.000, +0.100)"
     )
-    assert "3. grip: left gripper commanded 0.50; reads 0.500 after 0.5s" in lines
+    assert "3. grip: left gripper commanded 0.50; reads 0.500 after 0.8s" in lines
     assert "5. wait: waited 0.5s" in lines
     assert results[1].startswith("right arm moved over 1.3s")
     observation = script.requests[1]["messages"][-1]["content"]

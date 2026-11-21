@@ -4,5 +4,6 @@ for themselves when they drive arms directly, with its arguments and motion:
 degrees, or a rotation matrix) on the arm's kinematic model and eases all its
 joints there together; `move_joints`, `grip`, `park`, `state`, `look`, `wait`,
 and `sequence` (several steps in one call). Several calls per turn run in
-order. It needs a joint-position action space, `-P kinematics=module:factory`
+order, and moves stream at the embodiment's control rate (the controllers ran
+at 40 Hz). It needs a joint-position action space, `-P kinematics=module:factory`
 naming the arms' model, and scipy (the `plus` extra).

@@ -31,7 +31,8 @@ How they move, as the controllers did (medians over the definitions):
   0.2 s to settle. The controllers streamed this at 40-60 Hz; here it plays at
   the embodiment's control rate.
 - **Orientation:** yaw, tilt and roll in degrees. All zero points the tool
-  straight down, turned as the arm faces at the trial's start; yaw turns it
+  straight down, turned as the arm model's ``down`` says (else as the arm faces
+  at the trial's start); yaw turns it
   about the vertical, tilt leans its tip forward (+x), roll leans it toward the
   arm's right (-y): R = Rz(yaw) Ry(-tilt) Rx(-roll) R_down. Or a full 3x3
   rotation matrix, as some controllers took.
@@ -106,7 +107,10 @@ class ArmModel(Protocol):
     grasp point's position (m) and the tool's 3x3 rotation, whose third column
     points along the tool toward the grasp point. ``joint_low`` and
     ``joint_high`` are the joints' limits. A model may also offer
-    ``ik_seeds(position)``: extra joint vectors to start IK from.
+    ``ik_seeds(position)``, extra joint vectors to start IK from, and ``down``,
+    the 3x3 tool rotation that orientation zero means (the tool pointing straight
+    down, turned as the controllers' ``down()`` was); without it, zero is the
+    tool pointing down turned as it faces at the trial's start.
     """
 
     joint_low: Vec
@@ -147,7 +151,7 @@ class _Arm:
     gripper: int | None
     low: Vec  # joint limits: the model's within the action space's
     high: Vec
-    down: Vec | None = None  # the tool pointing straight down, turned as the arm faced at the start
+    down: Vec | None = None  # orientation zero: the tool pointing straight down
 
 
 class PlusTools:
@@ -222,8 +226,11 @@ class PlusTools:
             return
         self._start = self._readback(observation)
         for arm in self._arms.values():
-            _, rotation = arm.model.fk(self._start[arm.joints])
-            arm.down = _down_like(np.asarray(rotation, dtype=np.float64))
+            down = getattr(arm.model, "down", None)
+            if down is None:
+                _, rotation = arm.model.fk(self._start[arm.joints])
+                down = _down_like(np.asarray(rotation, dtype=np.float64))
+            arm.down = np.asarray(down, dtype=np.float64)
 
     def take_report(self) -> Callable[[Observation], str] | None:
         """The last move's report, once: call it with the observation after the move."""
@@ -364,25 +371,19 @@ class PlusTools:
         if not _finite(opening):
             return ToolResult(error="opening must be a number, 0 closed .. 1 open")
         index = arm.gripper
-        target = float(np.clip(float(opening), self._low[index], self._high[index]))  # type: ignore[arg-type]
-        hz = self._control.resolved_hz
-        held = self._control.hold_target(observation).copy()
-        start = float(held[index])
-        limit = self._max_step[index]
-        ramp = math.ceil(abs(target - start) / limit - 1e-9) if limit else 1
-        steps = max(ramp, round(GRIP_SECONDS * hz), 1)
-        actions = []
-        for i in range(1, steps + 1):
-            data = held.copy()
-            data[index] = start + (target - start) * min(1.0, i / max(ramp, 1))
-            actions.append(Action(data=data))
-        chunk = self._chunk(actions, observation)
-        seconds = steps / hz
-        self._report = lambda obs: (
-            f"{arm.name} gripper commanded {target:.2f}; reads "
-            f"{self._readback(obs)[index]:.3f} after {seconds:.1f}s"
+        # As the controllers' grip: the last command with the gripper changed, eased like any move.
+        held = self._control.hold_target(observation)
+        result = self._joint_move(
+            arm, held[arm.joints], opening, GRIP_SECONDS, observation, joints_from=held
         )
-        return ToolResult(chunk=chunk, note=f"setting the {arm.name} gripper to {target:.2f}")
+        if result.chunk is not None:
+            target = float(result.chunk.actions[-1].data[index])
+            took = self._took(result)
+            self._report = lambda obs: (
+                f"{arm.name} gripper commanded {target:.2f}; reads "
+                f"{self._readback(obs)[index]:.3f} after {took:.1f}s"
+            )
+        return result
 
     def _park(self, arguments: dict[str, Any], observation: Observation) -> ToolResult:
         self.observe(observation)
@@ -457,8 +458,14 @@ class PlusTools:
         gripper: object,
         seconds: object,
         observation: Observation,
+        *,
+        joints_from: Vec | None = None,
     ) -> ToolResult:
-        """Ease the arm's joints (and gripper) from where they are to ``target``, then settle."""
+        """Ease the arm's joints (and gripper) to ``target``, then settle.
+
+        The joints start where they are measured (``go``, ``move_joints``, ``park``) or
+        from ``joints_from`` (``grip``: the last command, so a sagging arm is not lowered).
+        """
         if seconds is None:
             duration = DEFAULT_SECONDS
         elif not _finite(seconds) or float(seconds) <= 0:  # type: ignore[arg-type]
@@ -470,7 +477,8 @@ class PlusTools:
         hz = self._control.resolved_hz
         held = self._control.hold_target(observation).copy()
         start = held.copy()
-        start[arm.joints] = self._readback(observation)[arm.joints]
+        source = self._readback(observation) if joints_from is None else joints_from
+        start[arm.joints] = source[arm.joints]
         end = start.copy()
         end[arm.joints] = target
         if arm.gripper is not None and gripper is not None:
@@ -588,7 +596,8 @@ class PlusTools:
     def _pose(self, arm: _Arm, observation: Observation) -> str:
         readback = self._readback(observation)
         position, rotation = arm.model.fk(readback[arm.joints])
-        yaw, tilt, roll = self._angles(arm, np.asarray(rotation, dtype=np.float64))
+        angles = self._angles(arm, np.asarray(rotation, dtype=np.float64))
+        yaw, tilt, roll = (round(value, 1) + 0.0 for value in angles)  # no "-0.0"
         text = (
             f"grasp point {_xyz(np.asarray(position))} m, yaw {yaw:+.1f}, tilt {tilt:+.1f}, "
             f"roll {roll:+.1f} deg"
@@ -641,7 +650,7 @@ class PlusTools:
             "Move one arm so its grasp point (between the fingertips) is at x, y, z (metres, "
             "in that arm's own base frame: +x forward, +y left, +z up) with the given tool "
             "orientation. Orientation in degrees: all zero points the tool straight down, "
-            "turned as the arm faced at the trial's start; yaw turns it about the vertical "
+            "turned as the arm faces at its home pose; yaw turns it about the vertical "
             "(positive: counterclockwise seen from above), tilt leans its tip forward (+x), "
             "roll leans it to the side (positive toward the arm's right, -y). Exactly, "
             "R = Rz(yaw) Ry(-tilt) Rx(-roll) R_down; or give `rotation`, a full 3x3 matrix "
