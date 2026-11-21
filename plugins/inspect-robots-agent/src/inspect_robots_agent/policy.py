@@ -59,6 +59,7 @@ from inspect_robots_agent._llm import (
     _has_openrouter_variant,
     resolve_provider,
 )
+from inspect_robots_agent._plus import KinematicsFactory, PlusTools, load_kinematics
 from inspect_robots_agent._png import png_data_url
 from inspect_robots_agent._responses import ResponsesClient
 
@@ -111,6 +112,11 @@ _SPEEDS = frozenset({"fast"})
 _SERVICE_TIERS = frozenset({"auto", "default", "flex", "priority", "fast", "ultrafast"})
 _INTERACTIONS_SERVICE_TIERS = frozenset({"standard", "flex", "priority"})
 _IMAGE_MODES = frozenset({"always", "on_demand"})
+#: ``default``: one motion tool call per turn. ``plus`` (IR+): the controller
+#: functions coding agents write for themselves, several calls per turn (_plus.py).
+_TOOLSETS = frozenset({"default", "plus"})
+#: Stateful wires keep the conversation server-side; IR+'s deferred tool results are untested there.
+_PLUS_WIRES = frozenset({"chat", "responses", "messages"})
 _DEPTH_MODES = frozenset({"render", "off"})
 
 
@@ -169,6 +175,34 @@ to make. When the goal is achieved call done; if it cannot be achieved call \
 give_up. Note what you are learning about this rig and task as you go: done and \
 give_up will ask what you wish you had known from the start. You have a budget \
 of {budget} LLM calls for the whole trial."""
+
+#: IR+ prompt edits: several calls per turn, notes optional.
+_PLUS_PROMPT_EDITS = (
+    (
+        "Work toward the user's goal in small, deliberate motions; re-check the "
+        "observation after every motion. ",
+        "Work toward the user's goal in deliberate steps; check the result (with "
+        "`look`, or in the next observation) wherever it matters. ",
+    ),
+    (
+        "Every move tool call must include a `note`: in one or two sentences, say what "
+        "you observe in the current observation and why you chose this motion. The user "
+        "is watching these notes to see what you see and what you decide, so write them "
+        "for a human reader. ",
+        "Tool calls take an optional `note`: say what you observe and why you chose the "
+        "call. The user reads these notes live and in the saved transcript. ",
+    ),
+    (
+        "Respond with exactly one tool call per turn. ",
+        "You may make several tool calls in one turn: they run one after another, in "
+        "order, each motion playing out before the next call starts, and a call that "
+        "fails skips the rest of the turn. `sequence` holds several steps in one call "
+        "and runs them the same way. `state` and `look` report what is true at "
+        "their place in the turn. The next observation arrives when the turn's calls "
+        "have run. ",
+    ),
+)
+_PLUS_NUDGE = "Respond with one or more tool calls."
 
 _PRE_CHECK_PROMPT_CLAUSE = (
     " A motion pre-check may reject a move with a stated reason. Adjust the target "
@@ -318,6 +352,10 @@ class AgentPolicyConfig(PolicyConfig):
     #: Evaluation notes appended verbatim to every trial's system prompt
     #: (scoring regime, budget use); ``None`` when not configured.
     eval_notes: str | None = None
+    #: ``default`` or ``plus`` (IR+: controller tools, several calls per turn).
+    toolset: str = "default"
+    #: IR+'s arm model: the ``module:factory`` it was given (``None`` for the default toolset).
+    kinematics: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -327,6 +365,40 @@ class _PendingMotion:
     issued_step: object
     chunk_len: int
     target: npt.NDArray[np.float64] | None
+
+
+@dataclass(eq=False)
+class _PlusSequence:
+    """A ``sequence`` call being run: its step results, sent as one tool result at the end."""
+
+    call_id: str
+    size: int
+    lines: list[str]
+
+
+@dataclass(frozen=True, eq=False)
+class _PlusCall:
+    """One call (or one step of a ``sequence``) waiting to run in an IR+ turn."""
+
+    id: str
+    name: str
+    arguments: str
+    #: The sequence this is a step of, and its 1-based place there.
+    sequence: _PlusSequence | None = None
+    number: int = 0
+
+
+@dataclass(eq=False)
+class _PlusTurn:
+    """An IR+ turn in progress: its calls still to run, and what the next observation completes."""
+
+    calls: list[_PlusCall]
+    #: The call whose motion or wait is playing: (call, its report from the next observation).
+    in_flight: tuple[_PlusCall, Callable[[Observation], str]] | None = None
+    #: Camera frames taken by ``look`` during the turn, delivered with the next observation.
+    frames: list[dict[str, Any]] | None = None
+    #: A call failed or ended the trial: the rest are skipped with this reason.
+    skip: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -408,6 +480,8 @@ class LLMAgentPolicy(PolicyBase):
         max_retries: int = 3,
         backoff_s: float = 1.0,
         timeout_s: float | None = None,
+        toolset: str = "default",
+        kinematics: str | KinematicsFactory | None = None,
     ) -> None:
         # Reject non-strings with a guided ConfigError to prevent unquoted CLI
         # values (e.g. -P model=42) from causing downstream errors or silent bypasses.
@@ -589,6 +663,28 @@ class LLMAgentPolicy(PolicyBase):
             raise ConfigError(
                 f"images must be one of {sorted(_IMAGE_MODES)}, got {images!r}.\n"
                 "fix: pass -P images=always or -P images=on_demand"
+            )
+        if toolset not in _TOOLSETS:
+            raise ConfigError(
+                f"toolset must be one of {sorted(_TOOLSETS)}, got {toolset!r}.\n"
+                "fix: pass -P toolset=default or -P toolset=plus"
+            )
+        if toolset == "plus" and images != "always":
+            raise ConfigError(
+                "toolset=plus attaches camera images to every observation and offers `look` "
+                f"between moves; it does not combine with images={images!r}.\n"
+                "fix: drop -P images= when using -P toolset=plus"
+            )
+        if toolset == "plus" and kinematics is None:
+            raise ConfigError(
+                "toolset=plus moves the arms by IK on their kinematic model and needs it.\n"
+                "fix: pass -P kinematics=<module>:<factory> (a factory returning one ArmModel "
+                "per arm; see inspect_robots_agent._plus)"
+            )
+        if toolset == "plus" and wire not in _PLUS_WIRES:
+            raise ConfigError(
+                f"toolset=plus supports wire={sorted(_PLUS_WIRES)}, got wire={wire!r}.\n"
+                "fix: use -P wire=chat, responses or messages with -P toolset=plus"
             )
         if depth not in _DEPTH_MODES:
             raise ConfigError(
@@ -878,6 +974,10 @@ class LLMAgentPolicy(PolicyBase):
         self._prior_learnings_text = prior_learnings_text
         self._eval_notes = eval_notes_text
         self._pre_check = pre_check
+        self._toolset = toolset
+        self._kinematics = kinematics
+        self._plus: PlusTools | None = None
+        self._plus_turn: _PlusTurn | None = None
         self._explicit_base_url = bool(base_url)
         self._wire = wire
         self.config = AgentPolicyConfig(
@@ -904,6 +1004,13 @@ class LLMAgentPolicy(PolicyBase):
             prior_learnings_sha256=prior_learnings_sha256,
             pre_check=pre_check_identity,
             eval_notes=eval_notes_text,
+            toolset=toolset,
+            kinematics=(
+                kinematics
+                if kinematics is None or isinstance(kinematics, str)
+                else f"{getattr(kinematics, '__module__', '?')}:"
+                f"{getattr(kinematics, '__qualname__', repr(kinematics))}"
+            ),
         )
         # Placeholder until bind(); eval() always binds before compat/rollout.
         self.info = PolicyInfo(
@@ -936,6 +1043,33 @@ class LLMAgentPolicy(PolicyBase):
         )
         adapter.bind(embodiment_info)
         self._adapter = adapter
+        self._plus = None
+        if self._toolset == "plus":
+            space = embodiment_info.action_space
+            semantics = space.semantics
+            if semantics is None or semantics.control_mode != "joint_pos":
+                mode = None if semantics is None else semantics.control_mode
+                raise ConfigError(
+                    "toolset=plus commands joint positions, as the coding agents' controllers "
+                    f"did; this embodiment's action space is {mode!r}.\n"
+                    "fix: use the embodiment's joint-position interface, or drop -P toolset=plus"
+                )
+            labels = semantics.dim_labels or tuple(str(i) for i in range(space.shape[0]))
+            assert self._kinematics is not None
+            try:
+                models = load_kinematics(self._kinematics)(embodiment_info)
+                self._plus = PlusTools(
+                    adapter.control,
+                    tuple(labels),
+                    np.asarray(space.low, dtype=np.float64),
+                    np.asarray(space.high, dtype=np.float64),
+                    models,
+                    max_step=semantics.max_step,
+                )
+            except (ValueError, ImportError, AttributeError) as exc:
+                raise ConfigError(
+                    f"toolset=plus: {exc}.\nfix: check -P kinematics= for this embodiment"
+                ) from exc
         self._state_labels = adapter.control.state_labels()
         self._embodiment_name = embodiment_info.name
         self._embodiment_docs = getattr(embodiment_info, "docs", None)
@@ -964,7 +1098,13 @@ class LLMAgentPolicy(PolicyBase):
         self._hindsight = None
         if self._adapter is not None:
             self._adapter.start_trial()
+        if self._plus is not None:
+            self._plus.start_trial()
+        self._plus_turn = None
         template = _ON_DEMAND_SYSTEM_TEMPLATE if self._images == "on_demand" else _SYSTEM_TEMPLATE
+        if self._toolset == "plus":
+            for old, new in _PLUS_PROMPT_EDITS:
+                template = template.replace(old, new)
         formatted = template.format(name=self._embodiment_name, budget=self._max_llm_calls)
         if self._pre_check is not None:
             formatted += _PRE_CHECK_PROMPT_CLAUSE
@@ -1071,6 +1211,8 @@ class LLMAgentPolicy(PolicyBase):
                 "LLMAgentPolicy.act() before bind(); run it through eval() or call "
                 "policy.bind(embodiment.info) first"
             )
+        if self._plus is not None:
+            return self._act_plus(adapter, self._plus, observation)
         depth = resolve_depth(observation) if self._depth == "render" else {}
         self._revealed.clear()
         reveal: tuple[str, ...] | None = None
@@ -1374,6 +1516,206 @@ class LLMAgentPolicy(PolicyBase):
                     f"LLM tool calls kept failing; last error: {last_error or 'unknown'}"
                 )
 
+    # -- IR+ (toolset=plus) ---------------------------------------------------------
+
+    def _plus_library(self, adapter: ToolAdapter, plus: PlusTools) -> ToolLibrary:
+        """IR+'s tools, then termination and contributed tools (not the core move tools)."""
+        core = set(adapter.control.library.names)
+        return plus.library + ToolLibrary(tool for tool in adapter.tools if tool.name not in core)
+
+    def _act_plus(
+        self, adapter: ToolAdapter, plus: PlusTools, observation: Observation
+    ) -> ActionChunk:
+        """IR+'s loop: run a turn's calls in order, one chunk per motion, then ask the model again.
+
+        A motion's tool result is written when the next observation shows how it
+        played; ``state`` and ``look`` answer from the observation at their place
+        in the turn, and ``look``'s frames go out with the turn's next observation.
+        The model sees a new observation only once every call of its turn has run.
+        """
+        plus.observe(observation)
+        tools = self._plus_library(adapter, plus)
+        depth = resolve_depth(observation) if self._depth == "render" else {}
+        turn = self._plus_turn
+        if turn is not None:
+            chunk = self._plus_continue(turn, tools, observation, depth)
+            if chunk is not None:
+                return chunk
+        frames = turn.frames if turn is not None and turn.frames else []
+        self._plus_turn = None
+        content = _observation_content(
+            observation,
+            self._state_labels,
+            max_steps=self._max_steps,
+            depth=depth,
+            setpoint_lines=adapter.control.setpoint_lines(observation),
+            wall_s=None if self._trial_started is None else self._clock() - self._trial_started,
+        )
+        self._messages.append({"role": "user", "content": content + frames})
+        step_label = _step_label(observation, self._max_steps)
+        state_summary = " | ".join(state_lines(observation, self._state_labels))
+        self._echo(f"[agent] >> {step_label or 'observation'}: {state_summary}")
+        failures = 0
+        while True:
+            if self._calls_used >= self._max_llm_calls:
+                return self._forced_give_up(adapter, observation, "LLM call budget exhausted")
+            outgoing = self._messages
+            if self._image_horizon is not None:
+                outgoing = _evicted_view(
+                    self._messages,
+                    self._image_horizon,
+                    mark_anchor=isinstance(self._client, (AnthropicClient, ResponsesClient)),
+                )
+            try:
+                message = self._client.complete(
+                    outgoing,
+                    tools.schemas(),
+                    temperature=self._temperature,
+                    reasoning_effort=self._effort,
+                )
+            except ContentFilteredError as exc:
+                self._calls_used += 1
+                return self._forced_give_up(adapter, observation, str(exc))
+            self._calls_used += 1
+            if message.usage is not None:
+                for key, value in message.usage.items():
+                    self._usage_totals[key] = self._usage_totals.get(key, 0) + value
+            raw_message = message.raw()
+            self._messages.append(raw_message)
+            content_text = raw_message.get("content")
+            if isinstance(content_text, str) and content_text:
+                self._echo(f"[agent] << {content_text}")
+            for tool_call in message.tool_calls:
+                self._echo(f"[agent] << tool_call {tool_call.name}({tool_call.arguments})")
+            if not message.tool_calls:
+                failures += 1
+                if failures >= _MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError(f"LLM produced no tool call in {failures} consecutive turns")
+                self._messages.append({"role": "user", "content": _PLUS_NUDGE})
+                continue
+            calls = [_PlusCall(c.id, c.name, c.arguments) for c in message.tool_calls]
+            turn = _PlusTurn(calls=calls, frames=[])
+            self._plus_turn = turn
+            chunk = self._plus_continue(turn, tools, observation, depth)
+            if chunk is not None:
+                return chunk
+            # The turn moved nothing (state, look, or a failed call): show what it
+            # asked for and ask again, without a new observation.
+            self._plus_turn = None
+            failed = turn.skip is not None and turn.skip.startswith("an earlier call")
+            failures = failures + 1 if failed else 0
+            if failures >= _MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError("LLM tool calls kept failing in IR+ turns")
+            follow = [
+                {"type": "text", "text": "The turn moved nothing; the observation is unchanged."}
+            ]
+            self._messages.append({"role": "user", "content": follow + (turn.frames or [])})
+
+    def _plus_continue(
+        self,
+        turn: _PlusTurn,
+        tools: ToolLibrary,
+        observation: Observation,
+        depth: Mapping[str, Any],
+    ) -> ActionChunk | None:
+        """Finish the call whose motion just played, then run the turn's next calls.
+
+        A ``sequence`` call is replaced by its steps, which run as separate calls
+        would and report together. Returns the next motion's chunk, or ``None``
+        once every call has run.
+        """
+        if turn.in_flight is not None:
+            call, report = turn.in_flight
+            turn.in_flight = None
+            self._plus_report(call, report(observation))
+        while turn.calls:
+            call = turn.calls.pop(0)
+            if turn.skip is not None:
+                self._plus_report(call, f"skipped: {turn.skip}")
+                continue
+            if call.name == "sequence" and call.sequence is None:
+                steps = self._plus_sequence_steps(call.arguments)
+                if isinstance(steps, str):
+                    turn.skip = "an earlier call in this turn failed"
+                    self._plus_report(call, steps)
+                    continue
+                sequence = _PlusSequence(call.id, len(steps), [])
+                turn.calls[:0] = [
+                    _PlusCall(f"{call.id}#{number}", name, arguments, sequence, number)
+                    for number, (name, arguments) in enumerate(steps, start=1)
+                ]
+                continue
+            result = tools.execute(call.name, call.arguments, observation)
+            if result.error is not None:
+                turn.skip = "an earlier call in this turn failed"
+                self._plus_report(call, result.error)
+                continue
+            if call.name == "look":
+                names = _unique_names(result.capture or ())
+                parts = _image_parts(observation, reveal=names, depth=depth)
+                if parts:
+                    where = _step_label(observation) or "this point in the turn"
+                    assert turn.frames is not None
+                    turn.frames += [{"type": "text", "text": f"From look at {where}:"}, *parts]
+                    self._plus_report(call, f"captured {_quoted_names(names)}; the frames follow")
+                else:
+                    self._plus_report(call, "no camera images are available in this observation")
+                continue
+            chunk = result.chunk
+            if chunk is None:
+                self._plus_report(call, result.note)
+                continue
+            if chunk.terminal is not None:
+                self._hindsight = (
+                    chunk.actions[0].meta.get("stop_hindsight") if chunk.actions else None
+                )
+                self._plus_report(call, result.note)
+                for rest in turn.calls:
+                    self._plus_report(rest, "skipped: the trial ends with an earlier call")
+                turn.calls.clear()
+                self._plus_turn = None
+                return chunk
+            assert self._plus is not None
+            taken = self._plus.take_report()
+            fallback = result.note or "moved"
+            turn.in_flight = (call, taken if taken is not None else _constant(fallback))
+            self._echo(f"[agent] -- {result.note}")
+            return chunk
+        return None
+
+    def _plus_sequence_steps(self, arguments: str) -> list[tuple[str, str]] | str:
+        """Decode a ``sequence`` call's arguments into its steps, or an error to report."""
+        assert self._plus is not None
+        try:
+            decoded = json.loads(arguments)
+        except (TypeError, ValueError):
+            return "arguments for sequence are not valid JSON"
+        if not isinstance(decoded, dict):
+            return "arguments for sequence must be a JSON object"
+        return self._plus.sequence_steps(decoded)
+
+    def _plus_report(self, call: _PlusCall, text: str) -> None:
+        """Answer a call; a sequence's steps are gathered and answered together after the last."""
+        sequence = call.sequence
+        if sequence is None:
+            self._plus_result(call.id, text)
+            return
+        line = f"{call.number}. {call.name}: {text}"
+        sequence.lines.append(line)
+        self._echo(f"[agent] -- sequence {line}")
+        if len(sequence.lines) == sequence.size:
+            self._messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": sequence.call_id,
+                    "content": "\n".join(sequence.lines),
+                }
+            )
+
+    def _plus_result(self, call_id: str, text: str) -> None:
+        self._messages.append({"role": "tool", "tool_call_id": call_id, "content": text})
+        self._echo(f"[agent] -- {text}")
+
     def _forced_give_up(
         self, adapter: ToolAdapter, observation: Observation, why: str
     ) -> ActionChunk:
@@ -1583,3 +1925,8 @@ def agent_policy(**kwargs: Any) -> LLMAgentPolicy:
     forwards ``-P key=value`` pairs here.
     """
     return LLMAgentPolicy(**kwargs)
+
+
+def _constant(text: str) -> Callable[[Observation], str]:
+    """A report that says ``text`` whatever the observation."""
+    return lambda _: text
