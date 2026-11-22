@@ -146,3 +146,28 @@ def test_stacked_smoothing_controllers_keep_separate_state() -> None:
         expected.append(outer_prev)
 
     assert np.allclose(actual, expected)
+
+
+class _BufferReusingPolicy(_VaryingPolicy):
+    """Writes each value into one preallocated float64 array, as allocation-free loops do."""
+
+    def __init__(self, values: list[float]):
+        super().__init__(values)
+        self._out = np.zeros(1)
+
+    def act(self, observation: Observation) -> ActionChunk:
+        self._out[:] = self._values[self._index]
+        self._index += 1
+        return ActionChunk(actions=[Action(data=self._out)])
+
+
+def test_smoothing_survives_a_policy_that_reuses_its_output_buffer() -> None:
+    # The first smoothed action is stored as the EMA's previous value; without a
+    # copy it is the policy's buffer, so the next write moves it and the second
+    # step passes the raw target through unsmoothed.
+    smooth = SmoothingActionManager(DefaultActionManager(), alpha=0.5)
+    store: dict[str, object] = {}
+    policy = _BufferReusingPolicy([0.0, 10.0, 10.0])
+    obs = Observation(instruction="x")
+    actual = [float(_action(smooth.next_action(policy, obs, t, store)).data[0]) for t in range(3)]
+    assert actual == [0.0, 5.0, 7.5]
