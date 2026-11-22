@@ -810,6 +810,13 @@ def test_preflight_malformed_reply_raises(monkeypatch: pytest.MonkeyPatch) -> No
         _seq_vlm(post, monkeypatch).preflight()  # type: ignore[attr-defined]
 
 
+def test_preflight_truncated_reply_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = {"choices": [{"finish_reason": "length", "message": {"content": "GRADE: suc"}}]}
+    post = _SeqPost((200, json.dumps(reply).encode()))
+    with pytest.raises(ConfigError, match=r"incomplete reply"):
+        _seq_vlm(post, monkeypatch).preflight()  # type: ignore[attr-defined]
+
+
 def test_failed_grading_records_a_flattened_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
