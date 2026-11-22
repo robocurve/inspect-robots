@@ -87,6 +87,36 @@ def test_inference_every_step() -> None:
     assert policy.num_inferences == 6  # re-infers every step (vs DefaultActionManager)
 
 
+class _TrajectoryPolicy:
+    """Predicts target ``s`` for absolute step ``s``, written into one reused buffer."""
+
+    def __init__(self, chunk_len: int = 3):
+        self._out = np.zeros((chunk_len, 2))
+        self._t = 0
+        self.info = PolicyInfo(name="trajectory", action_space=_DELTA_SPACE)
+        self.config = PolicyConfig()
+
+    def reset(self, scene: Scene) -> None:
+        self._t = 0
+
+    def act(self, observation: Observation) -> ActionChunk:
+        steps = self._t + np.arange(len(self._out), dtype=np.float64)
+        self._out[:] = steps[:, None]
+        self._t += 1
+        return ActionChunk(actions=[Action(data=row) for row in self._out])
+
+
+def test_blend_survives_a_policy_that_reuses_its_output_buffer() -> None:
+    # Every retained chunk predicts step t as t, so the blend must be t. Without a
+    # copy, older chunks alias the buffer and contribute the newest chunk's
+    # predictions for later steps instead.
+    ctrl = EnsemblingActionManager(_DELTA_SPACE, m=0.0)
+    store: dict[str, object] = {}
+    policy = _TrajectoryPolicy()
+    blended = [_action(ctrl.next_action(policy, Observation(), t, store)).data for t in range(4)]
+    assert np.allclose(blended, [[t, t] for t in range(4)])
+
+
 def test_rejects_unaverageable_semantics() -> None:
     with pytest.raises(ValueError, match="rotation_repr"):
         EnsemblingActionManager(

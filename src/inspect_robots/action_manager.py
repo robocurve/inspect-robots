@@ -334,7 +334,9 @@ class SmoothingActionManager:
         action = self.inner.next_action(policy, observation, t, store)
         if isinstance(action, Termination):
             return action
-        raw = np.asarray(action.data, dtype=np.float64)
+        # Copied: a policy may reuse its output buffer, which would move the EMA's
+        # previous action along with the next request.
+        raw = np.array(action.data, dtype=np.float64)
         prev = store.get(self._store_key)
         smoothed = raw if prev is None else self.alpha * raw + (1 - self.alpha) * prev
         store[self._store_key] = smoothed
@@ -416,7 +418,8 @@ class EnsemblingActionManager:
         buffer.append(
             (
                 t,
-                [np.asarray(a.data, dtype=np.float64) for a in chunk.actions],
+                # Copied: a reused policy buffer would rewrite retained predictions.
+                [np.array(a.data, dtype=np.float64) for a in chunk.actions],
                 dict(chunk.meta),
             )
         )
