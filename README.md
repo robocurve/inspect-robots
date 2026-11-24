@@ -1,3 +1,28 @@
+https://github.com/user-attachments/assets/73effd9c-f1c3-4e8b-8591-169a87e63016
+
+[![Watch the film](robocurve-readme-yc-poster.jpg)](https://orchestrastudios.ai/films/robocurve)
+
+## 🎬 We made Robocurve a film
+
+Hi Robocurve team — I'm Remy Tennant, founder of Orchestra Studios. This is a gift — a film we made specially for your company, directed from your product itself: your actual screens, in motion.
+
+We're running a promotional campaign: **we're giving away 100 videos to YC companies over the next 30 days, first come, first served.** We came to you first because we admire Inspect Robots — "Inspect AI, but for robotics": define a benchmark once, run any LLM or VLA policy on any real arm, humanoid or simulator, with auditable logs and Rerun visualization — and the discipline behind it, mypy-strict with 100% coverage badges in the README. So we went ahead and made yours — the short film above. I think it came out great, and I'd love you to have it.
+
+**Use it as-is, or claim it and get the real thing:**
+- This copy is yours either way. Want just the video? Trim the outro card off the end and use it — no signup, no strings. It's 720p only because GitHub caps README videos at 10 MB; that's the whole reason, not a teaser.
+- **Claim it at [orchestrastudios.ai/YC](https://orchestrastudios.ai/YC)** and you get the full 1080p master — plus the project itself, transferred to you the moment you sign up.
+- Claiming means the film becomes *code you own*, not a file you're stuck with: edit any scene, line or voice, re-audition, re-render as often as you like. When your product changes, it can re-render from your code, so it never goes stale.
+- Want changes? Just tell me what you'd fix — I'll hand it to the AI agent embedded in the project. It makes the edits and re-renders. First round's on us, no sweat.
+
+**No strings attached.** No card, no sales call, no deadline on the gift itself — the film above is yours whether or not you ever claim the project. Why free? Orchestra just launched, and this is our launch campaign: we're giving a film to 100 YC companies, first come first served. We're YC founders ourselves, so we started with our own community — and a claimed project is worth more to us than a fee. That's the whole exchange.
+
+Questions? Email me at **remy@orchestrastudios.ai**.
+
+— Remy Tennant
+Orchestra Studios
+
+---
+
 <div align="center">
 
 <img src="https://raw.githubusercontent.com/robocurve/inspect-robots/main/docs/assets/inspect-robots-logo.svg" alt="Inspect Robots logo — a line-art robot inspecting a dot through a magnifying lens" width="160">
