@@ -79,6 +79,10 @@ def _parse_value(text: str) -> Any:
     # int() and float() skip surrounding whitespace, so match the same text.
     if _ZERO_PADDED.match(text.strip()):
         return text
+    # int() and float() also accept PEP 515 digit separators, which would turn
+    # a name such as "2024_10_25" into the integer 20241025.
+    if "_" in text:
+        return text
     return _parse_number(text)
 
 
