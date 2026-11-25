@@ -207,6 +207,11 @@ def test_parse_value_keeps_zero_padded_numbers_as_strings(text: str) -> None:
     assert parse_value(text) == text
 
 
+@pytest.mark.parametrize("text", ["2024_10_25", "1_000", "1_0.5", "1e1_0", "-3_2"])
+def test_parse_value_keeps_underscored_digits_as_strings(text: str) -> None:
+    assert parse_value(text) == text
+
+
 @pytest.mark.parametrize(
     ("text", "value"), [("0", 0), ("-0", 0), ("0.5", 0.5), ("0e3", 0.0), (" 0.5", 0.5)]
 )
