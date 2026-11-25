@@ -271,6 +271,25 @@ def test_bind_requires_unambiguous_state_and_camera() -> None:
         policy.bind(_info(cameras=(CameraSpec("front", 2, 2), CameraSpec("wrist", 2, 2))))
 
 
+def test_bind_prefers_joint_pos_over_a_same_shape_eef_pose() -> None:
+    # A 6-DoF arm with a gripper and a pose topic declares two (7,) fields; the
+    # joint_pos key decides, as in core's reference_state_fields.
+    script = _ScriptedTransport([_completion("close_gripper()")])
+    policy = _policy(script)
+    state = StateSpec(fields=(StateField("eef_pose", (3,)), StateField("joint_pos", (3,))))
+    policy.bind(_info(state=state))
+    policy.reset(Scene(id="s0", instruction="close"))
+    observation = Observation(
+        images={},
+        state={"eef_pose": np.array([0.5, 0.5, 0.5]), "joint_pos": np.array([0.1, -0.1, 1.0])},
+        instruction="pick the cube",
+    )
+
+    chunk = policy.act(observation)
+
+    assert np.allclose(chunk.actions[-1].data, np.array([0.1, -0.1, 0.0]))
+
+
 def test_bind_uses_last_dimension_fallback_when_labels_are_absent() -> None:
     script = _ScriptedTransport([_completion("close_gripper()")])
     policy = _policy(script)

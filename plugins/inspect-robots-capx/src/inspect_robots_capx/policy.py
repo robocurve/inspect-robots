@@ -28,7 +28,7 @@ from inspect_robots.errors import ConfigError
 from inspect_robots.policy import PolicyBase, PolicyConfig, PolicyInfo
 from inspect_robots.policy_adapter import embodiment_notes, state_lines
 from inspect_robots.scene import Scene
-from inspect_robots.spaces import Box
+from inspect_robots.spaces import Box, reference_state_fields
 from inspect_robots.types import DONE, GIVE_UP, ActionChunk, Observation, Termination
 from inspect_robots_agent import (
     ENV_MODEL,
@@ -346,7 +346,9 @@ class CapxPolicy(PolicyBase):
         state_spec = embodiment_info.observation_space.state
         if state_spec is None:
             raise ValueError(f"{prefix} an observation StateSpec for full joint state")
-        matching = [field.key for field in state_spec.fields if field.shape == (space.dim,)]
+        # The core rule, so a joint_pos field still wins next to a same-shape
+        # eef_pose (a 6-DoF arm plus gripper, or a 7-DoF arm, with a pose topic).
+        matching = reference_state_fields(state_spec, space.dim, semantics.control_mode)
         if len(matching) != 1:
             raise ValueError(
                 f"{prefix} exactly one state field with shape ({space.dim},); "
