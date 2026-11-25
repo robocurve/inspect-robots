@@ -31,6 +31,8 @@ from inspect_robots import (
 from inspect_robots.compat import check_compatibility
 from inspect_robots.conformance import assert_embodiment_conformant
 from inspect_robots.registry import registered, resolve
+from inspect_robots.spaces import reference_state_fields
+from inspect_robots.tools import control_tools
 from inspect_robots_ros import RosEmbodiment, ros_embodiment
 from inspect_robots_ros._client import RosbridgeClient, TopicSample
 from inspect_robots_ros._msgs import (
@@ -945,15 +947,17 @@ def test_factory_validation_errors_are_actionable(kwargs: dict[str, Any], match:
         RosEmbodiment(**defaults)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
+_SEVEN_DIM_WITH_EEF_POSE = [
+    pytest.param(
         {
             "joints": tuple(f"joint_{index}" for index in range(7)),
             "action_low": (-1.0,) * 7,
             "action_high": (1.0,) * 7,
             "eef_pose_topic": "/eef_pose",
         },
+        id="seven_joints",
+    ),
+    pytest.param(
         {
             "joints": tuple(f"joint_{index}" for index in range(6)),
             "action_low": (-1.0,) * 6,
@@ -964,15 +968,54 @@ def test_factory_validation_errors_are_actionable(kwargs: dict[str, Any], match:
             "gripper_high": 0.08,
             "eef_pose_topic": "/eef_pose",
         },
-    ],
-)
-def test_seven_dimensional_action_with_eef_pose_is_rejected(kwargs: dict[str, Any]) -> None:
-    with pytest.raises(
-        ValueError,
-        match="omit eef_pose_topic on a 7-dim action space until core supports "
-        "key-priority reference matching",
-    ):
-        RosEmbodiment(command_topic="/arm/command", **kwargs)
+        id="six_joints_and_gripper",
+    ),
+]
+
+
+@pytest.mark.parametrize("kwargs", _SEVEN_DIM_WITH_EEF_POSE)
+def test_seven_dimensional_action_with_eef_pose_uses_joint_pos_as_reference(
+    kwargs: dict[str, Any],
+) -> None:
+    # eef_pose has the same (7,) shape as joint_pos here, so only the key tells
+    # them apart; joint_pos control must still resolve joint_pos.
+    embodiment = RosEmbodiment(command_topic="/arm/command", **kwargs)
+    info = embodiment.info
+    state_spec = info.observation_space.state
+    assert state_spec is not None
+    shapes = {field.key: field.shape for field in state_spec.fields}
+    assert shapes["joint_pos"] == shapes["eef_pose"] == (7,)
+    assert reference_state_fields(state_spec, 7, "joint_pos") == ["joint_pos"]
+    assert_embodiment_conformant(info)
+    semantics = info.action_space.semantics
+    assert semantics is not None
+    tools = control_tools(info.action_space, info.observation_space, info.control_hz)
+    assert tools.state_labels() == ("joint_pos", semantics.dim_labels)
+    embodiment.close()
+
+
+def test_seven_dimensional_step_reports_joint_pos_and_eef_pose_separately() -> None:
+    joints = tuple(f"joint_{index}" for index in range(6))
+    embodiment, _client, _clock = _ready_embodiment(
+        joints=joints,
+        action_low=(-1.0,) * 6,
+        action_high=(1.0,) * 6,
+        gripper_topic="/gripper/command",
+        gripper_joint="finger",
+        gripper_low=0.0,
+        gripper_high=0.08,
+        eef_pose_topic="/eef_pose",
+        joint_message={
+            "name": [*joints, "finger"],
+            "position": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.04],
+        },
+    )
+    action = np.asarray([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.04])
+    observation = embodiment.step(Action(data=action)).observation
+    np.testing.assert_allclose(observation.state["joint_pos"], action)
+    np.testing.assert_array_equal(
+        observation.state["eef_pose"], [1.0, 2.0, 3.0, 0.9, 0.1, 0.2, 0.3]
+    )
 
 
 def test_info_declares_spaces_semantics_capabilities_and_lazy_network() -> None:
@@ -1017,7 +1060,7 @@ def test_info_declares_spaces_semantics_capabilities_and_lazy_network() -> None:
 
 @pytest.mark.parametrize("with_gripper", [False, True])
 @pytest.mark.parametrize("with_eef_pose", [False, True])
-def test_conformance_matrix_passes_away_from_seven_dimensions(
+def test_conformance_matrix_passes_with_optional_state_fields(
     with_gripper: bool, with_eef_pose: bool
 ) -> None:
     kwargs: dict[str, Any] = {}

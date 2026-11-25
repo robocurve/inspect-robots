@@ -265,11 +265,6 @@ class RosEmbodiment(EmbodimentBase):
 
         parsed_cameras = _parse_cameras(cameras)
         action_dim = len(parsed_joints) + (1 if gripper_topic is not None else 0)
-        if action_dim == 7 and eef_pose_topic is not None:
-            raise ValueError(
-                "omit eef_pose_topic on a 7-dim action space until core supports "
-                "key-priority reference matching"
-            )
 
         resolved_fresh_timeout = (
             2.0 / control_hz if fresh_obs_timeout_s is None else float(fresh_obs_timeout_s)

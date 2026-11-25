@@ -109,7 +109,7 @@ Pass values as `-E key=value` arguments or as keyword arguments to
 | `gripper_low` | `None` | Native lower gripper command bound. Required with `gripper_topic`. |
 | `gripper_high` | `None` | Native upper gripper command bound. Required with `gripper_topic` and must exceed `gripper_low`. |
 | `gripper_closed_at` | `low` | `low` or `high`, identifying which native bound means closed. |
-| `eef_pose_topic` | `None` | Optional `geometry_msgs/PoseStamped` source for `eef_pose`. |
+| `eef_pose_topic` | `None` | Optional `geometry_msgs/PoseStamped` source for `eef_pose`. Works with any action size, including 7 (a seven-joint arm, or six joints plus a gripper), where `joint_pos` stays the control reference. |
 | `cameras` | none | Camera name to compressed topic and resolution. Compact form: `wrist:/camera/compressed:640x480`. |
 | `control_hz` | `10.0` | Command rate. The adapter sleep-gates each arm publish to this rate. |
 | `fresh_obs_timeout_s` | `2/control_hz` | Maximum step-time wait for a sequence-newer joint-state message. |
@@ -200,6 +200,3 @@ confirmation on non-interactive stdin raises `EOFError` and halts the run.
 - A rosbridge `status:error` after publishing usually indicates a mismatched
   `ros_version`, `command_type`, or controller message type. The first error is
   latched and all later client calls fail.
-- A 7-dimensional action space cannot also declare `eef_pose` in this release.
-  This includes a seven-joint arm and a six-joint arm with a gripper. Omit
-  `eef_pose_topic` until core supports key-priority reference matching.
